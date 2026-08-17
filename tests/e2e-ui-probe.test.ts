@@ -17,9 +17,12 @@ import {
 function snapshot(overrides: Record<string, unknown> = {}) {
   return {
     schema: "deviludo.e2e-ui-probe", sessionNonce: "0123456789abcdef0123456789abcdef", pid: 1234,
-    sequence: 7, sceneId: "main", state: { paused: false, phase: "playing" }, progress: { turn: 2 },
+    sequence: 7, sceneId: "main", state: {
+      screen_mode: "PLAYING", session_active: true, gameplay_input_enabled: true,
+      blocking_layer_count: 0, paused: false, phase: "playing",
+    }, progress: { turn: 2 },
     controls: [
-      { id: "primary-control", visible: true, enabled: true, text: "Activate", value: 0, rect: { x: 100, y: 200, width: 120, height: 50 } },
+      { id: "primary-control", scope: "GAMEPLAY", visible: true, enabled: true, text: "Activate", value: 0, rect: { x: 100, y: 200, width: 120, height: 50 } },
     ],
     ...overrides,
   };
@@ -29,6 +32,19 @@ describe("deviludo.e2e-ui-probe", () => {
   test("accepts a nonce/PID-scoped semantic UI and state snapshot", () => {
     assert.equal(validateProbeSnapshot(snapshot(), { sessionNonce: "0123456789abcdef0123456789abcdef", pid: 1234 }), true);
     assert.deepEqual(resolveProbeControl(snapshot() as never, "primary-control").control.rect, { x: 100, y: 200, width: 120, height: 50 });
+  });
+
+  test("rejects contradictory lifecycle states and gameplay controls exposed through a menu", () => {
+    assert.equal(validateProbeSnapshot(snapshot({ state: {
+      screen_mode: "MENU", session_active: true, gameplay_input_enabled: true, blocking_layer_count: 0,
+    } })), false);
+    assert.equal(validateProbeSnapshot(snapshot({
+      state: { screen_mode: "MENU", session_active: false, gameplay_input_enabled: false, blocking_layer_count: 0 },
+    })), false);
+    assert.equal(validateProbeSnapshot(snapshot({
+      state: { screen_mode: "MENU", session_active: false, gameplay_input_enabled: false, blocking_layer_count: 0 },
+      controls: [{ ...snapshot().controls[0], scope: "NAVIGATION" }],
+    })), true);
   });
 
   test("rejects stale processes, non-monotonic sequences and duplicate or out-of-client controls", () => {
@@ -60,7 +76,10 @@ describe("deviludo.e2e-ui-probe", () => {
 
   test("evaluates pre/post state, progress, control and scene assertions", () => {
     const before = snapshot({ sequence: 7, progress: { turn: 1 } });
-    const after = snapshot({ sequence: 8, state: { paused: true }, progress: { turn: 2 } });
+    const after = snapshot({ sequence: 8, state: {
+      screen_mode: "PAUSED", session_active: true, gameplay_input_enabled: false,
+      blocking_layer_count: 0, paused: true,
+    }, progress: { turn: 2 } });
     assert.deepEqual(evaluateProbeAssertions([
       { source: "PROGRESS", key: "turn", operator: "CHANGED" },
       { source: "STATE", key: "paused", operator: "EQUALS", value: true },
@@ -78,16 +97,16 @@ describe("deviludo.e2e-ui-probe", () => {
 
   test("maps nested visual hits to the unique smallest semantic control", () => {
     const nested = snapshot({ controls: [
-      { id: "dialog", visible: true, enabled: true, rect: { x: 40, y: 80, width: 600, height: 400 } },
-      { id: "confirm-button", visible: true, enabled: true, rect: { x: 300, y: 360, width: 160, height: 48 } },
+      { id: "dialog", scope: "OVERLAY", visible: true, enabled: true, rect: { x: 40, y: 80, width: 600, height: 400 } },
+      { id: "confirm-button", scope: "OVERLAY", visible: true, enabled: true, rect: { x: 300, y: 360, width: 160, height: 48 } },
     ] });
     assert.equal(resolveProbeControlAtPoint(nested as never, 380, 384)?.id, "confirm-button");
   });
 
   test("rejects equal-size semantic hit ambiguity instead of persisting fixed coordinates", () => {
     const ambiguous = snapshot({ controls: [
-      { id: "choice-a", visible: true, enabled: true, rect: { x: 100, y: 100, width: 120, height: 50 } },
-      { id: "choice-b", visible: true, enabled: true, rect: { x: 100, y: 100, width: 120, height: 50 } },
+      { id: "choice-a", scope: "NAVIGATION", visible: true, enabled: true, rect: { x: 100, y: 100, width: 120, height: 50 } },
+      { id: "choice-b", scope: "NAVIGATION", visible: true, enabled: true, rect: { x: 100, y: 100, width: 120, height: 50 } },
     ] });
     assert.equal(resolveProbeControlAtPoint(ambiguous as never, 160, 125), null);
   });
@@ -144,7 +163,7 @@ describe("deviludo.e2e-ui-probe", () => {
         const temporary = `${path}.tmp`;
         const invalid = snapshot({
           sequence: 9,
-          controls: [{ id: "dialog", visible: true, enabled: true, text: "", value: "", rect: { x: 1100, y: 100, width: 300, height: 200 } }],
+          controls: [{ id: "dialog", scope: "OVERLAY", visible: true, enabled: true, text: "", value: "", rect: { x: 1100, y: 100, width: 300, height: 200 } }],
         });
         void writeFile(temporary, JSON.stringify(invalid)).then(() => rename(temporary, path));
       }, 50);

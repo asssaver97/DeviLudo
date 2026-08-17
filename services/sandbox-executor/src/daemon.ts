@@ -16,7 +16,7 @@ const socketPath = process.env.DEVILUDO_EXECUTOR_SOCKET ?? "/run/deviludo-execut
 const executorId = process.env.DEVILUDO_EXECUTOR_ID ?? "";
 const identityKeyFile = process.env.DEVILUDO_EXECUTOR_IDENTITY_KEY_FILE ?? "";
 const allowlistedImages = new Set((process.env.DEVILUDO_EXECUTOR_ALLOWED_IMAGES ?? "").split(",").filter(Boolean));
-const providerHosts = new Set((process.env.DEVILUDO_PROVIDER_ALLOWLIST ?? "api.anthropic.com,api.openai.com").split(",").map(value => value.trim()).filter(Boolean));
+const providerHosts = new Set((process.env.DEVILUDO_PROVIDER_ALLOWLIST ?? "api.anthropic.com,api.openai.com,chatgpt.com").split(",").map(value => value.trim()).filter(Boolean));
 const workRoot = process.env.DEVILUDO_EXECUTOR_WORK_ROOT ?? "/var/lib/deviludo-executor";
 const secretRoot = process.env.DEVILUDO_EXECUTOR_SECRET_ROOT ?? "/run/deviludo-secrets";
 const projectsRoot = process.env.DEVILUDO_PROJECTS_ROOT ?? "/var/lib/deviludo-projects";

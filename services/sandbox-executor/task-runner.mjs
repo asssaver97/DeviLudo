@@ -117,7 +117,7 @@ async function runAgent(plan) {
   }
   const isRepairPass = e2eRepairContext !== null || upstreamFailureSummary !== null;
   const checkpointEmitterInstruction = "A DEVILUDO_E2E_CHECKPOINT:<checkpoint-id> runtime marker is optional synchronization metadata only and can never satisfy an assertion by itself. If used, emit it only after the real semantic state exists and append it to DEVILUDO_E2E_CHECKPOINT_FILE when that environment variable is non-empty.";
-  const probeInstruction = "Implement the read-only deviludo.e2e-ui-probe contract in the actual game. Atomically replace DEVILUDO_E2E_UI_PROBE_FILE after each visible/state/progress change. Include asynchronous UI lifecycle changes: a window, popup, dialog, overlay, animation, or deferred layout must publish again from its real visibility/layout signal or a completed draw frame, not only from the synchronous input handler that requested the change. Show and hide must both advance the sequence, and the snapshot must read the actual rendered state. Map every control and embedded Window/Popup rectangle against the root game client viewport before converting to 1280x720; never use a child window's own content size as the root scale, clamp an invalid rectangle, or publish an out-of-client snapshot. A node detached from the scene tree or without a live root viewport must never be published as visible or enabled: wait until it is attached and laid out, or publish the truthful non-actionable state using the last valid in-client rectangle. Never invent a fallback viewport size to make a detached node appear actionable. If real dialog content exceeds the root client, fix the production UI with a bounded window and scrollable content; never shrink, clip, or substitute only the Probe rectangle. Every control reported visible and enabled for an action must be connected to its production input handler. After real OS input, successful, rejected, and asynchronously completed actions must all converge on a final UI refresh and publish a newer Probe with the truthful outcome, so an action can never silently leave the previous sequence in place. Every snapshot uses schema deviludo.e2e-ui-probe and must contain the current DEVILUDO_E2E_SESSION_NONCE, OS process id, a strictly increasing sequence, sceneId, flat state and progress objects, and unique stable controls with id, visible, enabled, text/value, and 1280x720 client-relative rect. The probe may describe state but must never invoke actions, complete gameplay, or fake results.";
+  const probeInstruction = "Implement the read-only deviludo.e2e-ui-probe contract in the actual game. Atomically replace DEVILUDO_E2E_UI_PROBE_FILE after each visible/state/progress change. Include asynchronous UI lifecycle changes: a window, popup, dialog, overlay, animation, or deferred layout must publish again from its real visibility/layout signal or a completed draw frame, not only from the synchronous input handler that requested the change. Show and hide must both advance the sequence, and the snapshot must read the actual rendered state. Every state object must publish the fixed lifecycle fields screen_mode (MENU, PLAYING, PAUSED or RESULT), session_active, gameplay_input_enabled and blocking_layer_count. MENU means no session, no gameplay input, zero blocking layers; PLAYING means an active session, enabled gameplay input and zero blocking layers; PAUSED means an active session and disabled gameplay input, with blocking_layer_count reflecting the actual visible blocking layers rather than assuming one exists. Every control must declare scope NAVIGATION, GAMEPLAY, OVERLAY or STATUS. MENU must never publish an enabled visible GAMEPLAY control. Map every control and embedded Window/Popup rectangle against the root game client viewport before converting to 1280x720; never use a child window's own content size as the root scale, clamp an invalid rectangle, or publish an out-of-client snapshot. A node detached from the scene tree or without a live root viewport must never be published as visible or enabled: wait until it is attached and laid out, or publish the truthful non-actionable state using the last valid in-client rectangle. Never invent a fallback viewport size to make a detached node appear actionable. If real dialog content exceeds the root client, fix the production UI with a bounded window and scrollable content; never shrink, clip, or substitute only the Probe rectangle. Every control reported visible and enabled for an action must be connected to its production input handler. After real OS input, successful, rejected, and asynchronously completed actions must all converge on a final UI refresh and publish a newer Probe with the truthful outcome, so an action can never silently leave the previous sequence in place. Every snapshot uses schema deviludo.e2e-ui-probe and must contain the current DEVILUDO_E2E_SESSION_NONCE, OS process id, a strictly increasing sequence, sceneId, flat state and progress objects, and unique stable controls with id, scope, visible, enabled, text/value, and 1280x720 client-relative rect. The probe may describe state but must never invoke actions, complete gameplay, or fake results.";
   const coherentJourneyInstructions = [
     "Every interactive journey must represent one coherent, uninterrupted player objective. After an action leaves a menu, mode, scene, or session, never target controls from that previous context unless the journey contains a real visible action that returns there.",
     "Keep the FRESH coreJourney to the shortest real core loop that crosses one genuine progress boundary. Put acceptance criteria for mutually exclusive modes, alternate entry paths, destructive/settings flows, or long end states in separate journeys instead of concatenating every requirement into one script.",
@@ -161,7 +161,8 @@ async function runAgent(plan) {
     "- EXISTS and CHANGED assertions must not contain value. Every other Probe operator must contain a string, number, or boolean value.",
     "- Every PLAYER_INTERACTION requirement must be covered by at least one real action inside a feature that maps that requirement, and every such action must verify an operation-after state change through postconditions.",
     "- The fresh core journey must cross a real progress boundary and include at least two real actions with PRIMARY_ACTION and COMPLETE_LOOP intents.",
-    "- The core journey must contain asserted checkpoint events with unique IDs and the roles START, READY, PROGRESS, and COMPLETION; at least one must use visualMode STABLE_REPLAY. Other checkpoints may use DYNAMIC.",
+    "- The core journey is an ordered lifecycle proof: START must be the first non-wait event; navigation may follow; exactly one START_SESSION action must create the session; READY comes next; then PRIMARY_ACTION, PROGRESS, COMPLETE_LOOP and COMPLETION in that order. START and READY both use STABLE_REPLAY. START asserts screen_mode=MENU, session_active=false, gameplay_input_enabled=false and blocking_layer_count=0. The START_SESSION postconditions and READY checkpoint assert screen_mode=PLAYING, session_active=true, gameplay_input_enabled=true and blocking_layer_count=0.",
+    "- A clean launch is defective if a start/menu layer is drawn over an already-active board, HUD, tutorial or enabled gameplay controls. Do not hide the contradiction in Probe metadata or teach the Test Agent to click through it; fix the production startup state so only the current lifecycle layer is rendered and interactive.",
     "- If a checkpoint emits expectedOutput, it must be exactly DEVILUDO_E2E_CHECKPOINT:<that checkpoint's id>. Rename the checkpoint id or runtime marker together; aliases are not supported.",
     "- Every DYNAMIC ACTION, PROGRESS or COMPLETION checkpoint must declare changeTargetId for a stable semantic control or viewport region whose pixels must change after the preceding real input.",
     "- A checkpoint requires non-empty assertions. expectedOutput is optional auxiliary synchronization and, if present, must equal DEVILUDO_E2E_CHECKPOINT:<checkpoint-id>.",
@@ -515,7 +516,7 @@ function validTestManifest(value, expectedRequirements = null) {
           && ["START", "READY", "PROGRESS", "COMPLETION"].every(role => roles.has(role))
           && checkpointEvents.some(event => event.visualMode === "STABLE_REPLAY")
           && assertionsComplete && intents.has("PRIMARY_ACTION") && intents.has("COMPLETE_LOOP")
-          && actionEvents.length >= 2) coreJourney = true;
+          && actionEvents.length >= 2 && validCoreJourneyLifecycle(feature.interactionScript.events)) coreJourney = true;
       }
     } else if (feature.verificationMethod === "visual") {
       if (!validVisualSpec(feature.expectedVisual)) return false;
@@ -691,7 +692,8 @@ function testManifestValidationIssues(value, expectedRequirements = null) {
           && ["START", "READY", "PROGRESS", "COMPLETION"].every(role => roles.has(role))
           && checkpointEvents.some(event => event.visualMode === "STABLE_REPLAY")
           && checkpointEvents.every(event => Array.isArray(event.assertions) && event.assertions.length > 0)
-          && intents.has("PRIMARY_ACTION") && intents.has("COMPLETE_LOOP") && actionEvents.length >= 2) coreJourney = true;
+          && intents.has("PRIMARY_ACTION") && intents.has("COMPLETE_LOOP") && actionEvents.length >= 2
+          && validCoreJourneyLifecycle(feature.interactionScript.events)) coreJourney = true;
       }
     } else if (feature.verificationMethod === "visual") {
       checkpoints += 1;
@@ -700,7 +702,7 @@ function testManifestValidationIssues(value, expectedRequirements = null) {
   }
   if (journeys < 1 || journeys > 32) add("the manifest must contain 1-32 interactive journeys");
   if (checkpoints < 3 || checkpoints > 64) add("the manifest must contain 3-64 screenshot checkpoints");
-  if (!coreJourney) add("a FRESH core-loop journey must contain START, READY, PROGRESS and COMPLETION checkpoints plus PRIMARY_ACTION and COMPLETE_LOOP real inputs");
+  if (!coreJourney) add("a FRESH core-loop journey must prove the ordered MENU -> START_SESSION -> PLAYING -> PRIMARY_ACTION -> PROGRESS -> COMPLETE_LOOP -> COMPLETION lifecycle");
   const missingAutomated = [...requirementIds].filter(id => !automatedCoverage.has(id));
   if (missingAutomated.length > 0) add(`requirements missing automated feature coverage: ${missingAutomated.slice(0, 10).join(", ")}`);
   const missingInteractive = [...playerRequirementIds].filter(id => !interactiveCoverage.has(id));
@@ -854,6 +856,57 @@ function validInteractionScript(value) {
 
 function isInteractionActionType(value) {
   return ["key_tap", "key_hold", "click", "double_click", "drag", "scroll", "text_input", "gamepad_button_tap", "gamepad_button_hold", "gamepad_axis", "gamepad_trigger", "gamepad_release_all"].includes(value);
+}
+
+// Keep validation data behind hoisted function declarations. This executable
+// starts work through top-level await before the declarations below are
+// evaluated, so a later top-level `const` can still be uninitialized
+// zone when a fast or checkpoint-restored Agent reaches manifest validation.
+function requiredCoreStartAssertions() {
+  return [
+    { source: "STATE", key: "screen_mode", operator: "EQUALS", value: "MENU" },
+    { source: "STATE", key: "session_active", operator: "EQUALS", value: false },
+    { source: "STATE", key: "gameplay_input_enabled", operator: "EQUALS", value: false },
+    { source: "STATE", key: "blocking_layer_count", operator: "EQUALS", value: 0 },
+  ];
+}
+
+function requiredCoreReadyAssertions() {
+  return [
+    { source: "STATE", key: "screen_mode", operator: "EQUALS", value: "PLAYING" },
+    { source: "STATE", key: "session_active", operator: "EQUALS", value: true },
+    { source: "STATE", key: "gameplay_input_enabled", operator: "EQUALS", value: true },
+    { source: "STATE", key: "blocking_layer_count", operator: "EQUALS", value: 0 },
+  ];
+}
+
+function validCoreJourneyLifecycle(events) {
+  const meaningful = events.filter(event => event?.type !== "wait");
+  const indexes = role => meaningful.map((event, index) => event?.type === "checkpoint" && event.role === role ? index : -1).filter(index => index >= 0);
+  const starts = indexes("START"), ready = indexes("READY"), progress = indexes("PROGRESS"), completion = indexes("COMPLETION");
+  if (starts.length !== 1 || ready.length !== 1 || progress.length !== 1 || completion.length !== 1 || starts[0] !== 0) return false;
+  if (meaningful[starts[0]].visualMode !== "STABLE_REPLAY" || meaningful[ready[0]].visualMode !== "STABLE_REPLAY"
+    || !containsAssertions(meaningful[starts[0]].assertions, requiredCoreStartAssertions())
+    || !containsAssertions(meaningful[ready[0]].assertions, requiredCoreReadyAssertions())) return false;
+  const actions = meaningful.map((event, index) => isInteractionActionType(event?.type) ? { event, index } : null).filter(Boolean);
+  const startActions = actions.filter(entry => entry.event.intent === "START_SESSION");
+  const primaryActions = actions.filter(entry => entry.event.intent === "PRIMARY_ACTION");
+  const completeActions = actions.filter(entry => entry.event.intent === "COMPLETE_LOOP");
+  if (startActions.length !== 1 || primaryActions.length < 1 || completeActions.length < 1) return false;
+  const startAction = startActions[0], primary = primaryActions[0], complete = completeActions.at(-1);
+  if (!(starts[0] < startAction.index && startAction.index < ready[0]
+    && ready[0] < primary.index && primary.index < progress[0]
+    && progress[0] < complete.index && complete.index < completion[0])) return false;
+  if (actions.some(entry => entry.index < startAction.index && entry.event.intent !== "NAVIGATION")) return false;
+  if (actions.some(entry => entry.index > startAction.index && entry.index < ready[0])) return false;
+  return containsAssertions(startAction.event.postconditions, requiredCoreReadyAssertions());
+}
+
+function containsAssertions(actual, required) {
+  return Array.isArray(actual) && required.every(expected => actual.some(candidate => candidate?.source === expected.source
+    && candidate.key === expected.key && candidate.targetId === expected.targetId
+    && candidate.property === expected.property && candidate.operator === expected.operator
+    && candidate.value === expected.value));
 }
 
 function validProbeAssertion(value) {
@@ -1012,7 +1065,7 @@ async function runGenerationAgent(configuration, environment, prompt, onOutput, 
     const executable = configuration.runtime === "CLAUDE_CODE" ? "claude" : "codex";
     const arguments_ = configuration.runtime === "CLAUDE_CODE"
       ? claudeGenerationArguments(configuration, continuation, jobId, resumedClaude)
-      : ["exec", "--ephemeral", "--json", "--skip-git-repo-check", "-m", configuration.model, "-C", "/workspace/project", "-"];
+      : codexArguments(configuration.model);
     try {
       const remaining = deadline - Date.now();
       if (remaining <= 0) throw new Error("Agent deadline exceeded after 80 minutes");
@@ -1080,7 +1133,8 @@ async function runGenerationAgent(configuration, environment, prompt, onOutput, 
       const failure = classifyAgentFailure(lastError);
       const maxAttemptsForFailure = failure.code === "INCOMPLETE_OUTPUT"
         ? 4
-        : failure.code === "GUIDANCE_PENDING" ? 3 : 2;
+        : failure.code === "GUIDANCE_PENDING" ? 3
+        : failure.code === "PROVIDER_ERROR" ? 4 : 2;
       if (attempt >= maxAttemptsForFailure || !failure.recoverable) {
         throw new Error(`Agent generation failed [${failure.code}]: ${failure.detail}`);
       }
@@ -1142,6 +1196,13 @@ function classifyAgentFailure(error) {
   const detail = sanitizeError(message.replace(/^claude exited [^:]+:\s*/i, "").replace(/^codex exited [^:]+:\s*/i, ""));
   if (error?.code === "GUIDANCE_PENDING") return { code: "GUIDANCE_PENDING", detail, recoverable: true };
   if (error?.code === "TEST_MANIFEST_INVALID") return { code: "TEST_MANIFEST_INVALID", detail, recoverable: true };
+  // Codex refreshes its account model catalogue independently from the
+  // Responses request. A CDN/proxy can reject that refresh while the official
+  // login and inference route remain valid; treating this diagnostic as a
+  // permanent credential failure aborts otherwise recoverable work.
+  if (/(?:codex_models_manager|failed to refresh available models)[\s\S]*\b403\b/i.test(detail)) {
+    return { code: "PROVIDER_ERROR", detail, recoverable: true };
+  }
   if (/\b(?:401|403)\b|invalid api key|authentication|unauthorized|forbidden/i.test(detail)) {
     return { code: "AUTH_ERROR", detail, recoverable: false };
   }
@@ -1254,7 +1315,37 @@ async function runConfiguredAgent(configuration, apiKey, prompt) {
   await mkdir(environment.CODEX_HOME, { recursive: true });
   validateCodexAuth(apiKey);
   await writeFile(`${environment.CODEX_HOME}/auth.json`, apiKey, { mode: 0o600 });
-  return command("codex", ["exec", "--ephemeral", "--json", "--skip-git-repo-check", "-m", configuration.model, "-C", "/workspace/project", "-"], environment, prompt);
+  return command("codex", codexArguments(configuration.model), environment, prompt);
+}
+
+function codexArguments(model) {
+  // The task container is already the security boundary: it has a read-only
+  // root filesystem, a bounded writable project mount, dropped capabilities,
+  // no host credentials, and allowlisted Provider egress. Running Codex's
+  // nested Linux sandbox inside that container depends on user namespaces and
+  // bubblewrap features that hardened Docker/Kata tasks deliberately deny.
+  const arguments_ = [
+    "exec",
+    "--ephemeral",
+    "--json",
+    "--ignore-user-config",
+    // Official ChatGPT login normally advertises WebSocket transport. Some
+    // locked-down executor networks and authenticated forward proxies cannot
+    // preserve that upgrade reliably. Register the same official backend as
+    // an HTTP-only Responses provider so a transport failure cannot be
+    // mistaken for an Agent or product failure.
+    "--config", "model_provider=deviludo_chatgpt",
+    "--config", "model_providers.deviludo_chatgpt.name=OpenAI",
+    "--config", "model_providers.deviludo_chatgpt.base_url=https://chatgpt.com/backend-api/codex",
+    "--config", "model_providers.deviludo_chatgpt.wire_api=responses",
+    "--config", "model_providers.deviludo_chatgpt.requires_openai_auth=true",
+    "--config", "model_providers.deviludo_chatgpt.supports_websockets=false",
+    "--skip-git-repo-check",
+    "--dangerously-bypass-approvals-and-sandbox",
+  ];
+  if (model !== "account-default") arguments_.push("-m", model);
+  arguments_.push("-C", "/workspace/project", "-");
+  return arguments_;
 }
 
 function validateCodexAuth(value) {

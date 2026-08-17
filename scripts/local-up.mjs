@@ -245,7 +245,7 @@ if (!ciMode) {
   const e2eConfiguration = {
     nodeId: initialized.macNodeId,
     poolKind: "E2E_MACOS",
-    coreUrl: process.env.DEVILUDO_CORE_API_URL ?? "http://127.0.0.1:8080",
+    coreUrl: process.env.DEVILUDO_CORE_API_URL?.trim() || remoteE2eConfiguration.coreUrl,
     token: e2eNodeToken,
     identityKeyFile: new URL("../.deviludo/local/e2e-macos-ed25519.pem", import.meta.url).pathname,
     jobRoot: new URL("../.deviludo/local/tart-host-jobs", import.meta.url).pathname,
@@ -813,7 +813,7 @@ async function detectLocalProviderUpstreamProxy() {
   const explicit = process.env.DEVILUDO_PROVIDER_UPSTREAM_PROXY?.trim();
   if (explicit) return normalizeLocalUpstreamProxy(explicit);
   if (process.platform !== "darwin") return "";
-  const hosts = (process.env.DEVILUDO_PROVIDER_ALLOWLIST ?? "api.anthropic.com,api.openai.com")
+  const hosts = (process.env.DEVILUDO_PROVIDER_ALLOWLIST ?? "api.anthropic.com,api.openai.com,chatgpt.com")
     .split(",").map(value => value.trim()).filter(Boolean);
   let fakeIpDetected = false;
   for (const host of hosts) {

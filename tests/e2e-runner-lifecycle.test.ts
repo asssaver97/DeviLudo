@@ -259,6 +259,11 @@ test("the production Guest, relay, executor and node all wire the lifecycle guar
     readFile(new URL("../.github/workflows/release.yml", import.meta.url), "utf8"),
   ]);
   assert.match(guest, /validateGuestInteractionScript as validInteractionScript/);
+  assert.match(guest, /await runConsumerPackageSmoke\(gamePackage\)/);
+  assert.match(guest, /const environment = await isolatedGameEnvironment\(runId\);[\s\S]*uninstrumented: true/);
+  assert.match(guest, /PACKAGE_NOT_PLAYABLE/);
+  assert.match(guest, /POSTCONDITION_TRANSITION_MISSING/);
+  assert.match(guest, /decision\.screenIntegrity === "PRODUCT_DEFECT"[\s\S]*VISUAL_INTEGRITY_DEFECT/);
   assert.match(guest, /policyInput\?\.close\(\)/);
   assert.match(guest, /type: "heartbeat"/);
   assert.match(guest, /const summary = productFailureMessage\(error\.code, error\.message\)/);

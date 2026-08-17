@@ -22,9 +22,9 @@ test("Agent settings accept fixed runtimes and normalize safe provider URLs", ()
     apiKey: null,
     models: null,
     roleModels: {
-      design: "gpt-5.3-codex",
-      development: "gpt-5.3-codex",
-      test: "gpt-5.3-codex",
+      design: "account-default",
+      development: "account-default",
+      test: "account-default",
     },
     imageModel: null,
   });
@@ -32,6 +32,10 @@ test("Agent settings accept fixed runtimes and normalize safe provider URLs", ()
     agentRuntime: "CODEX_CLI",
     baseUrl: "https://api.example.com/v1/",
   }, "production"), /official ChatGPT login/i);
+  assert.throws(() => parseAgentSettingsInput({
+    agentRuntime: "CODEX_CLI",
+    roleModels: { design: "custom", development: "custom", test: "custom" },
+  }, "production"), /account default model/i);
   assert.throws(() => parseAgentSettingsInput({
     agentRuntime: "UNKNOWN",
     baseUrl: "https://api.example.com",

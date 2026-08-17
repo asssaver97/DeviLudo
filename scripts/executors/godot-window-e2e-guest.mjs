@@ -31,6 +31,7 @@ import {
   isSafeProjectPngPath as safePngPath,
   isStableId as stableId,
   validLaunchProfile,
+  validateCoreJourneyLifecycle,
   validateGuestInteractionScript as validInteractionScript,
   validateProbeAssertion as validProbeAssertion,
 } from "../e2e-interaction-contract.mjs";
@@ -115,6 +116,7 @@ try {
   }
   platformDeadline = startedAt + frozenTimeoutSeconds * 1_000;
 
+  await runConsumerPackageSmoke(gamePackage);
   await runUnitTests(gamePackage, manifest);
   const journeys = manifest.features.filter(feature => feature.verificationMethod === "interactive");
   for (const journey of journeys) {
@@ -182,6 +184,38 @@ async function prepareInstalledArtifact() {
   if (platform === "macos") {
     const zip = (await readdir(workspace)).find(name => name.toLowerCase().endsWith(".zip"));
     if (zip) await execute("unzip", ["-q", join(workspace, zip), "-d", workspace], { timeout: 120_000, maxBuffer: 2 * 1024 * 1024 });
+  }
+}
+
+async function runConsumerPackageSmoke(gamePackage) {
+  const runId = "consumer-package-startup";
+  const gameLogPath = join(workspace, "game-logs", `${runId}.log`);
+  await mkdir(dirname(gameLogPath), { recursive: true });
+  const environment = await isolatedGameEnvironment(runId);
+  // Intentionally omit every E2E contract variable. This launches exactly as
+  // a player would, so a package that only works with Probe/scenario/test
+  // settings can never pass delivery.
+  const { launched, testEnvironment } = await launchManagedGame(
+    gamePackage, gameWindowArguments(gameLogPath), environment, runId, false,
+  );
+  launchRecords.push({ journeyId: runId, runLabel: "consumer-package", uninstrumented: true, ...launched.record });
+  try {
+    await testEnvironment.prepare();
+    await delay(2_000);
+    if (!await processAlive(launched.pid)) throw productFailure("PACKAGE_NOT_PLAYABLE", "交付包在普通玩家环境启动后立即退出");
+    const screenshotPath = join(workspace, "evidence-screenshots", `${runId}.png`);
+    await mkdir(dirname(screenshotPath), { recursive: true });
+    await captureAndInspectScreenshot(screenshotPath, path => testEnvironment.capture(path));
+    screenshots.push({ id: runId, path: screenshotPath });
+  } finally {
+    await testEnvironment.close();
+    await launched.terminate();
+    const logs = await launched.logs();
+    const gameLog = await readOptionalLog(gameLogPath);
+    const stdout = [logs.stdout, gameLog.toString("utf8")].filter(Boolean).join("\n");
+    stdoutLogs.push(stdout); stderrLogs.push(logs.stderr);
+    const errors = godotErrorLines(stdout, logs.stderr);
+    if (errors.length) throw productFailure("GODOT_SCRIPT_ERROR", errors[0]);
   }
 }
 
@@ -358,23 +392,27 @@ async function executeJourney(gamePackage, journey, runLabel, recordEvidence) {
         const afterDigest = probeStateDigest(after);
         const assertionsPassed = assertions.every(assertion => assertion.passed);
         const stateChanged = postconditionResult.stateChanged;
+        const transitionProven = assertions.some(assertion => assertion.passed
+          && JSON.stringify(assertion.previous) !== JSON.stringify(assertion.actual));
         if (recordEvidence) {
           steps.push({
             journeyId: journey.id, stepId: event.stepId, type: event.type, intent: event.intent,
             coversRequirementIds: event.coversRequirementIds, target: targetRecord,
             before: { sequence: before.sequence, sceneId: before.sceneId, digest: beforeDigest },
             after: { sequence: after.sequence, sceneId: after.sceneId, digest: afterDigest },
-            assertions, status: assertionsPassed && stateChanged ? "PASSED" : "FAILED",
+            assertions, status: assertionsPassed && stateChanged && transitionProven ? "PASSED" : "FAILED",
           });
         }
-        if (!assertionsPassed || !stateChanged) {
+        if (!assertionsPassed || !stateChanged || !transitionProven) {
           if (recordEvidence) {
             await captureFailedActionEvidence({
               testEnvironment, journey, event, probe: after, assertions, priorInputs,
-              failureCode: assertionsPassed ? "ACTION_STATE_UNCHANGED" : "POSTCONDITION_FAILED",
+              failureCode: assertionsPassed && stateChanged ? "POSTCONDITION_TRANSITION_MISSING"
+                : assertionsPassed ? "ACTION_STATE_UNCHANGED" : "POSTCONDITION_FAILED",
             });
           }
           if (!assertionsPassed) throw productFailure("POSTCONDITION_FAILED", `${journey.id}/${event.stepId} 操作后状态断言失败`);
+          if (!transitionProven) throw productFailure("POSTCONDITION_TRANSITION_MISSING", `${journey.id}/${event.stepId} 的断言未证明该操作改变了被测结果`);
           throw productFailure("ACTION_STATE_UNCHANGED", `${journey.id}/${event.stepId} 未产生可验证状态变化`);
         }
         if (recordEvidence) event.coversRequirementIds.forEach(id => coveredPlayerRequirements.add(id));
@@ -598,6 +636,24 @@ async function runAdaptiveRollout(gamePackage, manifest, rolloutIndex) {
       playerPolicy = policyResponse.policy;
       const decision = policyResponse.decision;
       const beforeDigest = probeStateDigest(currentProbe);
+      if (decision.screenIntegrity === "PRODUCT_DEFECT") {
+        const record = {
+          schema: "deviludo.e2e-trajectory-event", rolloutIndex, decisionIndex, seed,
+          observedAt: new Date().toISOString(), screenshotSha256: screenshot.sha256,
+          screenIntegrity: decision.screenIntegrity,
+          screenIntegrityReason: decision.screenIntegrityReason,
+          status: decision.status, observation: decision.observation, rationale: decision.rationale,
+          actions: [], semanticActions: [],
+          before: { sequence: currentProbe.sequence, sceneId: currentProbe.sceneId, digest: beforeDigest },
+          after: { sequence: currentProbe.sequence, sceneId: currentProbe.sceneId, digest: beforeDigest },
+          stateChanged: false, recovery,
+          oracle: { success: [], failure: [] }, policy: policyResponse.policy,
+        };
+        await appendFile(trajectoryPath, `${JSON.stringify(record)}\n`, { mode: 0o600 });
+        decisions.push(record);
+        failureCode = "VISUAL_INTEGRITY_DEFECT";
+        break;
+      }
       const nativeEvents = policyNativeEvents(decision.actions);
       const signature = jsonDigest({ screenshot: screenshot.sha256, actions: decision.actions });
       const seen = (loopSignatures.get(signature) ?? 0) + 1;
@@ -636,6 +692,7 @@ async function runAdaptiveRollout(gamePackage, manifest, rolloutIndex) {
       const record = {
         schema: "deviludo.e2e-trajectory-event", rolloutIndex, decisionIndex, seed,
         observedAt: new Date().toISOString(), screenshotSha256: screenshot.sha256,
+        screenIntegrity: decision.screenIntegrity, screenIntegrityReason: decision.screenIntegrityReason,
         status: decision.status, observation: decision.observation, rationale: decision.rationale,
         actions: decision.actions, semanticActions: semanticizePolicyActions(decision.actions, currentProbe),
         before: { sequence: currentProbe.sequence, sceneId: currentProbe.sceneId, digest: beforeDigest },
@@ -1140,7 +1197,8 @@ function assertManifest(value) {
         const intents = new Set(events.filter(isActionEvent).map(event => event.intent));
         if (["START", "READY", "PROGRESS", "COMPLETION"].every(role => roles.has(role))
           && checkpoints.some(event => event.visualMode === "STABLE_REPLAY")
-          && intents.has("PRIMARY_ACTION") && intents.has("COMPLETE_LOOP")) hasCore = true;
+          && intents.has("PRIMARY_ACTION") && intents.has("COMPLETE_LOOP")
+          && validateCoreJourneyLifecycle(events)) hasCore = true;
       }
     } else if (feature.verificationMethod === "visual") {
       if (!feature.expectedVisual || Object.hasOwn(feature.expectedVisual, "version") || !safePngPath(feature.expectedVisual.referenceImage)) {

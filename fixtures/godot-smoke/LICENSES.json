@@ -1,6 +1,11 @@
 {
-  "fixture": "DeviLudo local smoke project",
-  "assets": [],
-  "codeLicense": "Project-authored test fixture",
+  "project": "Ember Voyager",
+  "assets": [
+    {
+      "path": "res://assets/generated/",
+      "license": "Generated or user-supplied; distribution rights must be provided by the packager"
+    }
+  ],
+  "codeLicense": "Project-authored game code",
   "generatedContent": false
 }

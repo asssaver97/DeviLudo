@@ -10,6 +10,19 @@ const GAMEPAD_BUTTONS = new Set([
 ]);
 const GAMEPAD_AXES = new Set(["LEFT_X", "LEFT_Y", "RIGHT_X", "RIGHT_Y"]);
 
+export const CORE_START_ASSERTIONS = Object.freeze([
+  Object.freeze({ source: "STATE", key: "screen_mode", operator: "EQUALS", value: "MENU" }),
+  Object.freeze({ source: "STATE", key: "session_active", operator: "EQUALS", value: false }),
+  Object.freeze({ source: "STATE", key: "gameplay_input_enabled", operator: "EQUALS", value: false }),
+  Object.freeze({ source: "STATE", key: "blocking_layer_count", operator: "EQUALS", value: 0 }),
+]);
+export const CORE_READY_ASSERTIONS = Object.freeze([
+  Object.freeze({ source: "STATE", key: "screen_mode", operator: "EQUALS", value: "PLAYING" }),
+  Object.freeze({ source: "STATE", key: "session_active", operator: "EQUALS", value: true }),
+  Object.freeze({ source: "STATE", key: "gameplay_input_enabled", operator: "EQUALS", value: true }),
+  Object.freeze({ source: "STATE", key: "blocking_layer_count", operator: "EQUALS", value: 0 }),
+]);
+
 export function validateGuestInteractionScript(value, journeyRequirements, playerRequirements) {
   if (!value || typeof value !== "object" || Array.isArray(value)
     || !Array.isArray(journeyRequirements) || !(playerRequirements instanceof Set)
@@ -100,6 +113,41 @@ export function isInteractionAction(event) {
   return ACTION_TYPES.has(event?.type);
 }
 
+export function validateCoreJourneyLifecycle(events) {
+  if (!Array.isArray(events)) return false;
+  const meaningful = events.filter(event => event?.type !== "wait");
+  const indexes = role => meaningful
+    .map((event, index) => event?.type === "checkpoint" && event.role === role ? index : -1)
+    .filter(index => index >= 0);
+  const starts = indexes("START");
+  const ready = indexes("READY");
+  const progress = indexes("PROGRESS");
+  const completion = indexes("COMPLETION");
+  if (starts.length !== 1 || ready.length !== 1 || progress.length !== 1 || completion.length !== 1
+    || starts[0] !== 0) return false;
+  const startCheckpoint = meaningful[starts[0]];
+  const readyCheckpoint = meaningful[ready[0]];
+  if (startCheckpoint.visualMode !== "STABLE_REPLAY" || readyCheckpoint.visualMode !== "STABLE_REPLAY"
+    || !containsAssertions(startCheckpoint.assertions, CORE_START_ASSERTIONS)
+    || !containsAssertions(readyCheckpoint.assertions, CORE_READY_ASSERTIONS)) return false;
+  const actions = meaningful
+    .map((event, index) => ACTION_TYPES.has(event?.type) ? { event, index } : null)
+    .filter(Boolean);
+  const startActions = actions.filter(entry => entry.event.intent === "START_SESSION");
+  const primaryActions = actions.filter(entry => entry.event.intent === "PRIMARY_ACTION");
+  const completeActions = actions.filter(entry => entry.event.intent === "COMPLETE_LOOP");
+  if (startActions.length !== 1 || primaryActions.length < 1 || completeActions.length < 1) return false;
+  const startAction = startActions[0];
+  const primary = primaryActions[0];
+  const complete = completeActions.at(-1);
+  if (!(starts[0] < startAction.index && startAction.index < ready[0]
+    && ready[0] < primary.index && primary.index < progress[0]
+    && progress[0] < complete.index && complete.index < completion[0])) return false;
+  if (actions.some(entry => entry.index < startAction.index && entry.event.intent !== "NAVIGATION")) return false;
+  if (actions.some(entry => entry.index > startAction.index && entry.index < ready[0])) return false;
+  return containsAssertions(startAction.event.postconditions, CORE_READY_ASSERTIONS);
+}
+
 export function checkpointOutputMarker(id) {
   return `DEVILUDO_E2E_CHECKPOINT:${id}`;
 }
@@ -129,4 +177,11 @@ function validDelay(value, required) {
 
 function validNumberRange(value, minimum, maximum) {
   return typeof value === "number" && Number.isFinite(value) && value >= minimum && value <= maximum;
+}
+
+function containsAssertions(actual, required) {
+  return Array.isArray(actual) && required.every(expected => actual.some(candidate => candidate?.source === expected.source
+    && candidate.key === expected.key && candidate.targetId === expected.targetId
+    && candidate.property === expected.property && candidate.operator === expected.operator
+    && candidate.value === expected.value));
 }

@@ -1,18 +1,6 @@
 extends SceneTree
 
-# DeviLudo E2E Test Reference Implementation
-#
-# This test script demonstrates the required pattern for automated feature verification.
-# Agent-generated projects should follow this structure:
-#
-# 1. Extend SceneTree and run all tests in _initialize()
-# 2. Use check(condition, name) for each assertion
-# 3. Assertion names must be kebab-case and match checkNames in agent.json testManifest
-# 4. Output structured results: print("DEVILUDO_E2E_RESULT:", JSON.stringify(...))
-# 5. Exit with quit(0 if failures.is_empty() else 1)
-#
-# Each check() call corresponds to one feature verification point.
-# Group related checks by feature (e.g. all ember collection checks, all pause checks).
+# Deterministic headless rules and persistence suite.
 
 const GameState = preload("res://scripts/game_state.gd")
 
@@ -37,6 +25,11 @@ func _initialize() -> void:
 	# Feature: damage-system (core-loop)
 	state.apply_damage(25)
 	check(state.hull == 75, "damage-reduces-hull")
+	state.apply_damage(-50)
+	check(state.hull == 75, "negative-damage-rejected")
+	state.apply_damage(500)
+	check(state.hull == 0, "hull-clamped-to-zero")
+	state.hull = 75
 
 	# Feature: win-condition (core-loop)
 	state.collect_ember("ember-b")
@@ -44,6 +37,8 @@ func _initialize() -> void:
 	check(state.has_won(), "twenty-minute-core-loop-win")
 
 	# Feature: save-persistence (data-integrity)
+	state.paused = true
+	state.language = "en-US"
 	var save_path := "user://deviludo-local-save.json"
 	var writer := FileAccess.open(save_path, FileAccess.WRITE)
 	check(writer != null, "save-open-write")
@@ -61,6 +56,10 @@ func _initialize() -> void:
 			var restored := GameState.new()
 			restored.restore(decoded)
 			check(restored.to_snapshot() == state.to_snapshot(), "save-round-trip")
+			check(restored.paused == state.paused and restored.language == state.language, "restore-preserves-session-fields")
+			decoded["embers"] = ["ember-a", "ember-a"]
+			restored.restore(decoded)
+			check(restored.embers == ["ember-a"], "restore-rejects-duplicate-embers")
 
 	# Feature: headless-performance (runtime-quality)
 	var duration_ms := float(Time.get_ticks_usec() - started_at) / 1000.0
@@ -68,7 +67,7 @@ func _initialize() -> void:
 
 	# Output structured results
 	var result := {
-		"suite": "deviludo-local-godot-e2e",
+		"suite": "ember-voyager-headless",
 		"checks": checks,
 		"failures": failures,
 		"duration_ms": duration_ms,

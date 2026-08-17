@@ -440,6 +440,8 @@ test("asset generation is leased, attempt-bounded, and never overwrites a user u
   assert.match(sql, /GRANT EXECUTE ON FUNCTION deviludo\.claim_asset_generation\(integer, integer\) TO deviludo_scheduler/);
   assert.match(sql, /GRANT EXECUTE ON FUNCTION deviludo\.fail_asset_generation\(uuid, uuid, text\) TO deviludo_scheduler/);
   assert.match(sql, /GRANT SELECT, INSERT, UPDATE ON deviludo\.instance_agent_settings TO deviludo_api/);
+  assert.match(sql, /GRANT SELECT ON deviludo\.instance_agent_settings TO deviludo_scheduler, deviludo_sandbox/);
+  assert.match(sql, /GRANT SELECT ON deviludo\.e2e_regression_traces\s+TO deviludo_scheduler, deviludo_sandbox, deviludo_claim_executor/);
   assert.match(sql, /deviludo\.workflow_instances, deviludo\.instance_agent_settings,/);
   // These sweep every workspace, so they are definer functions owned by the role
   // that bypasses row-level security.

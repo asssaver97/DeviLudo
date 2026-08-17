@@ -3,6 +3,7 @@ import {
   interactionActionEvents,
   interactionCheckpointCount,
   interactionHasUserAction,
+  validateCoreJourneyLifecycle,
   validateInteractionScript,
   type CheckpointRole,
   type InteractionScript,
@@ -204,7 +205,8 @@ export function validateTestManifest(value: unknown): value is TestManifest {
           && assertionsComplete
           && intents.has("PRIMARY_ACTION") && intents.has("COMPLETE_LOOP")
           && actions.length >= 2
-          && interactionHasUserAction(item.interactionScript)) hasCoreJourney = true;
+          && interactionHasUserAction(item.interactionScript)
+          && validateCoreJourneyLifecycle(item.interactionScript)) hasCoreJourney = true;
       }
     } else if (item.verificationMethod === "visual") {
       if (!validateVisualTestSpec(item.expectedVisual)) return false;

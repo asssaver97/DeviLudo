@@ -8,6 +8,7 @@ export type E2EProbeValue = string | number | boolean | null;
 export type E2EProbeRect = Readonly<{ x: number; y: number; width: number; height: number }>;
 export type E2EProbeControl = Readonly<{
   id: string;
+  scope: "NAVIGATION" | "GAMEPLAY" | "OVERLAY" | "STATUS";
   visible: boolean;
   enabled: boolean;
   rect: E2EProbeRect;

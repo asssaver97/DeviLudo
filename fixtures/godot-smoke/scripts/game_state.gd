@@ -1,4 +1,4 @@
-class_name DeviLudoFixtureGameState
+class_name EmberVoyagerGameState
 extends RefCounted
 
 const REQUIRED_EMBERS := 3
@@ -35,7 +35,11 @@ func to_snapshot() -> Dictionary:
 	}
 
 func restore(snapshot: Dictionary) -> void:
-	embers.assign(snapshot.get("embers", []))
+	embers.clear()
+	for ember_id in snapshot.get("embers", []):
+		var clean_id := str(ember_id)
+		if not clean_id.is_empty() and not embers.has(clean_id):
+			embers.append(clean_id)
 	hull = clampi(int(snapshot.get("hull", 100)), 0, 100)
 	elapsed_seconds = maxf(float(snapshot.get("elapsed_seconds", 0.0)), 0.0)
 	paused = bool(snapshot.get("paused", false))

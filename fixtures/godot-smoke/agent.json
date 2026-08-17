@@ -1,234 +1,156 @@
 {
-  "title": "DeviLudo Local Smoke",
+  "title": "Ember Voyager",
   "testManifest": {
     "schema": "deviludo.test-manifest",
     "inputProfiles": ["KEYBOARD_MOUSE"],
     "primaryInputProfile": "KEYBOARD_MOUSE",
     "adaptivePlayer": {
-      "goal": "Start from a clean profile, select a route and complete one full playable loop.",
-      "requirementIds": ["req-core-loop"],
+      "goal": "Choose the Aurora route, fly the ship through three embers, survive the hazards, and reach the result screen.",
+      "requirementIds": ["req-feature-001-1c21aed4", "req-feature-002-7e78804f", "req-feature-003-94a2b1b3", "req-feature-004-d7d2f7ba", "req-feature-005-5cfc2dae"],
       "allowedActions": ["KEYBOARD", "POINTER"],
-      "successAssertions": [{ "source": "PROGRESS", "key": "loop", "operator": "GREATER_THAN", "value": 0 }],
-      "failureAssertions": [{ "source": "STATE", "key": "failed", "operator": "EQUALS", "value": true }],
+      "successAssertions": [{"source":"PROGRESS","key":"loop","operator":"CHANGED"}, {"source":"STATE","key":"screen_mode","operator":"EQUALS","value":"RESULT"}],
+      "failureAssertions": [{"source":"STATE","key":"failed","operator":"EQUALS","value":true}],
       "rolloutTimeoutMs": 240000,
-      "maxDecisions": 8,
+      "maxDecisions": 20,
       "seedStrategy": "STABLE_PROJECT_PLATFORM"
     },
     "requirements": [
-      {
-        "requirementId": "req-core-loop",
-        "description": "玩家完成收集、受伤与胜利核心循环",
-        "source": "CORE_LOOP",
-        "verificationClass": "PLAYER_INTERACTION"
-      },
-      {
-        "requirementId": "req-pause",
-        "description": "暂停时游戏时间停止流逝",
-        "source": "ACCEPTANCE",
-        "verificationClass": "PLAYER_INTERACTION"
-      },
-      {
-        "requirementId": "req-save",
-        "description": "游戏状态可保存并恢复",
-        "source": "ACCEPTANCE",
-        "verificationClass": "SYSTEM",
-        "systemCategory": "DATA",
-        "exemptionReason": "存档字节和状态往返属于持久化数据完整性契约"
-      },
-      {
-        "requirementId": "req-runtime",
-        "description": "运行时保持稳定",
-        "source": "ACCEPTANCE",
-        "verificationClass": "SYSTEM",
-        "systemCategory": "RUNTIME",
-        "exemptionReason": "运行时稳定性由导出程序错误扫描和确定性测试共同验证"
-      }
+      {"requirementId":"req-feature-001-1c21aed4","description":"从初始菜单选择路线","source":"CORE_LOOP","verificationClass":"PLAYER_INTERACTION"},
+      {"requirementId":"req-feature-002-7e78804f","description":"进入标记为 PLAYING 的会话状态","source":"CORE_LOOP","verificationClass":"PLAYER_INTERACTION"},
+      {"requirementId":"req-feature-003-94a2b1b3","description":"暂停或恢复会话","source":"CORE_LOOP","verificationClass":"PLAYER_INTERACTION"},
+      {"requirementId":"req-feature-004-d7d2f7ba","description":"触发完成循环","source":"CORE_LOOP","verificationClass":"PLAYER_INTERACTION"},
+      {"requirementId":"req-feature-005-5cfc2dae","description":"显示核心循环完成结果","source":"CORE_LOOP","verificationClass":"PLAYER_INTERACTION"},
+      {"requirementId":"req-acceptance-001-9e54b648","description":"启动时进入非活动会话的菜单状态，并允许玩家主动选择路线","source":"ACCEPTANCE","verificationClass":"PLAYER_INTERACTION"},
+      {"requirementId":"req-acceptance-002-b23a8637","description":"选择路线后会话进入 PLAYING 状态且完成按钮可用","source":"ACCEPTANCE","verificationClass":"PLAYER_INTERACTION"},
+      {"requirementId":"req-acceptance-003-a0d747d0","description":"暂停时状态计时不增长，恢复后可继续","source":"ACCEPTANCE","verificationClass":"PLAYER_INTERACTION"},
+      {"requirementId":"req-acceptance-004-c7590cf4","description":"同一余烬不能重复收集，合法的新余烬可以加入状态","source":"ACCEPTANCE","verificationClass":"PLAYER_INTERACTION"},
+      {"requirementId":"req-acceptance-005-38766245","description":"非负伤害降低船体值且船体保持在 0 至 100","source":"ACCEPTANCE","verificationClass":"PLAYER_INTERACTION"},
+      {"requirementId":"req-acceptance-006-9d24c8cf","description":"收集至少 3 个余烬、船体大于 0 且用时不超过 1200 秒时满足胜利条件","source":"ACCEPTANCE","verificationClass":"PLAYER_INTERACTION"},
+      {"requirementId":"req-acceptance-007-5cc80575","description":"状态快照恢复后应保留余烬、船体、用时、暂停和语言字段","source":"ACCEPTANCE","verificationClass":"PLAYER_INTERACTION"},
+      {"requirementId":"req-acceptance-008-9d169034","description":"完成循环后显示结果层并将循环进度标记为完成","source":"ACCEPTANCE","verificationClass":"PLAYER_INTERACTION"},
+      {"requirementId":"req-acceptance-009-914dcf29","description":"界面布局应在项目配置的 640×360 视口内完整可见和可操作","source":"ACCEPTANCE","verificationClass":"PLAYER_INTERACTION"}
     ],
     "features": [
       {
-        "id": "collect-ember",
-        "requirementIds": ["req-core-loop"],
-        "category": "core-loop",
-        "description": "玩家可以收集余烬道具，重复收集同一道具会被拒绝",
-        "verificationMethod": "unit",
-        "gdsTestPath": "res://tests/e2e.gd",
-        "checkNames": ["collect-first-ember", "reject-duplicate-ember"],
-        "timeoutMs": 60000
+        "id":"play-aurora-loop",
+        "requirementIds":["req-feature-001-1c21aed4","req-feature-002-7e78804f","req-acceptance-001-9e54b648","req-acceptance-002-b23a8637","req-acceptance-004-c7590cf4","req-acceptance-009-914dcf29"],
+        "category":"core-loop",
+        "description":"Start a clean voyage and cross the first genuine ember collection boundary.",
+        "verificationMethod":"interactive",
+        "gdsTestPath":"res://tests/e2e.gd",
+        "checkNames":["collect-first-ember","reject-duplicate-ember"],
+        "coreJourney":true,
+        "launchProfile":{"type":"FRESH"},
+        "timeoutMs":300000,
+        "interactionScript":{"events":[
+          {"type":"checkpoint","id":"game-start","role":"START","visualMode":"STABLE_REPLAY","expectedOutput":"DEVILUDO_E2E_CHECKPOINT:game-start","assertions":[{"source":"STATE","key":"screen_mode","operator":"EQUALS","value":"MENU"},{"source":"STATE","key":"session_active","operator":"EQUALS","value":false},{"source":"STATE","key":"gameplay_input_enabled","operator":"EQUALS","value":false},{"source":"STATE","key":"blocking_layer_count","operator":"EQUALS","value":0},{"source":"CONTROL","targetId":"new-game","property":"enabled","operator":"EQUALS","value":true}],"delay_ms":900},
+          {"type":"click","stepId":"choose-aurora-route","intent":"START_SESSION","targetId":"new-game","coversRequirementIds":["req-feature-001-1c21aed4","req-feature-002-7e78804f","req-acceptance-001-9e54b648","req-acceptance-002-b23a8637","req-acceptance-009-914dcf29"],"postconditions":[{"source":"STATE","key":"screen_mode","operator":"EQUALS","value":"PLAYING"},{"source":"STATE","key":"session_active","operator":"EQUALS","value":true},{"source":"STATE","key":"gameplay_input_enabled","operator":"EQUALS","value":true},{"source":"STATE","key":"blocking_layer_count","operator":"EQUALS","value":0}],"delay_ms":200},
+          {"type":"checkpoint","id":"route-selected","role":"READY","visualMode":"STABLE_REPLAY","expectedOutput":"DEVILUDO_E2E_CHECKPOINT:route-selected","assertions":[{"source":"STATE","key":"screen_mode","operator":"EQUALS","value":"PLAYING"},{"source":"STATE","key":"session_active","operator":"EQUALS","value":true},{"source":"STATE","key":"gameplay_input_enabled","operator":"EQUALS","value":true},{"source":"STATE","key":"blocking_layer_count","operator":"EQUALS","value":0},{"source":"PROGRESS","key":"embers","operator":"EQUALS","value":0},{"source":"PROGRESS","key":"hull","operator":"EQUALS","value":100}],"delay_ms":350},
+          {"type":"key_hold","key":"KEY_D","duration_ms":400,"stepId":"approach-west-ember","intent":"PRIMARY_ACTION","coversRequirementIds":["req-acceptance-002-b23a8637","req-acceptance-009-914dcf29"],"postconditions":[{"source":"PROGRESS","key":"ship_x","operator":"GREATER_THAN","value":250}],"delay_ms":100},
+          {"type":"checkpoint","id":"west-ember-approach","role":"PROGRESS","visualMode":"DYNAMIC","changeTargetId":"route-map","assertions":[{"source":"PROGRESS","key":"ship_x","operator":"GREATER_THAN","value":250},{"source":"PROGRESS","key":"embers","operator":"EQUALS","value":0}],"delay_ms":250},
+          {"type":"key_hold","key":"KEY_D","duration_ms":500,"stepId":"collect-west-ember","intent":"COMPLETE_LOOP","coversRequirementIds":["req-acceptance-004-c7590cf4"],"postconditions":[{"source":"PROGRESS","key":"embers","operator":"EQUALS","value":1},{"source":"PROGRESS","key":"ship_x","operator":"GREATER_THAN","value":350}],"delay_ms":100},
+          {"type":"checkpoint","id":"first-ember-collected","role":"COMPLETION","visualMode":"DYNAMIC","changeTargetId":"ember-counter","assertions":[{"source":"PROGRESS","key":"embers","operator":"EQUALS","value":1},{"source":"STATE","key":"screen_mode","operator":"EQUALS","value":"PLAYING"}],"delay_ms":400}
+        ]}
       },
       {
-        "id": "pause-system",
-        "requirementIds": ["req-pause"],
-        "category": "player-control",
-        "description": "暂停时游戏时间停止流逝",
-        "verificationMethod": "unit",
-        "gdsTestPath": "res://tests/e2e.gd",
-        "checkNames": ["pause-stops-clock"],
-        "timeoutMs": 60000
+        "id":"complete-aurora-voyage",
+        "requirementIds":["req-feature-004-d7d2f7ba","req-feature-005-5cfc2dae","req-acceptance-006-9d24c8cf","req-acceptance-008-9d169034"],
+        "category":"core-loop",
+        "description":"Collect all three embers through real flight and cross the victory boundary.",
+        "verificationMethod":"interactive",
+        "gdsTestPath":"res://tests/e2e.gd",
+        "checkNames":["collect-first-ember","twenty-minute-core-loop-win"],
+        "launchProfile":{"type":"FRESH"},
+        "timeoutMs":300000,
+        "interactionScript":{"events":[
+          {"type":"checkpoint","id":"victory-menu","role":"START","visualMode":"STABLE_REPLAY","assertions":[{"source":"STATE","key":"screen_mode","operator":"EQUALS","value":"MENU"}],"delay_ms":700},
+          {"type":"click","stepId":"start-victory-voyage","intent":"START_SESSION","targetId":"new-game","coversRequirementIds":["req-feature-004-d7d2f7ba","req-feature-005-5cfc2dae","req-acceptance-006-9d24c8cf","req-acceptance-008-9d169034"],"postconditions":[{"source":"STATE","key":"screen_mode","operator":"EQUALS","value":"PLAYING"},{"source":"PROGRESS","key":"embers","operator":"EQUALS","value":0},{"source":"PROGRESS","key":"hull","operator":"EQUALS","value":100}],"delay_ms":150},
+          {"type":"checkpoint","id":"victory-ready","role":"READY","visualMode":"STABLE_REPLAY","assertions":[{"source":"STATE","key":"gameplay_input_enabled","operator":"EQUALS","value":true}],"delay_ms":250},
+          {"type":"key_hold","key":"KEY_D","duration_ms":900,"stepId":"victory-west","intent":"PRIMARY_ACTION","coversRequirementIds":["req-acceptance-006-9d24c8cf"],"postconditions":[{"source":"PROGRESS","key":"embers","operator":"EQUALS","value":1}],"delay_ms":100},
+          {"type":"key_hold","key":"KEY_S","duration_ms":300,"stepId":"victory-align-middle","intent":"NAVIGATION","coversRequirementIds":["req-acceptance-006-9d24c8cf"],"postconditions":[{"source":"STATE","key":"screen_mode","operator":"EQUALS","value":"PLAYING"}],"delay_ms":100},
+          {"type":"key_hold","key":"KEY_D","duration_ms":850,"stepId":"victory-middle","intent":"PRIMARY_ACTION","coversRequirementIds":["req-acceptance-006-9d24c8cf"],"postconditions":[{"source":"PROGRESS","key":"embers","operator":"EQUALS","value":2}],"delay_ms":100},
+          {"type":"key_hold","key":"KEY_W","duration_ms":500,"stepId":"victory-align-east","intent":"NAVIGATION","coversRequirementIds":["req-acceptance-006-9d24c8cf"],"postconditions":[{"source":"STATE","key":"screen_mode","operator":"EQUALS","value":"PLAYING"}],"delay_ms":100},
+          {"type":"key_hold","key":"KEY_D","duration_ms":1050,"stepId":"victory-east","intent":"COMPLETE_LOOP","coversRequirementIds":["req-feature-004-d7d2f7ba","req-feature-005-5cfc2dae","req-acceptance-006-9d24c8cf","req-acceptance-008-9d169034"],"postconditions":[{"source":"PROGRESS","key":"embers","operator":"EQUALS","value":3},{"source":"STATE","key":"screen_mode","operator":"EQUALS","value":"RESULT"},{"source":"STATE","key":"loop_complete","operator":"EQUALS","value":true}],"delay_ms":100},
+          {"type":"checkpoint","id":"core-loop-complete","role":"COMPLETION","visualMode":"DYNAMIC","changeTargetId":"result-message","expectedOutput":"DEVILUDO_E2E_CHECKPOINT:core-loop-complete","assertions":[{"source":"PROGRESS","key":"loop","operator":"GREATER_THAN","value":0},{"source":"STATE","key":"blocking_layer_count","operator":"EQUALS","value":1}],"delay_ms":400}
+        ]}
       },
       {
-        "id": "core-loop-journey",
-        "requirementIds": ["req-core-loop", "req-pause"],
-        "category": "core-loop",
-        "description": "通过语义控件和真实键鼠选择路线、暂停并完成核心循环",
-        "verificationMethod": "interactive",
-        "coreJourney": true,
-        "launchProfile": { "type": "FRESH" },
-        "timeoutMs": 300000,
-        "interactionScript": {
-          "events": [
-            {
-              "type": "checkpoint",
-              "id": "game-start",
-              "role": "START",
-              "visualMode": "STABLE_REPLAY",
-              "expectedOutput": "DEVILUDO_E2E_CHECKPOINT:game-start",
-              "assertions": [
-                { "source": "SCENE", "operator": "EQUALS", "value": "smoke-main" }
-              ],
-              "delay_ms": 1000
-            },
-            {
-              "type": "checkpoint",
-              "id": "controls-ready",
-              "role": "READY",
-              "visualMode": "DYNAMIC",
-              "assertions": [
-                { "source": "CONTROL", "targetId": "route-select", "property": "enabled", "operator": "EQUALS", "value": true }
-              ]
-            },
-            {
-              "type": "click",
-              "targetId": "route-select",
-              "stepId": "select-route",
-              "intent": "PRIMARY_ACTION",
-              "coversRequirementIds": ["req-core-loop"],
-              "postconditions": [
-                { "source": "STATE", "key": "route_selected", "operator": "EQUALS", "value": true },
-                { "source": "CONTROL", "targetId": "complete-loop", "property": "enabled", "operator": "EQUALS", "value": true }
-              ],
-              "delay_ms": 200
-            },
-            {
-              "type": "checkpoint",
-              "id": "route-selected",
-        "role": "ACTION",
-        "visualMode": "DYNAMIC",
-        "changeTargetId": "route-select",
-              "expectedOutput": "DEVILUDO_E2E_CHECKPOINT:route-selected",
-              "assertions": [
-                { "source": "STATE", "key": "route_selected", "operator": "EQUALS", "value": true }
-              ]
-            },
-            {
-              "type": "key_tap",
-              "key": "KEY_P",
-              "stepId": "pause-game",
-              "intent": "FEATURE_ACTION",
-              "coversRequirementIds": ["req-pause"],
-              "postconditions": [
-                { "source": "STATE", "key": "paused", "operator": "EQUALS", "value": true }
-              ],
-              "delay_ms": 200
-            },
-            {
-              "type": "key_tap",
-              "key": "KEY_P",
-              "stepId": "resume-game",
-              "intent": "NAVIGATION",
-              "coversRequirementIds": [],
-              "postconditions": [
-                { "source": "STATE", "key": "paused", "operator": "EQUALS", "value": false }
-              ],
-              "delay_ms": 200
-            },
-            {
-              "type": "click",
-              "targetId": "complete-loop",
-              "stepId": "complete-loop",
-              "intent": "COMPLETE_LOOP",
-              "coversRequirementIds": ["req-core-loop"],
-              "postconditions": [
-                { "source": "STATE", "key": "loop_complete", "operator": "EQUALS", "value": true },
-                { "source": "PROGRESS", "key": "loop", "operator": "GREATER_THAN", "value": 0 }
-              ],
-              "delay_ms": 200
-            },
-            {
-              "type": "checkpoint",
-              "id": "loop-progressed",
-        "role": "PROGRESS",
-        "visualMode": "DYNAMIC",
-        "changeTargetId": "complete-loop",
-              "assertions": [
-                { "source": "PROGRESS", "key": "loop", "operator": "EQUALS", "value": 1 }
-              ]
-            },
-            {
-              "type": "checkpoint",
-              "id": "core-loop-complete",
-              "role": "COMPLETION",
-              "visualMode": "STABLE_REPLAY",
-              "expectedOutput": "DEVILUDO_E2E_CHECKPOINT:core-loop-complete",
-              "assertions": [
-                { "source": "STATE", "key": "loop_complete", "operator": "EQUALS", "value": true }
-              ]
-            }
-          ]
-        }
+        "id":"hazard-failure-voyage",
+        "requirementIds":["req-acceptance-005-38766245"],
+        "category":"core-loop",
+        "description":"Repeatedly re-enter a hazard until hull loss crosses the failure boundary.",
+        "verificationMethod":"interactive",
+        "gdsTestPath":"res://tests/e2e.gd",
+        "checkNames":["damage-reduces-hull","hull-clamped-to-zero"],
+        "launchProfile":{"type":"FRESH"},
+        "timeoutMs":300000,
+        "interactionScript":{"events":[
+          {"type":"checkpoint","id":"failure-menu","role":"START","visualMode":"STABLE_REPLAY","assertions":[{"source":"STATE","key":"screen_mode","operator":"EQUALS","value":"MENU"}],"delay_ms":700},
+          {"type":"click","stepId":"start-failure-voyage","intent":"START_SESSION","targetId":"new-game","coversRequirementIds":["req-acceptance-005-38766245"],"postconditions":[{"source":"STATE","key":"screen_mode","operator":"EQUALS","value":"PLAYING"},{"source":"PROGRESS","key":"hull","operator":"EQUALS","value":100}],"delay_ms":150},
+          {"type":"checkpoint","id":"failure-ready","role":"READY","visualMode":"STABLE_REPLAY","assertions":[{"source":"PROGRESS","key":"hull","operator":"EQUALS","value":100}],"delay_ms":250},
+          {"type":"key_hold","key":"KEY_W","duration_ms":360,"stepId":"align-first-hazard","intent":"NAVIGATION","coversRequirementIds":["req-acceptance-005-38766245"],"postconditions":[{"source":"STATE","key":"screen_mode","operator":"EQUALS","value":"PLAYING"}],"delay_ms":100},
+          {"type":"key_hold","key":"KEY_D","duration_ms":1320,"stepId":"first-hazard-hit","intent":"PRIMARY_ACTION","coversRequirementIds":["req-acceptance-005-38766245"],"postconditions":[{"source":"PROGRESS","key":"hull","operator":"EQUALS","value":75}],"delay_ms":100},
+          {"type":"key_hold","key":"KEY_A","duration_ms":300,"stepId":"leave-hazard-one","intent":"NAVIGATION","coversRequirementIds":["req-acceptance-005-38766245"],"postconditions":[{"source":"PROGRESS","key":"hull","operator":"EQUALS","value":75}],"delay_ms":100},
+          {"type":"key_hold","key":"KEY_D","duration_ms":300,"stepId":"second-hazard-hit","intent":"PRIMARY_ACTION","coversRequirementIds":["req-acceptance-005-38766245"],"postconditions":[{"source":"PROGRESS","key":"hull","operator":"EQUALS","value":50}],"delay_ms":100},
+          {"type":"key_hold","key":"KEY_A","duration_ms":300,"stepId":"leave-hazard-two","intent":"NAVIGATION","coversRequirementIds":["req-acceptance-005-38766245"],"postconditions":[{"source":"PROGRESS","key":"hull","operator":"EQUALS","value":50}],"delay_ms":100},
+          {"type":"key_hold","key":"KEY_D","duration_ms":300,"stepId":"third-hazard-hit","intent":"PRIMARY_ACTION","coversRequirementIds":["req-acceptance-005-38766245"],"postconditions":[{"source":"PROGRESS","key":"hull","operator":"EQUALS","value":25}],"delay_ms":100},
+          {"type":"key_hold","key":"KEY_A","duration_ms":300,"stepId":"leave-hazard-three","intent":"NAVIGATION","coversRequirementIds":["req-acceptance-005-38766245"],"postconditions":[{"source":"PROGRESS","key":"hull","operator":"EQUALS","value":25}],"delay_ms":100},
+          {"type":"key_hold","key":"KEY_D","duration_ms":300,"stepId":"final-hazard-hit","intent":"COMPLETE_LOOP","coversRequirementIds":["req-acceptance-005-38766245"],"postconditions":[{"source":"PROGRESS","key":"hull","operator":"EQUALS","value":0},{"source":"STATE","key":"screen_mode","operator":"EQUALS","value":"RESULT"},{"source":"STATE","key":"failed","operator":"EQUALS","value":true}],"delay_ms":100},
+          {"type":"checkpoint","id":"voyage-lost","role":"COMPLETION","visualMode":"DYNAMIC","changeTargetId":"result-message","assertions":[{"source":"STATE","key":"blocking_layer_count","operator":"EQUALS","value":1}],"delay_ms":400}
+        ]}
       },
       {
-        "id": "damage-system",
-        "requirementIds": ["req-core-loop"],
-        "category": "core-loop",
-        "description": "伤害正确减少船体完整度",
-        "verificationMethod": "unit",
-        "gdsTestPath": "res://tests/e2e.gd",
-        "checkNames": ["damage-reduces-hull"],
-        "timeoutMs": 60000
+        "id":"save-and-continue-voyage",
+        "requirementIds":["req-acceptance-007-5cc80575"],
+        "category":"data-integrity",
+        "description":"Pause a live voyage, save it to the main menu, and continue from the validated disk snapshot.",
+        "verificationMethod":"interactive",
+        "gdsTestPath":"res://tests/e2e.gd",
+        "checkNames":["save-round-trip","restore-preserves-session-fields"],
+        "launchProfile":{"type":"FRESH"},
+        "timeoutMs":300000,
+        "interactionScript":{"events":[
+          {"type":"checkpoint","id":"save-flow-menu","role":"START","visualMode":"STABLE_REPLAY","assertions":[{"source":"STATE","key":"screen_mode","operator":"EQUALS","value":"MENU"}],"delay_ms":700},
+          {"type":"click","stepId":"start-save-flow","intent":"START_SESSION","targetId":"new-game","coversRequirementIds":["req-acceptance-007-5cc80575"],"postconditions":[{"source":"STATE","key":"screen_mode","operator":"EQUALS","value":"PLAYING"}],"delay_ms":150},
+          {"type":"checkpoint","id":"save-flow-ready","role":"READY","visualMode":"STABLE_REPLAY","assertions":[{"source":"STATE","key":"screen_mode","operator":"EQUALS","value":"PLAYING"}],"delay_ms":250},
+          {"type":"key_hold","key":"KEY_D","duration_ms":900,"stepId":"make-save-progress","intent":"PRIMARY_ACTION","coversRequirementIds":["req-acceptance-007-5cc80575"],"postconditions":[{"source":"PROGRESS","key":"embers","operator":"GREATER_THAN_OR_EQUALS","value":1}],"delay_ms":100},
+          {"type":"key_tap","key":"KEY_P","stepId":"open-save-pause","intent":"NAVIGATION","coversRequirementIds":["req-acceptance-007-5cc80575"],"postconditions":[{"source":"STATE","key":"screen_mode","operator":"EQUALS","value":"PAUSED"}],"delay_ms":150},
+          {"type":"click","stepId":"save-and-return-menu","intent":"NAVIGATION","targetId":"save-main-menu","coversRequirementIds":["req-acceptance-007-5cc80575"],"postconditions":[{"source":"STATE","key":"screen_mode","operator":"EQUALS","value":"MENU"},{"source":"CONTROL","targetId":"continue-game","property":"enabled","operator":"EQUALS","value":true}],"delay_ms":250},
+          {"type":"click","stepId":"continue-saved-voyage","intent":"COMPLETE_LOOP","targetId":"continue-game","coversRequirementIds":["req-acceptance-007-5cc80575"],"postconditions":[{"source":"STATE","key":"screen_mode","operator":"EQUALS","value":"PLAYING"},{"source":"PROGRESS","key":"embers","operator":"GREATER_THAN_OR_EQUALS","value":1}],"delay_ms":250},
+          {"type":"checkpoint","id":"save-restored","role":"COMPLETION","visualMode":"DYNAMIC","changeTargetId":"ember-counter","assertions":[{"source":"STATE","key":"screen_mode","operator":"EQUALS","value":"PLAYING"},{"source":"PROGRESS","key":"embers","operator":"EQUALS","value":1}],"delay_ms":350}
+        ]}
       },
       {
-        "id": "win-condition",
-        "requirementIds": ["req-core-loop"],
-        "category": "core-loop",
-        "description": "收集足够余烬且船体完整时胜利",
-        "verificationMethod": "unit",
-        "gdsTestPath": "res://tests/e2e.gd",
-        "checkNames": ["twenty-minute-core-loop-win"],
-        "timeoutMs": 60000
+        "id":"pause-and-resume-voyage",
+        "requirementIds":["req-feature-003-94a2b1b3","req-acceptance-003-a0d747d0"],
+        "category":"core-loop",
+        "description":"Pause a live voyage, verify gameplay is blocked, then resume the same session.",
+        "verificationMethod":"interactive",
+        "gdsTestPath":"res://tests/e2e.gd",
+        "checkNames":["pause-stops-clock"],
+        "launchProfile":{"type":"FRESH"},
+        "timeoutMs":300000,
+        "interactionScript":{"events":[
+          {"type":"checkpoint","id":"pause-menu","role":"START","visualMode":"STABLE_REPLAY","assertions":[{"source":"STATE","key":"screen_mode","operator":"EQUALS","value":"MENU"}],"delay_ms":700},
+          {"type":"click","stepId":"start-pause-voyage","intent":"START_SESSION","targetId":"new-game","coversRequirementIds":["req-feature-003-94a2b1b3","req-acceptance-003-a0d747d0"],"postconditions":[{"source":"STATE","key":"screen_mode","operator":"EQUALS","value":"PLAYING"}],"delay_ms":150},
+          {"type":"checkpoint","id":"pause-ready","role":"READY","visualMode":"STABLE_REPLAY","assertions":[{"source":"STATE","key":"gameplay_input_enabled","operator":"EQUALS","value":true}],"delay_ms":250},
+          {"type":"key_tap","key":"KEY_P","stepId":"pause-voyage","intent":"PRIMARY_ACTION","coversRequirementIds":["req-feature-003-94a2b1b3","req-acceptance-003-a0d747d0"],"postconditions":[{"source":"STATE","key":"screen_mode","operator":"EQUALS","value":"PAUSED"},{"source":"STATE","key":"gameplay_input_enabled","operator":"EQUALS","value":false},{"source":"STATE","key":"blocking_layer_count","operator":"GREATER_THAN_OR_EQUALS","value":1}],"delay_ms":150},
+          {"type":"key_tap","key":"KEY_P","stepId":"resume-voyage","intent":"COMPLETE_LOOP","coversRequirementIds":["req-feature-003-94a2b1b3","req-acceptance-003-a0d747d0"],"postconditions":[{"source":"STATE","key":"screen_mode","operator":"EQUALS","value":"PLAYING"},{"source":"STATE","key":"gameplay_input_enabled","operator":"EQUALS","value":true},{"source":"STATE","key":"blocking_layer_count","operator":"EQUALS","value":0}],"delay_ms":300},
+          {"type":"checkpoint","id":"pause-resumed","role":"COMPLETION","visualMode":"DYNAMIC","changeTargetId":"route-map","assertions":[{"source":"STATE","key":"screen_mode","operator":"EQUALS","value":"PLAYING"}],"delay_ms":350}
+        ]}
       },
-      {
-        "id": "save-persistence",
-        "requirementIds": ["req-save"],
-        "category": "data-integrity",
-        "description": "游戏状态可以保存并原样恢复",
-        "verificationMethod": "unit",
-        "gdsTestPath": "res://tests/e2e.gd",
-        "checkNames": ["save-open-write", "save-open-read", "save-json-valid", "save-round-trip"],
-        "timeoutMs": 60000
-      },
-      {
-        "id": "headless-performance",
-        "requirementIds": ["req-runtime"],
-        "category": "runtime-quality",
-        "description": "headless 模式下测试套件在 250ms 内完成",
-        "verificationMethod": "unit",
-        "gdsTestPath": "res://tests/e2e.gd",
-        "checkNames": ["headless-performance-budget"],
-        "timeoutMs": 60000
-      }
+      {"id":"state-rules","requirementIds":["req-acceptance-003-a0d747d0","req-acceptance-004-c7590cf4","req-acceptance-005-38766245","req-acceptance-006-9d24c8cf"],"category":"data-integrity","description":"Deterministic state rules reject duplicate pickups, freeze paused time, clamp damage, and evaluate victory.","verificationMethod":"unit","gdsTestPath":"res://tests/e2e.gd","checkNames":["collect-first-ember","reject-duplicate-ember","pause-stops-clock","damage-reduces-hull","negative-damage-rejected","hull-clamped-to-zero","twenty-minute-core-loop-win"],"timeoutMs":300000},
+      {"id":"snapshot-round-trip","requirementIds":["req-acceptance-007-5cc80575"],"category":"data-integrity","description":"A JSON disk snapshot restores all persistent state and removes duplicate ember identifiers.","verificationMethod":"unit","gdsTestPath":"res://tests/e2e.gd","checkNames":["save-open-write","save-open-read","save-json-valid","save-round-trip","restore-preserves-session-fields","restore-rejects-duplicate-embers"],"timeoutMs":300000},
+      {"id":"headless-runtime","requirementIds":["req-acceptance-009-914dcf29"],"category":"runtime-quality","description":"The deterministic headless state suite completes within its runtime budget.","verificationMethod":"unit","gdsTestPath":"res://tests/e2e.gd","checkNames":["headless-performance-budget"],"timeoutMs":300000}
     ]
   },
   "assetManifest": {
-    "schemaVersion": "deviludo.asset-manifest.v1",
-    "items": [
-      {
-        "assetKey": "ui/ember-icon",
-        "assetType": "icon",
-        "description": "A compact glowing ember icon used by the collection counter",
-        "generationPrompt": "single warm orange ember icon, crisp game UI asset, transparent background, no text",
-        "frameCount": null,
-        "dimensions": "64x64"
-      }
+    "schemaVersion":"deviludo.asset-manifest.v1",
+    "items":[
+      {"assetKey":"backgrounds/space-route","assetType":"background","description":"Deep blue starfield route map with subtle nebula lanes and clear gameplay contrast, no text or UI.","generationPrompt":"16:9 sci-fi game background, deep navy starfield, subtle cyan and amber nebula navigation lanes, sparse distant stars, clean negative space for gameplay, no ships, no text, no interface, polished 2D illustration","frameCount":null,"dimensions":"1280x720"},
+      {"assetKey":"sprites/player-ship","assetType":"sprite","description":"Small cyan player spacecraft viewed from above, pointing right, with a bright readable silhouette.","generationPrompt":"top-down 2D game sprite of a compact cyan exploration spaceship facing right, bright engine glow, crisp readable silhouette, isolated transparent background, no text, centered with padding","frameCount":null,"dimensions":"96x68"},
+      {"assetKey":"sprites/ember","assetType":"sprite","description":"Golden-orange collectible stellar ember with a luminous crystalline core and transparent background.","generationPrompt":"single collectible stellar ember game sprite, golden orange crystalline flame core, strong warm glow, crisp edges, isolated transparent background, no text, centered","frameCount":null,"dimensions":"64x64"},
+      {"assetKey":"sprites/hazard","assetType":"sprite","description":"Red-violet angular space mine hazard with a threatening luminous core and transparent background.","generationPrompt":"top-down sci-fi space hazard sprite, angular red violet energy mine, dangerous luminous core, clear hostile silhouette, isolated transparent background, no text, centered","frameCount":null,"dimensions":"96x96"}
     ]
   }
 }

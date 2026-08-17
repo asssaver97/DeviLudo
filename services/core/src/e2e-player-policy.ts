@@ -9,6 +9,8 @@ export type PlayerPolicyStatus = typeof PLAYER_POLICY_STATUSES[number];
 
 export type PlayerPolicyAction = Readonly<Record<string, unknown> & { type: string }>;
 export type PlayerPolicyDecision = Readonly<{
+  screenIntegrity: "PASS" | "PRODUCT_DEFECT";
+  screenIntegrityReason: string;
   status: PlayerPolicyStatus;
   observation: string;
   rationale: string;
@@ -22,19 +24,19 @@ export type PlayerPolicyResult = Readonly<{
 
 const VISION_SMOKE_CASES = Object.freeze([
   Object.freeze({
-    left: "RED", right: "BLUE",
-    png: visionCalibrationPng([255, 0, 0], [0, 0, 255]),
+    expected: "RED",
+    png: visionCalibrationPng([255, 0, 0]),
   }),
   Object.freeze({
-    left: "BLUE", right: "YELLOW",
-    png: visionCalibrationPng([0, 0, 255], [255, 255, 0]),
+    expected: "YELLOW",
+    png: visionCalibrationPng([255, 255, 0]),
   }),
 ]);
 
 /** Build the calibration images instead of embedding opaque PNG blobs. The
  * previous blobs had invalid IDAT CRC/zlib checksums, so every visual model
  * correctly rejected them and the E2E preflight reported a false negative. */
-function visionCalibrationPng(left: readonly [number, number, number], right: readonly [number, number, number]): string {
+function visionCalibrationPng(color: readonly [number, number, number]): string {
   const width = 64;
   const height = 64;
   const channels = 3;
@@ -44,7 +46,6 @@ function visionCalibrationPng(left: readonly [number, number, number], right: re
     const row = y * rowBytes;
     pixels[row] = 0;
     for (let x = 0; x < width; x += 1) {
-      const color = x < width / 2 ? left : right;
       const offset = row + 1 + x * channels;
       pixels[offset] = color[0];
       pixels[offset + 1] = color[1];
@@ -322,7 +323,7 @@ export async function verifyE2ePlayerVision(input: Readonly<{
         ?.flatMap(item => item.content as readonly Record<string, unknown>[] ?? [])
         .find(item => typeof item.text === "string")?.text ?? "");
     const observed = parseVisionSmokeAnswer(answer);
-    if (observed.left !== testCase.left || observed.right !== testCase.right) {
+    if (observed.dominant !== testCase.expected) {
       throw visionUnavailable("Test Agent provider did not inspect the visual capability image");
     }
   }
@@ -331,13 +332,24 @@ export async function verifyE2ePlayerVision(input: Readonly<{
 export function parsePlayerPolicyDecision(raw: string, allowedGroups: readonly string[]): PlayerPolicyDecision {
   const source = raw.trim().replace(/^```(?:json)?\s*/i, "").replace(/\s*```$/, "");
   const value = JSON.parse(source) as Record<string, unknown>;
-  if (!PLAYER_POLICY_STATUSES.includes(value.status as PlayerPolicyStatus)
+  if (Object.keys(value).some(key => !["screenIntegrity", "screenIntegrityReason", "status", "observation", "rationale", "actions"].includes(key))
+    || !["PASS", "PRODUCT_DEFECT"].includes(String(value.screenIntegrity))
+    || typeof value.screenIntegrityReason !== "string" || value.screenIntegrityReason.trim().length < 1 || value.screenIntegrityReason.length > 500
+    || !PLAYER_POLICY_STATUSES.includes(value.status as PlayerPolicyStatus)
     || typeof value.observation !== "string" || value.observation.trim().length < 1 || value.observation.length > 500
     || typeof value.rationale !== "string" || value.rationale.trim().length < 1 || value.rationale.length > 500
     || !Array.isArray(value.actions) || value.actions.length > 4
-    || (value.status === "CONTINUE" && value.actions.length < 1)) throw new Error("Test Agent decision shape is invalid");
+    || (value.screenIntegrity === "PASS" && value.status === "CONTINUE" && value.actions.length < 1)
+    || (value.screenIntegrity === "PRODUCT_DEFECT" && value.actions.length !== 0)) throw new Error("Test Agent decision shape is invalid");
   const actions = value.actions.map(action => validatePolicyAction(action, allowedGroups));
-  return Object.freeze({ status: value.status as PlayerPolicyStatus, observation: value.observation.trim(), rationale: value.rationale.trim(), actions: Object.freeze(actions) });
+  return Object.freeze({
+    screenIntegrity: value.screenIntegrity as PlayerPolicyDecision["screenIntegrity"],
+    screenIntegrityReason: value.screenIntegrityReason.trim(),
+    status: value.status as PlayerPolicyStatus,
+    observation: value.observation.trim(),
+    rationale: value.rationale.trim(),
+    actions: Object.freeze(actions),
+  });
 }
 
 function validatePolicyAction(
@@ -391,7 +403,8 @@ function policyPrompt(request: PlayerPolicyRequest): string {
     `The attached ${E2E_PROVIDER_WIDTH}x${E2E_PROVIDER_HEIGHT} image is an exact half-scale observation of the current ${E2E_PLAYER_WIDTH}x${E2E_PLAYER_HEIGHT} game client. Inspect this image before choosing actions.`,
     "Describe at least one concrete visual fact from the current image: visible text, color, shape, texture, or an element with its screen location. Generic claims that no control is discernible are invalid visual inspection.",
     "If the frame is still loading, ground that conclusion in a visible logo, progress indicator, background color, or other concrete pixel detail. Do not repeatedly wait on a rendered, unchanged interface.",
-    "Highest priority: identify the topmost interactive layer. If a dialog, menu, mode selector, save selector, tutorial, consent prompt, or overlay blocks the underlying game, complete that layer before sending gameplay input.",
+    "First make an independent screen-integrity judgment. A clean title/menu over passive artwork is valid. A title, start menu, save selector, or new-game dialog drawn over a visibly active board, HUD, tutorial, gameplay controls, in-progress world, or contradictory state is a PRODUCT_DEFECT. A crash dialog, error screen, missing essential UI, or unusable layout is also a PRODUCT_DEFECT.",
+    "Never click through, dismiss, or work around a PRODUCT_DEFECT. Return no actions so the product fails and can be repaired. Only after screenIntegrity is PASS may you identify and operate the topmost interactive layer.",
     "This rollout starts with clean user data. Prefer a visible control that creates a fresh playable session over one that requires an existing save or prior progress.",
     "When a menu, modal, toolbar, or rectangular button is visible and POINTER is allowed, click the relevant visible control. Never send a keyboard key through a blocking overlay.",
     "Thin cyan guide lines in the observation appear every 40 pixels and correspond to every 80 pixels in the native 1280x720 client. Count from the top-left origin, then multiply observed x/y coordinates by 2 when returning pointer actions.",
@@ -402,7 +415,7 @@ function policyPrompt(request: PlayerPolicyRequest): string {
     `Allowed action groups: ${request.allowedActions.join(", ")}`,
     request.recovery ? "The last actions made no progress. Choose a different recovery action from visible UI only." : "Choose the next short action chunk from the visible game frame.",
     `Recent history: ${JSON.stringify(request.history)}`,
-    "Return only JSON: {\"status\":\"CONTINUE|GOAL_REACHED|UNRECOVERABLE\",\"observation\":\"brief visible facts\",\"rationale\":\"brief action reason\",\"actions\":[up to 4 actions]}.",
+    "Return only JSON: {\"screenIntegrity\":\"PASS|PRODUCT_DEFECT\",\"screenIntegrityReason\":\"brief independent visual judgment\",\"status\":\"CONTINUE|GOAL_REACHED|UNRECOVERABLE\",\"observation\":\"brief visible facts\",\"rationale\":\"brief action reason\",\"actions\":[up to 4 actions]}.",
     "Action JSON forms: wait(duration_ms), key_tap/key_hold(key,duration_ms), text_input(text), click/double_click(x,y), scroll(x,y,deltaY), drag(fromX,fromY,toX,toY,duration_ms), gamepad_button_tap/gamepad_button_hold(button,duration_ms), gamepad_axis(axis,value), gamepad_trigger(trigger,value), gamepad_release_all.",
     "UNRECOVERABLE is only valid after the runner has entered recovery mode. If the frame is still loading or no safe control is clear before recovery, CONTINUE with a short wait and inspect the next frame.",
     `Pointer actions use integer coordinates directly in this same ${E2E_PLAYER_WIDTH}x${E2E_PLAYER_HEIGHT} client. The screenshot, action history, and returned inputs all share this one coordinate space. Never use OS shortcuts. Use only action groups listed above.`,
@@ -412,15 +425,16 @@ function policyPrompt(request: PlayerPolicyRequest): string {
 const PLAYER_POLICY_SYSTEM = [
   "You are a black-box game player. You only see the attached live pixels and may only return safe player inputs.",
   "Never infer or request internal game state.",
-  "Resolve any visible topmost blocking interaction layer before attempting actions in the obscured game beneath it.",
+  "Judge whether the visible screen is a coherent shippable player state before taking any action. Never normalize or click through visibly contradictory lifecycle layers.",
+  "Resolve a legitimate topmost interaction layer before attempting actions in the unobscured game beneath it.",
   "Ground every action in something visible in the current frame, not in assumptions about the game genre.",
 ].join(" ");
 
 const VISION_SMOKE_PROMPT = [
-  "The attached synthetic calibration image contains two equal vertical solid-color panels.",
-  "Report the left and right panel colors using only RED, GREEN, BLUE, YELLOW, or UNAVAILABLE.",
-  "If the image is unavailable, report UNAVAILABLE for both fields.",
-  "Return only the required structured result.",
+  "The attached synthetic calibration image is one solid-color square.",
+  "Report its dominant color using only RED, GREEN, BLUE, YELLOW, or UNAVAILABLE.",
+  "If the image is unavailable, report UNAVAILABLE.",
+  'Return only JSON exactly shaped {"dominant":"<COLOR>"}; do not rename or add fields.',
 ].join(" ");
 
 const VISION_SMOKE_TOOL = Object.freeze({
@@ -429,10 +443,9 @@ const VISION_SMOKE_TOOL = Object.freeze({
   input_schema: {
     type: "object", additionalProperties: false,
     properties: {
-      left: { type: "string", enum: ["RED", "GREEN", "BLUE", "YELLOW", "UNAVAILABLE"] },
-      right: { type: "string", enum: ["RED", "GREEN", "BLUE", "YELLOW", "UNAVAILABLE"] },
+      dominant: { type: "string", enum: ["RED", "GREEN", "BLUE", "YELLOW", "UNAVAILABLE"] },
     },
-    required: ["left", "right"],
+    required: ["dominant"],
   },
 });
 
@@ -452,15 +465,15 @@ function claudeVisionSmokePayload(body: Record<string, unknown>): string {
   return String(content.find(item => item.type === "text")?.text ?? "");
 }
 
-function parseVisionSmokeAnswer(raw: string): Readonly<{ left: string; right: string }> {
+function parseVisionSmokeAnswer(raw: string): Readonly<{ dominant: string }> {
   try {
     const value = JSON.parse(raw.trim().replace(/^```(?:json)?\s*/i, "").replace(/\s*```$/, "")) as Record<string, unknown>;
     if (!value || typeof value !== "object" || Array.isArray(value)
-      || Object.keys(value).some(key => !["left", "right"].includes(key))
-      || typeof value.left !== "string" || typeof value.right !== "string") {
+      || Object.keys(value).some(key => key !== "dominant")
+      || typeof value.dominant !== "string") {
       throw new Error("invalid shape");
     }
-    return Object.freeze({ left: value.left.toUpperCase(), right: value.right.toUpperCase() });
+    return Object.freeze({ dominant: value.dominant.toUpperCase() });
   } catch {
     throw visionUnavailable("Test Agent provider did not return a grounded visual capability result");
   }
@@ -505,12 +518,14 @@ function playerDecisionTool(allowedGroups: PlayerPolicyRequest["allowedActions"]
     input_schema: {
       type: "object", additionalProperties: false,
       properties: {
+        screenIntegrity: { type: "string", enum: ["PASS", "PRODUCT_DEFECT"] },
+        screenIntegrityReason: { type: "string", minLength: 1, maxLength: 500 },
         status: { type: "string", enum: PLAYER_POLICY_STATUSES },
         observation: { type: "string", minLength: 1, maxLength: 500 },
         rationale: { type: "string", minLength: 1, maxLength: 500 },
         actions: { type: "array", maxItems: 4, items: { oneOf: actionVariants } },
       },
-      required: ["status", "observation", "rationale", "actions"],
+      required: ["screenIntegrity", "screenIntegrityReason", "status", "observation", "rationale", "actions"],
     },
   });
 }
@@ -591,7 +606,7 @@ function assertScreenshotWasInspected(observation: string): void {
 }
 
 function assertUnrecoverableFollowsRecovery(decision: PlayerPolicyDecision, request: PlayerPolicyRequest): void {
-  if (decision.status === "UNRECOVERABLE" && !request.recovery) {
+  if (decision.screenIntegrity === "PASS" && decision.status === "UNRECOVERABLE" && !request.recovery) {
     throw new Error("Test Agent cannot declare UNRECOVERABLE before recovery mode");
   }
 }

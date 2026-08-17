@@ -83,6 +83,46 @@ export function projectDocumentMarkdown(projectName: string, content: ProjectDoc
   ].join("\n");
 }
 
+/**
+ * The project document is the human-readable source of truth for the next
+ * delivery. Freeze its current gameplay and feature list into the executable
+ * specification immediately before approval so E2E cannot keep validating an
+ * obsolete import analysis after the user has changed the game requirements.
+ */
+export function synchronizeSpecificationWithProjectDocument(
+  specification: Readonly<Record<string, unknown>>,
+  document: ProjectDocumentContent,
+): Readonly<Record<string, unknown>> {
+  return Object.freeze({
+    ...specification,
+    vision: document.introduction,
+    playerExperience: document.gameplay,
+    coreLoop: Object.freeze(gameplaySteps(document.gameplay)),
+    acceptanceCriteria: Object.freeze([...document.features]),
+  });
+}
+
+function gameplaySteps(gameplay: string): string[] {
+  const clauses = gameplay
+    .split(/[\r\n。！？!?；;]+/u)
+    .map(value => value.trim())
+    .filter(Boolean);
+  const steps: string[] = [];
+  for (const clause of clauses.length > 0 ? clauses : [gameplay.trim()]) {
+    let remaining = clause;
+    while (remaining.length > MAX_LIST_ITEM_LENGTH && steps.length < MAX_LIST_ITEMS) {
+      const candidate = remaining.slice(0, MAX_LIST_ITEM_LENGTH);
+      const boundary = Math.max(candidate.lastIndexOf("，"), candidate.lastIndexOf(","), candidate.lastIndexOf(" "));
+      const end = boundary >= Math.floor(MAX_LIST_ITEM_LENGTH / 2) ? boundary : MAX_LIST_ITEM_LENGTH;
+      steps.push(remaining.slice(0, end).trim());
+      remaining = remaining.slice(end).replace(/^[，,\s]+/u, "").trim();
+    }
+    if (remaining && steps.length < MAX_LIST_ITEMS) steps.push(remaining);
+    if (steps.length >= MAX_LIST_ITEMS) break;
+  }
+  return steps.length > 0 ? steps : ["完成当前项目说明定义的核心游戏循环"];
+}
+
 function requiredText(value: unknown, label: string): string {
   if (typeof value !== "string") throw new Error(`${label}必须是文本`);
   const normalized = value.trim();

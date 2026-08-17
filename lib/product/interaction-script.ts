@@ -90,6 +90,20 @@ export type InteractionScript = Readonly<{
   events: readonly InteractionEvent[];
 }>;
 
+export const CORE_START_ASSERTIONS = Object.freeze([
+  Object.freeze({ source: "STATE", key: "screen_mode", operator: "EQUALS", value: "MENU" }),
+  Object.freeze({ source: "STATE", key: "session_active", operator: "EQUALS", value: false }),
+  Object.freeze({ source: "STATE", key: "gameplay_input_enabled", operator: "EQUALS", value: false }),
+  Object.freeze({ source: "STATE", key: "blocking_layer_count", operator: "EQUALS", value: 0 }),
+] as const satisfies readonly ProbeAssertion[]);
+
+export const CORE_READY_ASSERTIONS = Object.freeze([
+  Object.freeze({ source: "STATE", key: "screen_mode", operator: "EQUALS", value: "PLAYING" }),
+  Object.freeze({ source: "STATE", key: "session_active", operator: "EQUALS", value: true }),
+  Object.freeze({ source: "STATE", key: "gameplay_input_enabled", operator: "EQUALS", value: true }),
+  Object.freeze({ source: "STATE", key: "blocking_layer_count", operator: "EQUALS", value: 0 }),
+] as const satisfies readonly ProbeAssertion[]);
+
 export function validateInteractionScript(value: unknown): value is InteractionScript {
   if (!value || typeof value !== "object" || Array.isArray(value)) return false;
   const script = value as Record<string, unknown>;
@@ -182,6 +196,49 @@ export function interactionHasUserAction(script: InteractionScript): boolean {
   return interactionActionEvents(script).length > 0;
 }
 
+/**
+ * A core journey is a lifecycle proof, not a bag of conveniently named
+ * checkpoints. This deliberately fixes the event order and the common Probe
+ * state that every shipped game must expose. It prevents a menu drawn over an
+ * already-running game from passing merely because both states exist at some
+ * point in the script.
+ */
+export function validateCoreJourneyLifecycle(script: InteractionScript): boolean {
+  const events = script.events.filter(event => event.type !== "wait");
+  const indexes = (role: CheckpointRole) => events
+    .map((event, index) => event.type === "checkpoint" && event.role === role ? index : -1)
+    .filter(index => index >= 0);
+  const starts = indexes("START");
+  const ready = indexes("READY");
+  const progress = indexes("PROGRESS");
+  const completion = indexes("COMPLETION");
+  if (starts.length !== 1 || ready.length !== 1 || progress.length !== 1 || completion.length !== 1
+    || starts[0] !== 0) return false;
+
+  const startEvent = events[starts[0]!] as Extract<InteractionEvent, { type: "checkpoint" }>;
+  const readyEvent = events[ready[0]!] as Extract<InteractionEvent, { type: "checkpoint" }>;
+  if (startEvent.visualMode !== "STABLE_REPLAY" || readyEvent.visualMode !== "STABLE_REPLAY"
+    || !containsAssertions(startEvent.assertions, CORE_START_ASSERTIONS)
+    || !containsAssertions(readyEvent.assertions, CORE_READY_ASSERTIONS)) return false;
+
+  const actions = events
+    .map((event, index) => isActionEventType(event.type) ? { event: event as InteractionActionEvent, index } : null)
+    .filter((entry): entry is { event: InteractionActionEvent; index: number } => entry !== null);
+  const startActions = actions.filter(entry => entry.event.intent === "START_SESSION");
+  const primaryActions = actions.filter(entry => entry.event.intent === "PRIMARY_ACTION");
+  const completeActions = actions.filter(entry => entry.event.intent === "COMPLETE_LOOP");
+  if (startActions.length !== 1 || primaryActions.length < 1 || completeActions.length < 1) return false;
+  const startAction = startActions[0]!;
+  const primary = primaryActions[0]!;
+  const complete = completeActions.at(-1)!;
+  if (!(starts[0]! < startAction.index && startAction.index < ready[0]!
+    && ready[0]! < primary.index && primary.index < progress[0]!
+    && progress[0]! < complete.index && complete.index < completion[0]!)) return false;
+  if (actions.some(entry => entry.index < startAction.index && entry.event.intent !== "NAVIGATION")) return false;
+  if (actions.some(entry => entry.index > startAction.index && entry.index < ready[0]!)) return false;
+  return containsAssertions(startAction.event.postconditions, CORE_READY_ASSERTIONS);
+}
+
 export function isSafeProjectPngPath(value: unknown): value is string {
   return typeof value === "string"
     && value.length >= 5 && value.length <= 240
@@ -209,6 +266,13 @@ function isActionEventType(value: string): value is InteractionActionEvent["type
     "key_tap", "key_hold", "click", "double_click", "drag", "scroll", "text_input",
     "gamepad_button_tap", "gamepad_button_hold", "gamepad_axis", "gamepad_trigger", "gamepad_release_all",
   ].includes(value);
+}
+
+function containsAssertions(actual: readonly ProbeAssertion[], required: readonly ProbeAssertion[]): boolean {
+  return required.every(expected => actual.some(candidate => candidate.source === expected.source
+    && candidate.key === expected.key && candidate.targetId === expected.targetId
+    && candidate.property === expected.property && candidate.operator === expected.operator
+    && candidate.value === expected.value));
 }
 
 function isStableId(value: unknown): value is string {

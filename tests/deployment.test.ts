@@ -4,6 +4,11 @@ import test from "node:test";
 
 test("local deployment keeps Core private by default and exposes it only for explicit remote E2E", async () => {
   const compose = await readFile(new URL("../infra/docker-compose.yml", import.meta.url), "utf8");
+  const executorImage = await readFile(new URL("../Dockerfile.executor", import.meta.url), "utf8");
+  const [claudeAgentImage, codexAgentImage] = await Promise.all([
+    readFile(new URL("../Dockerfile.agent-claude", import.meta.url), "utf8"),
+    readFile(new URL("../Dockerfile.agent-codex", import.meta.url), "utf8"),
+  ]);
   assert.match(compose, /x-core: &core[\s\S]*image: deviludo-core:local/);
   for (const service of ["core-api", "core-scheduler", "core-sandbox"]) {
     assert.match(compose, new RegExp(`\\n  ${service}:\\n    <<: \\*core`));
@@ -53,8 +58,14 @@ test("local deployment keeps Core private by default and exposes it only for exp
   assert.match(localUp, /not assigned to a local network interface/);
   assert.match(localUp, /DEVILUDO_CORE_BIND_ADDRESS: remoteE2eHost \? "0\.0\.0\.0" : "127\.0\.0\.1"/);
   assert.match(localUp, /DEVILUDO_ARTIFACT_BIND_ADDRESS: remoteE2eHost \? "0\.0\.0\.0" : "127\.0\.0\.1"/);
+  assert.match(localUp, /coreUrl: process\.env\.DEVILUDO_CORE_API_URL\?\.trim\(\) \|\| remoteE2eConfiguration\.coreUrl/);
   assert.match(localUp, /randomBytes\(32\)\.toString\("base64url"\)/);
   assert.match(compose, /DEVILUDO_PROVIDER_UPSTREAM_PROXY/);
+  assert.match(compose, /api\.anthropic\.com,api\.openai\.com,chatgpt\.com/);
+  assert.match(compose, /DEVILUDO_CODEX_PROXY_URL: http:\/\/provider-proxy:3128/);
+  assert.match(executorImage, /services\/core\/src\/codex-cli\.ts/);
+  assert.match(claudeAgentImage, /install -y --no-install-recommends ca-certificates unzip/);
+  assert.match(codexAgentImage, /install -y --no-install-recommends ca-certificates unzip/);
   const providerProxy = await readFile(new URL("../services/sandbox-executor/proxy-entrypoint.sh", import.meta.url), "utf8");
   assert.match(providerProxy, /cache_peer %s parent %s 0 no-query default/);
   assert.match(providerProxy, /never_direct allow all/);
@@ -142,7 +153,7 @@ test("Agent generation preserves partial work and retries transient Provider fai
   const daemon = await readFile(new URL("../services/sandbox-executor/src/daemon.ts", import.meta.url), "utf8");
   const checkpointRestore = await readFile(new URL("../services/sandbox-executor/src/checkpoint-restore.ts", import.meta.url), "utf8");
   assert.match(runner, /attempt <= 4/);
-  assert.match(runner, /failure\.code === "INCOMPLETE_OUTPUT"[\s\S]*\? 4[\s\S]*failure\.code === "GUIDANCE_PENDING" \? 3 : 2/);
+  assert.match(runner, /failure\.code === "INCOMPLETE_OUTPUT"[\s\S]*\? 4[\s\S]*failure\.code === "GUIDANCE_PENDING" \? 3[\s\S]*failure\.code === "PROVIDER_ERROR" \? 4 : 2/);
   assert.match(runner, /readAgentGuidanceSnapshot/);
   assert.match(runner, /agentGuidanceArrivedDuringRun/);
   assert.match(runner, /TEST_MANIFEST_INVALID/);
@@ -161,11 +172,16 @@ test("Agent generation preserves partial work and retries transient Provider fai
   assert.match(codexImage, /COPY services\/sandbox-executor\/agent-guidance-contract\.mjs \/usr\/local\/lib\/deviludo\/agent-guidance-contract\.mjs/);
   assert.match(runner, /idleTimeoutMs: 8 \* 60_000/);
   assert.match(runner, /classifyAgentFailure/);
+  assert.match(runner, /codex_models_manager\|failed to refresh available models/);
   assert.match(runner, /maximum\[ _-\]\?turns\|max\[ _-\]\?turns/);
   assert.match(runner, /"--resume" : "--session-id"/);
   assert.match(runner, /Do not restart analysis or spawn background agents, background shell commands, or background tasks/);
   assert.match(runner, /"--tools", "Read,Write,Edit,Glob,Grep,Bash"/);
   assert.match(runner, /"--disallowedTools", "Agent,Task"/);
+  assert.match(runner, /"--dangerously-bypass-approvals-and-sandbox"/);
+  assert.match(runner, /model_provider=deviludo_chatgpt/);
+  assert.match(runner, /model_providers\.deviludo_chatgpt\.supports_websockets=false/);
+  assert.match(runner, /The task container is already the security boundary/);
   assert.match(runner, /environment\.CLAUDE_CODE_DISABLE_BACKGROUND_TASKS = "1"/);
   assert.match(runner, /interactionScript contains only events and no version field/);
   assert.match(runner, /fixed x\/y coordinates and unrelated key presses are forbidden/);
@@ -374,6 +390,9 @@ test("Core keeps Docker authority in executord and isolates Agent and Steam egre
   assert.match(taskRunner, /failures\.filter\(value => typeof value === "string"\)\.slice\(0, 50\)/);
   assert.match(taskRunner, /const specificationInstructions = existingManifestValid[\s\S]*Current revision notes:/);
   assert.match(taskRunner, /: \[`Specification: \$\{JSON\.stringify\(specification\)\}`\]/);
+  assert.match(taskRunner, /function requiredCoreStartAssertions\(\)/);
+  assert.match(taskRunner, /function requiredCoreReadyAssertions\(\)/);
+  assert.doesNotMatch(taskRunner, /^const core(?:Start|Ready)Assertions\s*=/m);
   assert.match(taskRunner, /make the first concrete source edit before inspecting broad regression coverage/);
   assert.match(taskRunner, /Open only the exact source\/test file named by the evidence first/);
   assert.match(taskRunner, /\n      5 \* 60_000,\n[\s\S]*isRepairPass \? 8 \* 60_000 : undefined/);
@@ -528,9 +547,9 @@ test("CI uses the fixed no-provider Agent while local macOS requires Tart E2E", 
   assert.doesNotMatch(smoke, /DEVELOPMENT_NATIVE/);
   const fixtureMain = await readFile(new URL("../fixtures/godot-smoke/scripts/main.gd", import.meta.url), "utf8");
   assert.match(fixtureMain, /func _unhandled_key_input\(event: InputEvent\)/);
-  assert.match(fixtureMain, /event\.keycode == KEY_DOWN/);
-  assert.match(fixtureMain, /event\.keycode == KEY_ENTER/);
-  assert.doesNotMatch(fixtureMain, /get_tree\(\)\.quit/);
+  assert.match(fixtureMain, /Input\.is_key_pressed\(KEY_D\)/);
+  assert.match(fixtureMain, /func _on_game_input\(event: InputEvent\)/);
+  assert.match(fixtureMain, /get_tree\(\)\.quit\(\)/);
 });
 
 test("Godot E2E is a real-window manifest run with portable visual evidence", async () => {

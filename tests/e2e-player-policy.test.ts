@@ -71,6 +71,8 @@ function request() {
 
 function decision(actions: readonly Record<string, unknown>[] = [{ type: "click", x: 640, y: 360 }]) {
   return JSON.stringify({
+    screenIntegrity: "PASS",
+    screenIntegrityReason: "The clean menu is isolated from gameplay and all controls are readable.",
     status: "CONTINUE",
     observation: "A playable menu is visible.",
     rationale: "Click the visible play control.",
@@ -118,8 +120,8 @@ describe("E2E Test Agent policy", () => {
   test("proves visual input with two synthetic color challenges", async () => {
     const bodies: Record<string, unknown>[] = [];
     const answers = [
-      { left: "RED", right: "BLUE" },
-      { left: "BLUE", right: "YELLOW" },
+      { dominant: "RED" },
+      { dominant: "YELLOW" },
     ];
     await verifyE2ePlayerVision({
       runtime: "CLAUDE_CODE",
@@ -139,9 +141,9 @@ describe("E2E Test Agent policy", () => {
     assert.match(first, /"type":"image"/);
     assert.match(second, /"type":"image"/);
     assert.notEqual(first, second);
-    assert.doesNotMatch(first, /expected|left panel is|right panel is/i);
-    assert.deepEqual(calibrationPanelColors(bodies[0]!), [[255, 0, 0], [0, 0, 255]]);
-    assert.deepEqual(calibrationPanelColors(bodies[1]!), [[0, 0, 255], [255, 255, 0]]);
+    assert.doesNotMatch(first, /expected|square is/i);
+    assert.deepEqual(calibrationPanelColors(bodies[0]!), [[255, 0, 0], [255, 0, 0]]);
+    assert.deepEqual(calibrationPanelColors(bodies[1]!), [[255, 255, 0], [255, 255, 0]]);
   });
 
   test("rejects a text-only route during visual preflight", async () => {
@@ -153,7 +155,7 @@ describe("E2E Test Agent policy", () => {
       model: "text-only-model",
       codexRunner: async () => {
         calls += 1;
-        return JSON.stringify({ left: "UNAVAILABLE", right: "UNAVAILABLE" });
+        return JSON.stringify({ dominant: "UNAVAILABLE" });
       },
     }), (error: unknown) => (error as { code?: string }).code === "PLAYER_POLICY_VISION_UNAVAILABLE");
     assert.equal(calls, 1);
@@ -235,6 +237,20 @@ describe("E2E Test Agent policy", () => {
     assert.throws(() => parsePlayerPolicyDecision(decision(Array.from({ length: 5 }, () => ({ type: "click", x: 1, y: 1 }))), ["POINTER"]), /shape/i);
   });
 
+  test("accepts a visual product defect only when it refuses to click through it", () => {
+    const defect = parsePlayerPolicyDecision(JSON.stringify({
+      screenIntegrity: "PRODUCT_DEFECT",
+      screenIntegrityReason: "A start dialog is drawn over an active board, HUD, and gameplay toolbar.",
+      status: "UNRECOVERABLE",
+      observation: "The centered start dialog visibly overlaps an already populated board and active controls.",
+      rationale: "The contradictory startup lifecycle must be repaired instead of dismissed.",
+      actions: [],
+    }), ["POINTER"]);
+    assert.equal(defect.screenIntegrity, "PRODUCT_DEFECT");
+    assert.equal(defect.actions.length, 0);
+    assert.throws(() => parsePlayerPolicyDecision(JSON.stringify({ ...defect, actions: [{ type: "click", x: 640, y: 360 }] }), ["POINTER"]), /shape/i);
+  });
+
   test("repairs malformed provider JSON once without exposing Probe or logs", async () => {
     const calls: CodexPromptInput[] = [];
     const responses = [
@@ -271,6 +287,9 @@ describe("E2E Test Agent policy", () => {
     assert.match(providerInput, /topmost interactive layer/);
     assert.match(providerInput, /starts with clean user data/);
     assert.match(providerInput, /fresh playable session/);
+    assert.match(providerInput, /title\/menu over passive artwork is valid/);
+    assert.match(providerInput, /active board, HUD, tutorial, gameplay controls/);
+    assert.match(providerInput, /Never click through, dismiss, or work around a PRODUCT_DEFECT/);
     assert.match(providerInput, /Never send a keyboard key through a blocking overlay/);
     assert.match(providerInput, /Do not guess SPACE, ENTER, movement keys/);
     assert.deepEqual(result.decision.actions[0], { type: "click", x: 640, y: 360 });
@@ -371,12 +390,16 @@ describe("E2E Test Agent policy", () => {
         calls += 1;
         const output = calls === 1
           ? JSON.stringify({
+            screenIntegrity: "PASS",
+            screenIntegrityReason: "The loading frame is coherent and does not show contradictory lifecycle layers.",
             status: "UNRECOVERABLE",
             observation: "The visible frame is still loading.",
             rationale: "No safe control is clear yet.",
             actions: [],
           })
           : JSON.stringify({
+            screenIntegrity: "PASS",
+            screenIntegrityReason: "The loading frame is coherent and does not show contradictory lifecycle layers.",
             status: "CONTINUE",
             observation: "The visible frame is still loading.",
             rationale: "Wait briefly for the topmost layer to finish rendering.",

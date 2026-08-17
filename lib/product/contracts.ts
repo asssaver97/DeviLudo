@@ -62,6 +62,7 @@ export type ArtifactRecord = Readonly<{
 }>;
 
 export const AGENT_RUNTIME_KINDS = ["CLAUDE_CODE", "CODEX_CLI"] as const;
+export const CODEX_ACCOUNT_DEFAULT_MODEL = "account-default" as const;
 export type AgentRuntimeKind = typeof AGENT_RUNTIME_KINDS[number];
 
 export type AgentRuntimeAvailability = Readonly<{

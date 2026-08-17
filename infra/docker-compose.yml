@@ -20,6 +20,7 @@ x-core: &core
     DEVILUDO_CODEX_CLI_VERSION: "${DEVILUDO_CODEX_CLI_VERSION:-}"
     DEVILUDO_CODEX_LOGIN_METHOD: "${DEVILUDO_CODEX_LOGIN_METHOD:-SIGNED_OUT}"
     DEVILUDO_CODEX_AUTH_FILE: /run/deviludo-codex/auth.json
+    DEVILUDO_CODEX_PROXY_URL: http://provider-proxy:3128
     DEVILUDO_SANDBOX_CONCURRENCY: ${DEVILUDO_SANDBOX_CONCURRENCY:-1}
     DEVILUDO_TELEMETRY_ENABLED: ${DEVILUDO_TELEMETRY_ENABLED:-1}
     DEVILUDO_TELEMETRY_ENDPOINT: ${DEVILUDO_TELEMETRY_ENDPOINT:-}
@@ -123,6 +124,7 @@ services:
     networks:
       - core
       - data
+      - provider-egress
 
   core-scheduler:
     <<: *core
@@ -249,7 +251,7 @@ services:
       DEVILUDO_EXECUTOR_STEAM_NETWORK: ${DEVILUDO_EXECUTOR_STEAM_NETWORK:-deviludo-executor-steam-local}
       DEVILUDO_EXECUTOR_EGRESS_PROXY: http://provider-proxy:3128
       DEVILUDO_EXECUTOR_STEAM_PROXY: http://steam-proxy:3128
-      DEVILUDO_PROVIDER_ALLOWLIST: ${DEVILUDO_PROVIDER_ALLOWLIST:-api.anthropic.com,api.openai.com}
+      DEVILUDO_PROVIDER_ALLOWLIST: ${DEVILUDO_PROVIDER_ALLOWLIST:-api.anthropic.com,api.openai.com,chatgpt.com}
       DEVILUDO_VAULT_ADDR: http://vault:8200
       DEVILUDO_VAULT_TOKEN_FILE: /run/service-secrets/vault.token
       DEVILUDO_VAULT_TOKEN_RENEW_INTERVAL_SECONDS: "3600"
@@ -324,10 +326,11 @@ services:
       - /run:rw,noexec,nosuid,nodev,size=16m,mode=0700,uid=13,gid=13
       - /tmp:rw,noexec,nosuid,nodev,size=16m,mode=0700,uid=13,gid=13
     environment:
-      DEVILUDO_PROVIDER_ALLOWLIST: ${DEVILUDO_PROVIDER_ALLOWLIST:-api.anthropic.com,api.openai.com}
+      DEVILUDO_PROVIDER_ALLOWLIST: ${DEVILUDO_PROVIDER_ALLOWLIST:-api.anthropic.com,api.openai.com,chatgpt.com}
       DEVILUDO_PROVIDER_UPSTREAM_PROXY: ${DEVILUDO_PROVIDER_UPSTREAM_PROXY:-}
     networks:
       - executor-agent
+      - provider-egress
       - egress
 
   steam-proxy:
@@ -498,6 +501,8 @@ networks:
     internal: true
   executor-steam:
     name: ${DEVILUDO_EXECUTOR_STEAM_NETWORK:-deviludo-executor-steam-local}
+    internal: true
+  provider-egress:
     internal: true
   native-artifact: {}
   egress: {}

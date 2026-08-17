@@ -43,6 +43,7 @@ import {
   createInitialProjectDocument,
   parseProjectDocumentContent,
   projectDocumentMarkdown,
+  synchronizeSpecificationWithProjectDocument,
   type ProjectDocumentContent,
 } from "@/lib/product/project-document";
 
@@ -1178,6 +1179,43 @@ export class CoreRepository {
       );
     });
     return this.readProject(input.workspaceId, input.projectId);
+  }
+
+  async synchronizeDraftSpecificationFromDocument(
+    workspaceId: string,
+    projectId: string,
+  ): Promise<ProductProjectDetail | null> {
+    await this.database.withWorkspace(workspaceId, async client => {
+      const workflow = await client.query<{ id: string; state_data: Record<string, unknown> }>(
+        `SELECT id::text, state_data
+           FROM deviludo.workflow_instances
+          WHERE project_id = $1::uuid
+          ORDER BY iteration_number DESC
+          LIMIT 1
+          FOR UPDATE`,
+        [projectId],
+      );
+      if (!workflow.rows[0]) return;
+      const document = await client.query<{ content: Record<string, unknown> }>(
+        `SELECT content FROM deviludo.project_documents WHERE project_id = $1::uuid`,
+        [projectId],
+      );
+      if (!document.rows[0]) throw new Error("Project document not found");
+      const current = productSpecificationFromState(workflow.rows[0].state_data);
+      const synchronized = synchronizeSpecificationWithProjectDocument(
+        current,
+        parseProjectDocumentContent(document.rows[0].content),
+      );
+      await client.query(
+        `UPDATE deviludo.workflow_instances
+            SET state_data = state_data || jsonb_build_object('specification', $2::jsonb),
+                version = version + 1,
+                updated_at = clock_timestamp()
+          WHERE id = $1::uuid AND state = 'DRAFT'`,
+        [workflow.rows[0].id, JSON.stringify(synchronized)],
+      );
+    });
+    return this.readProject(workspaceId, projectId);
   }
 
   async readProject(workspaceId: string, projectId: string): Promise<ProductProjectDetail | null> {

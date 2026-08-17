@@ -5,6 +5,7 @@ import {
   normalizeAgentProjectDocumentContent,
   parseProjectDocumentContent,
   projectDocumentMarkdown,
+  synchronizeSpecificationWithProjectDocument,
 } from "@/lib/product/project-document";
 
 test("new projects receive a structured collaborative game document", () => {
@@ -47,4 +48,23 @@ test("verbose Agent document items are split to the strict storage contract", ()
   assert.ok(content.features.every(feature => feature.length <= 300));
   assert.equal(content.features.join(""), verboseFeature);
   assert.deepEqual(parseProjectDocumentContent(content), content);
+});
+
+test("development approval freezes the current project document into E2E requirements", () => {
+  const synchronized = synchronizeSpecificationWithProjectDocument({
+    title: "旧分析标题",
+    coreLoop: ["旧的测试夹具按钮"],
+    acceptanceCriteria: ["旧的冒烟检查"],
+    revisionNotes: ["保留用户需求历史"],
+  }, {
+    introduction: "一款可发布的航行游戏",
+    gameplay: "从互斥主菜单开始新游戏。驾驶飞船收集三个目标；跨越终点后结算胜利。",
+    categories: ["冒险"],
+    features: ["菜单不得显示活动游戏内容", "真实输入可以完成核心循环"],
+  });
+  assert.equal(synchronized.vision, "一款可发布的航行游戏");
+  assert.deepEqual(synchronized.coreLoop, ["从互斥主菜单开始新游戏", "驾驶飞船收集三个目标", "跨越终点后结算胜利"]);
+  assert.deepEqual(synchronized.acceptanceCriteria, ["菜单不得显示活动游戏内容", "真实输入可以完成核心循环"]);
+  assert.deepEqual(synchronized.revisionNotes, ["保留用户需求历史"]);
+  assert.equal(synchronized.title, "旧分析标题");
 });

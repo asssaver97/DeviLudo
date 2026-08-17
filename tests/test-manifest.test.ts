@@ -13,6 +13,18 @@ import {
 
 const sceneMain = Object.freeze({ source: "SCENE" as const, operator: "EQUALS" as const, value: "main" });
 const changedTurn = Object.freeze({ source: "PROGRESS" as const, key: "turn", operator: "CHANGED" as const });
+const menuAssertions = Object.freeze([
+  { source: "STATE" as const, key: "screen_mode", operator: "EQUALS" as const, value: "MENU" },
+  { source: "STATE" as const, key: "session_active", operator: "EQUALS" as const, value: false },
+  { source: "STATE" as const, key: "gameplay_input_enabled", operator: "EQUALS" as const, value: false },
+  { source: "STATE" as const, key: "blocking_layer_count", operator: "EQUALS" as const, value: 0 },
+]);
+const playingAssertions = Object.freeze([
+  { source: "STATE" as const, key: "screen_mode", operator: "EQUALS" as const, value: "PLAYING" },
+  { source: "STATE" as const, key: "session_active", operator: "EQUALS" as const, value: true },
+  { source: "STATE" as const, key: "gameplay_input_enabled", operator: "EQUALS" as const, value: true },
+  { source: "STATE" as const, key: "blocking_layer_count", operator: "EQUALS" as const, value: 0 },
+]);
 
 function checkpoint(id: string, role: "START" | "READY" | "PROGRESS" | "COMPLETION", stable = false) {
   return { type: "checkpoint" as const, id, role, assertions: [sceneMain], visualMode: stable ? "STABLE_REPLAY" as const : "DYNAMIC" as const,
@@ -45,7 +57,9 @@ function completeManifest(): TestManifest {
         description: "从干净用户目录完成核心循环", verificationMethod: "interactive", coreJourney: true,
         launchProfile: { type: "FRESH" }, timeoutMs: 300_000,
         interactionScript: { events: [
-          checkpoint("game-start", "START", true), checkpoint("game-ready", "READY"),
+          { ...checkpoint("game-start", "START", true), assertions: menuAssertions },
+          { type: "click", stepId: "start-session", intent: "START_SESSION", targetId: "new-game", coversRequirementIds: ["req-core-loop"], postconditions: playingAssertions },
+          { ...checkpoint("game-ready", "READY", true), assertions: playingAssertions },
           { type: "click", stepId: "activate-primary-control", intent: "PRIMARY_ACTION", targetId: "primary-control", coversRequirementIds: ["req-core-loop"], postconditions: [changedTurn] },
           checkpoint("turn-progress", "PROGRESS"),
           { type: "click", stepId: "finish", intent: "COMPLETE_LOOP", targetId: "end-turn", coversRequirementIds: ["req-core-loop"], postconditions: [changedTurn] },
@@ -157,6 +171,22 @@ describe("test-manifest", () => {
         ...manifest.adaptivePlayer,
         successAssertions: [{ source: "CONTROL", targetId: "end-turn", property: "enabled", operator: "EQUALS", value: true }],
       },
+    }), false);
+  });
+
+  test("rejects a menu captured over an already-running game and a start action mislabeled as gameplay", () => {
+    const manifest = completeManifest();
+    const core = manifest.features[0];
+    const events = core.interactionScript!.events;
+    const falsePositiveSequence = [
+      { ...events[0], assertions: playingAssertions },
+      { ...events[2], assertions: playingAssertions },
+      { ...events[1], intent: "PRIMARY_ACTION" as const, postconditions: playingAssertions },
+      ...events.slice(3),
+    ];
+    assert.equal(validateTestManifest({
+      ...manifest,
+      features: [{ ...core, interactionScript: { events: falsePositiveSequence } }, ...manifest.features.slice(1)],
     }), false);
   });
 

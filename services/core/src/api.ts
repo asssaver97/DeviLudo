@@ -1549,21 +1549,25 @@ async function approveProjectDevelopment(input: Readonly<{
   project: ProductProjectDetail;
   requestedByActorId: string;
 }>): Promise<boolean> {
+  const project = await input.repository.synchronizeDraftSpecificationFromDocument(
+    input.workspaceId,
+    input.project.id,
+  ) ?? input.project;
   const specificationObject = await input.objectStore.putSpecification({
     workspaceId: input.workspaceId,
-    projectId: input.project.id,
-    workflowId: input.project.workflowId,
-    specification: input.project.specification,
+    projectId: project.id,
+    workflowId: project.workflowId,
+    specification: project.specification,
   });
   await input.repository.registerSpecificationArtifact({
     workspaceId: input.workspaceId,
-    projectId: input.project.id,
-    workflowId: input.project.workflowId,
+    projectId: project.id,
+    workflowId: project.workflowId,
     object: specificationObject,
   });
-  return input.repository.appendSignal(input.workspaceId, input.project.workflowId, {
+  return input.repository.appendSignal(input.workspaceId, project.workflowId, {
     kind: "SPEC_APPROVED",
-    idempotencyKey: `spec-approved:${input.project.workflowId}`,
+    idempotencyKey: `spec-approved:${project.workflowId}`,
     payload: { specificationObject, requestedByActorId: input.requestedByActorId },
   });
 }

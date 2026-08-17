@@ -2,6 +2,7 @@ import { spawn } from "node:child_process";
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { CODEX_ACCOUNT_DEFAULT_MODEL } from "@/lib/product/contracts";
 
 export type CodexPromptInput = Readonly<{
   authJson: string;
@@ -18,7 +19,20 @@ export async function runCodexPrompt(input: CodexPromptInput): Promise<string> {
   const root = await mkdtemp(join(tmpdir(), "deviludo-codex-"));
   try {
     await writeFile(join(root, "auth.json"), input.authJson, { mode: 0o600 });
-    const args = ["exec", "--ephemeral", "--json", "--skip-git-repo-check", "-m", input.model, "-C", root];
+    const args = [
+      "exec",
+      "--ephemeral",
+      "--json",
+      "--config", "model_provider=deviludo_chatgpt",
+      "--config", "model_providers.deviludo_chatgpt.name=OpenAI",
+      "--config", "model_providers.deviludo_chatgpt.base_url=https://chatgpt.com/backend-api/codex",
+      "--config", "model_providers.deviludo_chatgpt.wire_api=responses",
+      "--config", "model_providers.deviludo_chatgpt.requires_openai_auth=true",
+      "--config", "model_providers.deviludo_chatgpt.supports_websockets=false",
+      "--skip-git-repo-check",
+    ];
+    if (input.model !== CODEX_ACCOUNT_DEFAULT_MODEL) args.push("-m", input.model);
+    args.push("-C", root);
     if (input.imageBase64) {
       const image = join(root, "frame.png");
       await writeFile(image, Buffer.from(input.imageBase64, "base64"), { mode: 0o600 });
@@ -41,10 +55,18 @@ function validateAuth(value: string): void {
 
 function executeCodex(args: readonly string[], prompt: string, codexHome: string, timeoutMs: number): Promise<string> {
   return new Promise((resolve, reject) => {
+    const proxy = process.env.DEVILUDO_CODEX_PROXY_URL?.trim();
+    if (proxy && !/^http:\/\/[a-z0-9.-]+:\d+$/i.test(proxy)) {
+      return reject(new Error("Codex CLI proxy configuration is invalid"));
+    }
     const child = spawn("codex", args, {
       shell: false,
       stdio: ["pipe", "pipe", "pipe"],
-      env: { ...process.env, CODEX_HOME: codexHome },
+      env: {
+        ...process.env,
+        CODEX_HOME: codexHome,
+        ...(proxy ? { HTTP_PROXY: proxy, HTTPS_PROXY: proxy, ALL_PROXY: proxy } : {}),
+      },
     });
     const stdout: Buffer[] = [];
     const stderr: Buffer[] = [];

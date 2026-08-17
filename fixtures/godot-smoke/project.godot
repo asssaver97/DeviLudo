@@ -1,19 +1,19 @@
-; DeviLudo signed local TestKit fixture.
-; The local runtime copies this project into an isolated Git workspace.
+; Ember Voyager desktop game.
 config_version=5
 
 [application]
 
-config/name="DeviLudo Local Smoke"
+config/name="Ember Voyager"
 run/main_scene="res://main.tscn"
 config/features=PackedStringArray("4.3")
 
 [display]
 
-window/size/viewport_width=640
-window/size/viewport_height=360
-window/size/window_width_override=640
-window/size/window_height_override=360
+window/size/viewport_width=1280
+window/size/viewport_height=720
+window/size/window_width_override=1280
+window/size/window_height_override=720
+window/stretch/mode="canvas_items"
 
 [rendering]
 

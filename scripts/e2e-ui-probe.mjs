@@ -4,6 +4,8 @@ import { readFile } from "node:fs/promises";
 export const E2E_UI_PROBE_SCHEMA = "deviludo.e2e-ui-probe";
 export const E2E_CLIENT_WIDTH = 1280;
 export const E2E_CLIENT_HEIGHT = 720;
+const CONTROL_SCOPES = new Set(["NAVIGATION", "GAMEPLAY", "OVERLAY", "STATUS"]);
+const SCREEN_MODES = new Set(["MENU", "PLAYING", "PAUSED", "RESULT"]);
 
 export async function readProbeSnapshot(path, expected) {
   let value;
@@ -30,17 +32,24 @@ export function probeSnapshotValidationError(value, expected = {}) {
   if (expected.pid && value.pid !== expected.pid) return "process ID does not match the launched game";
   if (expected.afterSequence !== undefined && value.sequence <= expected.afterSequence) return `sequence ${value.sequence} did not advance beyond ${expected.afterSequence}`;
   if (!flatProbeValues(value.state) || !flatProbeValues(value.progress)) return "state or progress contains a non-primitive or invalid field";
+  const lifecycleError = lifecycleValidationError(value);
+  if (lifecycleError) return lifecycleError;
   const ids = new Set();
   for (const [index, control] of value.controls.entries()) {
     const label = typeof control?.id === "string" ? control.id : `#${index}`;
     if (!control || typeof control !== "object" || Array.isArray(control)
       || !stableId(control.id)) return `control ${label} has an invalid semantic ID or structure`;
     if (ids.has(control.id)) return `control ${label} is duplicated`;
+    if (!CONTROL_SCOPES.has(control.scope)) return `control ${label} scope is invalid`;
     if (typeof control.visible !== "boolean" || typeof control.enabled !== "boolean") return `control ${label} visibility or enabled state is invalid`;
     if (!validRect(control.rect)) return `control ${label} rectangle ${rectDiagnostic(control.rect)} must be positive and remain inside 1280x720`;
     if (control.text !== undefined && (typeof control.text !== "string" || control.text.length > 2_000)) return `control ${label} text exceeds the probe contract`;
     if (control.value !== undefined && !primitive(control.value)) return `control ${label} value must be primitive`;
     ids.add(control.id);
+  }
+  if (value.state.screen_mode === "MENU"
+    && value.controls.some(control => control.scope === "GAMEPLAY" && control.visible && control.enabled)) {
+    return "MENU cannot expose enabled gameplay controls behind its navigation layer";
   }
   return null;
 }
@@ -155,7 +164,7 @@ export function evaluateProbeAssertions(assertions, before, after) {
 
 export function probeStateDigest(snapshot) {
   const controls = [...snapshot.controls]
-    .map(control => ({ id: control.id, visible: control.visible, enabled: control.enabled, text: control.text ?? null, value: control.value ?? null }))
+    .map(control => ({ id: control.id, scope: control.scope, visible: control.visible, enabled: control.enabled, text: control.text ?? null, value: control.value ?? null }))
     .sort((left, right) => left.id.localeCompare(right.id));
   const content = stableJson({ sceneId: snapshot.sceneId, state: snapshot.state, progress: snapshot.progress, controls });
   return `sha256:${createHash("sha256").update(content).digest("hex")}`;
@@ -216,6 +225,22 @@ function rectDiagnostic(value) {
 function flatProbeValues(value) {
   return Object.entries(value).length <= 1_000
     && Object.entries(value).every(([key, item]) => /^[A-Za-z0-9][A-Za-z0-9_.-]{0,199}$/.test(key) && primitive(item));
+}
+
+function lifecycleValidationError(snapshot) {
+  const mode = snapshot.state.screen_mode;
+  const active = snapshot.state.session_active;
+  const gameplay = snapshot.state.gameplay_input_enabled;
+  const blocking = snapshot.state.blocking_layer_count;
+  if (!SCREEN_MODES.has(mode) || typeof active !== "boolean" || typeof gameplay !== "boolean"
+    || !Number.isSafeInteger(blocking) || blocking < 0 || blocking > 32) {
+    return "state must publish screen_mode, session_active, gameplay_input_enabled and blocking_layer_count";
+  }
+  if (mode === "MENU" && (active || gameplay || blocking !== 0)) return "MENU lifecycle state is internally contradictory";
+  if (mode === "PLAYING" && (!active || !gameplay || blocking !== 0)) return "PLAYING lifecycle state is internally contradictory";
+  if (mode === "PAUSED" && (!active || gameplay)) return "PAUSED lifecycle state is internally contradictory";
+  if (mode === "RESULT" && (gameplay || blocking !== 0)) return "RESULT lifecycle state is internally contradictory";
+  return null;
 }
 
 function primitive(value) {

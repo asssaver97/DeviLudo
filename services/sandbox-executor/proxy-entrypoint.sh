@@ -1,7 +1,7 @@
 #!/bin/sh
 set -eu
 
-allowlist=${DEVILUDO_PROVIDER_ALLOWLIST:-api.anthropic.com,api.openai.com}
+allowlist=${DEVILUDO_PROVIDER_ALLOWLIST:-api.anthropic.com,api.openai.com,chatgpt.com}
 upstream=${DEVILUDO_PROVIDER_UPSTREAM_PROXY:-}
 domains=
 old_ifs=$IFS

@@ -1,7 +1,7 @@
 # syntax=docker/dockerfile:1.7
 FROM node:22.22.0-bookworm-slim
 ARG CLAUDE_CODE_VERSION=2.1.201
-RUN --mount=type=cache,target=/root/.npm apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends unzip \
+RUN --mount=type=cache,target=/root/.npm apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends ca-certificates unzip \
  && rm -rf /var/lib/apt/lists/* \
  && npm install --global --no-audit --no-fund "@anthropic-ai/claude-code@${CLAUDE_CODE_VERSION}" \
  && useradd --create-home --uid 10001 task

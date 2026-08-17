@@ -3,6 +3,7 @@ import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
 import { isAbsolute, join } from "node:path";
 import {
   AGENT_RUNTIME_KINDS,
+  CODEX_ACCOUNT_DEFAULT_MODEL,
   type AgentModelConfiguration,
   type AgentRoleModelConfiguration,
   type AgentRuntimeKind,
@@ -72,9 +73,14 @@ export function parseAgentSettingsInput(
     if (input.imageModel !== undefined && input.imageModel !== null && input.imageModel !== "") {
       throw new Error("Image generation requires a selected Provider connection");
     }
-    const roleModels = input.roleModels === undefined
-      ? Object.freeze({ design: "gpt-5.3-codex", development: "gpt-5.3-codex", test: "gpt-5.3-codex" })
-      : normalizeAgentRoleModels(input.roleModels);
+    if (input.roleModels !== undefined) {
+      throw new Error("Codex CLI uses the official account default model; custom role models are not accepted");
+    }
+    const roleModels = Object.freeze({
+      design: CODEX_ACCOUNT_DEFAULT_MODEL,
+      development: CODEX_ACCOUNT_DEFAULT_MODEL,
+      test: CODEX_ACCOUNT_DEFAULT_MODEL,
+    });
     return Object.freeze({
       agentRuntime: "CODEX_CLI",
       baseUrl: "https://chatgpt.com",

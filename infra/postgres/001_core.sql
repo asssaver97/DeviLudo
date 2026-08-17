@@ -77,7 +77,7 @@ CREATE TABLE deviludo.schema_metadata (
   applied_at timestamptz NOT NULL DEFAULT clock_timestamp()
 );
 INSERT INTO deviludo.schema_metadata(singleton, baseline, compatibility, current_version)
-VALUES (true, '001', 'deviludo-self-hosted-v1', '040_unify_image_generation_with_agent_connection');
+VALUES (true, '001', 'deviludo-self-hosted-v1', '042_restore_sandbox_e2e_trace_privilege');
 
 -- Every post-baseline change is immutable and checksummed. Fresh databases are
 -- created from this full snapshot and then stamp the migrations incorporated by
@@ -3088,6 +3088,10 @@ GRANT SELECT, INSERT, UPDATE, DELETE ON
   deviludo.e2e_policy_locks, deviludo.e2e_policy_decisions, deviludo.e2e_regression_traces
   TO deviludo_api;
 GRANT SELECT, INSERT, UPDATE ON deviludo.instance_agent_settings TO deviludo_api;
+-- complete_job is SECURITY INVOKER. Agent settlement checks whether the selected
+-- connection has an image model before it decides between asset preparation and
+-- the Builder, so the sandbox role needs this narrow read as part of its commit.
+GRANT SELECT ON deviludo.instance_agent_settings TO deviludo_scheduler, deviludo_sandbox;
 GRANT INSERT ON deviludo.object_cleanup_queue TO deviludo_api, deviludo_sandbox;
 GRANT SELECT, INSERT, DELETE ON deviludo.project_creation_receipts TO deviludo_api;
 GRANT SELECT, INSERT, UPDATE ON
@@ -3098,7 +3102,8 @@ GRANT SELECT, INSERT, UPDATE ON
   deviludo.operation_receipts,
   deviludo.artifacts, deviludo.artifact_inputs, deviludo.executor_receipts
   TO deviludo_scheduler;
-GRANT SELECT ON deviludo.e2e_regression_traces TO deviludo_scheduler;
+GRANT SELECT ON deviludo.e2e_regression_traces
+  TO deviludo_scheduler, deviludo_sandbox, deviludo_claim_executor;
 GRANT SELECT, UPDATE ON deviludo.steam_releases TO deviludo_scheduler;
 -- The asset generator resolves the configured provider and credential ref through
 -- an ordinary pooled read before calling out, so the scheduler reads this row

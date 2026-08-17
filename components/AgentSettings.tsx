@@ -4,6 +4,7 @@ import { useEffect, useState, type FormEvent, type ReactNode } from "react";
 import { cachedValue, clientCacheKeys, loadCached, storeCached } from "@/lib/product/client-cache";
 import {
   AGENT_RUNTIME_KINDS,
+  CODEX_ACCOUNT_DEFAULT_MODEL,
   type AgentModelConfiguration,
   type AgentRoleModelConfiguration,
   type AgentRuntimeAvailability,
@@ -123,9 +124,9 @@ export function AgentSettings() {
           ? { agentRuntime, settingsJson, roleModels, imageModel: imageModel.trim() || null }
           : {
               agentRuntime,
-              roleModels,
-              imageModel: agentRuntime === "CLAUDE_CODE" ? imageModel.trim() || null : null,
               ...(agentRuntime === "CLAUDE_CODE" ? {
+                roleModels,
+                imageModel: imageModel.trim() || null,
                 baseUrl,
                 models: effectiveModels(modelMode, singleModel, expandedModels),
                 ...(apiKey ? { apiKey } : {}),
@@ -338,7 +339,7 @@ export function AgentSettings() {
               </label>
             ) : null}
 
-            <fieldset className="agent-model-fieldset agent-role-model-fieldset">
+            {agentRuntime === "CLAUDE_CODE" ? <fieldset className="agent-model-fieldset agent-role-model-fieldset">
               <legend>{text("群聊 Agent", "GROUP CHAT AGENTS")}</legend>
               <p className="agent-role-model-description">{text(
                 "按角色选择模型；开发模型同时用于代码生成。",
@@ -352,7 +353,7 @@ export function AgentSettings() {
                   ? text("测试 Agent 玩家策略已通过真实视觉决策校验", "Test Agent player policy is ready for visual decisions")
                   : text("测试 Agent 玩家策略将在下一次 E2E 首次视觉决策时完成校验", "Test Agent player policy will be verified by the next E2E visual decision")}</p>
               </div>
-            </fieldset>
+            </fieldset> : null}
 
             {notice ? <p className="agent-config-notice is-success" role="status">{notice}</p> : null}
             {error ? <p className="agent-config-notice is-error" role="alert">{error}</p> : null}
@@ -530,9 +531,9 @@ function roleModelsFromRoutes(
     test: models.haiku || models.primary,
   });
   return Object.freeze({
-    design: "gpt-5.3-codex",
-    development: "gpt-5.3-codex",
-    test: "gpt-5.3-codex",
+    design: CODEX_ACCOUNT_DEFAULT_MODEL,
+    development: CODEX_ACCOUNT_DEFAULT_MODEL,
+    test: CODEX_ACCOUNT_DEFAULT_MODEL,
   });
 }
 
