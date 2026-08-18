@@ -16,6 +16,7 @@ import {
 } from "./image-generation";
 import type { CoreObjectStore } from "./object-store";
 import type { CoreRepository } from "./repository";
+import { resolveAgentModel } from "./agent-settings";
 
 /**
  * The lease has to outlive the slowest provider call, or a still-running
@@ -61,12 +62,12 @@ export async function runAssetGenerationBatch(
   // Resolve the credential once per batch rather than per asset: it is one
   // instance-wide setting, and Vault reads are not free.
   const settings = await repository.readAgentSettings();
-  if (!settings || settings.agentRuntime !== "CLAUDE_CODE" || !settings.imageModel) return IDLE;
+  if (!settings || settings.agentRuntime !== "CLAUDE_CODE") return IDLE;
   const apiKey = await secrets.readApiKey(settings.credentialSecretRef);
   if (!apiKey) return IDLE;
   const target: ImageGenerationTarget = Object.freeze({
     baseUrl: settings.baseUrl,
-    model: settings.imageModel,
+    model: resolveAgentModel(settings.primaryModel, settings.modelOverrides, "image"),
     apiKey,
   });
 

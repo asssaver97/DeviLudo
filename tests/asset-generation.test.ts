@@ -44,7 +44,8 @@ function lease(overrides: Partial<AssetGenerationLease> = {}): AssetGenerationLe
 const settings = Object.freeze({
   agentRuntime: "CLAUDE_CODE" as const,
   baseUrl: "https://api.example.com/v1",
-  imageModel: "gpt-image-1",
+  primaryModel: "claude-primary",
+  modelOverrides: Object.freeze({ design: null, development: null, test: null, image: "gpt-image-1" }),
   credentialSecretRef: "vault://instance/agent-runtime/api-key/versions/1",
   apiKeyMask: "sk-********abcd",
   apiKeyFingerprint: "sha256:0123456789ab",

@@ -8,8 +8,8 @@ test("instance Agent settings persist safely and freeze into workspace jobs", as
     settings: {
       agentRuntime: "CLAUDE_CODE",
       baseUrl: "https://api.anthropic.com",
-      model: null,
-      models: null,
+      primaryModel: "claude-sonnet-4-5",
+      modelOverrides: { design: null, development: null, test: null, image: null },
       apiKeyConfigured: false,
       apiKeyMasked: null,
       apiKeyFingerprint: null,
@@ -43,10 +43,6 @@ test("instance Agent settings persist safely and freeze into workspace jobs", as
           ANTHROPIC_BASE_URL: "https://api.anthropic.com",
           ANTHROPIC_AUTH_TOKEN: apiKey,
           ANTHROPIC_MODEL: "claude-fable-5-max",
-          ANTHROPIC_DEFAULT_OPUS_MODEL: "claude-opus-route",
-          ANTHROPIC_DEFAULT_SONNET_MODEL: "claude-sonnet-route",
-          ANTHROPIC_DEFAULT_HAIKU_MODEL: "claude-haiku-route",
-          CLAUDE_CODE_SUBAGENT_MODEL: "claude-subagent-route",
         },
       }),
     },
@@ -59,7 +55,8 @@ test("instance Agent settings persist safely and freeze into workspace jobs", as
     apiKeyConfigured: boolean;
     apiKeyMasked: string;
     apiKeyFingerprint: string;
-    models: Record<string, string> | null;
+    primaryModel: string;
+    modelOverrides: Record<string, string | null>;
     revision: number;
   } };
   expect(createdBody.settings).toMatchObject({
@@ -95,26 +92,15 @@ test("instance Agent settings persist safely and freeze into workspace jobs", as
   expect(locked[0]?.payload.agentConfiguration).toMatchObject({
     runtime: "CLAUDE_CODE",
     baseUrl: "https://api.anthropic.com",
-    models: {
-      primary: "claude-fable-5-max",
-      opus: "claude-opus-route",
-      sonnet: "claude-sonnet-route",
-      haiku: "claude-haiku-route",
-      subagent: "claude-subagent-route",
-    },
+    model: "claude-fable-5-max",
     revision: 1,
   });
   expect(String(locked[0]?.payload.agentConfiguration.credentialRef)).toMatch(
     /^vault:\/\/instance\/agent-runtime\/api-key\/versions\//,
   );
 
-  expect(createdBody.settings.models).toEqual({
-    primary: "claude-fable-5-max",
-    opus: "claude-opus-route",
-    sonnet: "claude-sonnet-route",
-    haiku: "claude-haiku-route",
-    subagent: "claude-subagent-route",
-  });
+  expect(createdBody.settings.primaryModel).toBe("claude-fable-5-max");
+  expect(createdBody.settings.modelOverrides).toEqual({ design: null, development: null, test: null, image: null });
 
   const rows = await stack.queryRows<{
     agent_runtime: string;

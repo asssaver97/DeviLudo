@@ -73,30 +73,25 @@ export type AgentRuntimeAvailability = Readonly<{
   authentication: "CHATGPT" | "API_KEY" | "SIGNED_OUT" | null;
 }>;
 
-export type AgentModelConfiguration = Readonly<{
-  primary: string;
-  opus: string;
-  sonnet: string;
-  haiku: string;
-  subagent: string;
-}>;
-
 export const PROJECT_AGENT_ROLES = ["DESIGN", "DEVELOPMENT", "TEST"] as const;
 export type ProjectAgentRole = typeof PROJECT_AGENT_ROLES[number];
 
-export type AgentRoleModelConfiguration = Readonly<{
-  design: string;
-  development: string;
-  test: string;
+export const AGENT_MODEL_OVERRIDE_ROLES = ["design", "development", "test", "image"] as const;
+export type AgentModelOverrideRole = typeof AGENT_MODEL_OVERRIDE_ROLES[number];
+
+/** A null override inherits the instance's primary model. */
+export type AgentModelOverrides = Readonly<{
+  design: string | null;
+  development: string | null;
+  test: string | null;
+  image: string | null;
 }>;
 
 export type InstanceAgentSettings = Readonly<{
   agentRuntime: AgentRuntimeKind;
   baseUrl: string;
-  model: string | null;
-  models: AgentModelConfiguration | null;
-  roleModels: AgentRoleModelConfiguration;
-  imageModel: string | null;
+  primaryModel: string;
+  modelOverrides: AgentModelOverrides;
   imageGenerationReady: boolean;
   apiKeyConfigured: boolean;
   apiKeyMasked: string | null;

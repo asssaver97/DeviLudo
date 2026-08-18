@@ -1,5 +1,6 @@
 import type { StoredInstanceAgentSettings } from "./repository";
 import { runCodexPrompt } from "./codex-cli";
+import { resolveAgentModel } from "./agent-settings";
 
 type FetchLike = typeof fetch;
 
@@ -31,8 +32,7 @@ async function requestClaudeName(
   apiKey: string,
   prompt: string,
 ): Promise<string> {
-  const model = settings.models?.primary;
-  if (!model) throw new Error("Claude Code 主模型尚未配置");
+  const model = resolveAgentModel(settings.primaryModel, settings.modelOverrides, "design");
   const response = await fetchImpl(messagesEndpoint(settings.baseUrl), {
     method: "POST",
     headers: {
@@ -61,8 +61,8 @@ async function requestCodexName(
   authJson: string,
   prompt: string,
 ): Promise<string> {
-  if (settings.agentRuntime !== "CODEX_CLI" || !settings.model) throw new Error("Codex CLI 模型尚未配置");
-  return runCodexPrompt({ authJson, model: settings.model, prompt, timeoutMs: 30_000 });
+  if (settings.agentRuntime !== "CODEX_CLI") throw new Error("Codex CLI 模型尚未配置");
+  return runCodexPrompt({ authJson, model: settings.primaryModel, prompt, timeoutMs: 30_000 });
 }
 
 function messagesEndpoint(baseUrl: string): string {

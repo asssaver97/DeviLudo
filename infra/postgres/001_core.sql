@@ -77,7 +77,7 @@ CREATE TABLE deviludo.schema_metadata (
   applied_at timestamptz NOT NULL DEFAULT clock_timestamp()
 );
 INSERT INTO deviludo.schema_metadata(singleton, baseline, compatibility, current_version)
-VALUES (true, '001', 'deviludo-self-hosted-v1', '042_restore_sandbox_e2e_trace_privilege');
+VALUES (true, '001', 'deviludo-self-hosted-v1', '043_primary_agent_model');
 
 -- Every post-baseline change is immutable and checksummed. Fresh databases are
 -- created from this full snapshot and then stamp the migrations incorporated by
@@ -221,19 +221,15 @@ CREATE TABLE deviludo.instance_agent_settings (
     length(base_url) BETWEEN 8 AND 2048
     AND base_url ~ '^https?://'
   ),
-  primary_model text CHECK (primary_model IS NULL OR primary_model ~ '^[A-Za-z0-9][A-Za-z0-9._:/-]{0,199}$'),
-  opus_model text CHECK (opus_model IS NULL OR opus_model ~ '^[A-Za-z0-9][A-Za-z0-9._:/-]{0,199}$'),
-  sonnet_model text CHECK (sonnet_model IS NULL OR sonnet_model ~ '^[A-Za-z0-9][A-Za-z0-9._:/-]{0,199}$'),
-  haiku_model text CHECK (haiku_model IS NULL OR haiku_model ~ '^[A-Za-z0-9][A-Za-z0-9._:/-]{0,199}$'),
-  subagent_model text CHECK (subagent_model IS NULL OR subagent_model ~ '^[A-Za-z0-9][A-Za-z0-9._:/-]{0,199}$'),
-  role_models jsonb NOT NULL CHECK (
-    jsonb_typeof(role_models) = 'object'
-    AND role_models ?& ARRAY['design', 'development', 'test']
-    AND (role_models->>'design') ~ '^[A-Za-z0-9][A-Za-z0-9._:/-]{0,199}$'
-    AND (role_models->>'development') ~ '^[A-Za-z0-9][A-Za-z0-9._:/-]{0,199}$'
-    AND (role_models->>'test') ~ '^[A-Za-z0-9][A-Za-z0-9._:/-]{0,199}$'
+  primary_model text NOT NULL CHECK (primary_model ~ '^[A-Za-z0-9][A-Za-z0-9._:/-]{0,199}$'),
+  model_overrides jsonb NOT NULL CHECK (
+    jsonb_typeof(model_overrides) = 'object'
+    AND model_overrides ?& ARRAY['design', 'development', 'test', 'image']
+    AND (model_overrides->'design' = 'null'::jsonb OR (model_overrides->>'design') ~ '^[A-Za-z0-9][A-Za-z0-9._:/-]{0,199}$')
+    AND (model_overrides->'development' = 'null'::jsonb OR (model_overrides->>'development') ~ '^[A-Za-z0-9][A-Za-z0-9._:/-]{0,199}$')
+    AND (model_overrides->'test' = 'null'::jsonb OR (model_overrides->>'test') ~ '^[A-Za-z0-9][A-Za-z0-9._:/-]{0,199}$')
+    AND (model_overrides->'image' = 'null'::jsonb OR (model_overrides->>'image') ~ '^[A-Za-z0-9][A-Za-z0-9._:/-]{0,199}$')
   ),
-  image_model text CHECK (image_model IS NULL OR image_model ~ '^[A-Za-z0-9][A-Za-z0-9._:/-]{0,199}$'),
   credential_secret_ref text NOT NULL CHECK (
     length(credential_secret_ref) BETWEEN 32 AND 1000
     AND credential_secret_ref LIKE 'vault://instance/agent-runtime/api-key/versions/%'
@@ -246,15 +242,7 @@ CREATE TABLE deviludo.instance_agent_settings (
   test_policy_checked_revision bigint CHECK (test_policy_checked_revision IS NULL OR test_policy_checked_revision > 0),
   updated_by text NOT NULL CHECK (length(updated_by) BETWEEN 1 AND 200),
   created_at timestamptz NOT NULL DEFAULT clock_timestamp(),
-  updated_at timestamptz NOT NULL DEFAULT clock_timestamp(),
-  CONSTRAINT instance_agent_settings_runtime_models CHECK (
-    (agent_runtime = 'CLAUDE_CODE' AND primary_model IS NOT NULL AND opus_model IS NOT NULL
-      AND sonnet_model IS NOT NULL AND haiku_model IS NOT NULL AND subagent_model IS NOT NULL)
-    OR
-    (agent_runtime = 'CODEX_CLI' AND primary_model IS NOT NULL AND opus_model IS NULL
-      AND sonnet_model IS NULL AND haiku_model IS NULL AND subagent_model IS NULL
-      AND image_model IS NULL)
-  )
+  updated_at timestamptz NOT NULL DEFAULT clock_timestamp()
 );
 
 CREATE TABLE deviludo.runtime_images (
@@ -1271,14 +1259,7 @@ BEGIN
         'agentConfiguration', jsonb_build_object(
           'runtime', agent_settings.agent_runtime::text,
           'baseUrl', agent_settings.base_url,
-          'model', CASE WHEN agent_settings.agent_runtime = 'CODEX_CLI' THEN agent_settings.primary_model END,
-          'models', CASE WHEN agent_settings.agent_runtime <> 'CLAUDE_CODE' OR agent_settings.primary_model IS NULL THEN NULL ELSE jsonb_build_object(
-            'primary', coalesce(agent_settings.role_models->>'development', agent_settings.primary_model),
-            'opus', agent_settings.opus_model,
-            'sonnet', agent_settings.sonnet_model,
-            'haiku', agent_settings.haiku_model,
-            'subagent', agent_settings.subagent_model
-          ) END,
+          'model', coalesce(agent_settings.model_overrides->>'development', agent_settings.primary_model),
           'credentialRef', agent_settings.credential_secret_ref,
           'revision', agent_settings.revision
         )
@@ -1680,7 +1661,7 @@ BEGIN
   END IF;
   IF NOT EXISTS (
     SELECT 1 FROM deviludo.instance_agent_settings
-     WHERE singleton = true AND agent_runtime = 'CLAUDE_CODE' AND image_model IS NOT NULL
+     WHERE singleton = true AND agent_runtime = 'CLAUDE_CODE'
   ) THEN RETURN; END IF;
 
   RETURN QUERY
@@ -2102,14 +2083,7 @@ BEGIN
         'agentConfiguration', jsonb_build_object(
           'runtime', agent_settings.agent_runtime::text,
           'baseUrl', agent_settings.base_url,
-          'model', CASE WHEN agent_settings.agent_runtime = 'CODEX_CLI' THEN agent_settings.primary_model END,
-          'models', CASE WHEN agent_settings.agent_runtime <> 'CLAUDE_CODE' OR agent_settings.primary_model IS NULL THEN NULL ELSE jsonb_build_object(
-            'primary', coalesce(agent_settings.role_models->>'development', agent_settings.primary_model),
-            'opus', agent_settings.opus_model,
-            'sonnet', agent_settings.sonnet_model,
-            'haiku', agent_settings.haiku_model,
-            'subagent', agent_settings.subagent_model
-          ) END,
+          'model', coalesce(agent_settings.model_overrides->>'development', agent_settings.primary_model),
           'credentialRef', agent_settings.credential_secret_ref,
           'revision', agent_settings.revision
         )
@@ -2156,14 +2130,7 @@ BEGIN
           'agentConfiguration', jsonb_build_object(
             'runtime', agent_settings.agent_runtime::text,
             'baseUrl', agent_settings.base_url,
-            'model', CASE WHEN agent_settings.agent_runtime = 'CODEX_CLI' THEN agent_settings.primary_model END,
-            'models', CASE WHEN agent_settings.agent_runtime <> 'CLAUDE_CODE' OR agent_settings.primary_model IS NULL THEN NULL ELSE jsonb_build_object(
-              'primary', coalesce(agent_settings.role_models->>'development', agent_settings.primary_model),
-              'opus', agent_settings.opus_model,
-              'sonnet', agent_settings.sonnet_model,
-              'haiku', agent_settings.haiku_model,
-              'subagent', agent_settings.subagent_model
-            ) END,
+            'model', coalesce(agent_settings.model_overrides->>'development', agent_settings.primary_model),
             'credentialRef', agent_settings.credential_secret_ref,
             'revision', agent_settings.revision
           )
@@ -2473,7 +2440,7 @@ BEGIN
       VALUES (
         job.workspace_id, job.project_id, job.workflow_id,
         EXISTS (SELECT 1 FROM deviludo.instance_agent_settings
-          WHERE singleton = true AND agent_runtime = 'CLAUDE_CODE' AND image_model IS NOT NULL)
+          WHERE singleton = true AND agent_runtime = 'CLAUDE_CODE')
       )
       ON CONFLICT (workspace_id, project_id) DO UPDATE
         SET workflow_id = excluded.workflow_id,
@@ -2691,14 +2658,7 @@ BEGIN
           'agentConfiguration', jsonb_build_object(
             'runtime', agent_settings.agent_runtime::text,
             'baseUrl', agent_settings.base_url,
-            'model', CASE WHEN agent_settings.agent_runtime = 'CODEX_CLI' THEN agent_settings.primary_model END,
-            'models', CASE WHEN agent_settings.agent_runtime <> 'CLAUDE_CODE' OR agent_settings.primary_model IS NULL THEN NULL ELSE jsonb_build_object(
-              'primary', coalesce(agent_settings.role_models->>'development', agent_settings.primary_model),
-              'opus', agent_settings.opus_model,
-              'sonnet', agent_settings.sonnet_model,
-              'haiku', agent_settings.haiku_model,
-              'subagent', agent_settings.subagent_model
-            ) END,
+            'model', coalesce(agent_settings.model_overrides->>'development', agent_settings.primary_model),
             'credentialRef', agent_settings.credential_secret_ref,
             'revision', agent_settings.revision
           )

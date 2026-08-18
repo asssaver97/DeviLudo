@@ -42,7 +42,7 @@ paths:
     get:
       operationId: readGlobalAgentSettings
       responses:
-        "200": { description: Selected Agent connection, role models, optional single image model, and runtime availability }
+        "200": { description: Selected Agent connection, primary model, four optional Agent model overrides, and runtime availability }
     put:
       operationId: saveGlobalAgentSettings
       responses:

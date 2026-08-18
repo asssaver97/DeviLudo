@@ -150,13 +150,8 @@ export class StackHarness {
         agentRuntime: "CLAUDE_CODE",
         baseUrl: "https://api.example.com",
         apiKey: "sk-e2e-instance-secret",
-        models: {
-          primary: "claude-primary",
-          opus: "claude-opus",
-          sonnet: "claude-sonnet",
-          haiku: "claude-haiku",
-          subagent: "claude-subagent",
-        },
+        primaryModel: "claude-primary",
+        modelOverrides: { design: null, development: null, test: null, image: null },
       },
     });
     expect(response.ok(), await response.text()).toBeTruthy();

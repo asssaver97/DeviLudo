@@ -1,5 +1,6 @@
 import { gzipSync, inflateRawSync } from "node:zlib";
 import type { StoredInstanceAgentSettings } from "./repository";
+import { resolveAgentModel } from "./agent-settings";
 import { runCodexPrompt } from "./codex-cli";
 import {
   crc32,
@@ -214,10 +215,7 @@ export async function analyzeImportedProject(input: Readonly<{
   apiKey: string;
   fetchImpl?: FetchLike;
 }>): Promise<ImportedProjectAnalysis> {
-  const model = input.settings.agentRuntime === "CLAUDE_CODE"
-    ? input.settings.models?.primary?.trim()
-    : input.settings.model?.trim();
-  if (!model) throw new Error("Agent 主模型尚未配置");
+  const model = resolveAgentModel(input.settings.primaryModel, input.settings.modelOverrides, "design");
   const fixture = process.env.NODE_ENV === "test" ? process.env.DEVILUDO_PROJECT_IMPORT_TEST_RESPONSE?.trim() : "";
   const raw = fixture || await requestAnalysis(input.fetchImpl ?? fetch, input.settings, input.apiKey, model, input.source.context);
   const parsed = parseAnalysis(raw);

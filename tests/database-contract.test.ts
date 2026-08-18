@@ -65,11 +65,12 @@ test("every workspace-owned table fails closed with forced row isolation", async
   assert.match(sql, /GRANT SELECT, UPDATE ON deviludo\.job_guidance_messages TO deviludo_claim_executor/);
   assert.match(sql, /credential_secret_ref text NOT NULL/);
   assert.match(sql, /api_key_mask text NOT NULL/);
-  for (const column of ["primary_model", "opus_model", "sonnet_model", "haiku_model", "subagent_model"]) {
-    assert.match(sql, new RegExp(`${column} text CHECK`));
+  assert.match(sql, /primary_model text NOT NULL CHECK/);
+  assert.match(sql, /model_overrides jsonb NOT NULL CHECK/);
+  for (const role of ["design", "development", "test", "image"]) {
+    assert.match(sql, new RegExp(`model_overrides->'${role}'`));
   }
-  assert.match(sql, /role_models jsonb NOT NULL CHECK/);
-  assert.match(sql, /role_models->>'development'/);
+  assert.doesNotMatch(sql, /opus_model|sonnet_model|haiku_model|subagent_model|role_models|image_model/);
   assert.match(sql, /credential_secret_ref LIKE 'vault:\/\/instance\/agent-runtime\/api-key\/versions\/%'/);
   assert.doesNotMatch(sql, /instance_agent_provider_profiles/);
   assert.match(sql, /WHEN 'AGENT_GENERATION' THEN[\s\S]*p_payload \? 'repairFromE2eJobId'[\s\S]*artifact\.kind = 'E2E_REPORT'[\s\S]*repairFromE2eJobId/);
@@ -317,8 +318,8 @@ test("instance Agent settings are frozen into new workspace jobs by secret refer
   assert.match(sql, /agent_settings deviludo\.instance_agent_settings%ROWTYPE/);
   assert.match(sql, /'credentialRef', agent_settings\.credential_secret_ref/);
   assert.match(sql, /'runtime', agent_settings\.agent_runtime::text/);
-  assert.match(sql, /'model', CASE WHEN agent_settings\.agent_runtime = 'CODEX_CLI'/);
-  assert.match(sql, /'models', CASE WHEN agent_settings\.agent_runtime <> 'CLAUDE_CODE'/);
+  assert.match(sql, /'model', coalesce\(agent_settings\.model_overrides->>'development', agent_settings\.primary_model\)/);
+  assert.doesNotMatch(sql, /'models', CASE WHEN agent_settings\.agent_runtime <> 'CLAUDE_CODE'/);
   assert.match(sql, /'revision', agent_settings\.revision/);
 });
 
@@ -355,9 +356,9 @@ test("Agent generation lands its planned asset manifest, validated and whole", a
   assert.match(complete, /RAISE EXCEPTION 'asset manifest keys must be unique'/);
   assert.match(complete, /NOT IN\s*\n?\s*\('sprite', 'animation', 'background', 'ui', 'icon', 'tileset'\)/);
   // Re-planning keeps one manifest per project, gates the build only when the
-  // selected Agent connection has one image model, and preserves uploaded art.
+  // selected Claude connection is available, and preserves uploaded art.
   assert.match(complete, /ON CONFLICT \(workspace_id, project_id\) DO UPDATE/);
-  assert.match(complete, /EXISTS \(SELECT 1 FROM deviludo\.instance_agent_settings[\s\S]*agent_runtime = 'CLAUDE_CODE'[\s\S]*image_model IS NOT NULL\)/);
+  assert.match(complete, /EXISTS \(SELECT 1 FROM deviludo\.instance_agent_settings[\s\S]*agent_runtime = 'CLAUDE_CODE'\)/);
   assert.match(complete, /RETURNING id, auto_generate_enabled INTO asset_manifest_id, asset_auto_generate/);
   assert.match(complete, /ON CONFLICT \(workspace_id, manifest_id, asset_key\) DO UPDATE/);
   assert.match(complete, /DELETE FROM deviludo\.asset_items[\s\S]*status NOT IN \('generated', 'uploaded'\)[\s\S]*asset_key NOT IN/);
@@ -419,7 +420,7 @@ test("asset generation is leased, attempt-bounded, and never overwrites a user u
   assert.match(claim, /generation_attempt = item\.generation_attempt \+ 1/);
   // Without configured settings there is no credential to call with, so claiming
   // would only burn attempts.
-  assert.match(claim, /IF NOT EXISTS \([\s\S]*SELECT 1 FROM deviludo\.instance_agent_settings[\s\S]*agent_runtime = 'CLAUDE_CODE'[\s\S]*image_model IS NOT NULL[\s\S]*\) THEN RETURN; END IF;/);
+  assert.match(claim, /IF NOT EXISTS \([\s\S]*SELECT 1 FROM deviludo\.instance_agent_settings[\s\S]*agent_runtime = 'CLAUDE_CODE'[\s\S]*\) THEN RETURN; END IF;/);
 
   // A user upload that lands mid-generation wins: settlement only applies to items
   // still leased, so a generated image cannot replace the art they chose.
@@ -457,14 +458,16 @@ test("asset generation is leased, attempt-bounded, and never overwrites a user u
   assert.match(completeJob, /status = CASE\s*\n\s*WHEN deviludo\.asset_items\.status IN \('generated', 'uploaded'\) THEN deviludo\.asset_items\.status\s*\n\s*ELSE 'planned' END/);
 });
 
-test("image generation reuses the selected Agent credential and stores only one optional model", async () => {
+test("image generation inherits the primary model through the selected Agent connection", async () => {
   const sql = await readFile(sqlUrl, "utf8");
   const table = sql.match(/CREATE TABLE deviludo\.instance_agent_settings \(([\s\S]*?)\n\);/)?.[1] ?? "";
   assert.match(table, /credential_secret_ref text NOT NULL/);
   assert.match(table, /LIKE 'vault:\/\/instance\/agent-runtime\/api-key\/versions\/%'/);
   assert.match(table, /api_key_mask text NOT NULL CHECK \(api_key_mask ~ '\^\.\{3\}\\\*\{8\}\.\{4\}\$'\)/);
-  assert.match(table, /image_model text CHECK/);
-  assert.equal((table.match(/image_model text/g) ?? []).length, 1);
+  assert.match(table, /primary_model text NOT NULL CHECK/);
+  assert.match(table, /model_overrides jsonb NOT NULL CHECK/);
+  assert.match(table, /model_overrides->'image'/);
+  assert.doesNotMatch(table, /image_model|opus_model|sonnet_model|haiku_model|subagent_model|role_models/);
   assert.doesNotMatch(table, /\bapi_key text\b|\bapi_key_value\b|\bsecret text\b/);
   assert.doesNotMatch(sql, /CREATE TABLE deviludo\.instance_image_generation_settings/);
   assert.match(table, /singleton boolean PRIMARY KEY DEFAULT true CHECK \(singleton\)/);
@@ -476,4 +479,13 @@ test("the unified Agent connection migration removes the independent image setti
   assert.match(migration, /DROP CONSTRAINT IF EXISTS instance_agent_settings_runtime_models/);
   assert.match(migration, /DROP CONSTRAINT IF EXISTS instance_agent_settings_claude_provider_only/);
   assert.match(migration, /DROP TABLE deviludo\.instance_image_generation_settings/);
+});
+
+test("the primary-model migration removes obsolete Claude routes and folds image into role overrides", async () => {
+  const migration = await readFile(new URL("../infra/postgres/migrations/043_primary_agent_model.sql", import.meta.url), "utf8");
+  assert.match(migration, /ADD COLUMN model_overrides jsonb/);
+  assert.match(migration, /'design'[\s\S]*'development'[\s\S]*'test'[\s\S]*'image'/);
+  assert.match(migration, /DROP COLUMN opus_model[\s\S]*DROP COLUMN image_model/);
+  assert.match(migration, /coalesce\(agent_settings\.model_overrides->>''development'', agent_settings\.primary_model\)/);
+  assert.match(migration, /procedure\.prokind = 'f'/);
 });

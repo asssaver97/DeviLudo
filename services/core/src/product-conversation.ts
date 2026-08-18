@@ -1,12 +1,12 @@
 import type {
-  AgentModelConfiguration,
-  AgentRoleModelConfiguration,
+  AgentModelOverrides,
   AgentRuntimeKind,
   ProductConversationMessage,
   ProjectDiscoveryReport,
   ProjectAgentRole,
   ProjectDocumentContent,
 } from "@/lib/product/contracts";
+import { resolveAgentModel } from "./agent-settings";
 import {
   normalizeAgentProjectDocumentContent,
 } from "@/lib/product/project-document";
@@ -27,8 +27,8 @@ export type ConversationAgentProjectContext = Readonly<{
 export type ConversationAgentSettings = Readonly<{
   agentRuntime: AgentRuntimeKind;
   baseUrl: string;
-  models: AgentModelConfiguration | null;
-  roleModels?: AgentRoleModelConfiguration;
+  primaryModel: string;
+  modelOverrides: AgentModelOverrides;
   revision: number;
 }>;
 
@@ -624,24 +624,8 @@ function normalizeReply(value: string): string {
 }
 
 function conversationModel(settings: ConversationAgentSettings, role: ProjectAgentRole): string {
-  const configured = role === "DESIGN"
-    ? settings.roleModels?.design
-    : role === "DEVELOPMENT"
-      ? settings.roleModels?.development
-      : settings.roleModels?.test;
-  if (configured?.trim()) return configured.trim();
-  if (settings.agentRuntime === "CLAUDE_CODE") {
-    const model = role === "DESIGN"
-      ? settings.models?.sonnet
-      : role === "TEST"
-        ? settings.models?.haiku
-        : settings.models?.primary;
-    if (!model?.trim()) throw new Error("Claude Code Agent 角色模型尚未配置");
-    return model.trim();
-  }
-  return process.env.DEVILUDO_CODEX_CONVERSATION_MODEL
-    ?? process.env.DEVILUDO_CODEX_NAMING_MODEL
-    ?? "codex-mini-latest";
+  const modelRole = role === "DESIGN" ? "design" : role === "DEVELOPMENT" ? "development" : "test";
+  return resolveAgentModel(settings.primaryModel, settings.modelOverrides, modelRole);
 }
 
 function agentRoleLabel(role: ProjectAgentRole): string {

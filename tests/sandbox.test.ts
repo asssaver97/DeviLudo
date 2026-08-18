@@ -73,7 +73,6 @@ test("Agent sandbox plans consume only the frozen instance configuration referen
         runtime: "CODEX_CLI",
         baseUrl: "https://api.example.com/v1",
         model: "gpt-5.3-codex",
-        models: null,
         credentialRef: "vault://instance/agent-runtime/api-key/versions/30000000-0000-4000-8000-000000000099",
         revision: 3,
       }),
@@ -83,7 +82,6 @@ test("Agent sandbox plans consume only the frozen instance configuration referen
     runtime: "CODEX_CLI",
     baseUrl: "https://api.example.com/v1",
     model: "gpt-5.3-codex",
-    models: null,
     credentialRef: "vault://instance/agent-runtime/api-key/versions/30000000-0000-4000-8000-000000000099",
     credentialEnvironmentVariable: "CODEX_AUTH_JSON",
     environment: { DEVILUDO_CODEX_MODEL: "gpt-5.3-codex" },
@@ -100,21 +98,14 @@ test("Agent sandbox plans consume only the frozen instance configuration referen
   })), /configuration lock/i);
 });
 
-test("Claude Code sandbox plans map each configured model route to its environment variable", () => {
+test("Claude Code sandbox plans route every internal Claude alias through the effective model", () => {
   const configured = sandboxPlan(Object.freeze({
     ...baseJob,
     payload: Object.freeze({
       agentConfiguration: Object.freeze({
         runtime: "CLAUDE_CODE",
         baseUrl: "https://www.sotamodel.net",
-        model: null,
-        models: {
-          primary: "claude-fable-5-max",
-          opus: "claude-opus-route",
-          sonnet: "claude-sonnet-route",
-          haiku: "claude-haiku-route",
-          subagent: "claude-subagent-route",
-        },
+        model: "claude-fable-5-max",
         credentialRef: "vault://instance/agent-runtime/api-key/versions/30000000-0000-4000-8000-000000000099",
         revision: 4,
       }),
@@ -124,10 +115,10 @@ test("Claude Code sandbox plans map each configured model route to its environme
   assert.deepEqual(configured.agentConfiguration?.environment, {
     ANTHROPIC_BASE_URL: "https://www.sotamodel.net",
     ANTHROPIC_MODEL: "claude-fable-5-max",
-    ANTHROPIC_DEFAULT_OPUS_MODEL: "claude-opus-route",
-    ANTHROPIC_DEFAULT_SONNET_MODEL: "claude-sonnet-route",
-    ANTHROPIC_DEFAULT_HAIKU_MODEL: "claude-haiku-route",
-    CLAUDE_CODE_SUBAGENT_MODEL: "claude-subagent-route",
+    ANTHROPIC_DEFAULT_OPUS_MODEL: "claude-fable-5-max",
+    ANTHROPIC_DEFAULT_SONNET_MODEL: "claude-fable-5-max",
+    ANTHROPIC_DEFAULT_HAIKU_MODEL: "claude-fable-5-max",
+    CLAUDE_CODE_SUBAGENT_MODEL: "claude-fable-5-max",
   });
 });
 

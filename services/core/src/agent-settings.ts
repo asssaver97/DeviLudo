@@ -3,9 +3,10 @@ import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
 import { isAbsolute, join } from "node:path";
 import {
   AGENT_RUNTIME_KINDS,
+  AGENT_MODEL_OVERRIDE_ROLES,
   CODEX_ACCOUNT_DEFAULT_MODEL,
-  type AgentModelConfiguration,
-  type AgentRoleModelConfiguration,
+  type AgentModelOverrideRole,
+  type AgentModelOverrides,
   type AgentRuntimeKind,
 } from "@/lib/product/contracts";
 
@@ -13,9 +14,8 @@ export type AgentSettingsInput = Readonly<{
   agentRuntime: AgentRuntimeKind;
   baseUrl: string;
   apiKey: string | null;
-  models: AgentModelConfiguration | null;
-  roleModels: AgentRoleModelConfiguration;
-  imageModel: string | null;
+  primaryModel: string;
+  modelOverrides: AgentModelOverrides;
 }>;
 
 export type AgentSecretVersion = Readonly<{
@@ -61,37 +61,28 @@ export function parseAgentSettingsInput(
     throw new Error("Agent settings must be an object");
   }
   const input = value as Record<string, unknown>;
-  const unknown = Object.keys(input).filter(key => !["agentRuntime", "baseUrl", "apiKey", "models", "roleModels", "settingsJson", "imageModel"].includes(key));
+  const unknown = Object.keys(input).filter(key => !["agentRuntime", "baseUrl", "apiKey", "primaryModel", "modelOverrides", "settingsJson"].includes(key));
   if (unknown.length > 0) throw new Error("Agent settings contain unsupported fields");
   if (!(AGENT_RUNTIME_KINDS as readonly unknown[]).includes(input.agentRuntime)) {
     throw new Error("Agent runtime must be Claude Code or Codex CLI");
   }
   if (input.agentRuntime === "CODEX_CLI") {
-    if (input.baseUrl !== undefined || input.apiKey !== undefined || input.models !== undefined || input.settingsJson !== undefined) {
+    if (input.baseUrl !== undefined || input.apiKey !== undefined || input.primaryModel !== undefined || input.settingsJson !== undefined) {
       throw new Error("Codex CLI uses the host's official ChatGPT login; custom Provider fields are not accepted");
     }
-    if (input.imageModel !== undefined && input.imageModel !== null && input.imageModel !== "") {
-      throw new Error("Image generation requires a selected Provider connection");
+    if (input.modelOverrides !== undefined) {
+      throw new Error("Codex CLI uses the official account default model; custom model overrides are not accepted");
     }
-    if (input.roleModels !== undefined) {
-      throw new Error("Codex CLI uses the official account default model; custom role models are not accepted");
-    }
-    const roleModels = Object.freeze({
-      design: CODEX_ACCOUNT_DEFAULT_MODEL,
-      development: CODEX_ACCOUNT_DEFAULT_MODEL,
-      test: CODEX_ACCOUNT_DEFAULT_MODEL,
-    });
     return Object.freeze({
       agentRuntime: "CODEX_CLI",
       baseUrl: "https://chatgpt.com",
       apiKey: null,
-      models: null,
-      roleModels,
-      imageModel: null,
+      primaryModel: CODEX_ACCOUNT_DEFAULT_MODEL,
+      modelOverrides: emptyAgentModelOverrides(),
     });
   }
   const fromJson = input.settingsJson !== undefined;
-  if (fromJson && (input.baseUrl !== undefined || input.apiKey !== undefined || input.models !== undefined)) {
+  if (fromJson && (input.baseUrl !== undefined || input.apiKey !== undefined || input.primaryModel !== undefined)) {
     throw new Error("Use either simple connection fields or Claude settings.json");
   }
   if (fromJson && input.agentRuntime !== "CLAUDE_CODE") {
@@ -99,7 +90,7 @@ export function parseAgentSettingsInput(
   }
   const connection = fromJson
     ? parseClaudeSettingsJson(input.settingsJson)
-    : { baseUrl: input.baseUrl, apiKey: input.apiKey, models: input.models };
+    : { baseUrl: input.baseUrl, apiKey: input.apiKey, primaryModel: input.primaryModel };
   if (typeof connection.baseUrl !== "string") throw new Error("Provider Base URL is required");
   const baseUrl = normalizeBaseUrl(connection.baseUrl, environment);
   let apiKey: string | null = null;
@@ -113,30 +104,23 @@ export function parseAgentSettingsInput(
     }
     apiKey = connection.apiKey;
   }
-  const models = normalizeAgentModels(connection.models);
-  if (models === null) {
-    throw new Error("Claude Code requires all five model routes");
-  }
-  const roleModels = input.roleModels === undefined
-    ? defaultAgentRoleModels(models)
-    : normalizeAgentRoleModels(input.roleModels);
-  const imageModel = input.imageModel === undefined || input.imageModel === null || input.imageModel === ""
-    ? null
-    : normalizeAgentModel(input.imageModel);
+  const primaryModel = normalizeAgentModel(connection.primaryModel);
+  const modelOverrides = input.modelOverrides === undefined
+    ? emptyAgentModelOverrides()
+    : normalizeAgentModelOverrides(input.modelOverrides);
   return Object.freeze({
     agentRuntime: input.agentRuntime as AgentRuntimeKind,
     baseUrl,
     apiKey,
-    models,
-    roleModels,
-    imageModel,
+    primaryModel,
+    modelOverrides,
   });
 }
 
 export function parseClaudeSettingsJson(value: unknown): Readonly<{
   baseUrl: unknown;
   apiKey: unknown;
-  models: unknown;
+  primaryModel: unknown;
 }> {
   if (typeof value !== "string" || value.length < 2 || value.length > 16 * 1024) {
     throw new Error("Claude settings.json must be a JSON string");
@@ -159,15 +143,8 @@ export function parseClaudeSettingsJson(value: unknown): Readonly<{
     throw new Error("Claude settings.json must contain an env object");
   }
   const env = root.env as Record<string, unknown>;
-  const modelKeys = [
-    "ANTHROPIC_MODEL",
-    "ANTHROPIC_DEFAULT_OPUS_MODEL",
-    "ANTHROPIC_DEFAULT_SONNET_MODEL",
-    "ANTHROPIC_DEFAULT_HAIKU_MODEL",
-    "CLAUDE_CODE_SUBAGENT_MODEL",
-  ] as const;
   const supported = new Set([
-    "ANTHROPIC_BASE_URL", "ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", ...modelKeys,
+    "ANTHROPIC_BASE_URL", "ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_MODEL",
   ]);
   if (Object.keys(env).some(key => !supported.has(key))) {
     throw new Error("Claude settings.json contains unsupported environment fields");
@@ -177,63 +154,40 @@ export function parseClaudeSettingsJson(value: unknown): Readonly<{
   if (apiKey && authToken && apiKey !== authToken) {
     throw new Error("Claude settings.json contains conflicting credentials");
   }
-  const configuredModels = modelKeys.map(key => env[key]);
-  const presentModels = configuredModels.filter(value => value !== undefined && value !== "");
-  if (presentModels.some(value => typeof value !== "string")) {
-    throw new Error("Claude settings.json model values must be strings");
-  }
-  if (presentModels.length > 0 && presentModels.length !== modelKeys.length) {
-    throw new Error("Claude settings.json must provide all five model values");
-  }
   return Object.freeze({
     baseUrl: env.ANTHROPIC_BASE_URL,
     apiKey: apiKey || authToken,
-    models: presentModels.length === 0 ? null : {
-      primary: env.ANTHROPIC_MODEL,
-      opus: env.ANTHROPIC_DEFAULT_OPUS_MODEL,
-      sonnet: env.ANTHROPIC_DEFAULT_SONNET_MODEL,
-      haiku: env.ANTHROPIC_DEFAULT_HAIKU_MODEL,
-      subagent: env.CLAUDE_CODE_SUBAGENT_MODEL,
-    },
+    primaryModel: env.ANTHROPIC_MODEL,
   });
 }
 
-export function normalizeAgentModels(value: unknown): AgentModelConfiguration | null {
-  if (value === undefined || value === null) return null;
+export function normalizeAgentModelOverrides(value: unknown): AgentModelOverrides {
   if (!value || typeof value !== "object" || Array.isArray(value)) {
-    throw new Error("Agent models must be an object");
+    throw new Error("Agent model overrides must be an object");
   }
   const input = value as Record<string, unknown>;
-  const keys = ["primary", "opus", "sonnet", "haiku", "subagent"] as const;
-  if (Object.keys(input).length !== keys.length || keys.some(key => !(key in input))) {
-    throw new Error("Agent models must contain all five routes");
+  if (Object.keys(input).length !== AGENT_MODEL_OVERRIDE_ROLES.length
+    || AGENT_MODEL_OVERRIDE_ROLES.some(key => !(key in input))) {
+    throw new Error("Agent model overrides must contain design, development, test, and image");
   }
-  const normalized = Object.fromEntries(keys.map(key => [key, normalizeAgentModel(input[key])])) as Record<string, string>;
-  return Object.freeze(normalized as AgentModelConfiguration);
+  return Object.freeze(Object.fromEntries(AGENT_MODEL_OVERRIDE_ROLES.map(key => {
+    const candidate = input[key];
+    return [key, candidate === undefined || candidate === null || candidate === ""
+      ? null
+      : normalizeAgentModel(candidate)];
+  })) as unknown as AgentModelOverrides);
 }
 
-export function normalizeAgentRoleModels(value: unknown): AgentRoleModelConfiguration {
-  if (!value || typeof value !== "object" || Array.isArray(value)) {
-    throw new Error("Agent role models must be an object");
-  }
-  const input = value as Record<string, unknown>;
-  const keys = ["design", "development", "test"] as const;
-  if (Object.keys(input).length !== keys.length || keys.some(key => !(key in input))) {
-    throw new Error("Agent role models must contain design, development, and test");
-  }
-  return Object.freeze(Object.fromEntries(
-    keys.map(key => [key, normalizeAgentModel(input[key])]),
-  ) as unknown as AgentRoleModelConfiguration);
+export function emptyAgentModelOverrides(): AgentModelOverrides {
+  return Object.freeze({ design: null, development: null, test: null, image: null });
 }
 
-function defaultAgentRoleModels(
-  models: AgentModelConfiguration,
-): AgentRoleModelConfiguration {
-  return Object.freeze({
-    design: models.sonnet,
-    development: models.primary,
-    test: models.haiku,
-  });
+export function resolveAgentModel(
+  primaryModel: string,
+  modelOverrides: AgentModelOverrides,
+  role: AgentModelOverrideRole,
+): string {
+  return modelOverrides[role] ?? primaryModel;
 }
 
 export function normalizeAgentModel(value: unknown): string {

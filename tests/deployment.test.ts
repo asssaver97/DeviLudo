@@ -733,8 +733,8 @@ test("image generation is part of the selected Agent connection", async () => {
     readFile(new URL("../components/AssetManifestPanel.tsx", import.meta.url), "utf8"),
   ]);
   assert.doesNotMatch(page, /ImageGenerationSettings/);
-  assert.match(agent, /name="imageModel"/);
-  assert.match(agent, /selected connection's Provider, Base URL, and credential/);
+  assert.match(agent, /updateModelOverride\("image"/);
+  assert.match(agent, /Image uses the same Provider, Base URL, and credential/);
   assert.match(assets, /imageGenerationReady/);
 });
 
@@ -798,15 +798,14 @@ test("the API Key field stays outside browser password managers", async () => {
   assert.doesNotMatch(component, /已保存 \$\{settings\.apiKeyMasked/);
 });
 
-test("model mode uses adjacent directional controls instead of text tabs", async () => {
+test("model settings use one primary model with four optional inheriting overrides", async () => {
   const component = await readFile(new URL("../components/AgentSettings.tsx", import.meta.url), "utf8");
-  assert.match(component, /className="agent-model-input-row"/);
-  assert.match(component, /direction="left" disabled=\{loading \|\| saving\} expanded=\{false\}/);
-  assert.match(component, /direction="down" disabled=\{loading \|\| saving\} expanded/);
-  assert.match(component, /<span aria-hidden="true">&lt;<\/span>/);
-  assert.doesNotMatch(component, /&lt;&lt;/);
-  assert.doesNotMatch(component, /className="model-mode-switch"/);
-  assert.doesNotMatch(component, />单一<\/button>|>展开<\/button>/);
+  assert.match(component, /name="primaryModel"/);
+  for (const role of ["design", "development", "test", "image"]) {
+    assert.match(component, new RegExp(`updateModelOverride\\("${role}"`));
+  }
+  assert.match(component, /inherits the primary model when empty/);
+  assert.doesNotMatch(component, /ModelMode|expandedModels|Opus|Sonnet|Haiku|Subagent/);
 });
 
 test("connection variables do not render helper copy below their inputs", async () => {

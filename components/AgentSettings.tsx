@@ -1,12 +1,10 @@
 "use client";
 
-import { useEffect, useState, type FormEvent, type ReactNode } from "react";
+import { useEffect, useState, type FormEvent } from "react";
 import { cachedValue, clientCacheKeys, loadCached, storeCached } from "@/lib/product/client-cache";
 import {
   AGENT_RUNTIME_KINDS,
-  CODEX_ACCOUNT_DEFAULT_MODEL,
-  type AgentModelConfiguration,
-  type AgentRoleModelConfiguration,
+  type AgentModelOverrides,
   type AgentRuntimeAvailability,
   type AgentRuntimeKind,
   type InstanceAgentSettings,
@@ -15,7 +13,6 @@ import { FileIcon, SettingsIcon, ShieldIcon } from "./console/Icons";
 import { useLanguage } from "./i18n/LanguageProvider";
 
 type ConfigurationMode = "SIMPLE" | "SETTINGS_JSON";
-type ModelMode = "SINGLE" | "EXPANDED";
 type AgentSettingsPayload = Readonly<{
   settings: InstanceAgentSettings;
   runtimes: readonly AgentRuntimeAvailability[];
@@ -24,14 +21,8 @@ type AgentSettingsPayload = Readonly<{
 const DEFAULT_SETTINGS: InstanceAgentSettings = Object.freeze({
   agentRuntime: "CLAUDE_CODE",
   baseUrl: "https://api.anthropic.com",
-  model: null,
-  models: null,
-  roleModels: Object.freeze({
-    design: "claude-sonnet-4-5",
-    development: "claude-opus-4-1",
-    test: "claude-haiku-4-5",
-  }),
-  imageModel: null,
+  primaryModel: "claude-sonnet-4-5",
+  modelOverrides: emptyModelOverrides(),
   imageGenerationReady: false,
   apiKeyConfigured: false,
   testPolicyReady: false,
@@ -46,31 +37,18 @@ const RUNTIME_COPY: Readonly<Record<AgentRuntimeKind, Readonly<{ name: string }>
   CODEX_CLI: Object.freeze({ name: "Codex CLI" }),
 });
 
-const EMPTY_MODELS: AgentModelConfiguration = Object.freeze({
-  primary: "",
-  opus: "",
-  sonnet: "",
-  haiku: "",
-  subagent: "",
-});
-
 export function AgentSettings() {
   const { errorText, text } = useLanguage();
   const initialPayload = cachedValue<AgentSettingsPayload>(clientCacheKeys.agentSettings);
   const initialSettings = initialPayload?.settings ?? DEFAULT_SETTINGS;
-  const initialModels = initialSettings.models ?? EMPTY_MODELS;
-  const initialRoleModels = initialSettings.roleModels ?? roleModelsFromRoutes(initialSettings.agentRuntime, initialModels);
   const [settings, setSettings] = useState<InstanceAgentSettings>(initialSettings);
   const [agentRuntime, setAgentRuntime] = useState<AgentRuntimeKind>(initialSettings.agentRuntime);
   const [baseUrl, setBaseUrl] = useState(initialSettings.baseUrl);
-  const [modelMode, setModelMode] = useState<ModelMode>(hasDistinctModels(initialModels) ? "EXPANDED" : "SINGLE");
-  const [singleModel, setSingleModel] = useState(initialModels.primary);
-  const [expandedModels, setExpandedModels] = useState<AgentModelConfiguration>(initialModels);
-  const [roleModels, setRoleModels] = useState<AgentRoleModelConfiguration>(initialRoleModels);
-  const [imageModel, setImageModel] = useState(initialSettings.imageModel ?? "");
+  const [primaryModel, setPrimaryModel] = useState(initialSettings.primaryModel);
+  const [modelOverrides, setModelOverrides] = useState<AgentModelOverrides>(initialSettings.modelOverrides);
   const [apiKey, setApiKey] = useState("");
   const [configurationMode, setConfigurationMode] = useState<ConfigurationMode>("SIMPLE");
-  const [settingsJson, setSettingsJson] = useState(() => formatClaudeSettingsJson(initialSettings.baseUrl, initialSettings.apiKeyMasked ?? "", initialSettings.models));
+  const [settingsJson, setSettingsJson] = useState(() => formatClaudeSettingsJson(initialSettings.baseUrl, initialSettings.apiKeyMasked ?? "", initialSettings.primaryModel));
   const [runtimes, setRuntimes] = useState<readonly AgentRuntimeAvailability[]>(initialPayload?.runtimes ?? []);
   const [loading, setLoading] = useState(!initialPayload);
   const [saving, setSaving] = useState(false);
@@ -95,13 +73,9 @@ export function AgentSettings() {
         setSettings(value);
         setAgentRuntime(value.agentRuntime);
         setBaseUrl(value.baseUrl);
-        const loadedModels = value.models ?? EMPTY_MODELS;
-        setExpandedModels(loadedModels);
-        setSingleModel(loadedModels.primary);
-        setModelMode(hasDistinctModels(loadedModels) ? "EXPANDED" : "SINGLE");
-        setRoleModels(value.roleModels ?? roleModelsFromRoutes(value.agentRuntime, loadedModels));
-        setImageModel(value.imageModel ?? "");
-        setSettingsJson(formatClaudeSettingsJson(value.baseUrl, value.apiKeyMasked ?? "", value.models));
+        setPrimaryModel(value.primaryModel);
+        setModelOverrides(value.modelOverrides);
+        setSettingsJson(formatClaudeSettingsJson(value.baseUrl, value.apiKeyMasked ?? "", value.primaryModel));
         setRuntimes(body.runtimes);
       })
       .catch(fetchError => {
@@ -121,14 +95,13 @@ export function AgentSettings() {
         method: "PUT",
         headers: { "content-type": "application/json" },
         body: JSON.stringify(configurationMode === "SETTINGS_JSON"
-          ? { agentRuntime, settingsJson, roleModels, imageModel: imageModel.trim() || null }
+          ? { agentRuntime, settingsJson, modelOverrides }
           : {
               agentRuntime,
               ...(agentRuntime === "CLAUDE_CODE" ? {
-                roleModels,
-                imageModel: imageModel.trim() || null,
                 baseUrl,
-                models: effectiveModels(modelMode, singleModel, expandedModels),
+                primaryModel,
+                modelOverrides,
                 ...(apiKey ? { apiKey } : {}),
               } : {}),
             }),
@@ -139,17 +112,13 @@ export function AgentSettings() {
       setSettings(body.settings);
       setAgentRuntime(body.settings.agentRuntime);
       setBaseUrl(body.settings.baseUrl);
-      const savedModels = body.settings.models ?? EMPTY_MODELS;
-      setExpandedModels(savedModels);
-      setSingleModel(savedModels.primary);
-      setModelMode(hasDistinctModels(savedModels) ? "EXPANDED" : "SINGLE");
-      setRoleModels(body.settings.roleModels);
-      setImageModel(body.settings.imageModel ?? "");
+      setPrimaryModel(body.settings.primaryModel);
+      setModelOverrides(body.settings.modelOverrides);
       setApiKey("");
       setSettingsJson(formatClaudeSettingsJson(
         body.settings.baseUrl,
         body.settings.apiKeyMasked ?? "",
-        body.settings.models,
+        body.settings.primaryModel,
       ));
       setNotice(text("Agent 配置已保存，仅影响之后启动的任务。", "Agent settings saved. They apply to newly started jobs only."));
     } catch (saveError) {
@@ -163,21 +132,17 @@ export function AgentSettings() {
     setAgentRuntime(kind);
     if (kind === "CODEX_CLI") {
       setConfigurationMode("SIMPLE");
-      setRoleModels(roleModelsFromRoutes(kind, EMPTY_MODELS));
-      setImageModel("");
+      setPrimaryModel("account-default");
+      setModelOverrides(emptyModelOverrides());
       setApiKey("");
       return;
     }
     const next = settings.agentRuntime === "CLAUDE_CODE" ? settings : DEFAULT_SETTINGS;
     setBaseUrl(next.baseUrl);
-    const nextModels = next.models ?? EMPTY_MODELS;
-    setExpandedModels(nextModels);
-    setSingleModel(nextModels.primary);
-    setModelMode(hasDistinctModels(nextModels) ? "EXPANDED" : "SINGLE");
-    setRoleModels(next.roleModels);
-    setImageModel(next.imageModel ?? "");
+    setPrimaryModel(next.primaryModel);
+    setModelOverrides(next.modelOverrides);
     setApiKey("");
-    setSettingsJson(formatClaudeSettingsJson(next.baseUrl, next.apiKeyMasked ?? "", next.models));
+    setSettingsJson(formatClaudeSettingsJson(next.baseUrl, next.apiKeyMasked ?? "", next.primaryModel));
   }
 
   function switchConfigurationMode(mode: ConfigurationMode) {
@@ -186,7 +151,7 @@ export function AgentSettings() {
       setSettingsJson(formatClaudeSettingsJson(
         baseUrl,
         apiKey || settings.apiKeyMasked || "",
-        effectiveModels(modelMode, singleModel, expandedModels),
+        primaryModel,
       ));
       setConfigurationMode(mode);
       return;
@@ -195,31 +160,15 @@ export function AgentSettings() {
       const connection = connectionFromClaudeSettingsJson(settingsJson, text);
       setBaseUrl(connection.baseUrl);
       setApiKey(connection.apiKey);
-      setExpandedModels(connection.models);
-      setSingleModel(connection.models.primary);
-      setModelMode(hasDistinctModels(connection.models) ? "EXPANDED" : "SINGLE");
+      setPrimaryModel(connection.primaryModel);
       setConfigurationMode(mode);
     } catch (modeError) {
       setError(modeError instanceof Error ? modeError.message : text("settings.json 格式无效", "Invalid settings.json"));
     }
   }
 
-  function switchModelMode(mode: ModelMode) {
-    if (mode === modelMode) return;
-    if (mode === "EXPANDED") {
-      setExpandedModels(modelsFromSingle(singleModel));
-    } else {
-      setSingleModel(expandedModels.primary);
-    }
-    setModelMode(mode);
-  }
-
-  function updateExpandedModel(key: keyof AgentModelConfiguration, value: string) {
-    setExpandedModels(current => Object.freeze({ ...current, [key]: value }));
-  }
-
-  function updateRoleModel(key: keyof AgentRoleModelConfiguration, value: string) {
-    setRoleModels(current => Object.freeze({ ...current, [key]: value }));
+  function updateModelOverride(key: keyof AgentModelOverrides, value: string) {
+    setModelOverrides(current => Object.freeze({ ...current, [key]: value.trim() ? value : null }));
   }
 
   return (
@@ -299,31 +248,10 @@ export function AgentSettings() {
                   />
                 </label>
 
-                <fieldset className="agent-model-fieldset">
-                    <legend>Model</legend>
-                    {modelMode === "SINGLE" ? (
-                      <label className="agent-model-single"><span>{text("统一模型", "Unified model")}</span>
-                        <div className="agent-model-input-row">
-                          <input aria-label={text("统一模型", "Unified model")} autoCapitalize="none" autoComplete="off" disabled={loading || saving} maxLength={200} onChange={event => setSingleModel(event.target.value)} placeholder="claude-fable-5-max" required type="text" value={singleModel} />
-                          <ModelModeButton direction="left" disabled={loading || saving} expanded={false} onClick={() => switchModelMode("EXPANDED")} />
-                        </div>
-                      </label>
-                    ) : (
-                      <div className="agent-model-expanded">
-                        <ModelInput
-                          action={<ModelModeButton direction="down" disabled={loading || saving} expanded onClick={() => switchModelMode("SINGLE")} />}
-                          disabled={loading || saving}
-                          label={text("主模型", "Primary")}
-                          onChange={value => updateExpandedModel("primary", value)}
-                          value={expandedModels.primary}
-                        />
-                        <ModelInput disabled={loading || saving} label="Opus" onChange={value => updateExpandedModel("opus", value)} value={expandedModels.opus} />
-                        <ModelInput disabled={loading || saving} label="Sonnet" onChange={value => updateExpandedModel("sonnet", value)} value={expandedModels.sonnet} />
-                        <ModelInput disabled={loading || saving} label="Haiku" onChange={value => updateExpandedModel("haiku", value)} value={expandedModels.haiku} />
-                        <ModelInput disabled={loading || saving} label="Subagent" onChange={value => updateExpandedModel("subagent", value)} value={expandedModels.subagent} />
-                      </div>
-                    )}
-                </fieldset>
+                <label>{text("主模型", "Primary model")}
+                  <input autoCapitalize="none" autoComplete="off" disabled={loading || saving} maxLength={200} name="primaryModel" onChange={event => setPrimaryModel(event.target.value)} placeholder="claude-sonnet-4-5" required type="text" value={primaryModel} />
+                  <small className="field-help">{text("设计、开发、测试和图片 Agent 默认均使用主模型。", "Design, Development, Test, and Image Agents use this model by default.")}</small>
+                </label>
 
               </>
             ) : (
@@ -332,23 +260,17 @@ export function AgentSettings() {
               </label>
             )}
 
-            {agentRuntime === "CLAUDE_CODE" ? (
-              <label>{text("图片生成模型（可选）", "Image model (optional)")}
-                <input autoCapitalize="none" autoComplete="off" disabled={loading || saving} maxLength={200} name="imageModel" onChange={event => setImageModel(event.target.value)} placeholder="gpt-image-1" type="text" value={imageModel} />
-                <small className="field-help">{text("沿用当前连接的 Provider、Base URL 和凭据；留空则关闭自动图片生成。", "Uses the selected connection's Provider, Base URL, and credential. Leave blank to disable automatic image generation.")}</small>
-              </label>
-            ) : null}
-
             {agentRuntime === "CLAUDE_CODE" ? <fieldset className="agent-model-fieldset agent-role-model-fieldset">
-              <legend>{text("群聊 Agent", "GROUP CHAT AGENTS")}</legend>
+              <legend>{text("Agent 模型", "AGENT MODELS")}</legend>
               <p className="agent-role-model-description">{text(
-                "按角色选择模型；开发模型同时用于代码生成。",
-                "Choose a model per role; the Development model also generates code.",
+                "以下均为可选覆盖；留空时自动继承主模型。开发模型同时用于代码生成，图片模型沿用同一个 Provider、Base URL 和凭据。",
+                "Every override is optional and inherits the primary model when empty. Development also generates code; Image uses the same Provider, Base URL, and credential.",
               )}</p>
               <div className="agent-model-expanded">
-                <ModelInput disabled={loading || saving} label={text("设计 Agent", "Design Agent")} onChange={value => updateRoleModel("design", value)} value={roleModels.design} />
-                <ModelInput disabled={loading || saving} label={text("开发 Agent", "Development Agent")} onChange={value => updateRoleModel("development", value)} value={roleModels.development} />
-                <ModelInput disabled={loading || saving} label={text("测试 Agent", "Test Agent")} onChange={value => updateRoleModel("test", value)} value={roleModels.test} />
+                <ModelInput disabled={loading || saving} inheritLabel={text("继承主模型", "Inherits primary")} label={text("设计 Agent", "Design Agent")} onChange={value => updateModelOverride("design", value)} placeholder={primaryModel} value={modelOverrides.design ?? ""} />
+                <ModelInput disabled={loading || saving} inheritLabel={text("继承主模型", "Inherits primary")} label={text("开发 Agent", "Development Agent")} onChange={value => updateModelOverride("development", value)} placeholder={primaryModel} value={modelOverrides.development ?? ""} />
+                <ModelInput disabled={loading || saving} inheritLabel={text("继承主模型", "Inherits primary")} label={text("测试 Agent", "Test Agent")} onChange={value => updateModelOverride("test", value)} placeholder={primaryModel} value={modelOverrides.test ?? ""} />
+                <ModelInput disabled={loading || saving} inheritLabel={text("继承主模型", "Inherits primary")} label={text("图片 Agent", "Image Agent")} onChange={value => updateModelOverride("image", value)} placeholder={primaryModel} value={modelOverrides.image ?? ""} />
                 <p className={`agent-config-notice ${settings.testPolicyReady ? "is-success" : ""}`} role="status">{settings.testPolicyReady
                   ? text("测试 Agent 玩家策略已通过真实视觉决策校验", "Test Agent player policy is ready for visual decisions")
                   : text("测试 Agent 玩家策略将在下一次 E2E 首次视觉决策时完成校验", "Test Agent player policy will be verified by the next E2E visual decision")}</p>
@@ -367,52 +289,25 @@ export function AgentSettings() {
 }
 
 function ModelInput({
-  action,
   disabled,
+  inheritLabel,
   label,
   onChange,
+  placeholder,
   value,
 }: Readonly<{
-  action?: ReactNode;
   disabled: boolean;
+  inheritLabel: string;
   label: string;
   onChange: (value: string) => void;
+  placeholder: string;
   value: string;
 }>) {
   return (
     <label><span>{label}</span>
-      <div className={action ? "agent-model-input-row" : undefined}>
-        <input autoCapitalize="none" autoComplete="off" disabled={disabled} maxLength={200} onChange={event => onChange(event.target.value)} placeholder="claude-fable-5-max" required type="text" value={value} />
-        {action}
-      </div>
+      <input autoCapitalize="none" autoComplete="off" disabled={disabled} maxLength={200} onChange={event => onChange(event.target.value)} placeholder={placeholder} type="text" value={value} />
+      <small className="field-help">{inheritLabel}</small>
     </label>
-  );
-}
-
-function ModelModeButton({
-  direction,
-  disabled,
-  expanded,
-  onClick,
-}: Readonly<{
-  direction: "down" | "left";
-  disabled: boolean;
-  expanded: boolean;
-  onClick: () => void;
-}>) {
-  const { text } = useLanguage();
-  return (
-    <button
-      aria-expanded={expanded}
-      aria-label={expanded ? text("收起模型配置", "Collapse model settings") : text("展开模型配置", "Expand model settings")}
-      className={`agent-model-mode-button is-${direction}`}
-      disabled={disabled}
-      onClick={onClick}
-      title={expanded ? text("收起模型配置", "Collapse model settings") : text("展开模型配置", "Expand model settings")}
-      type="button"
-    >
-      <span aria-hidden="true">&lt;</span>
-    </button>
   );
 }
 
@@ -453,18 +348,13 @@ function runtimeClass(
 function formatClaudeSettingsJson(
   baseUrl: string,
   apiKey: string,
-  models: AgentModelConfiguration | null,
+  primaryModel: string,
 ): string {
-  const values = models ?? EMPTY_MODELS;
   return JSON.stringify({
     env: {
       ANTHROPIC_BASE_URL: baseUrl,
       ANTHROPIC_AUTH_TOKEN: apiKey,
-      ANTHROPIC_MODEL: values.primary,
-      ANTHROPIC_DEFAULT_OPUS_MODEL: values.opus,
-      ANTHROPIC_DEFAULT_SONNET_MODEL: values.sonnet,
-      ANTHROPIC_DEFAULT_HAIKU_MODEL: values.haiku,
-      CLAUDE_CODE_SUBAGENT_MODEL: values.subagent,
+      ANTHROPIC_MODEL: primaryModel,
     },
   }, null, 2);
 }
@@ -475,7 +365,7 @@ function connectionFromClaudeSettingsJson(
 ): Readonly<{
   baseUrl: string;
   apiKey: string;
-  models: AgentModelConfiguration;
+  primaryModel: string;
 }> {
   let parsed: unknown;
   try {
@@ -496,55 +386,16 @@ function connectionFromClaudeSettingsJson(
   }
   const credential = values.ANTHROPIC_API_KEY || values.ANTHROPIC_AUTH_TOKEN || "";
   if (typeof credential !== "string") throw new Error(text("settings.json 中的凭据必须是字符串。", "The credential in settings.json must be a string."));
-  const models = {
-    primary: values.ANTHROPIC_MODEL,
-    opus: values.ANTHROPIC_DEFAULT_OPUS_MODEL,
-    sonnet: values.ANTHROPIC_DEFAULT_SONNET_MODEL,
-    haiku: values.ANTHROPIC_DEFAULT_HAIKU_MODEL,
-    subagent: values.CLAUDE_CODE_SUBAGENT_MODEL,
-  };
-  if (Object.values(models).some(model => typeof model !== "string")) {
-    throw new Error(text("settings.json 中的模型变量必须是字符串。", "Model variables in settings.json must be strings."));
-  }
-  const configuredModelCount = Object.values(models).filter(Boolean).length;
-  if (configuredModelCount !== 0 && configuredModelCount !== 5) {
-    throw new Error(text("settings.json 必须同时填写全部 5 个模型变量。", "Fill in all five model variables in settings.json together."));
+  if (typeof values.ANTHROPIC_MODEL !== "string" || !values.ANTHROPIC_MODEL) {
+    throw new Error(text("settings.json 缺少主模型 ANTHROPIC_MODEL。", "settings.json is missing the primary ANTHROPIC_MODEL."));
   }
   return Object.freeze({
     baseUrl: values.ANTHROPIC_BASE_URL,
     apiKey: credential,
-    models: Object.freeze(models as AgentModelConfiguration),
+    primaryModel: values.ANTHROPIC_MODEL,
   });
 }
 
-function modelsFromSingle(value: string): AgentModelConfiguration {
-  return Object.freeze({ primary: value, opus: value, sonnet: value, haiku: value, subagent: value });
-}
-
-function roleModelsFromRoutes(
-  runtime: AgentRuntimeKind,
-  models: AgentModelConfiguration,
-): AgentRoleModelConfiguration {
-  if (runtime === "CLAUDE_CODE") return Object.freeze({
-    design: models.sonnet || models.primary,
-    development: models.primary,
-    test: models.haiku || models.primary,
-  });
-  return Object.freeze({
-    design: CODEX_ACCOUNT_DEFAULT_MODEL,
-    development: CODEX_ACCOUNT_DEFAULT_MODEL,
-    test: CODEX_ACCOUNT_DEFAULT_MODEL,
-  });
-}
-
-function effectiveModels(
-  mode: ModelMode,
-  single: string,
-  expanded: AgentModelConfiguration,
-): AgentModelConfiguration {
-  return mode === "SINGLE" ? modelsFromSingle(single) : expanded;
-}
-
-function hasDistinctModels(models: AgentModelConfiguration): boolean {
-  return new Set(Object.values(models)).size > 1;
+function emptyModelOverrides(): AgentModelOverrides {
+  return Object.freeze({ design: null, development: null, test: null, image: null });
 }

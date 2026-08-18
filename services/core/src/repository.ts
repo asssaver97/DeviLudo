@@ -5,8 +5,7 @@ import {
   AGENT_RUNTIME_KINDS,
   type AgentProgressEvent,
   type AgentProgressEventKind,
-  type AgentModelConfiguration,
-  type AgentRoleModelConfiguration,
+  type AgentModelOverrides,
   type AgentRuntimeKind,
   type ArtifactRecord,
   type ProductEvent,
@@ -38,7 +37,7 @@ import type {
   WorkflowSignalInput,
 } from "./contracts";
 import { executorReceiptSigningPayload } from "./contracts";
-import { normalizeAgentModels, normalizeAgentRoleModels } from "./agent-settings";
+import { normalizeAgentModel, normalizeAgentModelOverrides } from "./agent-settings";
 import {
   createInitialProjectDocument,
   parseProjectDocumentContent,
@@ -411,8 +410,7 @@ export class CoreRepository {
 
   async readAgentSettings(): Promise<StoredInstanceAgentSettings | null> {
     const result = await this.database.pool.query<AgentSettingsRow>(
-        `SELECT agent_runtime::text, base_url, primary_model, opus_model,
-                sonnet_model, haiku_model, subagent_model, role_models, image_model, credential_secret_ref,
+        `SELECT agent_runtime::text, base_url, primary_model, model_overrides, credential_secret_ref,
                 test_policy_ready, test_policy_checked_revision::text,
                 api_key_mask, api_key_fingerprint, credential_version::text, revision::text,
                 updated_by, updated_at::text
@@ -425,9 +423,8 @@ export class CoreRepository {
   async saveAgentSettings(input: Readonly<{
     agentRuntime: AgentRuntimeKind;
     baseUrl: string;
-    models: AgentModelConfiguration | null;
-    roleModels: AgentRoleModelConfiguration;
-    imageModel: string | null;
+    primaryModel: string;
+    modelOverrides: AgentModelOverrides;
     credentialSecretRef: string;
     apiKeyMask: string;
     apiKeyFingerprint: string;
@@ -436,23 +433,16 @@ export class CoreRepository {
   }>): Promise<StoredInstanceAgentSettings> {
       const result = await this.database.pool.query<AgentSettingsRow>(
         `INSERT INTO deviludo.instance_agent_settings(
-           singleton, agent_runtime, base_url, primary_model, opus_model,
-           sonnet_model, haiku_model, subagent_model, role_models, image_model, credential_secret_ref,
+           singleton, agent_runtime, base_url, primary_model, model_overrides, credential_secret_ref,
            api_key_mask, api_key_fingerprint, credential_version, updated_by
          ) VALUES (
-           true, $1::deviludo.agent_runtime, $2, $3, $4, $5, $6, $7,
-           $8::jsonb, $9, $10, $11, $12, $13::uuid, $14
+           true, $1::deviludo.agent_runtime, $2, $3, $4::jsonb, $5, $6, $7, $8::uuid, $9
          )
          ON CONFLICT (singleton) DO UPDATE SET
            agent_runtime = EXCLUDED.agent_runtime,
            base_url = EXCLUDED.base_url,
            primary_model = EXCLUDED.primary_model,
-           opus_model = EXCLUDED.opus_model,
-           sonnet_model = EXCLUDED.sonnet_model,
-           haiku_model = EXCLUDED.haiku_model,
-           subagent_model = EXCLUDED.subagent_model,
-           role_models = EXCLUDED.role_models,
-           image_model = EXCLUDED.image_model,
+           model_overrides = EXCLUDED.model_overrides,
            credential_secret_ref = EXCLUDED.credential_secret_ref,
            api_key_mask = EXCLUDED.api_key_mask,
            api_key_fingerprint = EXCLUDED.api_key_fingerprint,
@@ -462,8 +452,7 @@ export class CoreRepository {
            revision = deviludo.instance_agent_settings.revision + 1,
            updated_by = EXCLUDED.updated_by,
            updated_at = clock_timestamp()
-         RETURNING agent_runtime::text, base_url, primary_model, opus_model,
-                   sonnet_model, haiku_model, subagent_model, role_models, image_model, credential_secret_ref,
+         RETURNING agent_runtime::text, base_url, primary_model, model_overrides, credential_secret_ref,
                    test_policy_ready, test_policy_checked_revision::text,
                    api_key_mask, api_key_fingerprint, credential_version::text, revision::text,
                    updated_by, updated_at::text
@@ -471,13 +460,8 @@ export class CoreRepository {
         [
           input.agentRuntime,
           input.baseUrl,
-          input.agentRuntime === "CODEX_CLI" ? input.roleModels.development : input.models?.primary ?? null,
-          input.models?.opus ?? null,
-          input.models?.sonnet ?? null,
-          input.models?.haiku ?? null,
-          input.models?.subagent ?? null,
-          JSON.stringify(input.roleModels),
-          input.imageModel,
+          input.primaryModel,
+          JSON.stringify(input.modelOverrides),
           input.credentialSecretRef,
           input.apiKeyMask,
           input.apiKeyFingerprint,
@@ -2956,12 +2940,7 @@ type AgentSettingsRow = {
   agent_runtime: string;
   base_url: string;
   primary_model: string | null;
-  opus_model: string | null;
-  sonnet_model: string | null;
-  haiku_model: string | null;
-  subagent_model: string | null;
-  role_models: unknown;
-  image_model: string | null;
+  model_overrides: unknown;
   credential_secret_ref: string;
   test_policy_ready: boolean;
   test_policy_checked_revision: string | null;
@@ -2976,10 +2955,8 @@ type AgentSettingsRow = {
 export type StoredInstanceAgentSettings = Readonly<{
   agentRuntime: AgentRuntimeKind;
   baseUrl: string;
-  model: string | null;
-  models: AgentModelConfiguration | null;
-  roleModels: AgentRoleModelConfiguration;
-  imageModel: string | null;
+  primaryModel: string;
+  modelOverrides: AgentModelOverrides;
   credentialSecretRef: string;
   testPolicyReady: boolean;
   testPolicyCheckedRevision: number | null;
@@ -2993,15 +2970,8 @@ export type StoredInstanceAgentSettings = Readonly<{
 
 function agentSettingsFromRow(row: AgentSettingsRow): StoredInstanceAgentSettings {
   const revision = Number(row.revision);
-  const runtime = row.agent_runtime as AgentRuntimeKind;
-  const models = normalizeAgentModels(runtime !== "CLAUDE_CODE" || row.primary_model === null ? null : {
-    primary: row.primary_model,
-    opus: row.opus_model,
-    sonnet: row.sonnet_model,
-    haiku: row.haiku_model,
-    subagent: row.subagent_model,
-  });
-  const roleModels = normalizeAgentRoleModels(row.role_models);
+  const primaryModel = normalizeAgentModel(row.primary_model);
+  const modelOverrides = normalizeAgentModelOverrides(row.model_overrides);
   const testPolicyCheckedRevision = row.test_policy_checked_revision === null ? null : Number(row.test_policy_checked_revision);
   if (!(AGENT_RUNTIME_KINDS as readonly string[]).includes(row.agent_runtime)
     || !Number.isSafeInteger(revision) || revision < 1
@@ -3013,10 +2983,8 @@ function agentSettingsFromRow(row: AgentSettingsRow): StoredInstanceAgentSetting
   return Object.freeze({
     agentRuntime: row.agent_runtime as AgentRuntimeKind,
     baseUrl: row.base_url,
-    model: runtime === "CODEX_CLI" ? row.primary_model ?? roleModels.development : null,
-    models,
-    roleModels,
-    imageModel: row.image_model,
+    primaryModel,
+    modelOverrides,
     credentialSecretRef: row.credential_secret_ref,
     testPolicyReady: row.test_policy_ready,
     testPolicyCheckedRevision,

@@ -4,10 +4,9 @@ import { isAbsolute } from "node:path";
 import { StringDecoder } from "node:string_decoder";
 import {
   AGENT_RUNTIME_KINDS,
-  type AgentModelConfiguration,
   type AgentRuntimeKind,
 } from "@/lib/product/contracts";
-import { normalizeAgentModel, normalizeAgentModels, normalizeBaseUrl } from "./agent-settings";
+import { normalizeAgentModel, normalizeBaseUrl } from "./agent-settings";
 import type { CoreConfig } from "./config";
 import type { JobProtocolV4, ObjectReference } from "./contracts";
 import type { CoreRepository } from "./repository";
@@ -26,8 +25,7 @@ export type SandboxPlan = Readonly<{
   agentConfiguration: Readonly<{
     runtime: AgentRuntimeKind;
     baseUrl: string;
-    model: string | null;
-    models: AgentModelConfiguration | null;
+    model: string;
     credentialRef: string;
     credentialEnvironmentVariable: "ANTHROPIC_AUTH_TOKEN" | "CODEX_AUTH_JSON";
     environment: Readonly<Record<string, string>>;
@@ -367,17 +365,10 @@ function agentConfigurationFromPayload(
     throw new Error("Agent configuration lock is invalid");
   }
   const input = value as Record<string, unknown>;
-  const runtime = input.runtime as AgentRuntimeKind;
   const baseUrl = typeof input.baseUrl === "string"
     ? normalizeBaseUrl(input.baseUrl, process.env.NODE_ENV ?? "development")
     : "";
-  const legacyModels = input.models && typeof input.models === "object" && !Array.isArray(input.models)
-    ? input.models as Record<string, unknown>
-    : null;
-  const model = runtime === "CODEX_CLI"
-    ? normalizeAgentModel(input.model ?? legacyModels?.primary)
-    : null;
-  const models = runtime === "CLAUDE_CODE" ? normalizeAgentModels(input.models) : null;
+  const model = normalizeAgentModel(input.model);
   if (!(AGENT_RUNTIME_KINDS as readonly unknown[]).includes(input.runtime)
     || !baseUrl
     || typeof input.credentialRef !== "string"
@@ -390,29 +381,26 @@ function agentConfigurationFromPayload(
     runtime: input.runtime as AgentRuntimeKind,
     baseUrl,
     model,
-    models,
     credentialRef: input.credentialRef,
     credentialEnvironmentVariable: input.runtime === "CLAUDE_CODE" ? "ANTHROPIC_AUTH_TOKEN" : "CODEX_AUTH_JSON",
     environment: input.runtime === "CLAUDE_CODE"
-      ? claudeCodeEnvironment(baseUrl, models)
-      : Object.freeze({ DEVILUDO_CODEX_MODEL: model ?? "" }),
+      ? claudeCodeEnvironment(baseUrl, model)
+      : Object.freeze({ DEVILUDO_CODEX_MODEL: model }),
     revision: Number(input.revision),
   });
 }
 
 function claudeCodeEnvironment(
   baseUrl: string,
-  models: AgentModelConfiguration | null,
+  model: string,
 ): Readonly<Record<string, string>> {
   return Object.freeze({
     ANTHROPIC_BASE_URL: baseUrl,
-    ...(models ? {
-      ANTHROPIC_MODEL: models.primary,
-      ANTHROPIC_DEFAULT_OPUS_MODEL: models.opus,
-      ANTHROPIC_DEFAULT_SONNET_MODEL: models.sonnet,
-      ANTHROPIC_DEFAULT_HAIKU_MODEL: models.haiku,
-      CLAUDE_CODE_SUBAGENT_MODEL: models.subagent,
-    } : {}),
+    ANTHROPIC_MODEL: model,
+    ANTHROPIC_DEFAULT_OPUS_MODEL: model,
+    ANTHROPIC_DEFAULT_SONNET_MODEL: model,
+    ANTHROPIC_DEFAULT_HAIKU_MODEL: model,
+    CLAUDE_CODE_SUBAGENT_MODEL: model,
   });
 }
 

@@ -14,6 +14,7 @@ import {
   createAgentSecretStore,
   isMaskedApiKey,
   parseAgentSettingsInput,
+  resolveAgentModel,
   type AgentSecretStore,
 } from "./agent-settings";
 import { detectAgentRuntimes } from "./agent-runtime-detection";
@@ -225,9 +226,8 @@ export async function runApi(
     const saved = await repository.saveAgentSettings({
       agentRuntime: input.agentRuntime,
       baseUrl: input.baseUrl,
-      models: input.models,
-      roleModels: input.roleModels,
-      imageModel: input.imageModel,
+      primaryModel: input.primaryModel,
+      modelOverrides: input.modelOverrides,
       credentialSecretRef: credential.secretRef,
       apiKeyMask: credential.mask,
       apiKeyFingerprint: credential.fingerprint,
@@ -1184,7 +1184,7 @@ export async function runApi(
     if (job.jobKind !== "E2E_TEST") return reply.code(409).send({ code: "PLAYER_POLICY_JOB_INVALID" });
     const settings = await repository.readAgentSettings();
     if (!settings) return reply.code(503).send({ code: "PLAYER_POLICY_NOT_CONFIGURED" });
-    const model = settings.roleModels.test;
+    const model = resolveAgentModel(settings.primaryModel, settings.modelOverrides, "test");
     const configurationDigest = jsonDigest({
       runtime: settings.agentRuntime, baseUrl: settings.baseUrl, model,
       settingsRevision: settings.revision, credentialVersion: settings.credentialVersion,
@@ -1240,7 +1240,7 @@ export async function runApi(
     const policyRequest = parsePlayerPolicyRequest(body.request);
     const settings = await repository.readAgentSettings();
     if (!settings) return reply.code(503).send({ code: "PLAYER_POLICY_NOT_CONFIGURED" });
-    const model = settings.roleModels.test;
+    const model = resolveAgentModel(settings.primaryModel, settings.modelOverrides, "test");
     const configurationDigest = jsonDigest({
       runtime: settings.agentRuntime, baseUrl: settings.baseUrl, model,
       settingsRevision: settings.revision, credentialVersion: settings.credentialVersion,
@@ -2052,16 +2052,14 @@ function publicAgentSettings(
   return Object.freeze({
     agentRuntime: settings?.agentRuntime ?? "CLAUDE_CODE",
     baseUrl: settings?.baseUrl ?? "https://api.anthropic.com",
-    model: settings?.model ?? null,
-    models: settings?.models ?? null,
-    roleModels: settings?.roleModels ?? Object.freeze({
-      design: "claude-sonnet-4-5",
-      development: "claude-opus-4-1",
-      test: "claude-haiku-4-5",
+    primaryModel: settings?.primaryModel ?? "claude-sonnet-4-5",
+    modelOverrides: settings?.modelOverrides ?? Object.freeze({
+      design: null,
+      development: null,
+      test: null,
+      image: null,
     }),
-    imageModel: settings?.imageModel ?? null,
     imageGenerationReady: settings?.agentRuntime === "CLAUDE_CODE"
-      && settings.imageModel !== null
       && settings.apiKeyMask !== null,
     apiKeyConfigured: settings !== null,
     apiKeyMasked: settings?.agentRuntime === "CLAUDE_CODE" ? apiKeyMask : null,

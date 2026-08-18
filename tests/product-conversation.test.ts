@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import type { AgentModelOverrides } from "../lib/product/contracts";
 import {
   generateProductConversationReply,
   generateProductConversationGroupReply,
@@ -21,6 +22,21 @@ const project = Object.freeze({
     features: Object.freeze(["十分钟一局"]),
   }),
 });
+
+function claudeSettings(revision = 1, overrides: AgentModelOverrides = Object.freeze({
+  design: null,
+  development: null,
+  test: null,
+  image: null,
+})) {
+  return Object.freeze({
+    agentRuntime: "CLAUDE_CODE" as const,
+    baseUrl: "https://provider.example/v1",
+    primaryModel: "claude-primary",
+    modelOverrides: overrides,
+    revision,
+  });
+}
 
 test("explicit development commands approve while discussions and negative commands do not", () => {
   for (const command of [
@@ -59,23 +75,12 @@ test("project group chat invokes design, development, and test Agents with indep
     history: Object.freeze([]),
     project,
     allowDraftMutation: true,
-    settings: Object.freeze({
-      agentRuntime: "CLAUDE_CODE" as const,
-      baseUrl: "https://provider.example/v1",
-      models: Object.freeze({
-        primary: "claude-primary",
-        opus: "claude-opus",
-        sonnet: "claude-sonnet",
-        haiku: "claude-haiku",
-        subagent: "claude-subagent",
-      }),
-      roleModels: Object.freeze({
+    settings: claudeSettings(9, Object.freeze({
         design: "design-model",
         development: "development-model",
         test: "test-model",
-      }),
-      revision: 9,
-    }),
+        image: null,
+      })),
     apiKey: "sk-test-secret",
     fetchImpl: async (_url, init) => {
       const body = JSON.parse(String(init?.body)) as Record<string, unknown>;
@@ -114,18 +119,7 @@ test("Claude design Agent receives project context and conversation history", as
     ]),
     project,
     allowDraftMutation: true,
-    settings: Object.freeze({
-      agentRuntime: "CLAUDE_CODE" as const,
-      baseUrl: "https://provider.example/v1",
-      models: Object.freeze({
-        primary: "claude-primary",
-        opus: "claude-opus",
-        sonnet: "claude-sonnet",
-        haiku: "claude-haiku",
-        subagent: "claude-subagent",
-      }),
-      revision: 7,
-    }),
+    settings: claudeSettings(7, Object.freeze({ design: "claude-sonnet", development: null, test: null, image: null })),
     apiKey: "sk-test-secret",
     fetchImpl: async (url, init) => {
       requestedUrl = String(url);
@@ -184,7 +178,8 @@ test("Codex design Agent uses the official CLI session and cannot mutate a locke
     settings: Object.freeze({
       agentRuntime: "CODEX_CLI" as const,
       baseUrl: "https://openai.example",
-      models: null,
+      primaryModel: "account-default",
+      modelOverrides: Object.freeze({ design: null, development: null, test: null, image: null }),
       revision: 3,
     }),
     apiKey: JSON.stringify({ tokens: { access_token: "test" } }),
@@ -207,18 +202,7 @@ test("draft conversations allow exploratory replies without repeating the projec
     history: Object.freeze([]),
     project,
     allowDraftMutation: true,
-    settings: Object.freeze({
-      agentRuntime: "CLAUDE_CODE" as const,
-      baseUrl: "https://provider.example",
-      models: Object.freeze({
-        primary: "claude-primary",
-        opus: "claude-opus",
-        sonnet: "claude-sonnet",
-        haiku: "claude-haiku",
-        subagent: "claude-subagent",
-      }),
-      revision: 1,
-    }),
+    settings: claudeSettings(),
     apiKey: "sk-test-secret",
     fetchImpl: async () => new Response(JSON.stringify({
       content: [{ type: "text", text: "可以从分工、资源冲突和限时事件三个方向探索。" }],
@@ -235,18 +219,7 @@ test("draft conversations merge a project document patch with the current docume
     history: Object.freeze([]),
     project,
     allowDraftMutation: true,
-    settings: Object.freeze({
-      agentRuntime: "CLAUDE_CODE" as const,
-      baseUrl: "https://provider.example",
-      models: Object.freeze({
-        primary: "claude-primary",
-        opus: "claude-opus",
-        sonnet: "claude-sonnet",
-        haiku: "claude-haiku",
-        subagent: "claude-subagent",
-      }),
-      revision: 1,
-    }),
+    settings: claudeSettings(),
     apiKey: "sk-test-secret",
     fetchImpl: async () => new Response(JSON.stringify({
       content: [{ type: "text", text: JSON.stringify({
@@ -277,18 +250,7 @@ test("draft conversations normalize an overlong Agent feature before applying th
     history: Object.freeze([]),
     project,
     allowDraftMutation: true,
-    settings: Object.freeze({
-      agentRuntime: "CLAUDE_CODE" as const,
-      baseUrl: "https://provider.example",
-      models: Object.freeze({
-        primary: "claude-primary",
-        opus: "claude-opus",
-        sonnet: "claude-sonnet",
-        haiku: "claude-haiku",
-        subagent: "claude-subagent",
-      }),
-      revision: 1,
-    }),
+    settings: claudeSettings(),
     apiKey: "sk-test-secret",
     fetchImpl: async () => new Response(JSON.stringify({
       content: [{ type: "text", text: JSON.stringify({
@@ -312,18 +274,7 @@ test("draft conversations reject an asserted mutation without a document patch",
     history: Object.freeze([]),
     project,
     allowDraftMutation: true,
-    settings: Object.freeze({
-      agentRuntime: "CLAUDE_CODE" as const,
-      baseUrl: "https://provider.example",
-      models: Object.freeze({
-        primary: "claude-primary",
-        opus: "claude-opus",
-        sonnet: "claude-sonnet",
-        haiku: "claude-haiku",
-        subagent: "claude-subagent",
-      }),
-      revision: 1,
-    }),
+    settings: claudeSettings(),
     apiKey: "sk-test-secret",
     fetchImpl: async () => new Response(JSON.stringify({
       content: [{ type: "text", text: JSON.stringify({
@@ -342,18 +293,7 @@ test("design Agent provider failures use a resettable idle timeout with a clear 
     history: Object.freeze([]),
     project,
     allowDraftMutation: true,
-    settings: Object.freeze({
-      agentRuntime: "CLAUDE_CODE" as const,
-      baseUrl: "https://provider.example",
-      models: Object.freeze({
-        primary: "claude-primary",
-        opus: "claude-opus",
-        sonnet: "claude-sonnet",
-        haiku: "claude-haiku",
-        subagent: "claude-subagent",
-      }),
-      revision: 1,
-    }),
+    settings: claudeSettings(),
     apiKey: "sk-test-secret",
     providerIdleTimeoutMs: 20,
     fetchImpl: async (_url, init) => await new Promise<Response>((_resolve, reject) => {
@@ -371,18 +311,7 @@ test("malformed JSON newlines never leak the reply envelope into chat", async ()
     history: Object.freeze([]),
     project,
     allowDraftMutation: true,
-    settings: Object.freeze({
-      agentRuntime: "CLAUDE_CODE" as const,
-      baseUrl: "https://provider.example",
-      models: Object.freeze({
-        primary: "claude-primary",
-        opus: "claude-opus",
-        sonnet: "claude-sonnet",
-        haiku: "claude-haiku",
-        subagent: "claude-subagent",
-      }),
-      revision: 1,
-    }),
+    settings: claudeSettings(),
     apiKey: "sk-test-secret",
     fetchImpl: async () => new Response(JSON.stringify({
       content: [{ type: "text", text: '```json\n{"reply":"第一段\n\n第二段","options":["方向一","方向二"],"applyToDraft":false,"readyForDevelopment":false,"projectDocument":{"introduction":"玩家共同维护一座太空站。","gameplay":"分工处理火灾、电力和导航故障。","categories":["合作","动作"],"features":["十分钟一局"]}}\n```' }],
@@ -406,18 +335,7 @@ test("Claude design Agent streams only the visible reply text", async () => {
     history: Object.freeze([]),
     project,
     allowDraftMutation: true,
-    settings: Object.freeze({
-      agentRuntime: "CLAUDE_CODE" as const,
-      baseUrl: "https://provider.example",
-      models: Object.freeze({
-        primary: "claude-primary",
-        opus: "claude-opus",
-        sonnet: "claude-sonnet",
-        haiku: "claude-haiku",
-        subagent: "claude-subagent",
-      }),
-      revision: 2,
-    }),
+    settings: claudeSettings(2),
     apiKey: "sk-test-secret",
     fetchImpl: async (_url, init) => {
       requestedBody = JSON.parse(String(init?.body)) as Record<string, unknown>;

@@ -20,13 +20,8 @@ test("Agent settings accept fixed runtimes and normalize safe provider URLs", ()
     agentRuntime: "CODEX_CLI",
     baseUrl: "https://chatgpt.com",
     apiKey: null,
-    models: null,
-    roleModels: {
-      design: "account-default",
-      development: "account-default",
-      test: "account-default",
-    },
-    imageModel: null,
+    primaryModel: "account-default",
+    modelOverrides: { design: null, development: null, test: null, image: null },
   });
   assert.throws(() => parseAgentSettingsInput({
     agentRuntime: "CODEX_CLI",
@@ -34,7 +29,7 @@ test("Agent settings accept fixed runtimes and normalize safe provider URLs", ()
   }, "production"), /official ChatGPT login/i);
   assert.throws(() => parseAgentSettingsInput({
     agentRuntime: "CODEX_CLI",
-    roleModels: { design: "custom", development: "custom", test: "custom" },
+    modelOverrides: { design: "custom", development: "custom", test: "custom", image: "custom" },
   }, "production"), /account default model/i);
   assert.throws(() => parseAgentSettingsInput({
     agentRuntime: "UNKNOWN",
@@ -52,7 +47,7 @@ test("Agent settings accept fixed runtimes and normalize safe provider URLs", ()
     agentRuntime: "CLAUDE_CODE",
     baseUrl: "https://api.anthropic.com",
     apiKey: "sk-valid-secret",
-  }), /five model routes/i);
+  }), /model format/i);
 });
 
 test("Test Agent vision readiness updates only the active Claude configuration", async () => {
@@ -81,22 +76,12 @@ test("Claude settings.json accepts only the supported connection fields", () => 
       ANTHROPIC_BASE_URL: "https://gateway.example.com/anthropic/",
       ANTHROPIC_AUTH_TOKEN: "sk-gateway-secret",
       ANTHROPIC_MODEL: "claude-fable-5-max",
-      ANTHROPIC_DEFAULT_OPUS_MODEL: "claude-opus-route",
-      ANTHROPIC_DEFAULT_SONNET_MODEL: "claude-sonnet-route",
-      ANTHROPIC_DEFAULT_HAIKU_MODEL: "claude-haiku-route",
-      CLAUDE_CODE_SUBAGENT_MODEL: "claude-subagent-route",
     },
   });
   assert.deepEqual(parseClaudeSettingsJson(settingsJson), {
     baseUrl: "https://gateway.example.com/anthropic/",
     apiKey: "sk-gateway-secret",
-    models: {
-      primary: "claude-fable-5-max",
-      opus: "claude-opus-route",
-      sonnet: "claude-sonnet-route",
-      haiku: "claude-haiku-route",
-      subagent: "claude-subagent-route",
-    },
+    primaryModel: "claude-fable-5-max",
   });
   assert.deepEqual(parseAgentSettingsInput({
     agentRuntime: "CLAUDE_CODE",
@@ -105,19 +90,8 @@ test("Claude settings.json accepts only the supported connection fields", () => 
     agentRuntime: "CLAUDE_CODE",
     baseUrl: "https://gateway.example.com/anthropic",
     apiKey: "sk-gateway-secret",
-    models: {
-      primary: "claude-fable-5-max",
-      opus: "claude-opus-route",
-      sonnet: "claude-sonnet-route",
-      haiku: "claude-haiku-route",
-      subagent: "claude-subagent-route",
-    },
-    roleModels: {
-      design: "claude-sonnet-route",
-      development: "claude-fable-5-max",
-      test: "claude-haiku-route",
-    },
-    imageModel: null,
+    primaryModel: "claude-fable-5-max",
+    modelOverrides: { design: null, development: null, test: null, image: null },
   });
   assert.throws(() => parseAgentSettingsInput({
     agentRuntime: "CODEX_CLI",
@@ -130,7 +104,7 @@ test("Claude settings.json accepts only the supported connection fields", () => 
     ANTHROPIC_BASE_URL: "https://api.anthropic.com",
     ANTHROPIC_MODEL: "model-a",
     CLAUDE_CODE_SUBAGENT_MODEL: "model-b",
-  } })), /all five model values/i);
+  } })), /unsupported environment fields/i);
 });
 
 test("API keys use a stable first-three and last-four mask", () => {

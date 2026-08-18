@@ -22,16 +22,8 @@ const sourceZip = createStoredZip([
 const settings: StoredInstanceAgentSettings = Object.freeze({
   agentRuntime: "CLAUDE_CODE",
   baseUrl: "https://gateway.example.com/anthropic/v1",
-  model: null,
-  models: Object.freeze({
-    primary: "claude-primary",
-    opus: "claude-opus",
-    sonnet: "claude-sonnet",
-    haiku: "claude-haiku",
-    subagent: "claude-subagent",
-  }),
-  roleModels: Object.freeze({ design: "claude-sonnet", development: "claude-primary", test: "claude-haiku" }),
-  imageModel: null,
+  primaryModel: "claude-primary",
+  modelOverrides: Object.freeze({ design: null, development: null, test: null, image: null }),
   credentialSecretRef: "vault://instance/agent-runtime/api-key/versions/30000000-0000-4000-8000-000000000099",
   apiKeyMask: "sk-********alue",
   apiKeyFingerprint: "sha256:0123456789ab",

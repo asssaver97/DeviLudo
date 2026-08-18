@@ -57,7 +57,7 @@ try {
     agentConfiguration: {
       runtime: "CLAUDE_CODE",
       baseUrl: "https://fixture.invalid",
-      models: { primary: "fixture", opus: "fixture", sonnet: "fixture", haiku: "fixture", subagent: "fixture" },
+      model: "fixture",
       credentialRef: `vault://instance/agent-runtime/api-key/versions/${randomUUID()}`,
       credentialEnvironmentVariable: "ANTHROPIC_AUTH_TOKEN",
       environment: {
