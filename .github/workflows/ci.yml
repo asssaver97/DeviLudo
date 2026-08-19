@@ -23,19 +23,10 @@ jobs:
           node-version: 22.22.0
           cache: npm
       - run: npm ci
-      - name: Install deployment script analyzers
-        timeout-minutes: 5
-        run: |
-          sudo apt-get \
-            -o Acquire::Retries=3 \
-            -o Acquire::http::Timeout=30 \
-            -o Acquire::https::Timeout=30 \
-            update
-          sudo apt-get install -y --no-install-recommends bats shellcheck
       - name: Analyze Bash deployment scripts
         run: shellcheck -e SC1090,SC1091,SC2317,SC2329 deploy/common/*.sh deploy/web/*.sh deploy/core/*.sh deploy/e2e-linux/*.sh deploy/e2e-macos/*.sh deploy/assets/*.sh deploy/assets/deviludo-e2e-host deploy/assets/deviludo-e2e-renew
       - name: Exercise Bash deployment contracts
-        run: bats deploy/tests/bash-deploy.bats
+        run: npx --no-install bats deploy/tests/bash-deploy.bats
       - run: npm run check
       - name: Start isolated local stack without native macOS host
         run: npm run local:up
