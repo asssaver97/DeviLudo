@@ -58,6 +58,10 @@
     "sharp": "0.34.5",
     "tsx": "4.22.1"
   },
+  "optionalDependencies": {
+    "@img/sharp-libvips-linux-x64": "1.2.4",
+    "@img/sharp-linux-x64": "0.34.5"
+  },
   "devDependencies": {
     "@playwright/test": "^1.62.0",
     "@types/node": "22.19.19",

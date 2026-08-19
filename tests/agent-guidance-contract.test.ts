@@ -39,13 +39,12 @@ test("holds the completion gate until late live guidance becomes quiescent", asy
   const path = join(root, "guidance.ndjson");
   await writeFile(path, "");
   const before = await readAgentGuidanceSnapshot(path);
-  const append = new Promise<void>((resolve, reject) => {
-    setTimeout(() => {
-      writeFile(path, `${JSON.stringify({ content: "replace the just-finished fallback" })}\n`).then(resolve, reject);
-    }, 15);
-  });
-  const settled = await waitForAgentGuidanceQuiescence(before, path, { quiescenceMs: 30, pollMs: 5 });
-  await append;
+  // Start the gate first, then append while it is sleeping before its initial
+  // poll. This preserves the race being tested without relying on a timer that
+  // can fire after the whole quiescence window on a loaded CI runner.
+  const settling = waitForAgentGuidanceQuiescence(before, path, { quiescenceMs: 30, pollMs: 5 });
+  await writeFile(path, `${JSON.stringify({ content: "replace the just-finished fallback" })}\n`);
+  const settled = await settling;
   assert.deepEqual(agentGuidanceArrivedDuringRun(before, settled), ["replace the just-finished fallback"]);
 });
 
