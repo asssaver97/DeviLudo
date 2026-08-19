@@ -31,6 +31,7 @@ import {
   sendConversationMessageStream,
 } from "@/lib/product/conversation-stream";
 import { ConversationBox } from "./conversation/ConversationBox";
+import { AssetAutoGenerationSetting } from "./AssetAutoGenerationSetting";
 import { AssetManifestPanel } from "./AssetManifestPanel";
 import { ProjectSteamPanel } from "./ProjectSteamPanel";
 import { ArrowIcon, PlusIcon, RerunIcon } from "./console/Icons";
@@ -84,6 +85,8 @@ export function ProjectStudio({ projectId }: { projectId: string }) {
   const [editingDocument, setEditingDocument] = useState(false);
   const [documentDraft, setDocumentDraft] = useState({ introduction: "", gameplay: "", categories: "", features: "" });
   const [assetPanelExpanded, setAssetPanelExpanded] = useState(false);
+  const [assetManifestRefreshKey, setAssetManifestRefreshKey] = useState(0);
+  const [deliveryConfigExpanded, setDeliveryConfigExpanded] = useState(false);
   const [localGit, setLocalGit] = useState<LocalGitState | null>(null);
   const [localGitError, setLocalGitError] = useState<string | null>(null);
   const [newBranchName, setNewBranchName] = useState("");
@@ -697,6 +700,66 @@ export function ProjectStudio({ projectId }: { projectId: string }) {
             ) : null}
           </div>
         </header>
+        <details
+          className="product-delivery-configuration"
+          onToggle={event => setDeliveryConfigExpanded(event.currentTarget.open)}
+          open={deliveryConfigExpanded}
+        >
+          <summary aria-label={deliveryConfigExpanded
+            ? text("收起项目交付配置", "Collapse project delivery settings")
+            : text("展开项目交付配置", "Expand project delivery settings")}>
+            <span className="product-delivery-config-copy">
+              <span aria-hidden="true" className="product-delivery-config-marker">CFG</span>
+              <span><b>{text("项目交付配置", "PROJECT DELIVERY SETTINGS")}</b><small>{text("图片素材、Git 分支与 SteamPipe", "Image assets, Git branch, and SteamPipe")}</small></span>
+            </span>
+            <span className="product-delivery-config-summary-meta">
+              <span className="product-delivery-config-branch">{localGit?.repository ? localGit.branch ?? "DETACHED HEAD" : text("未绑定 Git", "NO GIT")}</span>
+              <span className="product-delivery-config-toggle">
+                <span aria-hidden="true" className="product-delivery-config-toggle-icon"><ArrowIcon /></span>
+                <span className="product-delivery-config-toggle-closed">{text("展开配置", "OPEN SETTINGS")}</span>
+                <span className="product-delivery-config-toggle-open">{text("收起配置", "CLOSE SETTINGS")}</span>
+              </span>
+            </span>
+          </summary>
+          <div className="product-delivery-configuration-grid">
+            <AssetAutoGenerationSetting
+              onChanged={() => setAssetManifestRefreshKey(value => value + 1)}
+              projectId={projectId}
+              readOnly={viewingHistoricalIteration}
+            />
+            <section aria-label={text("Git 配置", "Git settings")} className="project-delivery-git-settings">
+              <header><span className="eyebrow">GIT</span><h3>{text("代码仓库与分支", "REPOSITORY & BRANCH")}</h3></header>
+              {project.localDirectory ? <div className="local-git-branch-panel">
+                <div className="local-git-branch-toolbar">
+                  <div className="local-git-branch-status">
+                    <span>{text(project.localDirectory.sourceKind === "GIT" ? "本地 GitHub 工作目录" : "本地项目工作目录", project.localDirectory.sourceKind === "GIT" ? "LOCAL GITHUB WORKTREE" : "LOCAL PROJECT WORKTREE")}</span>
+                    {localGit?.repository ? <strong><span>{text("当前分支", "Current branch")}</span><code>{localGit.branch ?? "DETACHED HEAD"}</code></strong> : null}
+                  </div>
+                  {localGit?.repository && !editingLocalBranch ? <button className="button button-secondary" disabled={deliveryActive || viewingHistoricalIteration} onClick={() => { setNewBranchName(""); setEditingLocalBranch(true); }} type="button">{text("修改分支", "CHANGE BRANCH")}</button> : null}
+                </div>
+                {localGit?.repository && editingLocalBranch ? <form className="local-git-branch-form" onSubmit={event => void createLocalBranch(event)}>
+                  <label><span>{text("新分支名称", "New branch name")}</span><input aria-label={text("新建 Git 分支", "New Git branch")} autoCapitalize="none" autoComplete="off" autoFocus disabled={branchBusy || deliveryActive || viewingHistoricalIteration} onChange={event => setNewBranchName(event.target.value)} placeholder="codex/my-feature" spellCheck={false} value={newBranchName} /></label>
+                  <div><button className="button button-secondary" disabled={branchBusy} onClick={() => { setNewBranchName(""); setEditingLocalBranch(false); }} type="button">{text("取消", "CANCEL")}</button><button className="button button-primary" disabled={branchBusy || deliveryActive || viewingHistoricalIteration || !newBranchName.trim()} type="submit">{branchBusy ? text("正在创建…", "CREATING…") : text("新建并切换", "CREATE & SWITCH")}</button></div>
+                </form> : null}
+                {localGit === null && !localGitError ? <small>{text("正在读取本地 Git 状态…", "Reading local Git status…")}</small> : null}
+                {localGit && !localGit.repository ? <small>{text("该项目目录尚未初始化为 Git 仓库。", "This project directory is not a Git repository yet.")}</small> : null}
+                {deliveryActive && localGit?.repository ? <small>{text("交付进行中不能切换分支。", "Branches cannot be switched during delivery.")}</small> : null}
+                {viewingHistoricalIteration && localGit?.repository ? <small>{text("历史轮次为只读视图。", "Historical iterations are read-only.")}</small> : null}
+                {localGitError ? <p aria-live="polite" className="repository-onboarding-error">{localGitError}</p> : null}
+              </div> : null}
+              {!project.localDirectory ? <p className="project-delivery-config-empty">{text("当前项目没有可配置的 Git 工作目录。", "This project has no configurable Git worktree.")}</p> : null}
+            </section>
+            <ProjectSteamPanel
+              compact
+              iterationNumber={viewedIterationNumber}
+              onChanged={async () => { await Promise.all([loadProject(true), loadIterations(), loadArtifacts(true)]); }}
+              projectId={projectId}
+              readOnly={viewingHistoricalIteration}
+              workflowId={viewingHistoricalIteration ? historicalIteration.workflowId : project.workflowId}
+              workflowState={viewedWorkflowState}
+            />
+          </div>
+        </details>
         <div className="product-delivery-canvas">
           <ol className="product-delivery-track">
             <li className={`product-delivery-stage status-${discoveryStage.view.kind}`} data-stage-status={discoveryStage.view.kind}>
@@ -864,57 +927,8 @@ export function ProjectStudio({ projectId }: { projectId: string }) {
           </section>
         ) : null}
         {assetPanelExpanded && !viewingHistoricalIteration ? (
-          <div className="product-delivery-inline-assets"><AssetManifestPanel onRerunStarted={() => void loadProject(true)} projectId={projectId} /></div>
+          <div className="product-delivery-inline-assets"><AssetManifestPanel onRerunStarted={() => void loadProject(true)} projectId={projectId} refreshKey={assetManifestRefreshKey} /></div>
         ) : null}
-        <details className="product-delivery-configuration">
-          <summary>
-            <span className="product-delivery-config-copy">
-              <span aria-hidden="true" className="product-delivery-config-marker">CFG</span>
-              <span><b>{text("项目交付配置", "PROJECT DELIVERY SETTINGS")}</b><small>{text("Git 分支、代码仓库与 SteamPipe", "Git branch, repository, and SteamPipe")}</small></span>
-            </span>
-            <span className="product-delivery-config-summary-meta">
-              <span className="product-delivery-config-branch">{localGit?.repository ? localGit.branch ?? "DETACHED HEAD" : text("未绑定 Git", "NO GIT")}</span>
-              <span className="product-delivery-config-toggle">
-                <span className="product-delivery-config-toggle-closed">{text("点击展开", "OPEN SETTINGS")}</span>
-                <span className="product-delivery-config-toggle-open">{text("点击收起", "CLOSE SETTINGS")}</span>
-                <ArrowIcon aria-hidden="true" />
-              </span>
-            </span>
-          </summary>
-          <div className="product-delivery-configuration-grid">
-            <section aria-label={text("Git 配置", "Git settings")} className="project-delivery-git-settings">
-              <header><span className="eyebrow">GIT</span><h3>{text("代码仓库与分支", "REPOSITORY & BRANCH")}</h3></header>
-              {project.localDirectory ? <div className="local-git-branch-panel">
-                <div className="local-git-branch-toolbar">
-                  <div className="local-git-branch-status">
-                    <span>{text(project.localDirectory.sourceKind === "GIT" ? "本地 GitHub 工作目录" : "本地项目工作目录", project.localDirectory.sourceKind === "GIT" ? "LOCAL GITHUB WORKTREE" : "LOCAL PROJECT WORKTREE")}</span>
-                    {localGit?.repository ? <strong><span>{text("当前分支", "Current branch")}</span><code>{localGit.branch ?? "DETACHED HEAD"}</code></strong> : null}
-                  </div>
-                  {localGit?.repository && !editingLocalBranch ? <button className="button button-secondary" disabled={deliveryActive || viewingHistoricalIteration} onClick={() => { setNewBranchName(""); setEditingLocalBranch(true); }} type="button">{text("修改分支", "CHANGE BRANCH")}</button> : null}
-                </div>
-                {localGit?.repository && editingLocalBranch ? <form className="local-git-branch-form" onSubmit={event => void createLocalBranch(event)}>
-                  <label><span>{text("新分支名称", "New branch name")}</span><input aria-label={text("新建 Git 分支", "New Git branch")} autoCapitalize="none" autoComplete="off" autoFocus disabled={branchBusy || deliveryActive || viewingHistoricalIteration} onChange={event => setNewBranchName(event.target.value)} placeholder="codex/my-feature" spellCheck={false} value={newBranchName} /></label>
-                  <div><button className="button button-secondary" disabled={branchBusy} onClick={() => { setNewBranchName(""); setEditingLocalBranch(false); }} type="button">{text("取消", "CANCEL")}</button><button className="button button-primary" disabled={branchBusy || deliveryActive || viewingHistoricalIteration || !newBranchName.trim()} type="submit">{branchBusy ? text("正在创建…", "CREATING…") : text("新建并切换", "CREATE & SWITCH")}</button></div>
-                </form> : null}
-                {localGit === null && !localGitError ? <small>{text("正在读取本地 Git 状态…", "Reading local Git status…")}</small> : null}
-                {localGit && !localGit.repository ? <small>{text("该项目目录尚未初始化为 Git 仓库。", "This project directory is not a Git repository yet.")}</small> : null}
-                {deliveryActive && localGit?.repository ? <small>{text("交付进行中不能切换分支。", "Branches cannot be switched during delivery.")}</small> : null}
-                {viewingHistoricalIteration && localGit?.repository ? <small>{text("历史轮次为只读视图。", "Historical iterations are read-only.")}</small> : null}
-                {localGitError ? <p aria-live="polite" className="repository-onboarding-error">{localGitError}</p> : null}
-              </div> : null}
-              {!project.localDirectory ? <p className="project-delivery-config-empty">{text("当前项目没有可配置的 Git 工作目录。", "This project has no configurable Git worktree.")}</p> : null}
-            </section>
-            <ProjectSteamPanel
-              compact
-              iterationNumber={viewedIterationNumber}
-              onChanged={async () => { await Promise.all([loadProject(true), loadIterations(), loadArtifacts(true)]); }}
-              projectId={projectId}
-              readOnly={viewingHistoricalIteration}
-              workflowId={viewingHistoricalIteration ? historicalIteration.workflowId : project.workflowId}
-              workflowState={viewedWorkflowState}
-            />
-          </div>
-        </details>
       </section>
 
       <div className="project-collaboration-layout">

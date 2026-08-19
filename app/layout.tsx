@@ -4,10 +4,14 @@ import "@fontsource/dotgothic16/400.css";
 import "@fontsource/press-start-2p/400.css";
 import { LanguageProvider, type Locale } from "@/components/i18n/LanguageProvider";
 import { ProductShell } from "@/components/ProductShell";
+import { ThemeProvider } from "@/components/theme/ThemeProvider";
 import { localizedMetadata } from "@/lib/web/localized-metadata";
 import "./globals.css";
 import "./product.css";
 import "./asset-manifest.css";
+import "./theme.css";
+
+const themeBootstrap = `(()=>{try{const k="deviludo_theme",v=localStorage.getItem(k),m=v==="light"||v==="dark"||v==="system"?v:"system",d=m==="system"?matchMedia("(prefers-color-scheme: dark)").matches?"dark":"light":m,e=document.documentElement;e.dataset.themeMode=m;e.dataset.theme=d;e.style.colorScheme=d}catch{}})()`;
 
 export async function generateMetadata(): Promise<Metadata> {
   const localized = await localizedMetadata(
@@ -31,7 +35,14 @@ export default async function RootLayout({ children }: Readonly<{ children: Reac
   const initialLocale: Locale = storedLocale === "en" ? "en" : "zh";
   return (
     <html lang={initialLocale === "en" ? "en" : "zh-CN"} suppressHydrationWarning>
-      <body className="antialiased"><LanguageProvider initialLocale={initialLocale}><ProductShell>{children}</ProductShell></LanguageProvider></body>
+      <head><script dangerouslySetInnerHTML={{ __html: themeBootstrap }} /></head>
+      <body className="antialiased">
+        <ThemeProvider>
+          <LanguageProvider initialLocale={initialLocale}>
+            <ProductShell>{children}</ProductShell>
+          </LanguageProvider>
+        </ThemeProvider>
+      </body>
     </html>
   );
 }

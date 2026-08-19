@@ -2,11 +2,11 @@
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import type { AssetManifest, AssetItem } from "@/lib/product/asset-manifest";
-import type { InstanceAgentSettings } from "@/lib/product/contracts";
 import { useLanguage } from "./i18n/LanguageProvider";
 
 type AssetManifestPanelProps = {
   projectId: string;
+  refreshKey?: number;
   /** Lets the studio refresh the delivery view once a rerun has been accepted. */
   onRerunStarted?: () => void;
 };
@@ -29,13 +29,11 @@ const EMPTY_COMPLETION: AssetCompletion = Object.freeze({
   total: 0, uploaded: 0, failed: 0, complete: false,
 });
 
-export function AssetManifestPanel({ projectId, onRerunStarted }: AssetManifestPanelProps) {
+export function AssetManifestPanel({ projectId, refreshKey = 0, onRerunStarted }: AssetManifestPanelProps) {
   const { errorText, text } = useLanguage();
   const [manifest, setManifest] = useState<AssetManifest | null>(null);
   const [items, setItems] = useState<readonly AssetItem[]>([]);
   const [autoGenerateEnabled, setAutoGenerateEnabled] = useState(false);
-  const [imageGenerationReady, setImageGenerationReady] = useState(false);
-  const [agentRuntime, setAgentRuntime] = useState<InstanceAgentSettings["agentRuntime"] | null>(null);
   const [uploading, setUploading] = useState(false);
   const [loading, setLoading] = useState(true);
   const [rebuilding, setRebuilding] = useState(false);
@@ -70,13 +68,6 @@ export function AssetManifestPanel({ projectId, onRerunStarted }: AssetManifestP
     return response.ok ? await response.json() as AssetManifestPayload : null;
   }, [projectId]);
 
-  const fetchAgentSettings = useCallback(async (signal: AbortSignal): Promise<InstanceAgentSettings | null> => {
-    const response = await fetch("/api/settings/agent", { signal });
-    if (!response.ok) return null;
-    const payload = await response.json() as { settings?: InstanceAgentSettings };
-    return payload.settings ?? null;
-  }, []);
-
   useEffect(() => {
     const controller = new AbortController();
     void fetchManifest(controller.signal)
@@ -86,15 +77,8 @@ export function AssetManifestPanel({ projectId, onRerunStarted }: AssetManifestP
       })
       .catch(() => undefined)
       .finally(() => { if (!controller.signal.aborted) setLoading(false); });
-    void fetchAgentSettings(controller.signal)
-      .then(settings => {
-        if (controller.signal.aborted) return;
-        setAgentRuntime(settings?.agentRuntime ?? null);
-        setImageGenerationReady(settings?.imageGenerationReady === true);
-      })
-      .catch(() => undefined);
     return () => controller.abort();
-  }, [applyManifest, fetchAgentSettings, fetchManifest]);
+  }, [applyManifest, fetchManifest, refreshKey]);
 
   // Generation settles in the background and gates artifact construction, so the
   // panel polls while work is outstanding and stops once it is not.
@@ -111,28 +95,6 @@ export function AssetManifestPanel({ projectId, onRerunStarted }: AssetManifestP
     timer = setTimeout(poll, 5_000);
     return () => { stopped = true; if (timer) clearTimeout(timer); };
   }, [generationOutstanding, loadManifest]);
-
-  const toggleAutoGenerate = async () => {
-    if (!manifest) return;
-
-    const newValue = !autoGenerateEnabled;
-    try {
-      const response = await fetch(`/api/projects/${projectId}/asset-manifest/auto-generate`, {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({ enabled: newValue }),
-      });
-
-      if (response.ok) {
-        setAutoGenerateEnabled(newValue);
-        // Turning it on makes planned assets claimable, so reload to start the
-        // poll above rather than waiting for the next manual refresh.
-        if (newValue) await loadManifest();
-      }
-    } catch (error) {
-      console.error("Failed to toggle auto-generate:", error);
-    }
-  };
 
   const handleUpload = async (assetKey: string, file: File) => {
     setUploadError(null);
@@ -208,33 +170,12 @@ export function AssetManifestPanel({ projectId, onRerunStarted }: AssetManifestP
 
   const generatingCount = items.filter(item => item.status === "generating").length;
 
-  // Readiness and the backend both come from the selected Agent runtime; the
-  // asset panel never owns a second Provider or credential.
+  // Generation policy lives with the rest of the project delivery settings.
+  // This panel is intentionally limited to status, uploads, and rebuilds.
   return (
     <div className="asset-manifest-panel">
       <div className="asset-manifest-header">
         <h3>{text("游戏素材", "GAME ASSETS")}</h3>
-        <div className="asset-manifest-controls">
-          <label className="auto-generate-toggle">
-            <input
-              type="checkbox"
-              checked={autoGenerateEnabled}
-              onChange={toggleAutoGenerate}
-              disabled={!autoGenerateEnabled && !imageGenerationReady}
-            />
-            <span>{text("自动生成素材", "Generate assets automatically")}</span>
-          </label>
-          {/* The toggle used to be disabled with no explanation, which read as a
-              bug. Whenever it cannot be used, say which condition is missing. */}
-          {!imageGenerationReady && !autoGenerateEnabled ? (
-            <span className="config-warning">
-              {agentRuntime === "CODEX_CLI" ? text(
-                "⚠️ 请先在设置中保存已完成官方登录的 Codex CLI 连接，图片将由内置 ImageGen 生成",
-                "⚠️ Save a Codex CLI connection with an active official sign-in first. Images will be generated by built-in ImageGen.",
-              ) : <>{text("⚠️ 需要先在", "⚠️ Configure an explicit image model in ")}<a href="/settings">{text("设置", "Settings")}</a>{text("的 Agent 连接中配置图片模型", " under the selected Agent connection first")}</>}
-            </span>
-          ) : null}
-        </div>
       </div>
 
       <div className="asset-manifest-status">

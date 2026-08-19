@@ -740,18 +740,41 @@ test("the shared product shell is mounted once so route changes preserve the loc
   assert.doesNotMatch(page, /ProductShell/);
 });
 
+test("the shell supports persistent light, dark, and live system themes without a hydration flash", async () => {
+  const [layout, provider, shell, themes] = await Promise.all([
+    readFile(new URL("../app/layout.tsx", import.meta.url), "utf8"),
+    readFile(new URL("../components/theme/ThemeProvider.tsx", import.meta.url), "utf8"),
+    readFile(new URL("../components/ProductShell.tsx", import.meta.url), "utf8"),
+    readFile(new URL("../app/theme.css", import.meta.url), "utf8"),
+  ]);
+  assert.match(layout, /const themeBootstrap = `[\s\S]*deviludo_theme[\s\S]*prefers-color-scheme: dark/);
+  assert.match(layout, /<head><script dangerouslySetInnerHTML=\{\{ __html: themeBootstrap \}\} \/><\/head>/);
+  assert.match(layout, /<ThemeProvider>[\s\S]*<LanguageProvider/);
+  assert.match(provider, /export type ThemeMode = "system" \| "light" \| "dark"/);
+  assert.match(provider, /localStorage\.setItem\(THEME_STORAGE_KEY, nextMode\)/);
+  assert.match(provider, /media\.addEventListener\("change", handleSystemChange\)/);
+  assert.match(provider, /document\.documentElement\.dataset\.theme = resolved/);
+  assert.match(shell, /<ThemeSwitcher compact \/>/);
+  assert.match(themes, /html\[data-theme="light"\] \.app-shell/);
+  assert.match(themes, /html\[data-theme="light"\] \.auth-screen/);
+  assert.match(themes, /html\[data-theme="light"\] \.product-delivery-configuration > summary/);
+  assert.match(themes, /html\[data-theme="light"\] \.product-delivery-config-toggle/);
+  assert.match(themes, /html\[data-theme="light"\] \.badge\.is-ready[\s\S]*background: #19845d/);
+  assert.match(themes, /\.theme-switcher button\[aria-pressed="true"\]/);
+});
+
 test("image generation is part of the selected Agent connection", async () => {
-  const [page, agent, assets] = await Promise.all([
+  const [page, agent, assetSettings] = await Promise.all([
     readFile(new URL("../app/settings/page.tsx", import.meta.url), "utf8"),
     readFile(new URL("../components/AgentSettings.tsx", import.meta.url), "utf8"),
-    readFile(new URL("../components/AssetManifestPanel.tsx", import.meta.url), "utf8"),
+    readFile(new URL("../components/AssetAutoGenerationSetting.tsx", import.meta.url), "utf8"),
   ]);
   assert.doesNotMatch(page, /ImageGenerationSettings/);
   assert.match(agent, /setImageModel/);
   assert.doesNotMatch(agent, /updateModelOverride\("image"/);
   assert.match(agent, /the image-generation backend follows the selected runtime automatically/);
   assert.match(agent, /Codex built-in ImageGen \(gpt-image-2\)/);
-  assert.match(assets, /imageGenerationReady/);
+  assert.match(assetSettings, /imageGenerationReady/);
 });
 
 test("settings and project details use unnumbered sections and Codex remains selectable", async () => {
@@ -788,6 +811,7 @@ test("remote E2E node connectivity refreshes from server heartbeats", async () =
   assert.match(dashboard, /window\.setInterval\(\(\) => refresh\(0\), 15_000\)/);
   assert.match(dashboard, /isRecentlyConnected\(node\.lastHeartbeatAt\)/);
   assert.match(dashboard, /Date\.now\(\) - Date\.parse\(value\) < 90_000/);
+  assert.match(dashboard, /pool\.readiness === "READY" \? "is-ready" : "is-not-ready"/);
 });
 
 test("product pages share local instance data and never poll an idle project", async () => {
@@ -850,6 +874,7 @@ test("Core product surfaces use their fixed local workspace without an identity 
 test("asset generation is an asynchronous panel rather than a delivery stage", async () => {
   const studio = await readFile(new URL("../components/ProjectStudio.tsx", import.meta.url), "utf8");
   const panel = await readFile(new URL("../components/AssetManifestPanel.tsx", import.meta.url), "utf8");
+  const assetSettings = await readFile(new URL("../components/AssetAutoGenerationSetting.tsx", import.meta.url), "utf8");
   // The serial pipeline must not contain an asset stage: it produces no job, so
   // the chain would stall waiting for one.
   const pipeline = studio.match(/const PIPELINE = \[([\s\S]*?)\] as const;/)?.[1] ?? "";
@@ -857,17 +882,19 @@ test("asset generation is an asynchronous panel rather than a delivery stage", a
   assert.deepEqual([...pipeline.matchAll(/\["([A-Z0-9_]+)"/g)].map(match => match[1]), [
     "AGENT_GENERATION", "ARTIFACT_BUILD", "E2E_TEST", "STEAM_PUBLISH",
   ]);
-  assert.match(studio, /<AssetManifestPanel onRerunStarted=\{\(\) => void loadProject\(true\)\} projectId=\{projectId\} \/>/);
+  assert.match(studio, /<AssetManifestPanel onRerunStarted=\{\(\) => void loadProject\(true\)\} projectId=\{projectId\} refreshKey=\{assetManifestRefreshKey\} \/>/);
   // Uploaded assets only reach the game through a build, so the panel's rebuild
   // is an ARTIFACT_BUILD rerun rather than a bespoke endpoint.
   assert.match(panel, /\/api\/projects\/\$\{projectId\}\/rerun-stage/);
   assert.match(panel, /stage: "ARTIFACT_BUILD"/);
   assert.doesNotMatch(panel, /rebuild-with-assets/);
   // The panel goes through the authenticated Core proxy, never straight to S3 or
-  // the database, and it only reads readiness from the selected Agent connection.
+  // the database. Generation readiness belongs to the delivery setting, while
+  // the expanded panel is only responsible for status, uploads, and rebuilds.
   assert.doesNotMatch(panel, /FormData|s3|S3Client|aws-sdk/);
-  assert.match(panel, /imageGenerationReady/);
-  assert.doesNotMatch(panel, /apiKeyMask|apiKey\b/);
+  assert.doesNotMatch(panel, /imageGenerationReady|toggleAutoGenerate/);
+  assert.match(assetSettings, /imageGenerationReady/);
+  assert.doesNotMatch(`${panel}\n${assetSettings}`, /apiKeyMask|apiKey\b/);
   assert.match(panel, /accept="image\/png,image\/jpeg,image\/webp"/);
 });
 
@@ -908,18 +935,25 @@ test("image assets gate the first build and Steam upload remains an explicit loc
 });
 
 test("auto-generate never removes the user's own way to supply an asset", async () => {
-  const panel = await readFile(new URL("../components/AssetManifestPanel.tsx", import.meta.url), "utf8");
+  const [panel, assetSettings, studio] = await Promise.all([
+    readFile(new URL("../components/AssetManifestPanel.tsx", import.meta.url), "utf8"),
+    readFile(new URL("../components/AssetAutoGenerationSetting.tsx", import.meta.url), "utf8"),
+    readFile(new URL("../components/ProjectStudio.tsx", import.meta.url), "utf8"),
+  ]);
   // Hiding upload while auto-generate was on was a trap: an asset whose prompt the
   // provider kept rejecting had no way forward, and a user holding the art had to
   // turn a setting off to use it. Only an in-flight generation hides it, because
   // that write would race the generator.
   assert.match(panel, /\{item\.status !== "generating" && \(/);
   assert.doesNotMatch(panel, /item\.status === "planned" && !autoGenerateEnabled/);
-  // A disabled toggle with no explanation reads as a bug, so each blocking
-  // condition names itself.
-  assert.match(panel, /disabled=\{!autoGenerateEnabled && !imageGenerationReady\}/);
-  assert.match(panel, /图片将由内置 ImageGen 生成/);
-  assert.doesNotMatch(panel, /generationConfig|providerSupported|configComplete/);
+  // Policy now lives in the prominent delivery settings instead of being hidden
+  // behind the asset-list disclosure. Every disabled state still explains itself.
+  assert.match(studio, /<AssetAutoGenerationSetting/);
+  assert.ok(studio.indexOf("product-delivery-configuration") < studio.indexOf("product-delivery-canvas"));
+  assert.match(assetSettings, /const cannotEnable = !autoGenerateEnabled && !imageGenerationReady/);
+  assert.match(assetSettings, /图片将由内置 ImageGen 生成/);
+  assert.match(assetSettings, /Agent 生成素材清单后即可配置自动生成/);
+  assert.doesNotMatch(`${panel}\n${assetSettings}`, /generationConfig|providerSupported|configComplete/);
   // Generation settles in the background with nothing to push the result, so the
   // panel polls while work is outstanding and stops when it is not.
   assert.match(panel, /const generationOutstanding = autoGenerateEnabled/);
@@ -1145,7 +1179,9 @@ test("project delivery is a top horizontal pipeline without the game specificati
   assert.match(studio, /product-delivery-stage-artifacts/);
   assert.match(studio, /product-delivery-configuration-grid/);
   assert.doesNotMatch(studio, /自动刷新|AUTO REFRESH/);
-  assert.match(studio, /product-delivery-config-toggle-closed[\s\S]*点击展开[\s\S]*product-delivery-config-toggle-open[\s\S]*点击收起/);
+  assert.match(studio, /product-delivery-config-toggle-icon[\s\S]*product-delivery-config-toggle-closed[\s\S]*展开配置[\s\S]*product-delivery-config-toggle-open[\s\S]*收起配置/);
+  assert.ok(studio.indexOf("product-delivery-configuration") < studio.indexOf("product-delivery-canvas"));
+  assert.match(studio, /<AssetAutoGenerationSetting[\s\S]*projectId=\{projectId\}/);
   assert.match(styles, /\.product-delivery-configuration > summary:hover[\s\S]*\.product-delivery-configuration\[open\]/);
   assert.match(studio, /!editingLocalBranch[\s\S]*修改分支/);
   assert.match(studio, /label: text\("已完成", "COMPLETED"\)[\s\S]*label: text\("进行中", "IN PROGRESS"\)[\s\S]*label: text\("未开始", "NOT STARTED"\)/);

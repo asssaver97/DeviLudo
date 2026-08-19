@@ -23,44 +23,6 @@
   font-weight: 600;
 }
 
-.asset-manifest-controls {
-  display: flex;
-  align-items: center;
-  gap: 12px;
-}
-
-.auto-generate-toggle {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  cursor: pointer;
-  user-select: none;
-}
-
-.auto-generate-toggle input[type="checkbox"] {
-  width: 18px;
-  height: 18px;
-  cursor: pointer;
-}
-
-.auto-generate-toggle input[type="checkbox"]:disabled {
-  opacity: 0.5;
-  cursor: not-allowed;
-}
-
-/* `--amber` is the theme's warning token; the panel previously referenced a
-   `--warning-color` that no theme defines, so this text fell back to inheriting. */
-.config-warning {
-  color: var(--amber);
-  font-size: 13px;
-  line-height: 1.5;
-}
-
-.config-warning a {
-  color: inherit;
-  text-decoration: underline;
-}
-
 .asset-manifest-status {
   display: flex;
   gap: 16px;

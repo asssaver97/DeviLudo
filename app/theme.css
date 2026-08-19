@@ -1,0 +1,597 @@
+/* Theme selection is applied on <html> before hydration. This file is loaded
+ * last so the light palette can replace the legacy command-center skin without
+ * changing screenshots, artwork, or status semantics. */
+
+html[data-theme="dark"] {
+  color-scheme: dark;
+}
+
+html[data-theme="light"] {
+  color-scheme: light;
+}
+
+.theme-switcher {
+  align-items: center;
+  background: #080d15;
+  border: 1px solid #33445c;
+  display: inline-flex;
+  padding: 3px;
+  position: relative;
+  z-index: 101;
+}
+
+.theme-switcher button {
+  align-items: center;
+  background: transparent;
+  border: 0;
+  color: #718094;
+  cursor: pointer;
+  display: inline-flex;
+  font: 600 10px/1 var(--font-geist-sans), Arial, sans-serif;
+  gap: 5px;
+  height: 28px;
+  justify-content: center;
+  min-width: 34px;
+  padding: 0 7px;
+}
+
+.theme-switcher button svg {
+  height: 15px;
+  stroke-width: 1.35;
+  width: 15px;
+}
+
+.theme-switcher button[aria-pressed="true"] {
+  background: var(--blue, #35c4ef);
+  box-shadow: 2px 2px 0 #020305;
+  color: #041019;
+}
+
+.theme-switcher button:focus-visible {
+  outline: 2px solid var(--acid, #ffc857);
+  outline-offset: 2px;
+}
+
+.theme-switcher.is-compact button {
+  height: 24px;
+  min-width: 28px;
+  padding: 0 5px;
+}
+
+.theme-switcher.is-compact button span {
+  clip: rect(0 0 0 0);
+  clip-path: inset(50%);
+  height: 1px;
+  overflow: hidden;
+  position: absolute;
+  white-space: nowrap;
+  width: 1px;
+}
+
+.auth-display-controls {
+  align-items: center;
+  display: flex;
+  gap: 8px;
+  position: fixed;
+  right: 24px;
+  top: 24px;
+  z-index: 101;
+}
+
+.auth-screen > .language-switcher {
+  position: static;
+}
+
+/* Light command center */
+html[data-theme="light"] body,
+html[data-theme="light"] body:has(.app-shell) {
+  background: #edf2f6;
+}
+
+html[data-theme="light"] .app-shell {
+  --canvas: #edf2f6;
+  --paper: #ffffff;
+  --ink: #17212d;
+  --muted: #647285;
+  --line: #ccd6e1;
+  --line-strong: #9aaabd;
+  --sidebar: #f7f9fc;
+  --sidebar-muted: #68778a;
+  --acid: #e4a716;
+  --acid-strong: #c48a00;
+  --blue: #087fa7;
+  --violet: #6755c7;
+  --amber: #a76508;
+  --green: #177b57;
+  --coral: #cc523d;
+  --danger: #c13f50;
+  --field: #f8fafc;
+  --ink-strong: #17212d;
+  --ink-muted: #647285;
+  --panel: #ffffff;
+  color: var(--ink);
+}
+
+html[data-theme="light"] .app-shell::after,
+html[data-theme="light"] .auth-screen::before {
+  background-image: repeating-linear-gradient(to bottom, transparent 0, transparent 3px, rgba(33, 52, 72, .035) 3px, rgba(33, 52, 72, .035) 4px);
+}
+
+html[data-theme="light"] .shell-sidebar {
+  background:
+    linear-gradient(rgba(248, 250, 252, .94), rgba(244, 247, 250, .98)),
+    url("/deviludo-city.png") center bottom / auto 65% no-repeat;
+  border-color: #c7d2de;
+  box-shadow: 4px 0 0 rgba(80, 101, 124, .12);
+  color: var(--ink);
+}
+
+html[data-theme="light"] .brand-copy b,
+html[data-theme="light"] .page-heading h1,
+html[data-theme="light"] .project-page-header h1,
+html[data-theme="light"] .focus-project-title h2,
+html[data-theme="light"] .auth-brand b {
+  color: var(--ink);
+  text-shadow: 3px 3px 0 #d6dee7;
+}
+
+html[data-theme="light"] .brand-mark,
+html[data-theme="light"] .auth-brand-mark {
+  background: #ffffff;
+  border-color: #ba8912;
+  box-shadow: 3px 3px 0 #c5d0dc;
+}
+
+html[data-theme="light"] .workspace-switcher {
+  background: rgba(255, 255, 255, .9);
+  border-color: #b9c6d4;
+  box-shadow: 3px 3px 0 #d1dae4;
+}
+
+html[data-theme="light"] .workspace-avatar,
+html[data-theme="light"] .agent-member i,
+html[data-theme="light"] .conversation-box-message.role-design .message-avatar {
+  background: #e4f4fa;
+  border-color: var(--blue);
+  color: var(--blue);
+}
+
+html[data-theme="light"] .shell-nav > p {
+  color: #7b8999;
+}
+
+html[data-theme="light"] .shell-nav-item {
+  color: #536477;
+}
+
+html[data-theme="light"] .shell-nav-item:hover {
+  background: #e8eef4;
+  border-color: #b9c8d7;
+  color: #13202d;
+}
+
+html[data-theme="light"] .shell-nav-item.is-active {
+  background: #dff3f9;
+  border-color: var(--blue);
+  box-shadow: 3px 3px 0 #c7d4df, inset 3px 0 0 var(--acid);
+  color: #102633;
+}
+
+html[data-theme="light"] .shell-main {
+  background:
+    radial-gradient(circle at 92% 4%, rgba(8, 127, 167, .08), transparent 26%),
+    linear-gradient(135deg, rgba(228, 167, 22, .045) 25%, transparent 25%) 0 0 / 18px 18px,
+    var(--canvas);
+}
+
+html[data-theme="light"] .shell-topbar {
+  background: rgba(248, 250, 252, .94);
+  border-color: #c8d3df;
+  box-shadow: 0 4px 0 rgba(80, 101, 124, .08);
+}
+
+html[data-theme="light"] .topbar-context {
+  color: #617286;
+}
+
+html[data-theme="light"] .topbar-mode {
+  background: #edf8fb;
+  border-color: #9cbfce;
+}
+
+html[data-theme="light"] .system-pill {
+  background: #edf8f3;
+  border-color: #acd1c2;
+}
+
+html[data-theme="light"] .icon-button:hover {
+  background: #e2eaf1;
+}
+
+html[data-theme="light"] :is(.language-switcher, .theme-switcher) {
+  background: #f4f7fa;
+  border-color: #aebdcd;
+}
+
+html[data-theme="light"] :is(.language-switcher, .theme-switcher) button {
+  color: #66768a;
+}
+
+html[data-theme="light"] :is(.language-switcher, .theme-switcher) button[aria-pressed="true"] {
+  background: var(--blue);
+  box-shadow: 2px 2px 0 #b8c7d4;
+  color: #ffffff;
+}
+
+html[data-theme="light"] :is(
+  .focus-project,
+  .attention-panel,
+  .activity-panel,
+  .fleet-panel,
+  .dashboard-empty-project,
+  .resource-empty-project,
+  .resource-list,
+  .resource-detail,
+  .project-catalog-card,
+  .project-catalog-empty,
+  .conversation-panel,
+  .connection-card,
+  .evidence-table-panel,
+  .evidence-artifacts,
+  .local-delivery,
+  .settings-card,
+  .repository-onboarding,
+  .settings-hub-card,
+  .simple-home-prompt,
+  .simple-home-project,
+  .product-studio-state,
+  .product-delivery-pipeline,
+  .product-artifacts-panel,
+  .asset-manifest-panel
+) {
+  background: rgba(255, 255, 255, .97);
+  border-color: #c4d0dc;
+  box-shadow: 4px 4px 0 #ced8e2;
+  color: var(--ink);
+}
+
+html[data-theme="light"] .focus-project {
+  background:
+    linear-gradient(90deg, rgba(255, 255, 255, .98) 0%, rgba(255, 255, 255, .96) 58%, rgba(245, 249, 252, .8) 100%),
+    url("/deviludo-city.png") right 58% / 63% auto no-repeat;
+}
+
+html[data-theme="light"] .product-delivery-configuration {
+  background: #ffffff;
+  border-color: #9fb0c2;
+  box-shadow: 3px 3px 0 #cbd6e0;
+}
+
+html[data-theme="light"] .product-delivery-configuration > summary {
+  background: linear-gradient(90deg, #edf8fb 0%, #f7fafc 72%);
+  border-left-color: var(--blue);
+  color: var(--ink);
+}
+
+html[data-theme="light"] .product-delivery-configuration > summary:hover,
+html[data-theme="light"] .product-delivery-configuration > summary:focus-visible {
+  background: linear-gradient(90deg, #dff3f8 0%, #eef6f9 72%);
+  border-left-color: var(--acid);
+  box-shadow: inset 0 0 0 1px rgba(8, 127, 167, .2);
+}
+
+html[data-theme="light"] .product-delivery-configuration[open] > summary {
+  background: #e2f2f7;
+  border-left-color: var(--acid);
+}
+
+html[data-theme="light"] .product-delivery-configuration > summary b {
+  color: #17212d;
+}
+
+html[data-theme="light"] .product-delivery-configuration > summary small {
+  color: #627286;
+}
+
+html[data-theme="light"] .product-delivery-config-marker {
+  background: #dff3f8;
+  border-color: #72adbf;
+  color: #075f7c;
+}
+
+html[data-theme="light"] .product-delivery-config-branch {
+  background: #ffffff;
+  border-color: #9cabbc;
+  color: #31465b;
+}
+
+html[data-theme="light"] .product-delivery-config-toggle {
+  background: #dff2f8;
+  border-color: #087fa7;
+  box-shadow: 2px 2px 0 #b9c8d4;
+  color: #075f7c;
+}
+
+html[data-theme="light"] .product-delivery-config-toggle-icon {
+  background: rgba(8, 127, 167, .1);
+}
+
+html[data-theme="light"] :is(
+  .project-tools-menu > div,
+  .workspace-dropdown,
+  .workspace-dialog,
+  .telemetry-toggle,
+  .agent-connection-status,
+  .agent-runtime-choice,
+  .settings-json-editor textarea,
+  .homeChat-contextRow,
+  .project-conversation-history,
+  .product-document-sidebar,
+  .product-delivery-pipeline-header,
+  .product-iteration-selector select,
+  .product-delivery-async-node,
+  .product-delivery-stage-marker,
+  .product-delivery-stage-rerun-icon,
+  .product-delivery-stage-artifacts button,
+  .product-delivery-configuration-grid,
+  .project-delivery-asset-settings,
+  .project-delivery-git-settings,
+  .product-steam-panel.is-compact,
+  .project-primary-section-heading,
+  .product-artifacts-panel > header,
+  .product-artifact-list article,
+  .conversation-agent-roster,
+  .conversation-box-message p,
+  .conversation-box-composer,
+  .asset-manifest-status,
+  .asset-item,
+  .asset-prompt-box
+) {
+  background: #f5f8fb;
+  border-color: #c5d1dd;
+  color: var(--ink);
+}
+
+html[data-theme="light"] .badge.is-ready {
+  background: #19845d;
+  border-color: #116847;
+  color: #ffffff;
+}
+
+html[data-theme="light"] .badge.is-not-ready {
+  background: #fff3d6;
+  border-color: #c99c3d;
+  color: #7d5004;
+}
+
+html[data-theme="light"] :is(
+  .workspace-option:hover,
+  .workspace-option:focus-visible,
+  .workspace-option.is-selected,
+  .project-conversation-history button:hover,
+  .project-conversation-history button.is-active,
+  .product-delivery-async-node:hover,
+  .product-delivery-async-node.is-expanded,
+  .product-delivery-stage-rerun-icon:hover,
+  .product-delivery-configuration[open] > summary,
+  .conversation-box-options button:hover,
+  .conversation-box-options button:focus-visible
+) {
+  background: #e2f2f7;
+  border-color: #8db8c8;
+  color: #153544;
+}
+
+html[data-theme="light"] :is(
+  .project-scope-selector select,
+  .settings-form input,
+  .settings-form select,
+  .profile-selection-row select,
+  .repository-onboarding-form input,
+  .repository-onboarding-form select,
+  .repository-onboarding-form textarea,
+  .credential-rotation-form input,
+  .delivery-cancel-controls textarea,
+  .local-git-branch-status strong,
+  .local-git-branch-form input,
+  .workspace-dialog input,
+  .homeChat-contextRow select,
+  .product-document-sidebar-editor textarea,
+  .product-document-editor textarea,
+  .conversation-box-composer > textarea
+) {
+  background: #ffffff;
+  border-color: #aebdcd;
+  color: #17212d;
+}
+
+html[data-theme="light"] :is(
+  .button-secondary,
+  .round-arrow,
+  .segment-control,
+  .pipeline-node,
+  .config-mode-switch,
+  .conversation-box-options button,
+  .conversation-box-composer kbd,
+  .asset-upload-button
+) {
+  background: #edf2f6;
+  border-color: #aebdcd;
+  box-shadow: 2px 2px 0 #ccd6e0;
+  color: #243447;
+}
+
+html[data-theme="light"] :is(.button-primary, .button-acid) {
+  background: #087fa7;
+  border-color: #056889;
+  box-shadow: 3px 3px 0 #aebdca;
+  color: #ffffff;
+  text-shadow: none;
+}
+
+html[data-theme="light"] :is(.button-primary, .button-acid):hover {
+  background: #066c8e;
+  border-color: #044f69;
+}
+
+html[data-theme="light"] :is(
+  .project-profile-options label,
+  .effective-lock-grid > div,
+  .credential-rotation-form,
+  .masked-list code,
+  .fencing-note,
+  .project-agent-note,
+  .inline-notice,
+  .local-delivery-lock,
+  .local-delivery-metric,
+  .local-platform,
+  .local-real-validation,
+  .product-iteration-history-summary dl > div,
+  .product-delivery-config-branch,
+  .project-delivery-asset-switch
+) {
+  background: #f2f6f9;
+  border-color: #c2cfdb;
+  color: var(--ink);
+}
+
+html[data-theme="light"] :is(
+  .project-profile-options label.selected,
+  .agent-runtime-choice:hover,
+  .agent-runtime-choice.is-selected,
+  .product-delivery-config-toggle,
+  .product-delivery-config-marker,
+  .asset-item-generating .asset-status
+) {
+  background: #dff2f8;
+  border-color: #82b7ca;
+  color: #11445a;
+}
+
+html[data-theme="light"] :is(
+  .agent-runtime-status.is-installed,
+  .agent-config-notice.is-success,
+  .local-platform-passed,
+  .local-real-validation.ready,
+  .connection-title .connected,
+  .state-active,
+  .product-studio-state.state-succeeded,
+  .product-delivery-stage.status-completed .product-delivery-stage-marker,
+  .product-release-approval,
+  .conversation-box-applied,
+  .asset-item-uploaded .asset-status,
+  .asset-item-generated .asset-status
+) {
+  background: #e5f5ee;
+  border-color: #92c9b4;
+  color: #126645;
+}
+
+html[data-theme="light"] :is(
+  .agent-config-notice.is-error,
+  .product-studio-state.state-failed,
+  .local-platform-invalidated,
+  .delivery-cancel-controls,
+  .asset-manifest-error,
+  .asset-item-failed .asset-status
+) {
+  background: #fff0f2;
+  border-color: #df9aa5;
+  color: #a42f41;
+}
+
+html[data-theme="light"] :is(
+  .connection-title .waiting,
+  .state-draft,
+  .state-ready,
+  .local-platform-running
+) {
+  background: #fff5dd;
+  border-color: #d6b36b;
+  color: #865505;
+}
+
+html[data-theme="light"] :is(.build-summary, .platform-status) {
+  background: rgba(235, 241, 246, .84);
+  border-color: #c3ceda;
+}
+
+html[data-theme="light"] :is(.os-mark, .resource-os, .asset-type, .asset-item-planned .asset-status) {
+  background: #e7eef5;
+  border-color: #b7c4d2;
+  color: #3e566f;
+}
+
+html[data-theme="light"] :is(.connection-logo.github, .connection-logo.steam, .security-explainer, .local-event-log, .pool-enrollment, .agent-generation-progress-events) {
+  background: #eef3f7;
+  border-color: #c2ceda;
+  color: var(--ink);
+}
+
+html[data-theme="light"] .product-delete-checkbox-indicator {
+  background: #ffffff;
+  border-color: #8799ad;
+}
+
+html[data-theme="light"] .product-delivery-config-toggle-icon,
+html[data-theme="light"] .asset-manifest-note {
+  background: rgba(8, 127, 167, .09);
+}
+
+html[data-theme="light"] .workspace-dialog-backdrop {
+  background: rgba(33, 46, 61, .38);
+}
+
+/* Connecting and unavailable states use the same preference instead of
+ * flashing the dark palette while Core is loading. */
+html[data-theme="light"] .auth-screen {
+  --acid: #e4a716;
+  --blue: #087fa7;
+  --field: #ffffff;
+  --ink-strong: #17212d;
+  --ink-muted: #647285;
+  --line-strong: #9aaabd;
+  --panel: #ffffff;
+  background:
+    radial-gradient(circle at 82% 10%, rgba(8, 127, 167, .1), transparent 29%),
+    linear-gradient(135deg, rgba(228, 167, 22, .045) 25%, transparent 25%) 0 0 / 18px 18px,
+    #edf2f6;
+  color: var(--ink-strong);
+}
+
+html[data-theme="light"] .auth-screen::after {
+  border-color: rgba(8, 127, 167, .13);
+}
+
+html[data-theme="light"] .auth-card {
+  background: rgba(255, 255, 255, .97);
+  border-color: #aebdcd;
+  box-shadow: 8px 8px 0 #cbd5df;
+}
+
+html[data-theme="light"] .auth-brand {
+  border-color: #c9d4df;
+}
+
+html[data-theme="light"] .auth-card :is(input, .auth-consent) {
+  background: #f7f9fb;
+  border-color: #aebdcd;
+  color: var(--ink-strong);
+}
+
+@media (max-width: 980px) {
+  .theme-switcher:not(.is-compact) button span {
+    display: none;
+  }
+}
+
+@media (max-width: 560px) {
+  .auth-display-controls {
+    right: 12px;
+    top: 12px;
+  }
+
+  .topbar-actions {
+    gap: 6px;
+  }
+}

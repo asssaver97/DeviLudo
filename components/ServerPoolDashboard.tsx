@@ -73,7 +73,7 @@ export function ServerPoolDashboard() {
                 <h2>{pool.kind}</h2>
                 <div className="capabilities">{pool.operatingSystem}</div>
               </div>
-              <span className="badge">{pool.readiness}</span>
+              <span className={`badge ${pool.readiness === "READY" ? "is-ready" : "is-not-ready"}`}>{pool.readiness}</span>
             </header>
             <div className="metrics">
               <div><strong>{pool.activeNodes}</strong><small>{text("活动", "ACTIVE")}</small></div>

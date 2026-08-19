@@ -7,6 +7,7 @@ import { createContext, useContext, useEffect, useState, type ReactNode } from "
 import type { LocalInstance } from "@/lib/product/contracts";
 import { cachedValue, clientCacheKeys, loadCached } from "@/lib/product/client-cache";
 import { LanguageSwitcher, useLanguage } from "./i18n/LanguageProvider";
+import { ThemeSwitcher } from "./theme/ThemeProvider";
 import { BellIcon, GamepadIcon, HomeIcon, ServerIcon, SettingsIcon } from "./console/Icons";
 
 type HealthState = "checking" | "ok" | "degraded";
@@ -40,10 +41,23 @@ export function ProductShell({ children }: { children: ReactNode }) {
   }, []);
 
   if (!instanceLoaded) {
-    return <div className="auth-screen"><LanguageSwitcher /><span className="eyebrow">DEVILUDO CORE</span><h1>{text("正在连接…", "CONNECTING…")}</h1></div>;
+    return (
+      <div className="auth-screen">
+        <div className="auth-display-controls"><ThemeSwitcher compact /><LanguageSwitcher /></div>
+        <span className="eyebrow">DEVILUDO CORE</span>
+        <h1>{text("正在连接…", "CONNECTING…")}</h1>
+      </div>
+    );
   }
   if (!instance) {
-    return <div className="auth-screen"><LanguageSwitcher /><span className="eyebrow">DEVILUDO CORE</span><h1>{text("本地实例不可用", "LOCAL INSTANCE UNAVAILABLE")}</h1><p>{text("请确认 DeviLudo Core 已启动。", "Make sure DeviLudo Core is running.")}</p></div>;
+    return (
+      <div className="auth-screen">
+        <div className="auth-display-controls"><ThemeSwitcher compact /><LanguageSwitcher /></div>
+        <span className="eyebrow">DEVILUDO CORE</span>
+        <h1>{text("本地实例不可用", "LOCAL INSTANCE UNAVAILABLE")}</h1>
+        <p>{text("请确认 DeviLudo Core 已启动。", "Make sure DeviLudo Core is running.")}</p>
+      </div>
+    );
   }
 
   const workspace = instance.workspace;
@@ -82,6 +96,7 @@ export function ProductShell({ children }: { children: ReactNode }) {
         <header className="shell-topbar">
           <div className="topbar-context"><span className="topbar-mode">COMMAND CENTER</span><span>{workspace.name}</span></div>
           <div className="topbar-actions">
+            <ThemeSwitcher compact />
             <LanguageSwitcher compact />
             <span aria-live="polite" className={`system-pill is-${health}`}><i /> {healthLabel}</span>
             <button aria-label={text("通知", "Notifications")} className="icon-button" type="button"><BellIcon /></button>
