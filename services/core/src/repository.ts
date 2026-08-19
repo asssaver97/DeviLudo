@@ -1,6 +1,6 @@
 import type { PoolClient } from "pg";
 import { randomUUID, verify } from "node:crypto";
-import { AssetManifestStore } from "./asset-manifest";
+import { AssetManifestStore, reconcileExistingSourceAssets } from "./asset-manifest";
 import {
   AGENT_RUNTIME_KINDS,
   type AgentProgressEvent,
@@ -2503,7 +2503,16 @@ export class CoreRepository {
           completion.afterReimageProof ?? null,
         ],
       );
-      return result.rows[0]?.completed === true;
+      const completed = result.rows[0]?.completed === true;
+      if (completed && job.jobKind === "AGENT_GENERATION") {
+        await reconcileExistingSourceAssets(
+          client,
+          job.workspaceId,
+          job.projectId,
+          (completion.receipt as Record<string, unknown>).assetManifest,
+        );
+      }
+      return completed;
     });
   }
 

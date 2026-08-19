@@ -5,7 +5,7 @@ export const ASSET_MANIFEST_SCHEMA_VERSION = "deviludo.asset-manifest.v1" as con
 export const ASSET_TYPES = ["sprite", "animation", "background", "ui", "icon", "tileset"] as const;
 export type AssetType = typeof ASSET_TYPES[number];
 
-export const ASSET_ITEM_STATUSES = ["planned", "generating", "generated", "uploaded", "failed"] as const;
+export const ASSET_ITEM_STATUSES = ["planned", "generating", "generated", "uploaded", "existing", "failed"] as const;
 export type AssetItemStatus = typeof ASSET_ITEM_STATUSES[number];
 
 export const ASSET_MANIFEST_STATUSES = ["planning", "ready", "partial", "complete"] as const;
@@ -21,6 +21,8 @@ export type AssetItem = Readonly<{
   frameCount?: number;
   dimensions?: string;
   status: AssetItemStatus;
+  /** Project-relative image already present in the published source revision. */
+  sourcePath?: string;
   objectKey?: string;
   errorMessage?: string;
   createdAt: string;
@@ -56,6 +58,14 @@ export function validateAssetManifest(value: unknown): value is AssetManifest {
 export function validateAssetItem(value: unknown): value is AssetItem {
   if (!value || typeof value !== "object" || Array.isArray(value)) return false;
   const item = value as Record<string, unknown>;
+  const sourcePathValid = item.sourcePath === undefined || (
+    typeof item.sourcePath === "string"
+    && item.sourcePath.length >= 5
+    && item.sourcePath.length <= 500
+    && /\.(?:png|jpe?g|webp|svg)$/i.test(item.sourcePath)
+    && !item.sourcePath.startsWith("/")
+    && !/(^|\/)\.{1,2}(\/|$)|\/\//.test(item.sourcePath)
+  );
 
   return typeof item.id === "string"
     && typeof item.manifestId === "string"
@@ -68,6 +78,8 @@ export function validateAssetItem(value: unknown): value is AssetItem {
     && typeof item.description === "string"
     && typeof item.status === "string"
     && ASSET_ITEM_STATUSES.includes(item.status as AssetItemStatus)
+    && sourcePathValid
+    && (item.status === "existing" ? typeof item.sourcePath === "string" : item.sourcePath === undefined)
     && typeof item.createdAt === "string"
     && typeof item.updatedAt === "string";
 }

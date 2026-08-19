@@ -32,14 +32,14 @@ import {
 } from "@/lib/product/conversation-stream";
 import { ConversationBox } from "./conversation/ConversationBox";
 import { AssetAutoGenerationSetting } from "./AssetAutoGenerationSetting";
-import { AssetManifestPanel } from "./AssetManifestPanel";
+import { AssetManifestPanel, type AssetManifestPayload } from "./AssetManifestPanel";
 import { ProjectSteamPanel } from "./ProjectSteamPanel";
 import { ArrowIcon, PlusIcon, RerunIcon } from "./console/Icons";
 import { localeTag, useLanguage } from "./i18n/LanguageProvider";
 
-// The serial delivery chain, in order. Asset generation is shown as a branch off
-// Agent generation, but it is a real readiness gate: artifact builds cannot start
-// until every planned image is generated/uploaded or auto-generation is disabled.
+// The serial delivery chain, in order. Asset generation is rendered as a
+// second-row branch at the Agent → build boundary because it is a build gate,
+// not a job kind in the serial workflow state machine.
 const PIPELINE = [
   ["AGENT_GENERATION", "Agent 生成", "Agent Generation"],
   ["ARTIFACT_BUILD", "制品构建", "Artifact Build"],
@@ -86,6 +86,8 @@ export function ProjectStudio({ projectId }: { projectId: string }) {
   const [documentDraft, setDocumentDraft] = useState({ introduction: "", gameplay: "", categories: "", features: "" });
   const [assetPanelExpanded, setAssetPanelExpanded] = useState(false);
   const [assetManifestRefreshKey, setAssetManifestRefreshKey] = useState(0);
+  const [assetManifestView, setAssetManifestView] = useState<AssetManifestPayload | null>(null);
+  const [retryingAssets, setRetryingAssets] = useState(false);
   const [deliveryConfigExpanded, setDeliveryConfigExpanded] = useState(false);
   const [localGit, setLocalGit] = useState<LocalGitState | null>(null);
   const [localGitError, setLocalGitError] = useState<string | null>(null);
@@ -140,6 +142,16 @@ export function ProjectStudio({ projectId }: { projectId: string }) {
     setArtifacts(values);
   }, [errorText, projectId]);
 
+  const loadAssetManifest = useCallback(async () => {
+    const response = await fetch(`/api/projects/${encodeURIComponent(projectId)}/asset-manifest`, { cache: "no-store" });
+    const payload = await response.json().catch(() => ({})) as AssetManifestPayload & { message?: string };
+    if (!response.ok) {
+      throw new Error(errorText(payload.message, `素材清单读取失败 (${response.status})`, `Unable to load asset manifest (${response.status})`));
+    }
+    setAssetManifestView(payload);
+    return payload;
+  }, [errorText, projectId]);
+
   const loadIterations = useCallback(async () => {
     const response = await fetch(`/api/projects/${encodeURIComponent(projectId)}/iterations`, { cache: "no-store" });
     const payload = await response.json().catch(() => ({})) as {
@@ -155,12 +167,12 @@ export function ProjectStudio({ projectId }: { projectId: string }) {
   useEffect(() => {
     let active = true;
     const initial = setTimeout(() => {
-      void Promise.all([loadProject(), loadConversations(), loadArtifacts(), loadIterations()]).catch(reason => {
+      void Promise.all([loadProject(), loadConversations(), loadArtifacts(), loadIterations(), loadAssetManifest()]).catch(reason => {
         if (active) setError(reason instanceof Error ? reason.message : text("项目读取失败", "Unable to load project"));
       });
     }, 0);
     return () => { active = false; clearTimeout(initial); };
-  }, [loadArtifacts, loadConversations, loadIterations, loadProject, text]);
+  }, [loadArtifacts, loadAssetManifest, loadConversations, loadIterations, loadProject, text]);
 
   const localDirectoryBindingId = project?.localDirectory?.bindingId ?? null;
   useEffect(() => {
@@ -185,13 +197,56 @@ export function ProjectStudio({ projectId }: { projectId: string }) {
     let timer: ReturnType<typeof setTimeout> | null = null;
     const poll = async () => {
       if (document.visibilityState === "visible") {
-        await Promise.all([loadProject(true), loadArtifacts(true), loadIterations()]).catch(() => undefined);
+        await Promise.all([loadProject(true), loadArtifacts(true), loadIterations(), loadAssetManifest()]).catch(() => undefined);
       }
       if (!stopped) timer = setTimeout(poll, 3_000);
     };
     timer = setTimeout(poll, 3_000);
     return () => { stopped = true; if (timer) clearTimeout(timer); };
-  }, [loadArtifacts, loadIterations, loadProject, projectAnalysisInProgress, workflowState]);
+  }, [loadArtifacts, loadAssetManifest, loadIterations, loadProject, projectAnalysisInProgress, workflowState]);
+
+  async function retryMissingAssets() {
+    if (retryingAssets || !assetManifestView?.manifest || selectedWorkflowId !== null) return;
+    setRetryingAssets(true);
+    setError(null);
+    try {
+      const response = await fetch(`/api/projects/${encodeURIComponent(projectId)}/asset-manifest/generate-missing`, {
+        method: "POST",
+      });
+      const payload = await response.json().catch(() => ({})) as { message?: string };
+      if (!response.ok) {
+        throw new Error(errorText(payload.message, `图片素材重跑失败 (${response.status})`, `Unable to rerun image assets (${response.status})`));
+      }
+      setAssetPanelExpanded(true);
+      setAssetManifestRefreshKey(value => value + 1);
+      await loadAssetManifest();
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : text("图片素材重跑失败", "Unable to rerun image assets"));
+    } finally {
+      setRetryingAssets(false);
+    }
+  }
+
+  async function openSourceImage(sourcePath: string) {
+    if (!project?.localDirectory) {
+      window.open(
+        `/api/projects/${encodeURIComponent(projectId)}/source-image?path=${encodeURIComponent(sourcePath)}`,
+        "_blank",
+        "noopener,noreferrer",
+      );
+      return;
+    }
+    const bridgeUrl = await localProjectBridgeUrl(text);
+    const response = await fetch(`${bridgeUrl}/directory/file/open`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ bindingId: project.localDirectory.bindingId, path: sourcePath }),
+    });
+    const payload = await response.json().catch(() => ({})) as { opened?: boolean; message?: string };
+    if (!response.ok || payload.opened !== true) {
+      throw new Error(errorText(payload.message, "无法打开本地图片素材", "Unable to open the local image asset"));
+    }
+  }
 
   async function createLocalBranch(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -559,6 +614,8 @@ export function ProjectStudio({ projectId }: { projectId: string }) {
             filename: payload.filename,
             sha256: artifact.object.sha256,
             sizeBytes: artifact.object.sizeBytes,
+            locale,
+            theme: document.documentElement.dataset.theme === "light" ? "light" : "dark",
           }),
         });
         const openResult = await openResponse.json().catch(() => ({})) as { opened?: boolean; message?: string };
@@ -638,6 +695,26 @@ export function ProjectStudio({ projectId }: { projectId: string }) {
   const rerunnableFailedStage = latestFailedJob && profileStages.has(latestFailedJob.kind)
     ? latestFailedJob.kind
     : null;
+  const assetItems = assetManifestView?.items ?? Object.freeze([]);
+  const assetCompletion = assetManifestView?.completion;
+  const assetOutstanding = assetItems.filter(item => ["planned", "generating", "failed"].includes(item.status)).length;
+  const assetNodeStatus = !assetManifestView?.manifest
+    ? "pending"
+    : assetCompletion?.complete
+      ? "completed"
+      : assetItems.some(item => item.status === "failed")
+        ? "failed"
+        : assetItems.some(item => item.status === "planned" || item.status === "generating")
+          ? "active"
+          : "pending";
+  const assetNodeSymbol = assetNodeStatus === "completed" ? "✓" : assetNodeStatus === "failed" ? "!" : assetNodeStatus === "active" ? "●" : "○";
+  const assetNodeLabel = !assetManifestView?.manifest
+    ? text("等待 Agent 规划", "WAITING FOR AGENT")
+    : assetCompletion?.complete
+      ? text("素材已就绪", "ASSETS READY")
+      : assetNodeStatus === "failed"
+        ? text("需要补齐", "NEEDS RETRY")
+        : text("正在准备", "PREPARING");
 
   return (
     <>
@@ -781,8 +858,9 @@ export function ProjectStudio({ projectId }: { projectId: string }) {
               const view = inProfile ? pipelineStageView(state, text) : OUT_OF_PROFILE_STAGE_VIEW(text);
               const finishedAt = inProfile ? pipelineStageFinishedAt(jobs) : null;
               return (
-                <li className={`product-delivery-stage status-${view.kind}`} data-stage-status={view.kind} key={kind}>
+                <li className={`product-delivery-stage status-${view.kind}`} data-stage-kind={kind} data-stage-status={view.kind} key={kind}>
                   <div className="product-delivery-stage-marker" aria-hidden="true">{view.symbol}</div>
+                  {kind === "AGENT_GENERATION" ? <span aria-hidden="true" className="product-delivery-material-junction" /> : null}
                   <b>{text(chineseLabel, englishLabel)}</b>
                   <strong>{view.label}</strong>
                   <small>{inProfile
@@ -827,45 +905,53 @@ export function ProjectStudio({ projectId }: { projectId: string }) {
                       <RerunIcon />
                     </button>
                   ) : null}
-                  {/* The asset readiness branch hangs off this stage rather than
-                      being absolutely positioned in the canvas: the Agent plans the
-                      manifest, so the branch belongs to that node and follows it
-                      wherever the flex track puts it. */}
-                  {kind === "AGENT_GENERATION" && !viewingHistoricalIteration ? (
-                    <div className="product-delivery-async-branch">
-                      <span aria-hidden="true" className="product-delivery-branch-line" />
-                      <button
-                        aria-expanded={assetPanelExpanded}
-                        className={`product-delivery-async-node ${assetPanelExpanded ? "is-expanded" : ""}`}
-                        onClick={() => setAssetPanelExpanded(!assetPanelExpanded)}
-                        type="button"
-                      >
-                        <span aria-hidden="true" className="product-delivery-async-marker">◈</span>
-                        <span className="product-delivery-async-copy">
-                          <b>{text("图片素材", "ASSET GEN")}</b>
-                          <small>{assetPanelExpanded
-                            ? text("收起素材清单", "Hide asset list")
-                            : text("构建前门禁 · 查看清单", "Pre-build gate · view list")}</small>
-                        </span>
-                        <ArrowIcon aria-hidden="true" className="product-delivery-async-chevron" />
-                      </button>
-                    </div>
-                  ) : kind === "AGENT_GENERATION" ? (
-                    <div className="product-delivery-async-branch">
-                      <span aria-hidden="true" className="product-delivery-branch-line" />
-                      <div className="product-delivery-async-node is-read-only">
-                        <span aria-hidden="true" className="product-delivery-async-marker">◈</span>
-                        <span className="product-delivery-async-copy">
-                          <b>{text("图片素材", "ASSET GEN")}</b>
-                          <small>{text("历史轮不展示当前素材规划", "Current asset plan hidden in history")}</small>
-                        </span>
-                      </div>
-                    </div>
-                  ) : null}
                 </li>
               );
             })}
           </ol>
+          <div className="product-delivery-material-branch">
+            <fieldset className="product-delivery-material-group">
+              <legend><span>{text("素材生成", "ASSET GENERATION")}</span><small>{text("Agent 与构建之间的素材门禁", "ASSET GATE BETWEEN AGENT AND BUILD")}</small></legend>
+              <ol className="product-delivery-material-stages">
+                <li className={`product-delivery-stage product-delivery-material-stage status-${viewingHistoricalIteration ? "pending" : assetNodeStatus}`} data-stage-status={viewingHistoricalIteration ? "pending" : assetNodeStatus}>
+                  <button
+                    aria-expanded={!viewingHistoricalIteration && assetPanelExpanded}
+                    className="product-delivery-material-disclosure"
+                    disabled={viewingHistoricalIteration}
+                    onClick={() => setAssetPanelExpanded(value => !value)}
+                    type="button"
+                  >
+                    <span aria-hidden="true" className="product-delivery-stage-marker">{viewingHistoricalIteration ? "—" : assetNodeSymbol}</span>
+                    <b>{text("美术", "ART")}</b>
+                    <strong>{viewingHistoricalIteration ? text("历史只读", "READ ONLY") : assetNodeLabel}</strong>
+                    <small>{viewingHistoricalIteration
+                      ? text("历史轮不展示当前素材规划", "Current assets are hidden for historical iterations")
+                      : `${assetCompletion?.uploaded ?? 0}/${assetCompletion?.total ?? 0} · ${assetPanelExpanded ? text("收起素材列表", "HIDE ASSET LIST") : text("展开素材列表", "VIEW ASSET LIST")}`}</small>
+                  </button>
+                  {!viewingHistoricalIteration && assetManifestView?.manifest && assetOutstanding > 0 ? (
+                    <button
+                      aria-label={text("重新运行美术素材节点，只补齐未生成图片", "Rerun the Art stage and generate only missing images")}
+                      className="product-delivery-stage-rerun-icon"
+                      disabled={retryingAssets}
+                      onClick={() => void retryMissingAssets()}
+                      title={text(`补齐 ${assetOutstanding} 个未完成素材`, `Generate ${assetOutstanding} missing assets`)}
+                      type="button"
+                    >
+                      <RerunIcon />
+                    </button>
+                  ) : null}
+                </li>
+                <li className="product-delivery-stage product-delivery-material-stage status-pending" data-stage-status="pending">
+                  <div className="product-delivery-material-static">
+                    <span aria-hidden="true" className="product-delivery-stage-marker">○</span>
+                    <b>{text("音乐", "MUSIC")}</b>
+                    <strong>{text("待规划", "NOT CONFIGURED")}</strong>
+                    <small>{text("尚未配置音乐生成模型", "No music generation model configured")}</small>
+                  </div>
+                </li>
+              </ol>
+            </fieldset>
+          </div>
         </div>
         {canRerunStages ? (
           <p className="product-delivery-rerun-hint">
@@ -927,7 +1013,7 @@ export function ProjectStudio({ projectId }: { projectId: string }) {
           </section>
         ) : null}
         {assetPanelExpanded && !viewingHistoricalIteration ? (
-          <div className="product-delivery-inline-assets"><AssetManifestPanel onRerunStarted={() => void loadProject(true)} projectId={projectId} refreshKey={assetManifestRefreshKey} /></div>
+          <div className="product-delivery-inline-assets"><AssetManifestPanel onManifestChange={setAssetManifestView} onOpenSourceImage={openSourceImage} onRerunStarted={() => void loadProject(true)} projectId={projectId} refreshKey={assetManifestRefreshKey} /></div>
         ) : null}
       </section>
 

@@ -493,12 +493,45 @@ export async function runApi(
     const workspace = await requireSelectedWorkspace(request, repository, principal);
     const project = await repository.readProject(workspace.id, request.params.projectId);
     if (!project) return reply.code(404).send({ code: "PROJECT_NOT_FOUND" });
+    if (project.source) {
+      const sourcePaths = await projectSources.listImagePaths(project.source.relativePath);
+      await repository.assets.synchronizeSourceImages({
+        workspaceId: workspace.id,
+        projectId: project.id,
+        workflowId: project.workflowId,
+        sourcePaths,
+      });
+    }
     const view = await repository.assets.read(workspace.id, project.id);
     // A project without a manifest is ordinary, not an error: the Agent has not
     // planned assets for it yet.
     if (!view) return reply.send({ manifest: null, items: [], completion: null });
     return reply.send(view);
   });
+
+  app.get<{ Params: { projectId: string }; Querystring: { path?: string } }>(
+    "/v1/projects/:projectId/source-image",
+    async (request, reply) => {
+      const principal = productAccess(request, config);
+      const workspace = await requireSelectedWorkspace(request, repository, principal);
+      const project = await repository.readProject(workspace.id, request.params.projectId);
+      if (!project) return reply.code(404).send({ code: "PROJECT_NOT_FOUND" });
+      if (!project.source || typeof request.query.path !== "string") {
+        return reply.code(404).send({ code: "SOURCE_IMAGE_NOT_FOUND" });
+      }
+      try {
+        const image = await projectSources.readImage(project.source.relativePath, request.query.path);
+        return reply
+          .header("cache-control", "private, no-store")
+          .header("content-security-policy", "sandbox; default-src 'none'; style-src 'unsafe-inline'")
+          .header("x-content-type-options", "nosniff")
+          .type(image.contentType)
+          .send(image.bytes);
+      } catch {
+        return reply.code(404).send({ code: "SOURCE_IMAGE_NOT_FOUND" });
+      }
+    },
+  );
 
   app.post<{ Params: { projectId: string } }>(
     "/v1/projects/:projectId/asset-manifest/auto-generate",
@@ -514,6 +547,19 @@ export async function runApi(
       const updated = await repository.assets.setAutoGenerate(workspace.id, project.id, body.enabled);
       if (!updated) return reply.code(404).send({ code: "ASSET_MANIFEST_NOT_FOUND" });
       return reply.send({ enabled: body.enabled });
+    },
+  );
+
+  app.post<{ Params: { projectId: string } }>(
+    "/v1/projects/:projectId/asset-manifest/generate-missing",
+    async (request, reply) => {
+      const principal = productAccess(request, config);
+      const workspace = await requireSelectedWorkspace(request, repository, principal);
+      const project = await repository.readProject(workspace.id, request.params.projectId);
+      if (!project) return reply.code(404).send({ code: "PROJECT_NOT_FOUND" });
+      const result = await repository.assets.retryMissing(workspace.id, project.id);
+      if (!result) return reply.code(404).send({ code: "ASSET_MANIFEST_NOT_FOUND" });
+      return reply.code(202).send(result);
     },
   );
 

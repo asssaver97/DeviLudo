@@ -313,7 +313,14 @@ async function runAgent(plan) {
   // the agent.json contract. Upload the file the Agent wrote into the generated
   // source so Core can ingest its test and asset manifests from the trusted,
   // digest-checked output object.
-  const agentManifest = await readGeneratedAgentManifest(requirementCatalog);
+  const agentManifest = await mergeDiscoveredSourceImages(
+    await readGeneratedAgentManifest(requirementCatalog),
+    "/workspace/project",
+  );
+  // Keep the deterministic inventory in both the published source and the
+  // completion object. Core can then list existing art without asking the model
+  // to notice binary files, and a later Agent pass starts from the same truth.
+  await writeFile("/workspace/project/agent.json", `${JSON.stringify(agentManifest, null, 2)}\n`, "utf8");
   await writeFile("/workspace/outputs/agent.json", JSON.stringify(agentManifest), "utf8");
   emitProgress("PHASE", "Agent 已完成代码修改，正在发布源码 revision");
   await manifest([
@@ -379,6 +386,121 @@ function validPlannedAsset(item) {
     && item.generationPrompt.length >= 1 && item.generationPrompt.length <= 4000
     && (item.frameCount == null || (Number.isInteger(item.frameCount) && item.frameCount >= 1 && item.frameCount <= 4096))
     && (item.dimensions == null || (typeof item.dimensions === "string" && /^[0-9]{1,5}x[0-9]{1,5}$/.test(item.dimensions)));
+}
+
+const SOURCE_IMAGE_EXTENSIONS = /\.(?:png|jpe?g|webp|svg)$/i;
+const SOURCE_IMAGE_IGNORED_DIRECTORIES = new Set([
+  ".git", ".godot", ".deviludo-export", ".deviludo-e2e", ".deviludo-e2e-package",
+  "node_modules", "build", "dist", "coverage",
+]);
+
+/**
+ * Merge a deterministic source-tree image inventory into the Agent plan.
+ *
+ * The model plans what the game needs; the executor decides what files actually
+ * exist. Matching a unique basename is intentionally a fallback only after exact
+ * project-relative keys, so common names such as icon.png cannot accidentally
+ * satisfy several unrelated planned assets.
+ */
+async function mergeDiscoveredSourceImages(agentManifest, root) {
+  const planned = agentManifest.assetManifest.items
+    .filter(item => item.discoveredSourceImage !== true)
+    .map(item => {
+      const plan = { ...item };
+      delete plan.status;
+      delete plan.sourcePath;
+      return plan;
+    });
+  const sourcePaths = await discoverSourceImages(root);
+  const sourceRecords = sourcePaths.map(sourcePath => ({
+    sourcePath,
+    strippedPath: sourcePath.replace(SOURCE_IMAGE_EXTENSIONS, ""),
+  }));
+  const basenameCounts = new Map();
+  for (const record of sourceRecords) {
+    const basename = record.strippedPath.split("/").at(-1);
+    basenameCounts.set(basename, (basenameCounts.get(basename) ?? 0) + 1);
+  }
+  const consumed = new Set();
+  const merged = planned.map(item => {
+    const candidates = sourceRecords.filter(record => {
+      const aliases = sourceImageAliases(record.strippedPath);
+      if (aliases.has(item.assetKey)) return true;
+      const plannedBase = item.assetKey.split("/").at(-1);
+      const sourceBase = record.strippedPath.split("/").at(-1);
+      return plannedBase === sourceBase && basenameCounts.get(sourceBase) === 1;
+    });
+    if (candidates.length !== 1) return item;
+    consumed.add(candidates[0].sourcePath);
+    return { ...item, status: "existing", sourcePath: candidates[0].sourcePath };
+  });
+  for (const record of sourceRecords) {
+    if (consumed.has(record.sourcePath) || merged.length >= 500) continue;
+    const assetKey = sourceInventoryKey(record.strippedPath);
+    if (merged.some(item => item.assetKey === assetKey)) continue;
+    merged.push({
+      assetKey,
+      assetType: inferSourceAssetType(record.sourcePath),
+      description: `Existing project image: ${record.sourcePath}`,
+      generationPrompt: `Recreate the existing game image at ${record.sourcePath} while preserving its current visual role and style.`,
+      frameCount: null,
+      dimensions: null,
+      status: "existing",
+      sourcePath: record.sourcePath,
+      discoveredSourceImage: true,
+    });
+  }
+  return {
+    ...agentManifest,
+    assetManifest: { ...agentManifest.assetManifest, items: merged },
+  };
+}
+
+async function discoverSourceImages(root) {
+  const found = [];
+  const visit = async directory => {
+    const entries = await readdir(directory, { withFileTypes: true });
+    entries.sort((left, right) => left.name.localeCompare(right.name));
+    for (const entry of entries) {
+      if (entry.isSymbolicLink()) continue;
+      if (entry.isDirectory()) {
+        if (!SOURCE_IMAGE_IGNORED_DIRECTORIES.has(entry.name)) await visit(resolve(directory, entry.name));
+        continue;
+      }
+      if (!entry.isFile() || !SOURCE_IMAGE_EXTENSIONS.test(entry.name)) continue;
+      const sourcePath = relative(root, resolve(directory, entry.name)).split(sep).join("/");
+      if (sourcePath.length > 500 || sourcePath.startsWith("../")) continue;
+      found.push(sourcePath);
+    }
+  };
+  await visit(root);
+  return found;
+}
+
+function sourceImageAliases(strippedPath) {
+  const aliases = new Set([strippedPath]);
+  for (const prefix of ["assets/generated/", "assets/", "art/", "images/"]) {
+    if (strippedPath.startsWith(prefix)) aliases.add(strippedPath.slice(prefix.length));
+  }
+  return aliases;
+}
+
+function sourceInventoryKey(strippedPath) {
+  if (strippedPath.length <= 200
+    && /^[A-Za-z0-9][A-Za-z0-9._/-]{0,199}$/.test(strippedPath)
+    && !/(^|\/)\.{1,2}(\/|$)|\/\//.test(strippedPath)
+    && !strippedPath.endsWith("/")) return strippedPath;
+  return `existing/${createHash("sha256").update(strippedPath).digest("hex").slice(0, 32)}`;
+}
+
+function inferSourceAssetType(sourcePath) {
+  const path = sourcePath.toLowerCase();
+  if (/(^|[\/_-])(tile|tileset)/.test(path)) return "tileset";
+  if (/(^|[\/_-])(background|backdrop|bg)([\/_-]|\.)/.test(path)) return "background";
+  if (/(^|[\/_-])(icon|favicon)([\/_-]|\.)/.test(path)) return "icon";
+  if (/(^|[\/_-])(ui|hud|button|panel|menu)([\/_-]|\.)/.test(path)) return "ui";
+  if (/(^|[\/_-])(animation|anim|sheet)([\/_-]|\.)/.test(path)) return "animation";
+  return "sprite";
 }
 
 function specificationRequirementCatalog(specification) {

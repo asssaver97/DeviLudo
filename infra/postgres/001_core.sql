@@ -77,7 +77,7 @@ CREATE TABLE deviludo.schema_metadata (
   applied_at timestamptz NOT NULL DEFAULT clock_timestamp()
 );
 INSERT INTO deviludo.schema_metadata(singleton, baseline, compatibility, current_version)
-VALUES (true, '001', 'deviludo-self-hosted-v1', '044_explicit_image_and_codex_models');
+VALUES (true, '001', 'deviludo-self-hosted-v1', '045_existing_source_assets');
 
 -- Every post-baseline change is immutable and checksummed. Fresh databases are
 -- created from this full snapshot and then stamp the migrations incorporated by
@@ -814,7 +814,15 @@ CREATE TABLE deviludo.asset_items (
   frame_count integer CHECK (frame_count IS NULL OR frame_count BETWEEN 1 AND 4096),
   dimensions text CHECK (dimensions IS NULL OR dimensions ~ '^[0-9]{1,5}x[0-9]{1,5}$'),
   status text NOT NULL DEFAULT 'planned'
-    CHECK (status IN ('planned', 'generating', 'generated', 'uploaded', 'failed')),
+    CHECK (status IN ('planned', 'generating', 'generated', 'uploaded', 'existing', 'failed')),
+  source_path text CHECK (
+    source_path IS NULL OR (
+      length(source_path) BETWEEN 1 AND 500
+      AND source_path !~ '(^|/)\.{1,2}(/|$)'
+      AND source_path !~ '//'
+      AND source_path !~ '^/'
+    )
+  ),
   bucket text,
   object_key text,
   sha256 text CHECK (sha256 IS NULL OR sha256 ~ '^sha256:[0-9a-f]{64}$'),
@@ -830,7 +838,8 @@ CREATE TABLE deviludo.asset_items (
   CHECK (
     (status IN ('generated', 'uploaded'))
       = (object_key IS NOT NULL AND bucket IS NOT NULL AND sha256 IS NOT NULL AND size_bytes IS NOT NULL)
-  )
+  ),
+  CHECK ((status = 'existing') = (source_path IS NOT NULL))
 );
 
 CREATE INDEX asset_items_manifest_status
@@ -846,6 +855,32 @@ ALTER TABLE deviludo.asset_items
   ADD CONSTRAINT asset_items_lease_requires_generating CHECK (
     (generation_lease_expires_at IS NOT NULL) = (status = 'generating')
   );
+
+-- complete_job historically enabled the image gate only for Claude. Resolve the
+-- default at manifest insertion instead: Codex has its built-in ImageGen backend,
+-- while Claude requires an explicit image model. User updates are not affected,
+-- so the project-level switch can still disable automatic generation later.
+CREATE OR REPLACE FUNCTION deviludo.default_asset_auto_generation()
+RETURNS trigger
+LANGUAGE plpgsql
+SECURITY INVOKER
+SET search_path = pg_catalog, deviludo
+AS $$
+BEGIN
+  NEW.auto_generate_enabled := EXISTS (
+    SELECT 1 FROM deviludo.instance_agent_settings
+     WHERE singleton = true
+       AND (
+         agent_runtime = 'CODEX_CLI'
+         OR (agent_runtime = 'CLAUDE_CODE' AND image_model IS NOT NULL)
+       )
+  );
+  RETURN NEW;
+END
+$$;
+CREATE TRIGGER asset_manifests_default_auto_generation
+BEFORE INSERT ON deviludo.asset_manifests
+FOR EACH ROW EXECUTE FUNCTION deviludo.default_asset_auto_generation();
 
 -- Freeze the exact image objects into every artifact-build job. The builder
 -- reads this immutable snapshot rather than whichever upload happens to be the
@@ -1662,7 +1697,11 @@ BEGIN
   END IF;
   IF NOT EXISTS (
     SELECT 1 FROM deviludo.instance_agent_settings
-     WHERE singleton = true AND agent_runtime = 'CLAUDE_CODE'
+     WHERE singleton = true
+       AND (
+         agent_runtime = 'CODEX_CLI'
+         OR (agent_runtime = 'CLAUDE_CODE' AND image_model IS NOT NULL)
+       )
   ) THEN RETURN; END IF;
 
   RETURN QUERY
@@ -1811,7 +1850,7 @@ BEGIN
            SELECT 1 FROM deviludo.asset_items item
             WHERE item.workspace_id = manifest.workspace_id
               AND item.manifest_id = manifest.id
-              AND item.status NOT IN ('generated', 'uploaded')
+              AND item.status NOT IN ('generated', 'uploaded', 'existing')
          )
        )
      ORDER BY workflow.updated_at, workflow.id

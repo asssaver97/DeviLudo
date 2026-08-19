@@ -356,10 +356,11 @@ test("Agent generation lands its planned asset manifest, validated and whole", a
   assert.match(complete, /RAISE EXCEPTION 'asset manifest items are invalid'/);
   assert.match(complete, /RAISE EXCEPTION 'asset manifest keys must be unique'/);
   assert.match(complete, /NOT IN\s*\n?\s*\('sprite', 'animation', 'background', 'ui', 'icon', 'tileset'\)/);
-  // Re-planning keeps one manifest per project, gates the build only when the
-  // selected Claude connection is available, and preserves uploaded art.
+  // Re-planning keeps one manifest per project. The insert trigger resolves the
+  // selected runtime's actual image backend without overriding later user toggles.
   assert.match(complete, /ON CONFLICT \(workspace_id, project_id\) DO UPDATE/);
-  assert.match(complete, /EXISTS \(SELECT 1 FROM deviludo\.instance_agent_settings[\s\S]*agent_runtime = 'CLAUDE_CODE'\)/);
+  assert.match(sql, /CREATE OR REPLACE FUNCTION deviludo\.default_asset_auto_generation\(\)[\s\S]*agent_runtime = 'CODEX_CLI'[\s\S]*agent_runtime = 'CLAUDE_CODE' AND image_model IS NOT NULL/);
+  assert.match(sql, /BEFORE INSERT ON deviludo\.asset_manifests/);
   assert.match(complete, /RETURNING id, auto_generate_enabled INTO asset_manifest_id, asset_auto_generate/);
   assert.match(complete, /ON CONFLICT \(workspace_id, manifest_id, asset_key\) DO UPDATE/);
   assert.match(complete, /DELETE FROM deviludo\.asset_items[\s\S]*status NOT IN \('generated', 'uploaded'\)[\s\S]*asset_key NOT IN/);
@@ -421,7 +422,9 @@ test("asset generation is leased, attempt-bounded, and never overwrites a user u
   assert.match(claim, /generation_attempt = item\.generation_attempt \+ 1/);
   // Without configured settings there is no credential to call with, so claiming
   // would only burn attempts.
-  assert.match(claim, /IF NOT EXISTS \([\s\S]*SELECT 1 FROM deviludo\.instance_agent_settings[\s\S]*agent_runtime = 'CLAUDE_CODE'[\s\S]*\) THEN RETURN; END IF;/);
+  assert.match(claim, /IF NOT EXISTS \([\s\S]*SELECT 1 FROM deviludo\.instance_agent_settings[\s\S]*agent_runtime = 'CODEX_CLI'[\s\S]*agent_runtime = 'CLAUDE_CODE' AND image_model IS NOT NULL[\s\S]*\) THEN RETURN; END IF;/);
+  assert.match(sql, /status IN \('planned', 'generating', 'generated', 'uploaded', 'existing', 'failed'\)/);
+  assert.match(sql, /\(status = 'existing'\) = \(source_path IS NOT NULL\)/);
 
   // A user upload that lands mid-generation wins: settlement only applies to items
   // still leased, so a generated image cannot replace the art they chose.

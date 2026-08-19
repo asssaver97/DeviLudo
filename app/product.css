@@ -1284,8 +1284,6 @@ textarea {
   .typing-dots i { animation: none; }
   .product-delivery-stage.status-active .product-delivery-stage-marker { animation: none; }
   .product-delivery-stage-rerun-icon:active svg { animation: none; }
-  /* The chevron still turns to show the open state; only the tween is dropped. */
-  .product-delivery-async-chevron { transition: none; }
 }
 
 /* Core project workspace */
@@ -1921,11 +1919,6 @@ textarea {
   padding: 0 28px 0 10px;
 }
 
-.product-delivery-async-node.is-read-only {
-  cursor: default;
-  opacity: .72;
-}
-
 .product-iteration-history-summary {
   margin-bottom: 18px;
 }
@@ -2001,10 +1994,7 @@ textarea {
 .product-delivery-track {
   display: flex;
   list-style: none;
-  /* The async branch below is absolutely positioned and contributes no height, so
-     the room for it is reserved here. Keeping the reserve on the track means it
-     travels with the branch instead of being a canvas min-height to remember. */
-  margin: 0 0 88px;
+  margin: 0;
   min-width: 1080px;
   overflow: visible;
   padding: 0;
@@ -2012,124 +2002,119 @@ textarea {
   z-index: 1;
 }
 
-/* The branch hangs from the Agent Generation cell rather than being placed by a
-   percentage of the canvas: the track is a flex row with a min-width, so any
-   fraction of the container stops describing where a stage actually is as soon as
-   the panel scrolls. Anchoring to the cell means the branch follows its stage at
-   every width, with no number to keep in sync. */
-.product-delivery-async-branch {
-  left: 50%;
-  padding-top: 16px;
+.product-delivery-material-branch {
+  display: grid;
+  grid-template-columns: repeat(5, minmax(0, 1fr));
+  margin-top: 18px;
+  min-width: 1080px;
+  padding-top: 32px;
+  position: relative;
+}
+
+/* The second and third main-track columns are Agent and Build. Their boundary
+   is 40% of a five-column track, so the branch reads as a real fork between the
+   two instead of belonging to either stage. */
+.product-delivery-stage[data-stage-kind="AGENT_GENERATION"]::before {
+  border-left: 2px dashed #397c66;
+  content: "";
+  bottom: -50px;
   position: absolute;
-  top: 100%;
-  transform: translateX(-50%);
-  width: min(190px, 100%);
+  right: 0;
+  top: 17px;
+  z-index: 0;
+}
+
+.product-delivery-material-junction {
+  background: #397c66;
+  height: 5px;
+  position: absolute;
+  right: -2px;
+  top: 15px;
+  transform: rotate(45deg);
+  width: 5px;
   z-index: 2;
 }
 
-/* Drawn as a bordered box rather than an SVG path: two dashed rules that inherit
-   the stage's own colour, so the branch reads as part of the pipeline instead of a
-   separately-themed graphic. */
-.product-delivery-branch-line {
-  border-bottom-left-radius: 3px;
-  border-left: 2px dashed var(--stage-line);
-  bottom: 12px;
-  left: calc(50% - 1px);
-  position: absolute;
-  top: 0;
-  width: 2px;
-}
-
-.product-delivery-async-node {
-  align-items: center;
-  background: #0c1420;
-  border: 2px solid var(--stage-line);
-  color: inherit;
-  cursor: pointer;
-  display: flex;
-  font: inherit;
-  gap: 9px;
-  padding: 8px 10px;
+.product-delivery-material-group {
+  border: 2px dashed #40536a;
+  grid-column: 2 / 4;
+  margin: 0;
+  min-width: 0;
+  padding: 17px 8px 16px;
   position: relative;
-  text-align: left;
-  transition: background .14s linear, border-color .14s linear;
-  width: 100%;
 }
 
-.product-delivery-async-node:hover {
-  background: #0b2130;
-  border-color: var(--blue);
-}
-
-.product-delivery-async-node:focus-visible {
-  border-color: var(--blue);
-  outline: 2px solid var(--blue);
-  outline-offset: 2px;
-}
-
-.product-delivery-async-node.is-expanded {
-  background: #0b2938;
-  border-color: var(--blue);
-}
-
-.product-delivery-async-marker {
-  align-items: center;
-  border: 2px solid var(--stage-line);
+.product-delivery-material-group > legend {
+  align-items: baseline;
+  background: #0b131e;
   color: var(--blue);
   display: flex;
-  flex: none;
-  font: 900 10px var(--font-geist-mono), monospace;
-  height: 24px;
-  justify-content: center;
-  width: 24px;
-}
-
-.product-delivery-async-node.is-expanded .product-delivery-async-marker,
-.product-delivery-async-node:hover .product-delivery-async-marker {
-  border-color: var(--blue);
-}
-
-/* min-width: 0 lets the label ellipsize instead of forcing the row wider than the
-   stage it hangs under. */
-.product-delivery-async-copy {
-  display: block;
-  min-width: 0;
-  flex: 1;
-}
-
-.product-delivery-async-copy b {
-  color: var(--ink);
-  display: block;
-  font: 800 9px/1.35 var(--font-geist-mono), monospace;
+  font: 900 9px var(--font-geist-mono), monospace;
+  gap: 9px;
+  letter-spacing: .08em;
+  margin-left: 10px;
+  padding: 0 8px;
   text-transform: uppercase;
 }
 
-.product-delivery-async-copy small {
-  color: #66758a;
-  display: block;
-  font: 7px/1.45 var(--font-geist-mono), monospace;
-  margin-top: 3px;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+.product-delivery-material-group > legend small {
+  color: #65758a;
+  font-size: 7px;
+  letter-spacing: .04em;
 }
 
-.product-delivery-async-chevron {
-  color: #66758a;
+.product-delivery-material-stages {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.product-delivery-material-stage {
   flex: none;
-  height: 14px;
-  transform: rotate(90deg);
-  transition: color .14s linear, transform .16s ease;
-  width: 14px;
+  min-height: 126px;
+  padding: 0 15px;
 }
 
-.product-delivery-async-node.is-expanded .product-delivery-async-chevron {
-  color: var(--blue);
-  transform: rotate(-90deg);
+.product-delivery-material-disclosure,
+.product-delivery-material-static {
+  background: transparent;
+  border: 0;
+  color: inherit;
+  display: block;
+  min-height: 116px;
+  padding: 0;
+  text-align: center;
+  width: 100%;
 }
 
-.product-delivery-async-node:hover .product-delivery-async-chevron {
-  color: var(--blue);
+.product-delivery-material-disclosure {
+  cursor: pointer;
+}
+
+.product-delivery-material-disclosure:hover,
+.product-delivery-material-disclosure:focus-visible {
+  background: rgb(31 198 255 / 7%);
+  outline: 0;
+}
+
+.product-delivery-material-disclosure:focus-visible {
+  box-shadow: inset 0 0 0 1px var(--blue);
+}
+
+.product-delivery-material-disclosure:disabled {
+  cursor: default;
+}
+
+.product-delivery-material-stage b,
+.product-delivery-material-stage strong,
+.product-delivery-material-stage small {
+  display: block;
+}
+
+.product-delivery-material-stage .product-delivery-stage-marker {
+  margin-bottom: 9px;
 }
 
 .product-delivery-stage {

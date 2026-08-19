@@ -1,5 +1,6 @@
 "use client";
 
+import Image from "next/image";
 import { useCallback, useEffect, useRef, useState } from "react";
 import type { AssetManifest, AssetItem } from "@/lib/product/asset-manifest";
 import { useLanguage } from "./i18n/LanguageProvider";
@@ -9,9 +10,13 @@ type AssetManifestPanelProps = {
   refreshKey?: number;
   /** Lets the studio refresh the delivery view once a rerun has been accepted. */
   onRerunStarted?: () => void;
+  onManifestChange?: (payload: AssetManifestPayload) => void;
+  onOpenSourceImage?: (sourcePath: string) => Promise<void>;
 };
 
-type AssetCompletion = Readonly<{
+type AssetListFilter = "all" | "complete" | "generating" | "failed";
+
+export type AssetCompletion = Readonly<{
   total: number;
   uploaded: number;
   failed: number;
@@ -19,7 +24,7 @@ type AssetCompletion = Readonly<{
 }>;
 
 /** Core answers with nulls for a project whose assets have not been planned yet. */
-type AssetManifestPayload = Readonly<{
+export type AssetManifestPayload = Readonly<{
   manifest: AssetManifest | null;
   items: readonly AssetItem[] | null;
   completion: AssetCompletion | null;
@@ -29,7 +34,13 @@ const EMPTY_COMPLETION: AssetCompletion = Object.freeze({
   total: 0, uploaded: 0, failed: 0, complete: false,
 });
 
-export function AssetManifestPanel({ projectId, refreshKey = 0, onRerunStarted }: AssetManifestPanelProps) {
+export function AssetManifestPanel({
+  projectId,
+  refreshKey = 0,
+  onRerunStarted,
+  onManifestChange,
+  onOpenSourceImage,
+}: AssetManifestPanelProps) {
   const { errorText, text } = useLanguage();
   const [manifest, setManifest] = useState<AssetManifest | null>(null);
   const [items, setItems] = useState<readonly AssetItem[]>([]);
@@ -39,6 +50,9 @@ export function AssetManifestPanel({ projectId, refreshKey = 0, onRerunStarted }
   const [rebuilding, setRebuilding] = useState(false);
   const [rebuildError, setRebuildError] = useState<string | null>(null);
   const [uploadError, setUploadError] = useState<string | null>(null);
+  const [sourceOpenError, setSourceOpenError] = useState<string | null>(null);
+  const [openingSourcePath, setOpeningSourcePath] = useState<string | null>(null);
+  const [assetFilter, setAssetFilter] = useState<AssetListFilter>("all");
   const [completion, setCompletion] = useState<AssetCompletion>(EMPTY_COMPLETION);
   const uploadInputRef = useRef<HTMLInputElement>(null);
   const uploadAssetKeyRef = useRef<string | null>(null);
@@ -48,7 +62,8 @@ export function AssetManifestPanel({ projectId, refreshKey = 0, onRerunStarted }
     setItems(data.items ?? []);
     setAutoGenerateEnabled(data.manifest?.autoGenerateEnabled ?? false);
     setCompletion(data.completion ?? EMPTY_COMPLETION);
-  }, []);
+    onManifestChange?.(data);
+  }, [onManifestChange]);
 
   const loadManifest = useCallback(async () => {
     try {
@@ -132,6 +147,21 @@ export function AssetManifestPanel({ projectId, refreshKey = 0, onRerunStarted }
     }
   };
 
+  const openSourceImage = async (sourcePath: string) => {
+    setSourceOpenError(null);
+    setOpeningSourcePath(sourcePath);
+    try {
+      if (onOpenSourceImage) await onOpenSourceImage(sourcePath);
+      else window.open(sourceImageUrl(projectId, sourcePath), "_blank", "noopener,noreferrer");
+    } catch (reason) {
+      setSourceOpenError(reason instanceof Error
+        ? reason.message
+        : text("源码图片打开失败", "Unable to open the source image"));
+    } finally {
+      setOpeningSourcePath(null);
+    }
+  };
+
   // Uploaded assets only reach the game through a build, so "rebuild with
   // assets" is an ARTIFACT_BUILD rerun: it keeps the Agent's generated source
   // and re-runs packaging plus every stage after it.
@@ -169,6 +199,12 @@ export function AssetManifestPanel({ projectId, refreshKey = 0, onRerunStarted }
   }
 
   const generatingCount = items.filter(item => item.status === "generating").length;
+  const filteredItems = items.filter(item => {
+    if (assetFilter === "complete") return ["existing", "generated", "uploaded"].includes(item.status);
+    if (assetFilter === "generating") return item.status === "generating";
+    if (assetFilter === "failed") return item.status === "failed";
+    return true;
+  });
 
   // Generation policy lives with the rest of the project delivery settings.
   // This panel is intentionally limited to status, uploads, and rebuilds.
@@ -178,31 +214,37 @@ export function AssetManifestPanel({ projectId, refreshKey = 0, onRerunStarted }
         <h3>{text("游戏素材", "GAME ASSETS")}</h3>
       </div>
 
-      <div className="asset-manifest-status">
-        <span>{text("总计", "Total")}: {completion.total}</span>
-        <span>{text("已完成", "Complete")}: {completion.uploaded}</span>
-        {generatingCount > 0 && <span className="generating">{text("正在生成", "Generating")}: {generatingCount}</span>}
-        {completion.failed > 0 && <span className="failed">{text("失败", "Failed")}: {completion.failed}</span>}
+      <div aria-label={text("按素材状态筛选", "Filter assets by status")} className="asset-manifest-status" role="group">
+        <button aria-controls="asset-image-list" aria-pressed={assetFilter === "all"} className={`asset-manifest-filter ${assetFilter === "all" ? "is-active" : ""}`} onClick={() => setAssetFilter("all")} type="button">
+          {text("全部", "All")}: {completion.total}
+        </button>
+        <button aria-controls="asset-image-list" aria-pressed={assetFilter === "complete"} className={`asset-manifest-filter complete ${assetFilter === "complete" ? "is-active" : ""}`} onClick={() => setAssetFilter("complete")} type="button">
+          {text("完成", "Complete")}: {completion.uploaded}
+        </button>
+        <button aria-controls="asset-image-list" aria-pressed={assetFilter === "generating"} className={`asset-manifest-filter generating ${assetFilter === "generating" ? "is-active" : ""}`} onClick={() => setAssetFilter("generating")} type="button">
+          {text("生成中", "Generating")}: {generatingCount}
+        </button>
+        {completion.failed > 0 && <button aria-controls="asset-image-list" aria-pressed={assetFilter === "failed"} className={`asset-manifest-filter failed ${assetFilter === "failed" ? "is-active" : ""}`} onClick={() => setAssetFilter("failed")} type="button">{text("失败", "Failed")}: {completion.failed}</button>}
         {completion.complete && (
           <button className="rebuild-button" disabled={rebuilding} onClick={() => void triggerRebuild()} type="button">
             {rebuilding ? text("正在启动重新构建…", "Starting rebuild…") : text("✓ 使用素材重新构建", "✓ Rebuild with assets")}
           </button>
         )}
       </div>
-      {/* A failed asset is not a dead end: its prompt can be re-planned by a rerun,
-          or the art can be uploaded directly. Say so rather than leaving a red
-          count with no next step. */}
+      {/* A failed asset is not a dead end: the Art branch can requeue only
+          unresolved entries, while upload remains available here. */}
       {completion.failed > 0 && (
         <p className="asset-manifest-note">
           {text(
-            `有 ${completion.failed} 个素材自动生成失败（已达重试上限）。可以直接在下方上传自备素材，或重跑 Agent 生成以重新规划提示词。`,
-            `${completion.failed} asset${completion.failed === 1 ? "" : "s"} failed automatic generation after all retries. Upload replacement art below or re-run Agent Generation to create a new plan.`,
+            `有 ${completion.failed} 个素材自动生成失败（已达重试上限）。可以直接上传自备素材，或点击上方美术节点的重跑按钮，只补齐缺失素材。`,
+            `${completion.failed} asset${completion.failed === 1 ? "" : "s"} failed automatic generation. Upload replacement art or use the Art node's rerun control to retry only missing assets.`,
           )}
         </p>
       )}
 
       {rebuildError && <p className="asset-manifest-error" role="alert">{rebuildError}</p>}
       {uploadError && <p className="asset-manifest-error" role="alert">{uploadError}</p>}
+      {sourceOpenError && <p className="asset-manifest-error" role="alert">{sourceOpenError}</p>}
 
       <input
         ref={uploadInputRef}
@@ -217,8 +259,9 @@ export function AssetManifestPanel({ projectId, refreshKey = 0, onRerunStarted }
           if (file && assetKey) void handleUpload(assetKey, file);
         }}
       />
-      <div aria-label={text("图片素材列表", "Image asset list")} className="asset-items-list" role="region" tabIndex={0}>
-        {items.map(item => (
+      <div aria-label={text("图片素材列表", "Image asset list")} className="asset-items-list" id="asset-image-list" role="region" tabIndex={0}>
+        {filteredItems.length === 0 ? <p className="asset-items-empty">{text("该状态下没有图片素材", "No image assets match this status")}</p> : null}
+        {filteredItems.map(item => (
           <div key={item.id} className={`asset-item asset-item-${item.status}`}>
             <div className="asset-item-header">
               <span className="asset-key">{item.assetKey}</span>
@@ -226,12 +269,25 @@ export function AssetManifestPanel({ projectId, refreshKey = 0, onRerunStarted }
               <span className="asset-status">{item.status}</span>
             </div>
             <div className="asset-description">{item.description}</div>
+            {item.sourcePath ? (
+              <button
+                aria-label={text(`打开源码图片 ${item.sourcePath}`, `Open source image ${item.sourcePath}`)}
+                className="asset-source-preview"
+                disabled={openingSourcePath !== null}
+                onClick={() => void openSourceImage(item.sourcePath!)}
+                type="button"
+              >
+                <SourceAssetThumbnail projectId={projectId} sourcePath={item.sourcePath} />
+                <span><b>{text("打开原文件", "OPEN ORIGINAL")}</b><small>{item.sourcePath}</small></span>
+                <strong>{openingSourcePath === item.sourcePath ? text("打开中…", "OPENING…") : text("打开", "OPEN")}</strong>
+              </button>
+            ) : null}
             {item.frameCount && (
               <div className="asset-meta">
                 {text("动画帧数", "Animation frames")}: {item.frameCount} | {text("尺寸", "Size")}: {item.dimensions || text("自动", "Auto")}
               </div>
             )}
-            {item.generationPrompt && (
+            {item.generationPrompt && item.status !== "existing" && (
               <div className="asset-prompt-box">
                 <div className="asset-prompt-label">{text("生成提示词", "Generation prompt")}:</div>
                 <div className="asset-prompt-content">{item.generationPrompt}</div>
@@ -243,7 +299,7 @@ export function AssetManifestPanel({ projectId, refreshKey = 0, onRerunStarted }
                 its prompt, and a user who has the art on disk should never have to
                 turn a setting off to use it. Only an asset already being generated
                 hides it, because that write would race the generator. */}
-            {item.status !== "generating" && (
+            {item.status !== "generating" && item.status !== "existing" && (
               <div className="asset-upload">
                 <button
                   className="asset-upload-button"
@@ -259,6 +315,9 @@ export function AssetManifestPanel({ projectId, refreshKey = 0, onRerunStarted }
                 ) : null}
               </div>
             )}
+            {item.status === "existing" ? (
+              <small className="asset-upload-hint">{text("已从当前源码中检测到，无需重复生成", "Detected in the current source; no generation is needed")}</small>
+            ) : null}
             {item.errorMessage && (
               <div className="asset-error">{errorText(item.errorMessage, "素材生成失败", "Asset generation failed")}</div>
             )}
@@ -267,6 +326,30 @@ export function AssetManifestPanel({ projectId, refreshKey = 0, onRerunStarted }
       </div>
     </div>
   );
+}
+
+function SourceAssetThumbnail({ projectId, sourcePath }: { projectId: string; sourcePath: string }) {
+  const [failed, setFailed] = useState(false);
+  const label = sourcePath.split(".").at(-1)?.toUpperCase() ?? "IMG";
+  return (
+    <span className="asset-source-thumbnail" aria-hidden="true">
+      {failed ? <span>{label}</span> : (
+        <Image
+          alt=""
+          height={72}
+          loading="lazy"
+          onError={() => setFailed(true)}
+          src={sourceImageUrl(projectId, sourcePath)}
+          unoptimized
+          width={72}
+        />
+      )}
+    </span>
+  );
+}
+
+function sourceImageUrl(projectId: string, sourcePath: string): string {
+  return `/api/projects/${encodeURIComponent(projectId)}/source-image?path=${encodeURIComponent(sourcePath)}`;
 }
 
 /** Base64-encode in chunks so a multi-megabyte asset cannot blow the call stack. */

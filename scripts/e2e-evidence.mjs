@@ -357,36 +357,137 @@ async function copyEvidenceFile(item, root, folder, extension) {
 }
 
 async function evidenceHtml(report, imagesInput, stdout, stderr, videosInput) {
+  const copy = {
+    zh: {
+      pagePassed: "E2E 测试通过 · DeviLudo",
+      pageFailed: "E2E 测试失败 · DeviLudo",
+      passed: "E2E 测试通过",
+      failed: "E2E 测试失败",
+      headlessChecks: "Headless 检查",
+      realPlayerJourneys: "真实玩家旅程",
+      systemRealInputs: "系统级真实输入",
+      requirementCoverage: "玩家需求覆盖",
+      screenshots: "截图",
+      stableBaselines: "稳定视觉基线",
+      adaptivePlay: "自适应游玩",
+      gamepadInputs: "手柄输入",
+      videos: "视频",
+      requirement: "需求",
+      status: "状态",
+      realInputEvidence: "真实操作证据",
+      noCoveredRequirements: "无已覆盖玩家需求",
+      deterministicJourneys: "确定性真实操作",
+      journey: "旅程",
+      step: "步骤",
+      input: "输入",
+      semanticTarget: "语义目标",
+      probeSequence: "Probe 序号",
+      noRealInputSteps: "无真实输入步骤",
+      testAgentPlay: "Test Agent 自适应游玩与 Oracle",
+      rollout: "Rollout",
+      seed: "种子",
+      result: "结果",
+      decisions: "决策数",
+      recoveries: "卡死恢复",
+      noAdaptivePlay: "未执行自适应游玩",
+      currentRegression: "当前回归轨迹",
+      existingReplay: "既有轨迹回放",
+      successfulTrace: "成功轨迹固化",
+      noCurrentTrace: "无当前轨迹",
+      replacementStored: "已通过两次干净回放并替换",
+      noReplacementTrace: "未生成替换轨迹",
+      completeVideos: "完整游戏视频",
+      noVideos: "无视频",
+      screenshotsAndDiffs: "截图与差异",
+      structuredResult: "完整结构化结果",
+      keyboard: "键盘",
+      oraclePassed: "核心循环 Oracle 通过",
+      oracleFailed: "未通过",
+    },
+    en: {
+      pagePassed: "E2E Test Passed · DeviLudo",
+      pageFailed: "E2E Test Failed · DeviLudo",
+      passed: "E2E TEST PASSED",
+      failed: "E2E TEST FAILED",
+      headlessChecks: "Headless Checks",
+      realPlayerJourneys: "Real Player Journeys",
+      systemRealInputs: "System-level Real Inputs",
+      requirementCoverage: "Player Requirement Coverage",
+      screenshots: "Screenshots",
+      stableBaselines: "Stable Visual Baselines",
+      adaptivePlay: "Adaptive Play",
+      gamepadInputs: "Gamepad Inputs",
+      videos: "Videos",
+      requirement: "Requirement",
+      status: "Status",
+      realInputEvidence: "Real-input Evidence",
+      noCoveredRequirements: "No covered player requirements",
+      deterministicJourneys: "Deterministic Real-input Journeys",
+      journey: "Journey",
+      step: "Step",
+      input: "Input",
+      semanticTarget: "Semantic Target",
+      probeSequence: "Probe Sequence",
+      noRealInputSteps: "No real-input steps",
+      testAgentPlay: "Test Agent Adaptive Play & Oracles",
+      rollout: "Rollout",
+      seed: "Seed",
+      result: "Result",
+      decisions: "Decisions",
+      recoveries: "Stall Recoveries",
+      noAdaptivePlay: "No adaptive play executed",
+      currentRegression: "Current Regression Trace",
+      existingReplay: "Existing Trace Replay",
+      successfulTrace: "Successful Trace Capture",
+      noCurrentTrace: "No current trace",
+      replacementStored: "Replaced after two clean replays",
+      noReplacementTrace: "No replacement trace generated",
+      completeVideos: "Complete Gameplay Videos",
+      noVideos: "No videos",
+      screenshotsAndDiffs: "Screenshots & Visual Diffs",
+      structuredResult: "Full Structured Result",
+      keyboard: "Keyboard",
+      oraclePassed: "Core-loop oracle passed",
+      oracleFailed: "Failed",
+    },
+  };
+  const t = key => `<span data-i18n="${key}">${escapeHtml(copy.zh[key])}</span>`;
   const images = [];
   for (const item of imagesInput) {
     const bytes = await readFile(item.path);
     images.push(`<figure><img alt="${escapeHtml(item.label)}" src="data:image/png;base64,${bytes.toString("base64")}"><figcaption>${escapeHtml(item.label)}</figcaption></figure>`);
   }
-  const title = report.outcome === "PASSED" ? "E2E PASSED" : "E2E FAILED";
-  const videos = videosInput.map(item => `<figure><video controls preload="metadata" src="videos/${escapeHtml(item.id)}.mp4"></video><figcaption>gameplay · ${escapeHtml(item.id)}</figcaption></figure>`).join("");
+  const titleKey = report.outcome === "PASSED" ? "passed" : "failed";
+  const primaryVideo = videosInput.find(item => item.id.includes("primary")) ?? videosInput[0];
+  const orderedVideos = primaryVideo
+    ? [primaryVideo, ...videosInput.filter(item => item !== primaryVideo)]
+    : videosInput;
+  const videos = orderedVideos.map(item => `<figure${item === primaryVideo ? " class=\"is-primary\"" : ""}><video controls preload="metadata" src="videos/${escapeHtml(item.id)}.mp4"></video><figcaption>gameplay · ${escapeHtml(item.id)}</figcaption></figure>`).join("");
   const coverage = report.coverage ?? {};
   const stats = [
-    ["Headless 检查", coverage.headlessCheckCount ?? 0],
-    ["真实玩家旅程", coverage.interactiveJourneyCount ?? 0],
-    ["系统级真实输入", coverage.realInputCount ?? 0],
-    ["玩家需求覆盖", `${coverage.coveredPlayerRequirementCount ?? 0}/${coverage.playerRequirementCount ?? 0}`],
-    ["截图", report.screenshotCount ?? imagesInput.filter(item => item.label.startsWith("checkpoint")).length],
-    ["稳定视觉基线", coverage.visualBaselineCount ?? 0],
-    ["自适应游玩", `${coverage.adaptiveSuccessCount ?? 0}/${coverage.adaptiveRolloutCount ?? 0}`],
-    ["手柄输入", coverage.gamepadInputCount ?? 0],
-    ["视频", videosInput.length],
-  ].map(([label, value]) => `<article><strong>${escapeHtml(label)}</strong><span>${escapeHtml(value)}</span></article>`).join("");
+    ["headlessChecks", coverage.headlessCheckCount ?? 0],
+    ["realPlayerJourneys", coverage.interactiveJourneyCount ?? 0],
+    ["systemRealInputs", coverage.realInputCount ?? 0],
+    ["requirementCoverage", `${coverage.coveredPlayerRequirementCount ?? 0}/${coverage.playerRequirementCount ?? 0}`],
+    ["screenshots", report.screenshotCount ?? imagesInput.filter(item => item.label.startsWith("checkpoint")).length],
+    ["stableBaselines", coverage.visualBaselineCount ?? 0],
+    ["adaptivePlay", `${coverage.adaptiveSuccessCount ?? 0}/${coverage.adaptiveRolloutCount ?? 0}`],
+    ["gamepadInputs", coverage.gamepadInputCount ?? 0],
+    ["videos", videosInput.length],
+  ].map(([label, value]) => `<article><strong>${t(label)}</strong><span>${escapeHtml(value)}</span></article>`).join("");
   const requirementRows = (report.requirementCoverage ?? []).map(requirement => `<tr><td>${escapeHtml(requirement.requirementId)}</td><td>${escapeHtml(requirement.status)}</td><td>${escapeHtml((requirement.evidenceSteps ?? []).join(", ") || requirement.exemptionReason || "-")}</td></tr>`).join("");
-  const stepRows = (report.steps ?? []).map(step => `<tr><td>${escapeHtml(step.journeyId)}</td><td>${escapeHtml(step.stepId)}</td><td>${escapeHtml(step.type)}</td><td>${escapeHtml(step.target?.controls?.map(control => control.id).join(", ") ?? "键盘")}</td><td>${escapeHtml(`${step.before?.sequence ?? "-"} → ${step.after?.sequence ?? "-"}`)}</td></tr>`).join("");
+  const stepRows = (report.steps ?? []).map(step => `<tr><td>${escapeHtml(step.journeyId)}</td><td>${escapeHtml(step.stepId)}</td><td>${escapeHtml(step.type)}</td><td>${step.target?.controls?.length ? escapeHtml(step.target.controls.map(control => control.id).join(", ")) : t("keyboard")}</td><td>${escapeHtml(`${step.before?.sequence ?? "-"} → ${step.after?.sequence ?? "-"}`)}</td></tr>`).join("");
   const rolloutRows = (report.adaptiveRollouts ?? []).map(rollout => {
     const recoveries = (rollout.decisions ?? []).filter(decision => decision.recovery === true).length;
-    const oracle = rollout.outcome === "PASSED" ? "核心循环 Oracle 通过" : rollout.failureCode ?? "未通过";
-    return `<tr><td>${escapeHtml(Number(rollout.rolloutIndex) + 1)}</td><td>${escapeHtml(rollout.seed)}</td><td>${escapeHtml(rollout.outcome)}</td><td>${escapeHtml(rollout.decisionCount)}</td><td>${escapeHtml(recoveries)}</td><td>${escapeHtml(oracle)}</td></tr>`;
+    const oracle = rollout.outcome === "PASSED" ? t("oraclePassed") : escapeHtml(rollout.failureCode ?? copy.zh.oracleFailed);
+    return `<tr><td>${escapeHtml(Number(rollout.rolloutIndex) + 1)}</td><td>${escapeHtml(rollout.seed)}</td><td>${escapeHtml(rollout.outcome)}</td><td>${escapeHtml(rollout.decisionCount)}</td><td>${escapeHtml(recoveries)}</td><td>${oracle}</td></tr>`;
   }).join("");
   const regression = report.regression ?? {};
-  const currentRegression = regression.currentReplay?.status ?? "无当前轨迹";
-  const replacementRegression = regression.replacement?.stored ? "已通过两次干净回放并替换" : "未生成替换轨迹";
-  return `<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width"><title>${title}</title><style>body{margin:0;background:#07111e;color:#e8f1ff;font:16px ui-monospace,monospace}main{max-width:1200px;margin:auto;padding:32px}header,article,figure,table{border:1px solid #32506f}header{padding:24px}h1{color:${report.outcome === "PASSED" ? "#57e3b2" : "#ff718d"}}.stats,section{display:grid;grid-template-columns:repeat(auto-fit,minmax(240px,1fr));gap:20px;margin-top:24px}.stats article{padding:16px;background:#0b1928}.stats strong,.stats span{display:block}.stats span{font-size:28px;color:#57e3b2;margin-top:8px}figure{margin:0;padding:12px;background:#0b1928}img,video{width:100%;height:auto;display:block}figcaption{padding-top:10px}table{width:100%;border-collapse:collapse;background:#0b1928}th,td{padding:10px;border:1px solid #253f5c;text-align:left}pre{white-space:pre-wrap;overflow-wrap:anywhere;background:#050b13;padding:16px}</style></head><body><main><header><h1>${title}</h1><p>${escapeHtml(report.summary ?? "")}</p><p>${escapeHtml(report.platform ?? "")}</p></header><div class="stats">${stats}</div><h2>玩家需求覆盖</h2><table><thead><tr><th>需求</th><th>状态</th><th>真实操作证据</th></tr></thead><tbody>${requirementRows || "<tr><td colspan=\"3\">无已覆盖玩家需求</td></tr>"}</tbody></table><h2>确定性真实操作</h2><table><thead><tr><th>旅程</th><th>步骤</th><th>输入</th><th>语义目标</th><th>Probe 序号</th></tr></thead><tbody>${stepRows || "<tr><td colspan=\"5\">无真实输入步骤</td></tr>"}</tbody></table><h2>Test Agent 自适应游玩与 Oracle</h2><table><thead><tr><th>Rollout</th><th>种子</th><th>结果</th><th>决策数</th><th>卡死恢复</th><th>Oracle</th></tr></thead><tbody>${rolloutRows || "<tr><td colspan=\"6\">未执行自适应游玩</td></tr>"}</tbody></table><h2>当前回归轨迹</h2><table><tbody><tr><th>既有轨迹回放</th><td>${escapeHtml(currentRegression)}</td></tr><tr><th>成功轨迹固化</th><td>${escapeHtml(replacementRegression)}</td></tr></tbody></table><h2>完整游戏视频</h2><section>${videos || "<p>无视频</p>"}</section><h2>截图与差异</h2><section>${images.join("")}</section><h2>完整结构化结果</h2><pre>${escapeHtml(JSON.stringify(report, null, 2))}</pre><h2>stdout</h2><pre>${escapeHtml(stdout)}</pre><h2>stderr</h2><pre>${escapeHtml(stderr)}</pre></main></body></html>`;
+  const currentRegression = regression.currentReplay?.status ? escapeHtml(regression.currentReplay.status) : t("noCurrentTrace");
+  const replacementRegression = regression.replacement?.stored ? t("replacementStored") : t("noReplacementTrace");
+  const pageTitleKey = report.outcome === "PASSED" ? "pagePassed" : "pageFailed";
+  const serializedCopy = JSON.stringify(copy).replaceAll("<", "\\u003c");
+  return `<!doctype html><html lang="zh-CN" data-locale="zh" data-theme="dark"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width"><title>${escapeHtml(copy.zh[pageTitleKey])}</title><script>(()=>{const p=new URLSearchParams(location.search),l=p.get("locale")==="en"?"en":p.get("locale")==="zh"?"zh":navigator.language.toLowerCase().startsWith("en")?"en":"zh",t=p.get("theme")==="light"?"light":"dark",e=document.documentElement;e.lang=l==="en"?"en":"zh-CN";e.dataset.locale=l;e.dataset.theme=t;e.style.colorScheme=t})()</script><style>:root{--bg:#07111e;--surface:#0b1928;--surface-strong:#050b13;--ink:#e8f1ff;--line:#32506f;--line-soft:#253f5c;--accent:#57e3b2;--danger:#ff718d;--muted:#9eb1c7}html[data-theme="light"]{--bg:#f2f6fb;--surface:#fff;--surface-strong:#e8eef6;--ink:#15243a;--line:#a8bfd8;--line-soft:#cfdae7;--accent:#087c65;--danger:#c33857;--muted:#52657a}body{margin:0;background:var(--bg);color:var(--ink);font:16px ui-monospace,monospace}main{max-width:1200px;margin:auto;padding:32px}header,article,figure,table{border:1px solid var(--line)}header{padding:24px;background:var(--surface)}h1{color:${report.outcome === "PASSED" ? "var(--accent)" : "var(--danger)"}}h2{margin-top:40px}.stats,section{display:grid;grid-template-columns:repeat(auto-fit,minmax(240px,1fr));gap:20px;margin-top:24px}.video-grid figure.is-primary{grid-column:1/-1}.image-grid{grid-template-columns:repeat(auto-fit,minmax(360px,1fr))}.stats article{padding:16px;background:var(--surface)}.stats strong,.stats span{display:block}.stats article>span{font-size:28px;color:var(--accent);margin-top:8px}figure{margin:0;padding:12px;background:var(--surface)}img,video{width:100%;height:auto;display:block}figcaption{padding-top:10px;color:var(--muted)}table{width:100%;border-collapse:collapse;background:var(--surface)}th,td{padding:10px;border:1px solid var(--line-soft);text-align:left}pre{white-space:pre-wrap;overflow-wrap:anywhere;background:var(--surface-strong);padding:16px}</style></head><body><main><header><h1>${t(titleKey)}</h1><p>${escapeHtml(report.summary ?? "")}</p><p>${escapeHtml(report.platform ?? "")}</p></header><div class="stats">${stats}</div><h2>${t("requirementCoverage")}</h2><table><thead><tr><th>${t("requirement")}</th><th>${t("status")}</th><th>${t("realInputEvidence")}</th></tr></thead><tbody>${requirementRows || `<tr><td colspan="3">${t("noCoveredRequirements")}</td></tr>`}</tbody></table><h2>${t("deterministicJourneys")}</h2><table><thead><tr><th>${t("journey")}</th><th>${t("step")}</th><th>${t("input")}</th><th>${t("semanticTarget")}</th><th>${t("probeSequence")}</th></tr></thead><tbody>${stepRows || `<tr><td colspan="5">${t("noRealInputSteps")}</td></tr>`}</tbody></table><h2>${t("testAgentPlay")}</h2><table><thead><tr><th>${t("rollout")}</th><th>${t("seed")}</th><th>${t("result")}</th><th>${t("decisions")}</th><th>${t("recoveries")}</th><th>Oracle</th></tr></thead><tbody>${rolloutRows || `<tr><td colspan="6">${t("noAdaptivePlay")}</td></tr>`}</tbody></table><h2>${t("currentRegression")}</h2><table><tbody><tr><th>${t("existingReplay")}</th><td>${currentRegression}</td></tr><tr><th>${t("successfulTrace")}</th><td>${replacementRegression}</td></tr></tbody></table><h2>${t("completeVideos")}</h2><section class="video-grid">${videos || `<p>${t("noVideos")}</p>`}</section><h2>${t("screenshotsAndDiffs")}</h2><section class="image-grid">${images.join("")}</section><h2>${t("structuredResult")}</h2><pre>${escapeHtml(JSON.stringify(report, null, 2))}</pre><h2>stdout</h2><pre>${escapeHtml(stdout)}</pre><h2>stderr</h2><pre>${escapeHtml(stderr)}</pre></main><script>(()=>{const copy=${serializedCopy},l=document.documentElement.dataset.locale||"zh",t=copy[l];document.title=t.${pageTitleKey};for(const node of document.querySelectorAll("[data-i18n]")){const value=t[node.dataset.i18n];if(value)node.textContent=value}})()</script></body></html>`;
 }
 
 async function regularFiles(root, maximumBytes = Number.MAX_SAFE_INTEGER) {

@@ -316,6 +316,11 @@ html[data-theme="light"] .product-delivery-config-toggle-icon {
   background: rgba(8, 127, 167, .1);
 }
 
+html[data-theme="light"] .product-delivery-material-group > legend {
+  background: #ffffff;
+  color: #075f7c;
+}
+
 html[data-theme="light"] :is(
   .project-tools-menu > div,
   .workspace-dropdown,
@@ -329,7 +334,8 @@ html[data-theme="light"] :is(
   .product-document-sidebar,
   .product-delivery-pipeline-header,
   .product-iteration-selector select,
-  .product-delivery-async-node,
+  .product-delivery-material-group,
+  .product-delivery-material-disclosure,
   .product-delivery-stage-marker,
   .product-delivery-stage-rerun-icon,
   .product-delivery-stage-artifacts button,
@@ -344,8 +350,12 @@ html[data-theme="light"] :is(
   .conversation-box-message p,
   .conversation-box-composer,
   .asset-manifest-status,
+  .asset-manifest-filter,
+  .asset-items-empty,
   .asset-item,
-  .asset-prompt-box
+  .asset-prompt-box,
+  .asset-source-preview,
+  .asset-source-thumbnail
 ) {
   background: #f5f8fb;
   border-color: #c5d1dd;
@@ -370,9 +380,14 @@ html[data-theme="light"] :is(
   .workspace-option.is-selected,
   .project-conversation-history button:hover,
   .project-conversation-history button.is-active,
-  .product-delivery-async-node:hover,
-  .product-delivery-async-node.is-expanded,
+  .product-delivery-material-disclosure:hover,
+  .product-delivery-material-disclosure:focus-visible,
   .product-delivery-stage-rerun-icon:hover,
+  .asset-source-preview:hover,
+  .asset-source-preview:focus-visible,
+  .asset-manifest-filter:hover,
+  .asset-manifest-filter:focus-visible,
+  .asset-manifest-filter.is-active,
   .product-delivery-configuration[open] > summary,
   .conversation-box-options button:hover,
   .conversation-box-options button:focus-visible
@@ -403,6 +418,18 @@ html[data-theme="light"] :is(
   background: #ffffff;
   border-color: #aebdcd;
   color: #17212d;
+}
+
+html[data-theme="light"] .asset-manifest-filter.complete.is-active {
+  background: #e5f5ee;
+  border-color: #74b99c;
+  color: #126645;
+}
+
+html[data-theme="light"] .asset-manifest-filter.failed.is-active {
+  background: #fff0f2;
+  border-color: #df9aa5;
+  color: #a42f41;
 }
 
 html[data-theme="light"] :is(
@@ -480,7 +507,8 @@ html[data-theme="light"] :is(
   .product-release-approval,
   .conversation-box-applied,
   .asset-item-uploaded .asset-status,
-  .asset-item-generated .asset-status
+  .asset-item-generated .asset-status,
+  .asset-item-existing .asset-status
 ) {
   background: #e5f5ee;
   border-color: #92c9b4;

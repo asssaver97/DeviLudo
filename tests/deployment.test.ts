@@ -871,7 +871,7 @@ test("Core product surfaces use their fixed local workspace without an identity 
   assert.doesNotMatch(projects, /这里只展示当前账号|PostgreSQL 工作区|CORE 工作流已绑定|隔离命名空间/);
 });
 
-test("asset generation is an asynchronous panel rather than a delivery stage", async () => {
+test("image assets are a branched visual stage backed by asynchronous generation", async () => {
   const studio = await readFile(new URL("../components/ProjectStudio.tsx", import.meta.url), "utf8");
   const panel = await readFile(new URL("../components/AssetManifestPanel.tsx", import.meta.url), "utf8");
   const assetSettings = await readFile(new URL("../components/AssetAutoGenerationSetting.tsx", import.meta.url), "utf8");
@@ -882,7 +882,13 @@ test("asset generation is an asynchronous panel rather than a delivery stage", a
   assert.deepEqual([...pipeline.matchAll(/\["([A-Z0-9_]+)"/g)].map(match => match[1]), [
     "AGENT_GENERATION", "ARTIFACT_BUILD", "E2E_TEST", "STEAM_PUBLISH",
   ]);
-  assert.match(studio, /<AssetManifestPanel onRerunStarted=\{\(\) => void loadProject\(true\)\} projectId=\{projectId\} refreshKey=\{assetManifestRefreshKey\} \/>/);
+  assert.match(studio, /className="product-delivery-material-branch"/);
+  assert.match(studio, /className="product-delivery-material-group"/);
+  assert.match(studio, /product-delivery-material-stage status-/);
+  assert.match(studio, /text\("美术", "ART"\)/);
+  assert.match(studio, /text\("音乐", "MUSIC"\)/);
+  assert.match(studio, /asset-manifest\/generate-missing/);
+  assert.match(studio, /<AssetManifestPanel onManifestChange=\{setAssetManifestView\} onOpenSourceImage=\{openSourceImage\}/);
   // Uploaded assets only reach the game through a build, so the panel's rebuild
   // is an ARTIFACT_BUILD rerun rather than a bespoke endpoint.
   assert.match(panel, /\/api\/projects\/\$\{projectId\}\/rerun-stage/);
@@ -910,7 +916,7 @@ test("image assets gate the first build and Steam upload remains an explicit loc
   const scheduler = await readFile(new URL("../services/core/src/scheduler.ts", import.meta.url), "utf8");
   assert.match(sql, /state = 'ASSET_GENERATING'/);
   assert.match(sql, /CREATE OR REPLACE FUNCTION deviludo\.advance_asset_workflows/);
-  assert.match(sql, /item\.status NOT IN \('generated', 'uploaded'\)/);
+  assert.match(sql, /item\.status NOT IN \('generated', 'uploaded', 'existing'\)/);
   assert.match(scheduler, /advanceReadyWorkflows\(\)/);
   assert.match(sql, /snapshot_artifact_build_assets/);
   assert.match(repository, /kind: "ASSET", assetKey, bucket, key,[\s\S]*sha256: sha256 as ObjectReference/);
@@ -943,8 +949,9 @@ test("auto-generate never removes the user's own way to supply an asset", async 
   // Hiding upload while auto-generate was on was a trap: an asset whose prompt the
   // provider kept rejecting had no way forward, and a user holding the art had to
   // turn a setting off to use it. Only an in-flight generation hides it, because
-  // that write would race the generator.
-  assert.match(panel, /\{item\.status !== "generating" && \(/);
+  // that write would race the generator. A source-discovered file is already
+  // supplied and is shown with its real source path instead of a duplicate upload.
+  assert.match(panel, /\{item\.status !== "generating" && item\.status !== "existing" && \(/);
   assert.doesNotMatch(panel, /item\.status === "planned" && !autoGenerateEnabled/);
   // Policy now lives in the prominent delivery settings instead of being hidden
   // behind the asset-list disclosure. Every disabled state still explains itself.
@@ -959,19 +966,37 @@ test("auto-generate never removes the user's own way to supply an asset", async 
   assert.match(panel, /const generationOutstanding = autoGenerateEnabled/);
   assert.match(panel, /if \(!generationOutstanding\) return;/);
   // A red failure count with no next step is a dead end; say what to do.
-  assert.match(panel, /可以直接在下方上传自备素材，或重跑 Agent 生成以重新规划提示词/);
+  assert.match(panel, /点击上方美术节点的重跑按钮，只补齐缺失素材/);
 });
 
 test("expanded image assets stay in a bounded scrolling list with one immediate picker", async () => {
-  const [panel, styles] = await Promise.all([
+  const [panel, studio, styles, core, bridge] = await Promise.all([
     readFile(new URL("../components/AssetManifestPanel.tsx", import.meta.url), "utf8"),
+    readFile(new URL("../components/ProjectStudio.tsx", import.meta.url), "utf8"),
     readFile(new URL("../app/asset-manifest.css", import.meta.url), "utf8"),
+    readFile(new URL("../services/core/src/api.ts", import.meta.url), "utf8"),
+    readFile(new URL("../scripts/local-git-import-server.mjs", import.meta.url), "utf8"),
   ]);
   assert.match(styles, /\.asset-items-list\s*\{[\s\S]*max-height:[\s\S]*overflow-y: auto/);
   assert.match(styles, /overscroll-behavior: contain/);
   assert.equal([...panel.matchAll(/type="file"/g)].length, 1);
   assert.match(panel, /uploadInputRef\.current\.click\(\)/);
   assert.match(panel, /aria-label=\{text\("图片素材列表", "Image asset list"\)\}[\s\S]*role="region"[\s\S]*tabIndex=\{0\}/);
+  assert.match(panel, /type AssetListFilter = "all" \| "complete" \| "generating" \| "failed"/);
+  assert.match(panel, /assetFilter === "complete"[\s\S]*\["existing", "generated", "uploaded"\]\.includes\(item\.status\)/);
+  assert.match(panel, /aria-pressed=\{assetFilter === "all"\}[\s\S]*setAssetFilter\("all"\)/);
+  assert.match(panel, /aria-pressed=\{assetFilter === "complete"\}[\s\S]*setAssetFilter\("complete"\)/);
+  assert.match(panel, /aria-pressed=\{assetFilter === "generating"\}[\s\S]*setAssetFilter\("generating"\)/);
+  assert.match(panel, /\{filteredItems\.map\(item => \(/);
+  assert.match(styles, /\.asset-manifest-filter\.is-active \{[\s\S]*border-color: var\(--blue\)/);
+  assert.match(panel, /className="asset-source-preview"[\s\S]*<SourceAssetThumbnail/);
+  assert.match(panel, /sourceImageUrl\(projectId, sourcePath\)/);
+  assert.match(studio, /fetch\(`\$\{bridgeUrl\}\/directory\/file\/open`/);
+  assert.match(core, /"\/v1\/projects\/:projectId\/source-image"/);
+  assert.match(core, /projectSources\.readImage/);
+  assert.match(core, /content-security-policy", "sandbox; default-src 'none'/);
+  assert.match(bridge, /async function openBoundProjectFile/);
+  assert.match(bridge, /execute\("\/usr\/bin\/open", \[canonical\]/);
 });
 
 test("all self-hosted artifacts open through the verified host bridge", async () => {
@@ -982,11 +1007,14 @@ test("all self-hosted artifacts open through the verified host bridge", async ()
   ]);
   assert.match(studio, /const opensOnHost = true/);
   assert.match(studio, /fetch\(`\$\{bridgeUrl\}\/artifact\/open`/);
+  assert.match(studio, /locale,[\s\S]*theme: document\.documentElement\.dataset\.theme/);
   assert.match(studio, /text\("打开", "OPEN"\)/);
   assert.match(bridge, /"E2E_REPORT"/);
   assert.match(bridge, /"PROJECT_DOCUMENT"/);
   assert.match(bridge, /if \(!BUILD_ARTIFACT_KINDS\.has\(kind\)\)[\s\S]*\/usr\/bin\/open/);
   assert.match(bridge, /sourceUrl\.origin !== artifactOrigin\.origin/);
+  assert.match(bridge, /reportUrl\.searchParams\.set\("locale", locale\)/);
+  assert.match(bridge, /reportUrl\.searchParams\.set\("theme", theme\)/);
   assert.match(bridge, /received !== expectedSize[\s\S]*hash\.digest\("hex"\)/);
   assert.match(bridge, /execute\("\/usr\/bin\/open", \[app\]/);
   assert.match(bridge, /assertSafeArchiveEntries/);
@@ -1191,39 +1219,22 @@ test("project delivery is a top horizontal pipeline without the game specificati
   assert.match(styles, /\.product-delivery-stage\.status-pending/);
 });
 
-test("the async asset branch is anchored to its stage, not placed by a guessed offset", async () => {
+test("asset generation branches between Agent and build into matching Art and Music nodes", async () => {
   const studio = await readFile(new URL("../components/ProjectStudio.tsx", import.meta.url), "utf8");
   const styles = await readFile(new URL("../app/product.css", import.meta.url), "utf8");
-  // The branch used to be a sibling of the track positioned at `calc(8.333% + 18px)`
-  // — one twelfth of the canvas, chosen to look like the first of six stages. That
-  // is wrong the moment anything changes: the fraction is of the padded canvas, the
-  // track carries a min-width so it stops tracking the percentage once the panel
-  // scrolls, and adding or reordering a stage silently moves the anchor. It now
-  // renders inside the AGENT_GENERATION cell, which is also the stage that actually
-  // plans the manifest.
-  assert.match(studio, /kind === "AGENT_GENERATION" \? \(\s*<div className="product-delivery-async-branch">/);
-  assert.doesNotMatch(styles, /8\.333%/);
-  const branch = styles.match(/^\.product-delivery-async-branch \{([\s\S]*?)\n\}/m)?.[1] ?? "";
-  assert.match(branch, /top: 100%/);
-  assert.match(branch, /left: 50%/);
-  assert.match(branch, /transform: translateX\(-50%\)/);
-  // Capped by the stage's own width, so the branch cannot spill under a neighbour
-  // however narrow the track gets.
-  assert.match(branch, /width: min\(190px, 100%\)/);
-  // Absolute positioning contributes no height, so the track has to reserve the
-  // room or the branch overlaps whatever follows the pipeline.
-  assert.match(styles, /^\.product-delivery-track \{[\s\S]*?margin: 0 0 88px;/m);
-  // The branch inherits --stage-line from the stage, so it is themed by the same
-  // status that colours the node it hangs from instead of a hardcoded grey.
-  assert.match(styles, /\.product-delivery-branch-line \{[\s\S]*?border-left: 2px dashed var\(--stage-line\)/);
-  assert.match(styles, /\.product-delivery-async-node \{[\s\S]*?border: 2px solid var\(--stage-line\)/);
-  // A disclosure needs a disclosure glyph: the cycle icon means "run again" and is
-  // already the rerun affordance on every stage in this same track.
-  assert.match(studio, /<ArrowIcon aria-hidden="true" className="product-delivery-async-chevron"/);
-  assert.match(styles, /\.product-delivery-async-node\.is-expanded \.product-delivery-async-chevron \{[\s\S]*?transform: rotate\(-90deg\)/);
-  // aria-expanded is the state a screen reader announces, and the visible label has
-  // to agree with it rather than always inviting the user to open.
-  assert.match(studio, /aria-expanded=\{assetPanelExpanded\}/);
-  assert.match(studio, /assetPanelExpanded\s*\?\s*text\("收起素材清单", "Hide asset list"\)/);
-  assert.match(styles, /\.product-delivery-async-node:focus-visible \{[\s\S]*?outline: 2px solid var\(--blue\)/);
+  const assetStyles = await readFile(new URL("../app/asset-manifest.css", import.meta.url), "utf8");
+  assert.match(studio, /<div className="product-delivery-material-branch">[\s\S]*<fieldset className="product-delivery-material-group">/);
+  assert.match(studio, /product-delivery-material-stages[\s\S]*text\("美术", "ART"\)[\s\S]*text\("音乐", "MUSIC"\)/);
+  assert.doesNotMatch(studio, /product-delivery-async-branch/);
+  assert.doesNotMatch(styles, /product-delivery-async-branch|8\.333%/);
+  assert.match(styles, /\.product-delivery-material-branch \{[\s\S]*grid-template-columns: repeat\(5/);
+  assert.match(studio, /data-stage-kind=\{kind\}[\s\S]*kind === "AGENT_GENERATION"[\s\S]*product-delivery-material-junction/);
+  assert.match(styles, /\.product-delivery-stage\[data-stage-kind="AGENT_GENERATION"\]::before \{[\s\S]*bottom: -50px;[\s\S]*right: 0;/);
+  assert.match(styles, /\.product-delivery-material-group \{[\s\S]*border: 2px dashed[\s\S]*grid-column: 2 \/ 4/);
+  assert.match(styles, /\.product-delivery-material-stages \{[\s\S]*grid-template-columns: repeat\(2/);
+  assert.match(studio, /aria-expanded=\{!viewingHistoricalIteration && assetPanelExpanded\}/);
+  assert.match(studio, /重新运行美术素材节点，只补齐未生成图片/);
+  assert.match(studio, /className="product-delivery-stage-rerun-icon"[\s\S]*<RerunIcon \/>/);
+  assert.match(assetStyles, /\.asset-source-preview \{[\s\S]*grid-template-columns: 72px/);
+  assert.match(assetStyles, /\.asset-source-thumbnail img \{[\s\S]*object-fit: contain/);
 });

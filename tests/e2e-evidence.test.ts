@@ -134,7 +134,13 @@ describe("E2E evidence", () => {
       const html = await readFile(validated.indexPath, "utf8");
       assert.match(html, /data:image\/png;base64/);
       assert.match(html, /Test Agent 自适应游玩与 Oracle/);
+      assert.match(html, /Test Agent Adaptive Play & Oracles/);
       assert.match(html, /当前回归轨迹/);
+      assert.match(html, /Current Regression Trace/);
+      assert.match(html, /完整游戏视频/);
+      assert.match(html, /Complete Gameplay Videos/);
+      assert.match(html, /data-i18n="completeVideos"/);
+      assert.match(html, /p\.get\("locale"\)===\"en\"/);
       assert.ok((validated.manifest.files as unknown[]).length >= 5);
     } finally { await rm(directory, { recursive: true, force: true }); }
   });

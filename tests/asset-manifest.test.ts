@@ -67,6 +67,25 @@ describe("Asset manifest validation", () => {
     assert.ok(validateAssetItem(item));
   });
 
+  it("requires existing source images to use a safe project-relative path", () => {
+    const item = {
+      id: "item-1",
+      manifestId: "manifest-1",
+      assetKey: "portraits/hero",
+      assetType: "sprite",
+      description: "Existing hero portrait",
+      status: "existing",
+      sourcePath: "assets/portraits/hero.png",
+      createdAt: "2024-01-01T00:00:00Z",
+      updatedAt: "2024-01-01T00:00:00Z",
+    };
+    assert.equal(validateAssetItem(item), true);
+    assert.equal(validateAssetItem({ ...item, sourcePath: "../hero.png" }), false);
+    assert.equal(validateAssetItem({ ...item, sourcePath: "/tmp/hero.png" }), false);
+    assert.equal(validateAssetItem({ ...item, sourcePath: undefined }), false);
+    assert.equal(validateAssetItem({ ...item, status: "planned" }), false);
+  });
+
   it("rejects invalid asset type", () => {
     const item = {
       id: "item-1",
@@ -133,6 +152,7 @@ describe("Asset manifest validation", () => {
         assetType: "sprite",
         description: "Test asset",
         status,
+        ...(status === "existing" ? { sourcePath: "assets/test/asset.png" } : {}),
         createdAt: "2024-01-01T00:00:00Z",
         updatedAt: "2024-01-01T00:00:00Z",
       };
@@ -212,6 +232,7 @@ function itemRow(overrides: Partial<Record<string, unknown>> = {}) {
     frame_count: "4",
     dimensions: "32x32",
     status: "planned",
+    source_path: null,
     object_key: null,
     error_message: null,
     created_at: "2024-01-01T00:00:00Z",
@@ -267,6 +288,16 @@ describe("Asset manifest store", () => {
     assert.deepEqual(view?.completion, { total: 1, uploaded: 1, failed: 0, complete: true });
   });
 
+  it("counts images discovered in the published source as complete", async () => {
+    const { database } = fakeDatabase(call => call.text.includes("asset_manifests")
+      ? { rows: [{ ...manifestRow, auto_generate_enabled: true }] }
+      : { rows: [itemRow({ status: "existing", source_path: "assets/portraits/hero.png", generation_prompt: null })] });
+    const view = await new AssetManifestStore(database).read(workspaceId, projectId);
+    assert.equal(view?.manifest.status, "complete");
+    assert.equal(view?.items[0].sourcePath, "assets/portraits/hero.png");
+    assert.deepEqual(view?.completion, { total: 1, uploaded: 1, failed: 0, complete: true });
+  });
+
   it("treats a project with no manifest as empty rather than an error", async () => {
     const { database, calls } = fakeDatabase(() => ({ rows: [] }));
     assert.equal(await new AssetManifestStore(database).read(workspaceId, projectId), null);
@@ -280,6 +311,23 @@ describe("Asset manifest store", () => {
     assert.deepEqual(found.calls[0].values, [projectId, true]);
     const missing = fakeDatabase(() => ({ rows: [], rowCount: 0 }));
     assert.equal(await new AssetManifestStore(missing.database).setAutoGenerate(workspaceId, projectId, true), false);
+  });
+
+  it("requeues only failed image work and preserves supplied images", async () => {
+    let call = 0;
+    const { database, calls } = fakeDatabase(() => {
+      call += 1;
+      if (call === 1) return { rows: [{ id: manifestId }], rowCount: 1 };
+      if (call === 2) return { rows: [], rowCount: 2 };
+      return { rows: [{ count: "3" }] };
+    });
+    assert.deepEqual(await new AssetManifestStore(database).retryMissing(workspaceId, projectId), {
+      queued: 2,
+      remaining: 3,
+    });
+    assert.match(calls[0].text, /auto_generate_enabled = true/);
+    assert.match(calls[1].text, /status = 'planned'[\s\S]*status = 'failed'/);
+    assert.doesNotMatch(calls[1].text, /existing|generated|uploaded/);
   });
 
   it("attaches an upload with the object metadata the schema requires together", async () => {

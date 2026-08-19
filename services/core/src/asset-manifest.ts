@@ -4,6 +4,8 @@
 // gate between Agent completion and artifact build. Every workspace-scoped query
 // here runs inside `withWorkspace` so the tables' forced row-level security applies.
 
+import { createHash } from "node:crypto";
+import type { PoolClient } from "pg";
 import type { Database } from "./database";
 import type {
   AssetItem,
@@ -31,6 +33,7 @@ type AssetItemRow = Readonly<{
   frame_count: string | null;
   dimensions: string | null;
   status: string;
+  source_path: string | null;
   object_key: string | null;
   error_message: string | null;
   created_at: string;
@@ -40,7 +43,7 @@ type AssetItemRow = Readonly<{
 const MANIFEST_COLUMNS = `id::text, workspace_id::text, project_id::text,
         auto_generate_enabled, planned_at::text`;
 const ITEM_COLUMNS = `id::text, manifest_id::text, asset_key, asset_type, description,
-        generation_prompt, frame_count::text, dimensions, status,
+        generation_prompt, frame_count::text, dimensions, status, source_path,
         object_key, error_message, created_at::text, updated_at::text`;
 
 export type AssetCompletion = Readonly<{
@@ -94,6 +97,7 @@ function itemFromRow(row: AssetItemRow): AssetItem {
     ...(row.frame_count ? { frameCount: Number(row.frame_count) } : {}),
     ...(row.dimensions ? { dimensions: row.dimensions } : {}),
     status: row.status as AssetItemStatus,
+    ...(row.source_path ? { sourcePath: row.source_path } : {}),
     ...(row.object_key ? { objectKey: row.object_key } : {}),
     ...(row.error_message ? { errorMessage: row.error_message } : {}),
     createdAt: row.created_at,
@@ -107,13 +111,13 @@ function itemFromRow(row: AssetItemRow): AssetItem {
  */
 function manifestStatus(items: readonly AssetItem[]): AssetManifestStatus {
   if (items.length === 0) return "planning";
-  const settled = items.filter(item => item.status === "generated" || item.status === "uploaded");
+  const settled = items.filter(item => ["generated", "uploaded", "existing"].includes(item.status));
   if (settled.length === items.length) return "complete";
   return settled.length > 0 ? "partial" : "ready";
 }
 
 function completionOf(items: readonly AssetItem[]): AssetCompletion {
-  const uploaded = items.filter(item => item.status === "generated" || item.status === "uploaded").length;
+  const uploaded = items.filter(item => ["generated", "uploaded", "existing"].includes(item.status)).length;
   return Object.freeze({
     total: items.length,
     uploaded,
@@ -173,6 +177,128 @@ export class AssetManifestStore {
         [projectId, enabled],
       );
       return (result.rowCount ?? 0) > 0;
+    });
+  }
+
+  /**
+   * Requeue only unresolved image work. Existing source images and already
+   * generated/uploaded objects are deliberately untouched.
+   */
+  async retryMissing(workspaceId: string, projectId: string): Promise<Readonly<{ queued: number; remaining: number }> | null> {
+    return this.database.withWorkspace(workspaceId, async client => {
+      const manifest = await client.query<{ id: string }>(
+        `UPDATE deviludo.asset_manifests
+            SET auto_generate_enabled = true, updated_at = clock_timestamp()
+          WHERE project_id = $1::uuid
+        RETURNING id::text`,
+        [projectId],
+      );
+      const manifestId = manifest.rows[0]?.id;
+      if (!manifestId) return null;
+      const retried = await client.query(
+        `UPDATE deviludo.asset_items
+            SET status = 'planned', generation_attempt = 0,
+                generation_lease_expires_at = NULL, error_message = NULL,
+                updated_at = clock_timestamp()
+          WHERE manifest_id = $1::uuid AND status = 'failed'`,
+        [manifestId],
+      );
+      const remaining = await client.query<{ count: string }>(
+        `SELECT count(*)::text AS count
+           FROM deviludo.asset_items
+          WHERE manifest_id = $1::uuid
+            AND status IN ('planned', 'generating', 'failed')`,
+        [manifestId],
+      );
+      return Object.freeze({
+        queued: retried.rowCount ?? 0,
+        remaining: Number(remaining.rows[0]?.count ?? 0),
+      });
+    });
+  }
+
+  /**
+   * Backfill existing projects from their immutable current source revision.
+   * The operation is idempotent: after the first read it performs one inventory
+   * query and no row writes until the source revision changes.
+   */
+  async synchronizeSourceImages(input: Readonly<{
+    workspaceId: string;
+    projectId: string;
+    workflowId: string;
+    sourcePaths: readonly string[];
+  }>): Promise<number> {
+    return this.database.withWorkspace(input.workspaceId, async client => {
+      const manifest = await client.query<{ id: string }>(
+        `INSERT INTO deviludo.asset_manifests(
+           workspace_id, project_id, workflow_id, auto_generate_enabled
+         ) VALUES ($1::uuid, $2::uuid, $3::uuid, false)
+         ON CONFLICT (workspace_id, project_id) DO UPDATE
+           SET updated_at = deviludo.asset_manifests.updated_at
+         RETURNING id::text`,
+        [input.workspaceId, input.projectId, input.workflowId],
+      );
+      const manifestId = manifest.rows[0]?.id;
+      if (!manifestId) return 0;
+      const rows = await client.query<AssetItemRow>(
+        `SELECT ${ITEM_COLUMNS}
+           FROM deviludo.asset_items
+          WHERE manifest_id = $1::uuid
+          ORDER BY asset_key`,
+        [manifestId],
+      );
+      const items = rows.rows.map(itemFromRow);
+      const normalized = input.sourcePaths
+        .filter(path => safeSourceImagePath(path))
+        .slice(0, 500)
+        .map(sourcePath => ({ sourcePath, strippedPath: sourcePath.replace(/\.(?:png|jpe?g|webp|svg)$/i, "") }));
+      const baseCounts = new Map<string, number>();
+      for (const source of normalized) {
+        const basename = source.strippedPath.split("/").at(-1) ?? source.strippedPath;
+        baseCounts.set(basename, (baseCounts.get(basename) ?? 0) + 1);
+      }
+      const occupied = new Set(items.map(item => item.assetKey));
+      let changed = 0;
+      for (const source of normalized) {
+        const aliases = sourceImageAliases(source.strippedPath);
+        const basename = source.strippedPath.split("/").at(-1) ?? source.strippedPath;
+        const candidates = items.filter(item => !["generated", "uploaded"].includes(item.status)
+          && (aliases.has(item.assetKey)
+            || (item.assetKey.split("/").at(-1) === basename && baseCounts.get(basename) === 1)));
+        const matched = candidates.length === 1 ? candidates[0] : null;
+        if (matched) {
+          if (matched.status !== "existing" || matched.sourcePath !== source.sourcePath) {
+            const result = await client.query(
+              `UPDATE deviludo.asset_items
+                  SET status = 'existing', source_path = $2,
+                      bucket = NULL, object_key = NULL, sha256 = NULL, size_bytes = NULL,
+                      error_message = NULL, generation_attempt = 0,
+                      generation_lease_expires_at = NULL, updated_at = clock_timestamp()
+                WHERE manifest_id = $1::uuid AND id = $3::uuid`,
+              [manifestId, source.sourcePath, matched.id],
+            );
+            changed += result.rowCount ?? 0;
+          }
+          continue;
+        }
+        const assetKey = sourceInventoryKey(source.strippedPath);
+        if (occupied.has(assetKey)) continue;
+        const result = await client.query(
+          `INSERT INTO deviludo.asset_items(
+             workspace_id, manifest_id, asset_key, asset_type, description,
+             generation_prompt, status, source_path
+           ) VALUES (
+             $1::uuid, $2::uuid, $3, $4, $5, $6, 'existing', $7
+           ) ON CONFLICT (workspace_id, manifest_id, asset_key) DO NOTHING`,
+          [input.workspaceId, manifestId, assetKey, inferSourceAssetType(source.sourcePath),
+            `Existing project image: ${source.sourcePath}`,
+            `Recreate the existing game image at ${source.sourcePath} while preserving its current visual role and style.`,
+            source.sourcePath],
+        );
+        occupied.add(assetKey);
+        changed += result.rowCount ?? 0;
+      }
+      return changed;
     });
   }
 
@@ -266,7 +392,7 @@ export class AssetManifestStore {
         // overwriting the file the user chose.
         `UPDATE deviludo.asset_items item
             SET status = 'uploaded', bucket = $3, object_key = $4, sha256 = $5,
-                size_bytes = $6, error_message = NULL,
+                size_bytes = $6, source_path = NULL, error_message = NULL,
                 generation_lease_expires_at = NULL, updated_at = clock_timestamp()
           WHERE item.asset_key = $2
             AND item.manifest_id = (
@@ -279,4 +405,78 @@ export class AssetManifestStore {
       return result.rows[0] ? itemFromRow(result.rows[0]) : null;
     });
   }
+}
+
+/**
+ * Reconcile the executor's deterministic source scan in the same transaction
+ * that registers Agent completion. This prevents a scheduler tick from leasing
+ * an image that is already present in the just-published source tree.
+ */
+export async function reconcileExistingSourceAssets(
+  client: PoolClient,
+  workspaceId: string,
+  projectId: string,
+  value: unknown,
+): Promise<number> {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return 0;
+  const items = (value as { items?: unknown }).items;
+  if (!Array.isArray(items)) return 0;
+  const existing = items.filter((item): item is Record<string, unknown> => Boolean(
+    item && typeof item === "object" && !Array.isArray(item)
+      && item.status === "existing"
+      && typeof item.assetKey === "string"
+      && typeof item.sourcePath === "string",
+  ));
+  let reconciled = 0;
+  for (const item of existing) {
+    const result = await client.query(
+      `UPDATE deviludo.asset_items asset
+          SET status = 'existing', source_path = $3,
+              bucket = NULL, object_key = NULL, sha256 = NULL, size_bytes = NULL,
+              error_message = NULL, generation_attempt = 0,
+              generation_lease_expires_at = NULL, updated_at = clock_timestamp()
+        WHERE asset.workspace_id = $1::uuid
+          AND asset.asset_key = $2
+          AND asset.manifest_id = (
+            SELECT id FROM deviludo.asset_manifests
+             WHERE workspace_id = $1::uuid AND project_id = $4::uuid
+          )`,
+      [workspaceId, item.assetKey, item.sourcePath, projectId],
+    );
+    reconciled += result.rowCount ?? 0;
+  }
+  if (reconciled !== existing.length) {
+    throw new Error("Existing source image inventory did not match the registered asset manifest");
+  }
+  return reconciled;
+}
+
+function safeSourceImagePath(value: string): boolean {
+  return value.length >= 5 && value.length <= 500
+    && /\.(?:png|jpe?g|webp|svg)$/i.test(value)
+    && !value.startsWith("/") && !/(^|\/)\.{1,2}(\/|$)|\/\//.test(value);
+}
+
+function sourceImageAliases(strippedPath: string): ReadonlySet<string> {
+  const aliases = new Set([strippedPath]);
+  for (const prefix of ["assets/generated/", "assets/", "art/", "images/"]) {
+    if (strippedPath.startsWith(prefix)) aliases.add(strippedPath.slice(prefix.length));
+  }
+  return aliases;
+}
+
+function sourceInventoryKey(strippedPath: string): string {
+  if (strippedPath.length <= 200 && /^[A-Za-z0-9][A-Za-z0-9._/-]{0,199}$/.test(strippedPath)
+    && !/(^|\/)\.{1,2}(\/|$)|\/\//.test(strippedPath) && !strippedPath.endsWith("/")) return strippedPath;
+  return `existing/${createHash("sha256").update(strippedPath).digest("hex").slice(0, 32)}`;
+}
+
+function inferSourceAssetType(sourcePath: string): AssetType {
+  const path = sourcePath.toLowerCase();
+  if (/(^|[\/_-])(tile|tileset)/.test(path)) return "tileset";
+  if (/(^|[\/_-])(background|backdrop|bg)([\/_-]|\.)/.test(path)) return "background";
+  if (/(^|[\/_-])(icon|favicon)([\/_-]|\.)/.test(path)) return "icon";
+  if (/(^|[\/_-])(ui|hud|button|panel|menu)([\/_-]|\.)/.test(path)) return "ui";
+  if (/(^|[\/_-])(animation|anim|sheet)([\/_-]|\.)/.test(path)) return "animation";
+  return "sprite";
 }

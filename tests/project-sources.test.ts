@@ -38,6 +38,48 @@ test("persistent source revisions are immutable, deterministic, and project-scop
   }
 });
 
+test("published source image inventory detects game art and excludes generated caches", async () => {
+  const root = await mkdtemp(join(tmpdir(), "deviludo-source-images-"));
+  try {
+    const store = new ProjectSourceStore(root);
+    const source = await store.publishFiles({
+      workspaceId,
+      projectId,
+      revision: 1,
+      files: [
+        { path: "project.godot", bytes: Buffer.from("[application]\n") },
+        { path: "assets/backgrounds/menu.PNG", bytes: Buffer.from("png") },
+        { path: "art/portraits/hero.webp", bytes: Buffer.from("webp") },
+        { path: "ui/icons/play.svg", bytes: Buffer.from("<svg/>") },
+        { path: "screenshots/checkpoint.jpeg", bytes: Buffer.from("jpeg") },
+        { path: ".godot/imported/cache.png", bytes: Buffer.from("cache") },
+        { path: ".deviludo-e2e/baselines/menu.png", bytes: Buffer.from("baseline") },
+        { path: "dist/export-cover.png", bytes: Buffer.from("build") },
+        { path: "notes/image.txt", bytes: Buffer.from("not an image") },
+      ],
+    });
+    assert.deepEqual(await store.listImagePaths(source.relativePath), [
+      "art/portraits/hero.webp",
+      "assets/backgrounds/menu.PNG",
+      "screenshots/checkpoint.jpeg",
+      "ui/icons/play.svg",
+    ]);
+    assert.strictEqual(
+      await store.listImagePaths(source.relativePath),
+      await store.listImagePaths(source.relativePath),
+      "immutable revision inventories should be cached",
+    );
+    const image = await store.readImage(source.relativePath, "assets/backgrounds/menu.PNG");
+    assert.equal(image.contentType, "image/png");
+    assert.deepEqual(image.bytes, Buffer.from("png"));
+    await assert.rejects(store.readImage(source.relativePath, "../outside.png"), /路径|path/i);
+    await assert.rejects(store.readImage(source.relativePath, "notes/image.txt"), /image path/i);
+    await assert.rejects(store.readImage(source.relativePath, ".godot/imported/cache.png"), /image path/i);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test("persistent source publication rejects credentials, traversal, and symlinked path components", async () => {
   const root = await mkdtemp(join(tmpdir(), "deviludo-sources-boundary-"));
   try {

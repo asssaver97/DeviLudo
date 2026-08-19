@@ -23,8 +23,19 @@ export type SourceCheckpoint = Readonly<{
   localDirectoryBaseDigest: string | null;
 }>;
 
+export type SourceImageFile = Readonly<{
+  bytes: Buffer;
+  contentType: "image/png" | "image/jpeg" | "image/webp" | "image/svg+xml";
+}>;
+
+const SOURCE_IMAGE_IGNORED_DIRECTORIES = new Set([
+  ".git", ".godot", ".deviludo-export", ".deviludo-e2e", ".deviludo-e2e-package",
+  "node_modules", "build", "dist", "coverage",
+]);
+
 export class ProjectSourceStore {
   private readonly root: string;
+  private readonly imagePathCache = new Map<string, readonly string[]>();
 
   constructor(root: string) {
     this.root = resolve(root);
@@ -99,6 +110,55 @@ export class ProjectSourceStore {
       fileCount: files.length,
       totalBytes: sumBytes(files),
     });
+  }
+
+  /** Immutable revisions make their image inventory safe to cache by path. */
+  async listImagePaths(relativePath: string): Promise<readonly string[]> {
+    const cached = this.imagePathCache.get(relativePath);
+    if (cached) return cached;
+    const directory = resolve(this.root, relativePath);
+    assertWithin(this.root, directory);
+    const rootInfo = await lstat(directory);
+    if (!rootInfo.isDirectory() || rootInfo.isSymbolicLink()) throw new Error("Source revision directory is invalid");
+    const paths: string[] = [];
+    const visit = async (current: string): Promise<void> => {
+      const entries = await readdir(current, { withFileTypes: true });
+      entries.sort((left, right) => left.name.localeCompare(right.name));
+      for (const entry of entries) {
+        if (entry.isSymbolicLink()) continue;
+        const path = resolve(current, entry.name);
+        assertWithin(directory, path);
+        if (entry.isDirectory()) {
+          if (!SOURCE_IMAGE_IGNORED_DIRECTORIES.has(entry.name)) {
+            await visit(path);
+          }
+        } else if (entry.isFile() && /\.(?:png|jpe?g|webp|svg)$/i.test(entry.name)) {
+          paths.push(relative(directory, path).split(sep).join("/"));
+        }
+      }
+    };
+    await visit(directory);
+    const result = Object.freeze(paths);
+    this.imagePathCache.set(relativePath, result);
+    return result;
+  }
+
+  /** Read one inventory image without exposing the source revision directory. */
+  async readImage(relativePath: string, sourcePath: string): Promise<SourceImageFile> {
+    const directory = resolve(this.root, relativePath);
+    assertWithin(this.root, directory);
+    const normalized = normalizeProjectPath(sourcePath);
+    const contentType = sourceImageContentType(normalized);
+    if (!contentType || normalized.split("/").some(segment => SOURCE_IMAGE_IGNORED_DIRECTORIES.has(segment))) {
+      throw new Error("Source image path is invalid");
+    }
+    const path = resolve(directory, normalized);
+    assertWithin(directory, path);
+    const info = await lstat(path);
+    if (!info.isFile() || info.isSymbolicLink() || info.size < 1 || info.size > 32 * 1024 * 1024) {
+      throw new Error("Source image is invalid");
+    }
+    return Object.freeze({ bytes: await readFile(path), contentType });
   }
 
   async publishDirectory(input: Readonly<{
@@ -302,6 +362,15 @@ function sourceDigest(files: readonly SourceFile[]): string {
 
 function sumBytes(files: readonly SourceFile[]): number {
   return files.reduce((total, file) => total + file.bytes.length, 0);
+}
+
+function sourceImageContentType(path: string): SourceImageFile["contentType"] | null {
+  const extension = path.split(".").at(-1)?.toLowerCase();
+  if (extension === "png") return "image/png";
+  if (extension === "jpg" || extension === "jpeg") return "image/jpeg";
+  if (extension === "webp") return "image/webp";
+  if (extension === "svg") return "image/svg+xml";
+  return null;
 }
 
 function checkpointDetails(

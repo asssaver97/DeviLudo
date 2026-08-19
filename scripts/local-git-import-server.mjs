@@ -14,7 +14,7 @@ import {
 import { createServer } from "node:http";
 import { homedir } from "node:os";
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { promisify } from "node:util";
 import sourceArchive from "../lib/product/source-archive.ts";
 import projectImport from "../services/core/src/project-import.ts";
@@ -82,6 +82,7 @@ const server = createServer(async (request, response) => {
       "/github/clone",
       "/directory/git/status",
       "/directory/git/branch",
+      "/directory/file/open",
       "/artifact/open",
     ].includes(request.url ?? "")) {
       sendJson(response, 404, { code: "NOT_FOUND", message: "本地项目接口不存在" }, cors);
@@ -102,6 +103,10 @@ const server = createServer(async (request, response) => {
         const binding = await requireBinding(body.bindingId);
         const branchName = requestedGitBranch(body.branchName);
         sendJson(response, 200, await createGitBranch(binding.path, branchName), cors);
+        return;
+      }
+      if (request.url === "/directory/file/open") {
+        sendJson(response, 200, await openBoundProjectFile(body), cors);
         return;
       }
       if (request.url === "/artifact/open") {
@@ -276,6 +281,8 @@ async function openLocalArtifact(body) {
   const filename = typeof body.filename === "string" ? body.filename : "";
   const expectedSha256 = typeof body.sha256 === "string" ? body.sha256 : "";
   const expectedSize = Number(body.sizeBytes);
+  const locale = body.locale === "en" ? "en" : body.locale === "zh" ? "zh" : "";
+  const theme = body.theme === "light" ? "light" : body.theme === "dark" ? "dark" : "";
   let sourceUrl;
   try { sourceUrl = new URL(typeof body.url === "string" ? body.url : ""); }
   catch { throw failure("INVALID_ARTIFACT_OPEN_REQUEST", "制品打开地址无效"); }
@@ -286,6 +293,7 @@ async function openLocalArtifact(body) {
     || !/^[A-Za-z0-9._-]{1,180}$/.test(filename)
     || !/^sha256:[0-9a-f]{64}$/.test(expectedSha256)
     || !Number.isSafeInteger(expectedSize) || expectedSize < 1
+    || !locale || !theme
     || sourceUrl.origin !== artifactOrigin.origin || sourceUrl.username || sourceUrl.password) {
     throw failure("INVALID_ARTIFACT_OPEN_REQUEST", "制品打开请求无效");
   }
@@ -295,7 +303,7 @@ async function openLocalArtifact(body) {
   const cached = await readFile(metadataPath, "utf8").then(JSON.parse).catch(() => null);
   if (cached?.sha256 === expectedSha256 && cached?.kind === kind
     && cached?.targetPlatform === targetPlatform && cached?.filename === filename) {
-    try { return await launchLocalArtifact(destination, kind, targetPlatform, filename); }
+    try { return await launchLocalArtifact(destination, kind, targetPlatform, filename, locale, theme); }
     catch { await rm(destination, { recursive: true, force: true }); }
   }
 
@@ -343,7 +351,7 @@ async function openLocalArtifact(body) {
     await writeFile(join(staging, "artifact.json"), `${JSON.stringify({ sha256: expectedSha256, kind, targetPlatform, filename })}\n`, { mode: 0o600 });
     await rm(destination, { recursive: true, force: true });
     await rename(staging, destination);
-    return launchLocalArtifact(destination, kind, targetPlatform, filename);
+    return launchLocalArtifact(destination, kind, targetPlatform, filename, locale, theme);
   } catch (error) {
     await rm(staging, { recursive: true, force: true });
     if ([
@@ -360,6 +368,28 @@ async function openLocalArtifact(body) {
   }
 }
 
+async function openBoundProjectFile(body) {
+  if (process.platform !== "darwin") {
+    throw failure("SOURCE_FILE_OPEN_UNAVAILABLE", "本地源码文件直接打开目前仅支持 macOS");
+  }
+  const binding = await requireBinding(body.bindingId);
+  let projectPath;
+  try { projectPath = normalizeProjectPath(body.path); }
+  catch { throw failure("INVALID_SOURCE_FILE", "源码文件路径无效"); }
+  if (!/\.(?:png|jpe?g|webp|svg)$/i.test(projectPath)) {
+    throw failure("INVALID_SOURCE_FILE", "只能打开项目中的图片素材");
+  }
+  const root = await realpath(binding.path);
+  const candidate = resolve(root, projectPath);
+  if (!candidate.startsWith(`${root}${sep}`)) throw failure("INVALID_SOURCE_FILE", "源码文件路径无效");
+  const info = await lstat(candidate).catch(() => null);
+  if (!info?.isFile() || info.isSymbolicLink()) throw failure("SOURCE_FILE_NOT_FOUND", "源码图片已不存在");
+  const canonical = await realpath(candidate);
+  if (!canonical.startsWith(`${root}${sep}`)) throw failure("INVALID_SOURCE_FILE", "源码文件超出项目目录");
+  await execute("/usr/bin/open", [canonical], { timeout: 30_000, maxBuffer: 64 * 1024 });
+  return Object.freeze({ opened: true, action: "OPENED" });
+}
+
 function assertSafeArchiveEntries(value) {
   const unsafe = value.split("\n").map(entry => entry.trim()).filter(Boolean).some(entry => {
     const normalized = entry.replace(/^\.\//, "");
@@ -368,12 +398,20 @@ function assertSafeArchiveEntries(value) {
   if (unsafe) throw failure("UNSAFE_ARTIFACT_ARCHIVE", "制品压缩包包含不安全路径，已停止打开");
 }
 
-async function launchLocalArtifact(destination, kind, targetPlatform, filename) {
+async function launchLocalArtifact(destination, kind, targetPlatform, filename, locale, theme) {
   if (!BUILD_ARTIFACT_KINDS.has(kind)) {
     const target = kind === "E2E_REPORT" && filename.toLowerCase().endsWith(".zip")
       ? join(destination, "e2e-report/index.html")
       : join(destination, filename);
-    await execute("/usr/bin/open", [target], { timeout: 30_000, maxBuffer: 64 * 1024 });
+    const openTarget = kind === "E2E_REPORT"
+      ? (() => {
+          const reportUrl = pathToFileURL(target);
+          reportUrl.searchParams.set("locale", locale);
+          reportUrl.searchParams.set("theme", theme);
+          return reportUrl.href;
+        })()
+      : target;
+    await execute("/usr/bin/open", [openTarget], { timeout: 30_000, maxBuffer: 64 * 1024 });
     return Object.freeze({ opened: true, action: "OPENED" });
   }
   const content = join(destination, "content");
@@ -743,6 +781,9 @@ function importFailure(error) {
     LOCAL_DIRECTORY_DELETE_FAILED: 500,
     DIRECTORY_PICKER_UNAVAILABLE: 501,
     ARTIFACT_OPEN_UNAVAILABLE: 501,
+    SOURCE_FILE_OPEN_UNAVAILABLE: 501,
+    INVALID_SOURCE_FILE: 422,
+    SOURCE_FILE_NOT_FOUND: 404,
     UNSAFE_ARTIFACT_ARCHIVE: 422,
   };
   if (code in statusByCode) return { status: statusByCode[code], code, message: error.message };
