@@ -1,9 +1,9 @@
-// Image generation through the selected Agent Provider connection.
+// Image generation through the backend selected by the active Agent runtime.
 //
 // Asset generation deliberately runs outside the delivery chain and outside the
-// sandbox executor: it is a plain HTTP call to a configured provider, the same
-// shape as the design Agent's conversation calls in `product-conversation.ts`.
-// Giving it a job kind would put it back on the serial chain it was taken off.
+// sandbox executor. Claude connections call their compatible Images API; Codex
+// connections invoke the runtime's built-in ImageGen in an isolated CODEX_HOME.
+// Giving either path a job kind would put it back on the serial chain it left.
 
 export type FetchLike = typeof globalThis.fetch;
 
@@ -72,15 +72,15 @@ export function composeImagePrompt(request: AssetGenerationRequest): string {
  * The selected connection uses the OpenAI-compatible image endpoint. Request a
  * standard generation aspect and let the game's importer handle final sizing.
  */
-function imageSize(dimensions: string | null): "1024x1024" | "1792x1024" | "1024x1792" {
+function imageSize(dimensions: string | null): "1024x1024" | "1536x1024" | "1024x1536" {
   const match = dimensions?.match(/^(\d{1,5})x(\d{1,5})$/);
   if (!match) return "1024x1024";
   const width = Number(match[1]);
   const height = Number(match[2]);
   if (!width || !height) return "1024x1024";
   const ratio = width / height;
-  if (ratio >= 1.5) return "1792x1024";
-  if (ratio <= 1 / 1.5) return "1024x1792";
+  if (ratio >= 1.5) return "1536x1024";
+  if (ratio <= 1 / 1.5) return "1024x1536";
   return "1024x1024";
 }
 
@@ -129,7 +129,6 @@ async function generateWithSelectedConnection(
       prompt,
       n: 1,
       size: imageSize(request.dimensions),
-      response_format: "b64_json",
     }),
     signal: providerSignal(),
   });
@@ -137,7 +136,7 @@ async function generateWithSelectedConnection(
   const body = await response.json() as { data?: readonly { b64_json?: unknown }[] };
   const encoded = body.data?.[0]?.b64_json;
   if (typeof encoded !== "string" || !encoded) throw new Error("图片生成未返回图像数据");
-  return decodeBase64Image(encoded);
+  return validateGeneratedImage(Buffer.from(encoded, "base64"));
 }
 
 /**
@@ -147,8 +146,7 @@ async function generateWithSelectedConnection(
  * provider returning an HTML error page in the image field would otherwise be
  * stored as a PNG and reach the game as a corrupt texture.
  */
-function decodeBase64Image(encoded: string): GeneratedImage {
-  const content = Buffer.from(encoded, "base64");
+export function validateGeneratedImage(content: Buffer): GeneratedImage {
   if (content.length < 1) throw new Error("图片生成返回的图像为空");
   if (content.length > MAX_GENERATED_IMAGE_BYTES) throw new Error("生成的图片超出大小上限");
   const contentType = sniffContentType(content);

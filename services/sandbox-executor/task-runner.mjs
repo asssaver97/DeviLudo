@@ -1052,7 +1052,12 @@ async function runGenerationAgent(configuration, environment, prompt, onOutput, 
   // continuations inside this container so an outer database retry does not
   // destroy the Claude session and repeat the project scan from scratch. All
   // calls still share the single 80-minute deadline above.
-  for (let attempt = 1; attempt <= 4; attempt += 1) {
+  // Provider outages must not burn the database retry budget in under a
+  // minute. Keep the resumable worktree alive for the Agent's existing
+  // 80-minute budget and back off inside this task container. Non-provider
+  // failures retain their small, purpose-specific retry limits below.
+  const maxProviderAttempts = 16;
+  for (let attempt = 1; attempt <= maxProviderAttempts; attempt += 1) {
     const resumedClaude = configuration.runtime === "CLAUDE_CODE" && attempt > 1;
     const continuation = attempt === 1 ? prompt : resumedClaude
       ? resumeInstruction
@@ -1065,7 +1070,7 @@ async function runGenerationAgent(configuration, environment, prompt, onOutput, 
     const executable = configuration.runtime === "CLAUDE_CODE" ? "claude" : "codex";
     const arguments_ = configuration.runtime === "CLAUDE_CODE"
       ? claudeGenerationArguments(configuration, continuation, jobId, resumedClaude)
-      : codexArguments(configuration.model);
+      : codexArguments(configuration.environment.DEVILUDO_CODEX_MODEL ?? configuration.model);
     try {
       const remaining = deadline - Date.now();
       if (remaining <= 0) throw new Error("Agent deadline exceeded after 80 minutes");
@@ -1134,7 +1139,7 @@ async function runGenerationAgent(configuration, environment, prompt, onOutput, 
       const maxAttemptsForFailure = failure.code === "INCOMPLETE_OUTPUT"
         ? 4
         : failure.code === "GUIDANCE_PENDING" ? 3
-        : failure.code === "PROVIDER_ERROR" ? 4 : 2;
+        : failure.code === "PROVIDER_ERROR" ? maxProviderAttempts : 2;
       if (attempt >= maxAttemptsForFailure || !failure.recoverable) {
         throw new Error(`Agent generation failed [${failure.code}]: ${failure.detail}`);
       }
@@ -1161,7 +1166,12 @@ async function runGenerationAgent(configuration, environment, prompt, onOutput, 
       } else if (failure.code === "INCOMPLETE_OUTPUT") {
         resumeInstruction = "Resume from the current session and files now. Your previous response stopped before changing any source files. Make the smallest concrete source change required by the latest player guidance or reported E2E failure. For normal development, update only the directly affected automated tests and manifest mapping; for an E2E repair, preserve valid tests and manifests unless the report proves they are wrong. Run one bounded validation pass, then finish. Do not repeat the project audit or merely describe the next step.";
       }
-      const delaySeconds = ["TEST_MANIFEST_INVALID", "GUIDANCE_PENDING"].includes(failure.code) ? 0 : agentRetryDelaySeconds(failure);
+      const delaySeconds = ["TEST_MANIFEST_INVALID", "GUIDANCE_PENDING"].includes(failure.code)
+        ? 0
+        : agentRetryDelaySeconds(failure, attempt);
+      if (Date.now() + delaySeconds * 1_000 >= deadline) {
+        throw new Error(`Agent generation failed [DEADLINE_EXCEEDED]: Provider did not recover before the shared 80-minute deadline; last failure: ${failure.detail}`);
+      }
       const nextAttempt = attempt + 1;
       emitProgress("PHASE", failure.code === "GUIDANCE_PENDING"
         ? "执行期间收到新的实时指导；旧范围结果已拒绝，正在同一会话按最新范围继续"
@@ -1203,6 +1213,15 @@ function classifyAgentFailure(error) {
   if (/(?:codex_models_manager|failed to refresh available models)[\s\S]*\b403\b/i.test(detail)) {
     return { code: "PROVIDER_ERROR", detail, recoverable: true };
   }
+  // ChatGPT account authentication errors are concise API diagnostics. A
+  // reverse proxy/CDN block instead arrives as an HTML 403 (often with a
+  // Cloudflare Ray ID). That is an infrastructure routing failure, not an
+  // invalid user credential, and should recover in place without consuming a
+  // fresh database job attempt.
+  if (/\b403\b/i.test(detail)
+    && /(?:<html|<!doctype html|cloudflare|cf-ray|sorry, you have been blocked)/i.test(detail)) {
+    return { code: "PROVIDER_ERROR", detail, recoverable: true };
+  }
   if (/\b(?:401|403)\b|invalid api key|authentication|unauthorized|forbidden/i.test(detail)) {
     return { code: "AUTH_ERROR", detail, recoverable: false };
   }
@@ -1219,13 +1238,21 @@ function classifyAgentFailure(error) {
   return { code: "CLI_ERROR", detail, recoverable: false };
 }
 
-function agentRetryDelaySeconds(failure) {
+function agentRetryDelaySeconds(failure, attempt = 1) {
   if (failure.code !== "PROVIDER_ERROR") return 5;
   // Provider memory pressure typically survives an immediate retry. Preserve
   // the resumable session and give the gateway enough time to shed work instead
   // of consuming the second model call against the same overload window.
-  if (/memory overloaded|memory pressure|capacity|overload/i.test(failure.detail)) return 60;
-  return 15;
+  if (/memory overloaded|memory pressure|capacity|overload/i.test(failure.detail)) {
+    return Math.min(120, 30 * Math.max(1, attempt));
+  }
+  // HTML 403s from the edge are unlikely to clear in a few seconds. Other
+  // transport failures start faster, then converge on the same five-minute
+  // ceiling. The shared Agent deadline remains the hard upper bound.
+  const base = /(?:<html|<!doctype html|cloudflare|cf-ray|sorry, you have been blocked)/i.test(failure.detail)
+    ? 30
+    : 15;
+  return Math.min(300, base * (2 ** Math.min(4, Math.max(0, attempt - 1))));
 }
 
 async function projectTreeDigest(root) {
@@ -1315,7 +1342,7 @@ async function runConfiguredAgent(configuration, apiKey, prompt) {
   await mkdir(environment.CODEX_HOME, { recursive: true });
   validateCodexAuth(apiKey);
   await writeFile(`${environment.CODEX_HOME}/auth.json`, apiKey, { mode: 0o600 });
-  return command("codex", codexArguments(configuration.model), environment, prompt);
+  return command("codex", codexArguments(configuration.environment.DEVILUDO_CODEX_MODEL ?? configuration.model), environment, prompt);
 }
 
 function codexArguments(model) {

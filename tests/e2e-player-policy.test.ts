@@ -14,7 +14,7 @@ import type { CodexPromptInput } from "@/services/core/src/codex-cli";
 
 test("E2E node preserves the complete player-policy provider budget", async () => {
   const source = await readFile(new URL("../services/e2e-node/src/core-client.ts", import.meta.url), "utf8");
-  assert.match(source, /path\.includes\("\/player-policy"\) \? 160_000 : 10_000/);
+  assert.match(source, /path\.includes\("\/player-policy"\) \? 480_000 : 10_000/);
 });
 
 test("Core reuses a successful visual capability check for the same settings revision", async () => {
@@ -148,17 +148,20 @@ describe("E2E Test Agent policy", () => {
 
   test("rejects a text-only route during visual preflight", async () => {
     let calls = 0;
+    const inputs: CodexPromptInput[] = [];
     await assert.rejects(verifyE2ePlayerVision({
       runtime: "CODEX_CLI",
       baseUrl: "https://provider.example/v1",
       apiKey: "secret",
       model: "text-only-model",
-      codexRunner: async () => {
+      codexRunner: async input => {
+        inputs.push(input);
         calls += 1;
         return JSON.stringify({ dominant: "UNAVAILABLE" });
       },
     }), (error: unknown) => (error as { code?: string }).code === "PLAYER_POLICY_VISION_UNAVAILABLE");
     assert.equal(calls, 1);
+    assert.equal(inputs[0]?.reasoningEffort, "low");
   });
 
   test("reuses a decision across a clean node retry with different pixels", () => {
@@ -179,6 +182,18 @@ describe("E2E Test Agent policy", () => {
     const parsed = parsePlayerPolicyRequest(request());
     assert.equal(parsed.screenshotSha256, screenshotSha256);
     assert.equal(parsed.history.length, 1);
+    const denseFrame = Buffer.concat([screenshotBytes, Buffer.alloc(1_500_000, 1)]);
+    assert.equal(parsePlayerPolicyRequest({
+      ...request(),
+      screenshotBase64: denseFrame.toString("base64"),
+      screenshotSha256: `sha256:${createHash("sha256").update(denseFrame).digest("hex")}`,
+    }).screenshotSha256, `sha256:${createHash("sha256").update(denseFrame).digest("hex")}`);
+    const oversizedFrame = Buffer.concat([screenshotBytes, Buffer.alloc(4 * 1024 * 1024, 1)]);
+    assert.throws(() => parsePlayerPolicyRequest({
+      ...request(),
+      screenshotBase64: oversizedFrame.toString("base64"),
+      screenshotSha256: `sha256:${createHash("sha256").update(oversizedFrame).digest("hex")}`,
+    }), /invalid/i);
     assert.throws(() => parsePlayerPolicyRequest({ ...request(), screenshotSha256: `sha256:${"0".repeat(64)}` }), /invalid/i);
     assert.throws(() => parsePlayerPolicyRequest({ ...request(), rolloutIndex: 3 }), /invalid/i);
     assert.throws(() => parsePlayerPolicyRequest({ ...request(), decisionIndex: 40 }), /invalid/i);
@@ -269,6 +284,7 @@ describe("E2E Test Agent policy", () => {
       },
     });
     assert.equal(calls.length, 2);
+    assert.ok(calls.every(call => call.reasoningEffort === "low"));
     assert.equal(result.decision.actions[0]?.type, "click");
     assert.equal(result.inputTokens, 0);
     assert.equal(result.outputTokens, 0);
@@ -281,7 +297,8 @@ describe("E2E Test Agent policy", () => {
     assert.match(providerInput, /at least one concrete visual fact/);
     assert.match(providerInput, /Do not repeatedly wait on a rendered, unchanged interface/);
     assert.match(providerInput, /share this one coordinate space/);
-    assert.match(providerInput, /guide lines in the observation appear every 40 pixels/);
+    assert.match(providerInput, /top-left origin of the unmodified observation/);
+    assert.doesNotMatch(providerInput, /guide lines|drawgrid/i);
     assert.match(providerInput, /multiply observed x\/y coordinates by 2/);
     assert.match(providerInput, /approximate left, top, right, and bottom pixel bounds/);
     assert.match(providerInput, /topmost interactive layer/);

@@ -78,7 +78,7 @@ npm run local:bootstrap
 npm run local:up
 ```
 
-打开 [http://127.0.0.1:3100](http://127.0.0.1:3100)，然后在“设置 → Agent 设置”中选择 Claude Code 或宿主机已用官方账号登录的 Codex CLI。可选的图片生成沿用所选 Claude 连接，只配置一个图片模型，不再单独设置 Provider 或凭据。DeviLudo 始终自建运行，没有产品登录。
+打开 [http://127.0.0.1:3100](http://127.0.0.1:3100)，然后在“设置 → Agent 设置”中选择 Claude Code 或宿主机已用官方账号登录的 Codex CLI。图片生成后端会自动跟随运行时：Codex 使用内置 ImageGen（`gpt-image-2`），Claude 使用当前连接兼容的 Images API 和一个显式图片模型；不再单独设置图片 Provider 或凭据。DeviLudo 始终自建运行，没有产品登录。
 
 `local:bootstrap` 会安装缺失的容器工具链。在 Homebrew 安装 Tart 前，请确保 Xcode Command Line Tools 已更新到与当前系统兼容的版本。首次运行 `local:up` 会产生约 25 GB 网络下载，之后保留 OCI 缓存、基础克隆和带指纹的金镜像。Tart 当前实际占用约 90–95 GiB，Docker 镜像和构建缓存另计。脚本中的 35 GiB 检查只是下载基础镜像前的门槛，不是完整本地占用要求。
 

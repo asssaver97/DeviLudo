@@ -811,8 +811,12 @@ function validateAgentConfiguration(configuration: NonNullable<SandboxPlan["agen
       throw new Error("Claude Code environment is invalid");
     }
   } else if (configuration.runtime === "CODEX_CLI") {
+    const executionModel = environment.DEVILUDO_CODEX_MODEL;
     if (configuration.credentialEnvironmentVariable !== "CODEX_AUTH_JSON"
-      || Object.keys(environment).some(key => key !== "DEVILUDO_CODEX_MODEL")) {
+      || Object.keys(environment).some(key => key !== "DEVILUDO_CODEX_MODEL")
+      || typeof executionModel !== "string"
+      || !/^[A-Za-z0-9][A-Za-z0-9._:/-]{0,199}$/.test(executionModel)
+      || (configuration.model !== "account-default" && executionModel !== configuration.model)) {
       throw new Error("Codex environment is invalid");
     }
   } else {

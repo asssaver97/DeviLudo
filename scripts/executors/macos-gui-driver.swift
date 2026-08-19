@@ -151,8 +151,23 @@ func performInputEvent(_ event: [String: Any], window: GameWindow) {
         let mouseButton: CGMouseButton = button == "RIGHT" ? .right : button == "MIDDLE" ? .center : .left
         let down: CGEventType = button == "RIGHT" ? .rightMouseDown : button == "MIDDLE" ? .otherMouseDown : .leftMouseDown
         let up: CGEventType = button == "RIGHT" ? .rightMouseUp : button == "MIDDLE" ? .otherMouseUp : .leftMouseUp
-        let location = CGEvent(source: nil)?.location ?? CGPoint(x: window.bounds.midX, y: window.bounds.midY)
+        let scale = backingScale()
+        let location: CGPoint
+        if let x = event["x"] as? Int, let y = event["y"] as? Int {
+            location = CGPoint(
+                x: window.bounds.midX - 640 / scale + CGFloat(x) / scale,
+                y: window.bounds.maxY - 720 / scale + CGFloat(y) / scale
+            )
+        } else {
+            location = CGEvent(source: nil)?.location ?? CGPoint(x: window.bounds.midX, y: window.bounds.midY)
+        }
         if type != "mouse_up" { CGEvent(mouseEventSource: nil, mouseType: down, mouseCursorPosition: location, mouseButton: mouseButton)?.post(tap: .cghidEventTap) }
+        // Posting down and up in the same scheduler turn is not a physical
+        // click. Godot can observe neither edge when WindowServer coalesces the
+        // pair, leaving the UI probe unchanged even though the target and focus
+        // were correct. Keep explicit down/up events immediate for drag
+        // sequences, but give a complete click a short, human-scale hold.
+        if type == "mouse_click" { Thread.sleep(forTimeInterval: 0.05) }
         if type != "mouse_down" { CGEvent(mouseEventSource: nil, mouseType: up, mouseCursorPosition: location, mouseButton: mouseButton)?.post(tap: .cghidEventTap) }
     } else if type == "scroll" {
         guard let delta = event["deltaY"] as? Int,
@@ -176,6 +191,26 @@ func performInputEvent(_ event: [String: Any], window: GameWindow) {
 }
 
 let command = CommandLine.arguments.dropFirst().first ?? ""
+
+// LaunchServices does not expose the PID through `/usr/bin/open`. Resolve the
+// process through AppKit instead of shelling out to `ps -ax`: full process-list
+// enumeration can block transiently while a freshly cloned Tart guest is still
+// settling, and treating that timeout as an application crash made healthy
+// native launches fail before their first window appeared.
+if command == "find-pid" {
+    let executable = URL(fileURLWithPath: argument("--executable")).standardizedFileURL.path
+    guard executable.hasPrefix("/") else { fail("game executable path is invalid", code: 64) }
+    let application = NSWorkspace.shared.runningApplications
+        .filter { application in
+            application.isTerminated == false
+                && application.executableURL?.standardizedFileURL.path == executable
+        }
+        .max { left, right in
+            (left.launchDate ?? .distantPast) < (right.launchDate ?? .distantPast)
+        }
+    json(["ok": true, "pid": application?.processIdentifier ?? 0, "found": application != nil])
+}
+
 let pid = pid_t(Int32(argument("--pid")) ?? 0)
 guard pid > 1 else { fail("invalid pid", code: 64) }
 

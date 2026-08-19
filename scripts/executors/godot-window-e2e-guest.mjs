@@ -137,10 +137,24 @@ try {
     }
   }
   for (let rolloutIndex = 0; rolloutIndex < ADAPTIVE_ROLLOUT_COUNT; rolloutIndex += 1) {
+    const successes = adaptiveRollouts.filter(rollout => rollout.outcome === "PASSED").length;
+    const remaining = ADAPTIVE_ROLLOUT_COUNT - rolloutIndex;
+    // Stop as soon as the 2-of-3 gate is mathematically unreachable. Running
+    // another visual-model rollout cannot change the verdict and only wastes
+    // provider time while delaying the evidence-driven repair loop.
+    if (successes + remaining < ADAPTIVE_REQUIRED_SUCCESSES) break;
     assertPlatformBudget();
     adaptiveRollouts.push(await runAdaptiveRollout(gamePackage, manifest, rolloutIndex));
   }
   const adaptiveSuccesses = adaptiveRollouts.filter(rollout => rollout.outcome === "PASSED");
+  const visualIntegrityFailure = adaptiveRollouts.find(rollout => rollout.failureCode === "VISUAL_INTEGRITY_DEFECT");
+  if (visualIntegrityFailure) {
+    const decision = visualIntegrityFailure.decisions.find(item => item.screenIntegrity === "PRODUCT_DEFECT");
+    throw productFailure(
+      "VISUAL_INTEGRITY_DEFECT",
+      decision?.screenIntegrityReason || "Test Agent detected an unusable or contradictory game screen",
+    );
+  }
   if (adaptiveSuccesses.length < ADAPTIVE_REQUIRED_SUCCESSES) {
     throw productFailure("ADAPTIVE_PLAYABILITY_FAILED", `Test Agent 仅有 ${adaptiveSuccesses.length}/${ADAPTIVE_ROLLOUT_COUNT} 次完成核心循环`);
   }
@@ -330,6 +344,7 @@ async function executeJourney(gamePackage, journey, runLabel, recordEvidence) {
   const priorInputs = [];
   let previousCheckpoint = null;
   let currentProbe;
+  let executionError = null;
   const journeyStarted = Date.now();
   try {
     await testEnvironment.prepare();
@@ -495,9 +510,9 @@ async function executeJourney(gamePackage, journey, runLabel, recordEvidence) {
       previousCheckpoint = { id: event.id, path: screenshotPath, inputCount: priorInputs.length, probe: currentProbe };
     }
   } catch (error) {
-    if (String(error?.message ?? error).startsWith("INFRASTRUCTURE:")) throw error;
-    if (isProductFailure(error)) throw error;
-    throw productFailure("INPUT_OR_WINDOW_FAILED", error instanceof Error ? error.message : String(error));
+    executionError = String(error?.message ?? error).startsWith("INFRASTRUCTURE:") || isProductFailure(error)
+      ? error
+      : productFailure("INPUT_OR_WINDOW_FAILED", error instanceof Error ? error.message : String(error));
   } finally {
     const video = await testEnvironment.close();
     if (video) videos.push(video);
@@ -511,6 +526,7 @@ async function executeJourney(gamePackage, journey, runLabel, recordEvidence) {
     if (errors.length) failures.push(`GODOT_SCRIPT_ERROR: ${errors[0]}`);
   }
   if (failures.some(failure => failure.startsWith("GODOT_SCRIPT_ERROR"))) throw productFailure("GODOT_SCRIPT_ERROR", failures.at(-1));
+  if (executionError) throw executionError;
   return { captures };
 }
 
@@ -610,14 +626,11 @@ async function runAdaptiveRollout(gamePackage, manifest, rolloutIndex) {
         screenshotPath,
         path => testEnvironment.capture(path),
       );
-      const playerObservationPath = join(workspace, "adaptive-player-observations", `${runId}-${String(decisionIndex).padStart(2, "0")}.png`);
-      await mkdir(dirname(playerObservationPath), { recursive: true });
-      await execute("ffmpeg", [
-        "-nostdin", "-loglevel", "error", "-i", screenshotPath,
-        "-vf", "drawgrid=width=80:height=80:thickness=1:color=cyan@0.45",
-        "-frames:v", "1", "-y", playerObservationPath,
-      ], { timeout: 30_000, maxBuffer: 1024 * 1024 });
-      const screenshotBytes = await readFile(playerObservationPath);
+      // Player-policy vision must see the same unmodified client pixels as a
+      // player. An earlier coordinate grid was mistaken for game UI and could
+      // manufacture lifecycle defects. Core performs the only transformation:
+      // a deterministic half-scale resize that preserves the full frame.
+      const screenshotBytes = await readFile(screenshotPath);
       const playerObservationSha256 = `sha256:${createHash("sha256").update(screenshotBytes).digest("hex")}`;
       const policyRequest = {
         rolloutIndex, decisionIndex, screenshotBase64: screenshotBytes.toString("base64"), screenshotSha256: playerObservationSha256,
@@ -782,8 +795,14 @@ async function solidifyRegression(gamePackage, manifest, successfulRollouts) {
 function compactRegressionActions(decisions) {
   const compacted = [];
   for (const decision of decisions) {
+    // Adaptive exploration deliberately includes harmless probes that do not
+    // advance the game. Replaying those guesses makes a learned regression
+    // depend on incidental hit areas and timing. A regression is evidence of
+    // verified progress, so retain only action blocks whose Probe digest
+    // actually changed (including a bounded wait paired with such a block).
+    if (decision.stateChanged !== true) continue;
     for (const action of decision.semanticActions) {
-      if (action.type === "wait" || !regressionSafeAction(action)) continue;
+      if (!regressionSafeAction(action)) continue;
       const previous = compacted.at(-1);
       if (!previous || JSON.stringify(previous) !== JSON.stringify(action)) compacted.push(action);
     }
@@ -793,13 +812,23 @@ function compactRegressionActions(decisions) {
 
 function regressionSafeAction(action) {
   if (["click", "double_click", "scroll"].includes(action.type)) {
-    return typeof action.targetId === "string" && !Number.isFinite(action.x) && !Number.isFinite(action.y);
+    return typeof action.targetId === "string" && !Number.isFinite(action.x) && !Number.isFinite(action.y)
+      && validRelativePoint(action.relativeX, action.relativeY);
   }
   if (action.type === "drag") {
     return typeof action.fromTargetId === "string" && typeof action.toTargetId === "string"
-      && ![action.fromX, action.fromY, action.toX, action.toY].some(Number.isFinite);
+      && ![action.fromX, action.fromY, action.toX, action.toY].some(Number.isFinite)
+      && validRelativePoint(action.fromRelativeX, action.fromRelativeY)
+      && validRelativePoint(action.toRelativeX, action.toRelativeY);
   }
+  if (action.type === "wait") return Number.isInteger(action.duration_ms) && action.duration_ms >= 1 && action.duration_ms <= 5_000;
   return true;
+}
+
+function validRelativePoint(x, y) {
+  return (x === undefined && y === undefined)
+    || (Number.isInteger(x) && x >= 0 && x <= 10_000
+      && Number.isInteger(y) && y >= 0 && y <= 10_000);
 }
 
 async function replayRegression(gamePackage, trace, replayIndex) {
@@ -813,62 +842,170 @@ async function replayRegression(gamePackage, trace, replayIndex) {
       DEVILUDO_E2E_UI_PROBE_FILE: probePath, DEVILUDO_E2E_SESSION_NONCE: sessionNonce,
     }), runId, trace.inputProfile === "GAMEPAD",
   );
+  let replayMismatch = null;
+  let executionError = null;
   try {
     await testEnvironment.prepare();
     let probe = await waitForProbeSnapshot(probePath, { sessionNonce, pid: launched.pid }, PROBE_TIMEOUT_MS);
     for (const action of trace.actions) {
-      const concrete = materializeRegressionAction(action, probe);
+      // The game can publish its lifecycle snapshot before the first frame has
+      // registered every semantic control. Wait for a fresh Probe instead of
+      // rejecting an otherwise deterministic trace because of this startup or
+      // post-transition race.
+      const ready = await materializeRegressionActionWhenReady(
+        action, probe, probePath, { sessionNonce, pid: launched.pid }, PROBE_TIMEOUT_MS,
+      );
+      probe = ready.probe;
+      const concrete = ready.action;
       await testEnvironment.sequence(policyNativeEvents([concrete]), Math.min(30_000, remainingPlatformBudget()));
       probe = await waitForProbeSnapshot(probePath, { sessionNonce, pid: launched.pid, afterSequence: probe.sequence }, PROBE_TIMEOUT_MS);
     }
     return evaluateProbeAssertions(trace.successAssertions, null, probe).every(assertion => assertion.passed);
+  } catch (error) {
+    executionError = error;
+    // A compacted candidate may legitimately stop matching a clean replay: a
+    // visual click may not map to a unique semantic control, or a later control
+    // may not become available in the same order. That invalidates this
+    // candidate; it does not mean the VM or GUI driver failed. Keep genuine
+    // infrastructure faults fatal so they can use the node retry budget.
+    if (!isRegressionReplayMismatch(error)) throw error;
+    replayMismatch = error;
+    return false;
   } finally {
-    const video = await testEnvironment.close();
-    if (video) videos.push(video);
-    await launched.terminate();
+    // A mismatch can be detected immediately after the first Probe snapshot.
+    // Give the recorder enough time to capture a valid diagnostic clip instead
+    // of letting an expected candidate rejection be overwritten by a
+    // "fewer than two frames" cleanup error.
+    if (replayMismatch) await delay(500);
+    let cleanupError = null;
+    try {
+      const video = await testEnvironment.close();
+      if (video) videos.push(video);
+    } catch (error) {
+      cleanupError = error;
+    } finally {
+      await launched.terminate();
+    }
+    // Preserve the original action/probe result. In particular, an expected
+    // candidate mismatch can finish before the diagnostic recorder has two
+    // frames; that must continue to the next learned candidate rather than be
+    // rewritten as an infrastructure failure by cleanup.
+    if (cleanupError && !executionError) throw cleanupError;
   }
+}
+
+async function materializeRegressionActionWhenReady(action, initialProbe, probePath, identity, timeoutMs) {
+  const deadline = Date.now() + timeoutMs;
+  let probe = initialProbe;
+  let unavailable = null;
+  while (Date.now() < deadline) {
+    try {
+      return { action: materializeRegressionAction(action, probe), probe };
+    } catch (error) {
+      if (!isRegressionTargetUnavailable(error)) throw error;
+      unavailable = error;
+    }
+    const remaining = deadline - Date.now();
+    if (remaining <= 0) break;
+    try {
+      probe = await waitForProbeSnapshot(
+        probePath,
+        { ...identity, afterSequence: probe.sequence },
+        Math.min(1_000, remaining),
+      );
+    } catch {
+      // A single polling interval without a new snapshot is normal while the
+      // native UI settles. Preserve the concrete target error for diagnostics.
+      if (Date.now() >= deadline) break;
+    }
+  }
+  throw unavailable ?? new Error("E2E regression action target did not become ready");
+}
+
+function isRegressionTargetUnavailable(error) {
+  return error instanceof Error
+    && /^E2E control .+ (?:is missing or duplicated|is not visible(?: and enabled)?|is outside the 1280x720 client area)$/.test(error.message);
+}
+
+function isRegressionReplayMismatch(error) {
+  if (!(error instanceof Error) || error.message.startsWith("INFRASTRUCTURE:")) return false;
+  return /^E2E control .+ (?:is missing or duplicated|is not visible(?: and enabled)?|is outside the 1280x720 client area)$/.test(error.message)
+    || error.message.startsWith("E2E UI probe did not publish a fresh valid snapshot:");
 }
 
 function semanticizePolicyActions(actions, probe) {
   return actions.map(action => {
-    const targetAt = (x, y) => resolveProbeControlAtPoint(probe, x, y)?.id ?? null;
+    const targetAt = (x, y) => resolveProbeControlAtPoint(probe, x, y) ?? null;
     if (["click", "double_click", "scroll"].includes(action.type)) {
-      const targetId = targetAt(action.x, action.y);
-      if (!targetId) return action;
+      const target = targetAt(action.x, action.y);
+      if (!target) return action;
       const rest = { ...action };
       delete rest.x;
       delete rest.y;
-      return { ...rest, targetId };
+      return { ...rest, targetId: target.id, ...relativePointForTarget(target, action.x, action.y) };
     }
     if (action.type === "drag") {
-      const fromTargetId = targetAt(action.fromX, action.fromY);
-      const toTargetId = targetAt(action.toX, action.toY);
-      if (!fromTargetId || !toTargetId) return action;
+      const fromTarget = targetAt(action.fromX, action.fromY);
+      const toTarget = targetAt(action.toX, action.toY);
+      if (!fromTarget || !toTarget) return action;
       const rest = { ...action };
       delete rest.fromX;
       delete rest.fromY;
       delete rest.toX;
       delete rest.toY;
-      return { ...rest, fromTargetId, toTargetId };
+      const fromRelative = relativePointForTarget(fromTarget, action.fromX, action.fromY, "from");
+      const toRelative = relativePointForTarget(toTarget, action.toX, action.toY, "to");
+      return { ...rest, fromTargetId: fromTarget.id, toTargetId: toTarget.id, ...fromRelative, ...toRelative };
     }
     return action;
   });
 }
 
+function relativePointForTarget(target, x, y, prefix = "") {
+  const { width, height } = target.rect;
+  // Leaf controls replay more reliably at their current centre. Large canvases,
+  // maps and scrollable surfaces need the original semantic sub-position; an
+  // absolute screen coordinate would be layout-dependent, so persist bounded
+  // basis-point offsets inside the stable target instead.
+  if (width * height < E2E_CLIENT_WIDTH * E2E_CLIENT_HEIGHT * 0.05) return {};
+  const relativeX = Math.max(0, Math.min(10_000, Math.round(((x - target.rect.x) / width) * 10_000)));
+  const relativeY = Math.max(0, Math.min(10_000, Math.round(((y - target.rect.y) / height) * 10_000)));
+  if (!prefix) return { relativeX, relativeY };
+  return { [`${prefix}RelativeX`]: relativeX, [`${prefix}RelativeY`]: relativeY };
+}
+
 function materializeRegressionAction(action, probe) {
   if (action.fromTargetId && action.toTargetId) {
-    const from = resolveProbeControl(probe, action.fromTargetId).center;
-    const to = resolveProbeControl(probe, action.toTargetId).center;
+    const fromResolved = resolveProbeControl(probe, action.fromTargetId);
+    const toResolved = resolveProbeControl(probe, action.toTargetId);
+    const from = materializeRelativePoint(fromResolved, action.fromRelativeX, action.fromRelativeY);
+    const to = materializeRelativePoint(toResolved, action.toRelativeX, action.toRelativeY);
     const rest = { ...action };
     delete rest.fromTargetId;
     delete rest.toTargetId;
+    delete rest.fromRelativeX;
+    delete rest.fromRelativeY;
+    delete rest.toRelativeX;
+    delete rest.toRelativeY;
     return { ...rest, fromX: from.x, fromY: from.y, toX: to.x, toY: to.y };
   }
   if (!action.targetId) return action;
-  const center = resolveProbeControl(probe, action.targetId).center;
+  const resolved = resolveProbeControl(probe, action.targetId);
+  const point = materializeRelativePoint(resolved, action.relativeX, action.relativeY);
   const rest = { ...action };
   delete rest.targetId;
-  return { ...rest, ...center };
+  delete rest.relativeX;
+  delete rest.relativeY;
+  return { ...rest, ...point };
+}
+
+function materializeRelativePoint(resolved, relativeX, relativeY) {
+  if (!Number.isInteger(relativeX) || !Number.isInteger(relativeY)) return resolved.center;
+  const { x, y, width, height } = resolved.control.rect;
+  return {
+    x: Math.max(x, Math.min(x + width - 1, Math.floor(x + width * relativeX / 10_000))),
+    y: Math.max(y, Math.min(y + height - 1, Math.floor(y + height * relativeY / 10_000))),
+  };
 }
 
 function policyNativeEvents(actions) {
@@ -879,8 +1016,8 @@ function policyNativeEvents(actions) {
     if (action.type === "text_input") return [{ type: "text_input", text: action.text, delay_ms: 0 }];
     if (["click", "double_click"].includes(action.type)) return [
       { type: "mouse_move", x: action.x, y: action.y, delay_ms: 0 },
-      { type: "mouse_click", button: "LEFT", delay_ms: 80 },
-      ...(action.type === "double_click" ? [{ type: "mouse_click", button: "LEFT", delay_ms: 80 }] : []),
+      { type: "mouse_click", button: "LEFT", x: action.x, y: action.y, delay_ms: 80 },
+      ...(action.type === "double_click" ? [{ type: "mouse_click", button: "LEFT", x: action.x, y: action.y, delay_ms: 80 }] : []),
     ];
     if (action.type === "scroll") return [{ type: "mouse_move", x: action.x, y: action.y, delay_ms: 0 }, { type: "scroll", deltaY: action.deltaY, delay_ms: 80 }];
     if (action.type === "drag") return [
@@ -921,10 +1058,11 @@ async function requestPlayerPolicyOnce(request) {
   process.stdout.write(`${JSON.stringify({ type: "policy_request", id, request })}\n`);
   const responseLine = await Promise.race([
     policyLines.next(),
-    // The host policy client owns a 160-second Provider budget, including one
-    // structured-output repair. The guest must not exit before that bounded
-    // host request can return its decision or explicit infrastructure error.
-    delay(170_000).then(() => { throw new Error("INFRASTRUCTURE: Test Agent player policy timed out"); }),
+    // Core may make up to six independently bounded Provider calls: transport
+    // recovery, structured repair, and clean image reattachment have separate
+    // budgets. Keep the guest alive for that complete bounded request so it
+    // never retries while the same idempotency lock is still held in Core.
+    delay(490_000).then(() => { throw new Error("INFRASTRUCTURE: Test Agent player policy timed out"); }),
   ]);
   if (responseLine.done) throw new Error("INFRASTRUCTURE: Test Agent player policy relay closed");
   const message = JSON.parse(responseLine.value);
@@ -968,7 +1106,13 @@ function nativeInputEvents(event, snapshot) {
   // A real user cannot press the mouse at the exact same monotonic instant as
   // the cursor teleports, so leave one short dispatch interval before the
   // dependent button, wheel, or text event.
-  const click = (button, delay_ms = 80) => ({ type: "mouse_click", button: button ?? "LEFT", delay_ms });
+  const click = (button, point, delay_ms = 80) => ({
+    type: "mouse_click",
+    button: button ?? "LEFT",
+    x: point.x,
+    y: point.y,
+    delay_ms,
+  });
   switch (event.type) {
     case "key_tap": return [
       { type: "key_press", key: event.key, delay_ms: 0 },
@@ -979,15 +1123,24 @@ function nativeInputEvents(event, snapshot) {
       { type: "wait", delay_ms: event.duration_ms },
       { type: "key_release", key: event.key, delay_ms: 0 },
     ];
-    case "click": return [move(targetCenter(event.targetId)), click(event.button)];
-    case "double_click": return [move(targetCenter(event.targetId)), click(event.button), click(event.button, 80)];
+    case "click": {
+      const point = targetCenter(event.targetId);
+      return [move(point), click(event.button, point)];
+    }
+    case "double_click": {
+      const point = targetCenter(event.targetId);
+      return [move(point), click(event.button, point), click(event.button, point, 80)];
+    }
     case "drag": return [
       move(targetCenter(event.fromTargetId)), { type: "mouse_down", button: "LEFT", delay_ms: 80 },
       { type: "wait", delay_ms: event.duration_ms }, move(targetCenter(event.toTargetId)),
       { type: "mouse_up", button: "LEFT", delay_ms: 80 },
     ];
     case "scroll": return [move(targetCenter(event.targetId)), { type: "scroll", deltaY: event.deltaY, delay_ms: 80 }];
-    case "text_input": return [move(targetCenter(event.targetId)), click("LEFT"), { type: "text_input", text: event.text, delay_ms: 80 }];
+    case "text_input": {
+      const point = targetCenter(event.targetId);
+      return [move(point), click("LEFT", point), { type: "text_input", text: event.text, delay_ms: 80 }];
+    }
     case "gamepad_button_tap": return [{ type: event.type, button: event.button, delay_ms: 0 }];
     case "gamepad_button_hold": return [{ type: event.type, button: event.button, duration_ms: event.duration_ms, delay_ms: 0 }];
     case "gamepad_axis": return [{ type: event.type, axis: event.axis, value: event.value, duration_ms: event.duration_ms ?? 0, delay_ms: 0 }];
@@ -1067,14 +1220,19 @@ async function launchMacosApp(gamePackage, arguments_, environment) {
 
 async function waitForExecutablePid(executable, timeoutMs) {
   const deadline = Date.now() + timeoutMs;
+  let successfulQueries = 0;
+  let lastInfrastructureError = null;
   while (Date.now() < deadline) {
-    const { stdout } = await execute("ps", ["-ax", "-o", "pid=,command="], { timeout: 10_000, maxBuffer: 8 * 1024 * 1024 });
-    for (const line of stdout.split(/\r?\n/)) {
-      const match = line.trim().match(/^(\d+)\s+(.+)$/);
-      if (match && (match[2] === executable || match[2].startsWith(`${executable} `))) return Number(match[1]);
+    try {
+      const result = await driver("find-pid", ["--executable", executable], Math.min(5_000, Math.max(1_000, deadline - Date.now())));
+      successfulQueries += 1;
+      if (Number.isSafeInteger(result.pid) && result.pid > 1 && await processAlive(result.pid)) return result.pid;
+    } catch (error) {
+      lastInfrastructureError = error;
     }
-    await delay(100);
+    await delay(250);
   }
+  if (successfulQueries === 0 && lastInfrastructureError) throw lastInfrastructureError;
   throw productFailure("PACKAGE_LAUNCH_FAILED", "macOS LaunchServices 未启动交付包中的游戏进程");
 }
 
@@ -1310,7 +1468,8 @@ async function driver(command, arguments_, timeout = 30_000) {
     if (!value || value.ok !== true) throw new Error("GUI driver returned an invalid receipt");
     const pidIndex = arguments_.indexOf("--pid");
     const expectedPid = pidIndex >= 0 ? Number(arguments_[pidIndex + 1]) : 0;
-    if (value.pid !== expectedPid || (["wait", "capture"].includes(command)
+    if ((command === "find-pid" ? !Number.isSafeInteger(value.pid) || value.pid < 0 : value.pid !== expectedPid)
+      || (["wait", "capture"].includes(command)
       && (value.width !== E2E_CLIENT_WIDTH || value.height !== E2E_CLIENT_HEIGHT))) {
       throw new Error("GUI driver did not lock the requested PID and 1280x720 client area");
     }

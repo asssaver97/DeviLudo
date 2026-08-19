@@ -9,7 +9,9 @@ test("instance Agent settings persist safely and freeze into workspace jobs", as
       agentRuntime: "CLAUDE_CODE",
       baseUrl: "https://api.anthropic.com",
       primaryModel: "claude-sonnet-4-5",
-      modelOverrides: { design: null, development: null, test: null, image: null },
+      modelOverrides: { design: null, development: null, test: null },
+      imageModel: null,
+      imageGenerationBackend: null,
       apiKeyConfigured: false,
       apiKeyMasked: null,
       apiKeyFingerprint: null,
@@ -45,6 +47,7 @@ test("instance Agent settings persist safely and freeze into workspace jobs", as
           ANTHROPIC_MODEL: "claude-fable-5-max",
         },
       }),
+      imageModel: "gpt-image-1",
     },
   });
   const createdText = await created.text();
@@ -57,6 +60,9 @@ test("instance Agent settings persist safely and freeze into workspace jobs", as
     apiKeyFingerprint: string;
     primaryModel: string;
     modelOverrides: Record<string, string | null>;
+    imageModel: string | null;
+    imageGenerationBackend: "HTTP_IMAGES" | "CODEX_IMAGEGEN" | null;
+    imageGenerationReady: boolean;
     revision: number;
   } };
   expect(createdBody.settings).toMatchObject({
@@ -64,6 +70,9 @@ test("instance Agent settings persist safely and freeze into workspace jobs", as
     baseUrl: "https://api.anthropic.com",
     apiKeyConfigured: true,
     apiKeyMasked: "sk-********cret",
+    imageModel: "gpt-image-1",
+    imageGenerationBackend: "HTTP_IMAGES",
+    imageGenerationReady: true,
     revision: 1,
   });
   expect(createdBody.settings.apiKeyFingerprint).toMatch(/^sha256:[0-9a-f]{12}$/);
@@ -100,7 +109,8 @@ test("instance Agent settings persist safely and freeze into workspace jobs", as
   );
 
   expect(createdBody.settings.primaryModel).toBe("claude-fable-5-max");
-  expect(createdBody.settings.modelOverrides).toEqual({ design: null, development: null, test: null, image: null });
+  expect(createdBody.settings.modelOverrides).toEqual({ design: null, development: null, test: null });
+  expect(createdBody.settings.imageModel).toBe("gpt-image-1");
 
   const rows = await stack.queryRows<{
     agent_runtime: string;

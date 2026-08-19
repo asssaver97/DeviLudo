@@ -8,6 +8,7 @@ import {
   sniffContentType,
 } from "@/services/core/src/image-generation";
 import type { AssetGenerationLease } from "@/services/core/src/asset-manifest";
+import type { StoredInstanceAgentSettings } from "@/services/core/src/repository";
 
 const workspaceId = "10000000-0000-4000-8000-000000000001";
 const projectId = "10000000-0000-4000-8000-000000000002";
@@ -41,12 +42,15 @@ function lease(overrides: Partial<AssetGenerationLease> = {}): AssetGenerationLe
   });
 }
 
-const settings = Object.freeze({
+const settings: StoredInstanceAgentSettings = Object.freeze({
   agentRuntime: "CLAUDE_CODE" as const,
   baseUrl: "https://api.example.com/v1",
   primaryModel: "claude-primary",
-  modelOverrides: Object.freeze({ design: null, development: null, test: null, image: "gpt-image-1" }),
+  modelOverrides: Object.freeze({ design: null, development: null, test: null }),
+  imageModel: "gpt-image-1",
   credentialSecretRef: "vault://instance/agent-runtime/api-key/versions/1",
+  testPolicyReady: false,
+  testPolicyCheckedRevision: null,
   apiKeyMask: "sk-********abcd",
   apiKeyFingerprint: "sha256:0123456789ab",
   credentialVersion: "20000000-0000-4000-8000-000000000009",
@@ -58,9 +62,10 @@ const settings = Object.freeze({
 /** Records what the generator did so the tests can assert the sequence. */
 function harness(options: Readonly<{
   leases?: readonly AssetGenerationLease[];
-  imageSettings?: typeof settings | null;
+  imageSettings?: StoredInstanceAgentSettings | null;
   apiKey?: string | null;
   fetchImpl?: typeof globalThis.fetch;
+  codexImageRunner?: (input: Readonly<{ authJson: string; model: string; prompt: string }>) => Promise<Buffer>;
 }> = {}) {
   const stored: { assetKey: string; extension: string; contentType: string; bytes: number }[] = [];
   const completed: { itemId: string; objectKey: string }[] = [];
@@ -107,6 +112,7 @@ function harness(options: Readonly<{
       readApiKey: async () => options.apiKey === undefined ? "sk-test-key" : options.apiKey,
     },
     fetchImpl: options.fetchImpl,
+    codexImageRunner: options.codexImageRunner,
   };
   return { dependencies: dependencies as never, stored, completed, failures, claims };
 }
@@ -135,9 +141,9 @@ describe("Asset generation batch", () => {
     assert.equal(completed.length, 1);
     assert.match(completed[0].objectKey, /\/assets\/sprites\/player_idle\.png$/);
     assert.deepEqual(failures, []);
-    // The lease has to outlive the slowest provider call or a running generation
-    // gets re-claimed by the next sweep.
-    assert.equal(claims[0].leaseSeconds >= 120, true);
+    // The lease has to outlive the slowest runtime backend or a running
+    // generation gets re-claimed by the next sweep.
+    assert.equal(claims[0].leaseSeconds >= 600, true);
   });
 
   it("does nothing when the selected Agent connection has no image model or credential", async () => {
@@ -150,12 +156,51 @@ describe("Asset generation batch", () => {
     // attempt against a call that can never be made.
     assert.deepEqual(withoutSettings.claims, []);
 
+    const withoutImageModel = harness({
+      leases: [lease()],
+      imageSettings: Object.freeze({ ...settings, imageModel: null }),
+    });
+    assert.deepEqual(
+      await runAssetGenerationBatch(withoutImageModel.dependencies),
+      { claimed: 0, generated: 0, failed: 0 },
+    );
+    assert.deepEqual(withoutImageModel.claims, []);
+
     const withoutKey = harness({ leases: [lease()], apiKey: null });
     assert.deepEqual(
       await runAssetGenerationBatch(withoutKey.dependencies),
       { claimed: 0, generated: 0, failed: 0 },
     );
     assert.deepEqual(withoutKey.claims, []);
+  });
+
+  it("selects Codex built-in ImageGen from the active runtime", async () => {
+    const codexSettings: StoredInstanceAgentSettings = Object.freeze({
+      ...settings,
+      agentRuntime: "CODEX_CLI",
+      baseUrl: "https://chatgpt.com",
+      primaryModel: "gpt-5.6-sol",
+      imageModel: null,
+      apiKeyMask: "cod********json",
+    });
+    const observed: Array<{ authJson: string; model: string; prompt: string }> = [];
+    const { dependencies, completed, claims } = harness({
+      leases: [lease()],
+      imageSettings: codexSettings,
+      apiKey: JSON.stringify({ tokens: { access_token: "test-token" } }),
+      codexImageRunner: async input => {
+        observed.push(input);
+        return PNG;
+      },
+    });
+    assert.deepEqual(await runAssetGenerationBatch(dependencies), {
+      claimed: 1, generated: 1, failed: 0,
+    });
+    assert.equal(completed.length, 1);
+    assert.equal(claims[0].batchSize, 1);
+    assert.equal(observed[0].model, "gpt-5.6-sol");
+    assert.match(observed[0].prompt, /pixel art character idle/);
+    assert.match(observed[0].authJson, /test-token/);
   });
 
   it("records a provider failure against the item and keeps going", async () => {
@@ -258,7 +303,7 @@ describe("Image generation provider calls", () => {
     await generateAssetImage(target, { ...request, dimensions: "32x32" }, fetchImpl);
     await generateAssetImage(target, { ...request, dimensions: "1920x1080" }, fetchImpl);
     await generateAssetImage(target, { ...request, dimensions: "512x1024" }, fetchImpl);
-    assert.deepEqual(requested, ["1024x1024", "1792x1024", "1024x1792"]);
+    assert.deepEqual(requested, ["1024x1024", "1536x1024", "1024x1536"]);
   });
 
   it("requires the selected connection to return image bytes inline", async () => {

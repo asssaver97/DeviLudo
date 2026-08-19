@@ -8,22 +8,25 @@
 
 import type { AgentSecretStore } from "./agent-settings";
 import type { AssetGenerationLease } from "./asset-manifest";
+import { runCodexImage, type CodexImageRunner } from "./codex-cli";
 import {
+  composeImagePrompt,
   generateAssetImage,
   generatedImageExtension,
+  validateGeneratedImage,
   type FetchLike,
+  type GeneratedImage,
   type ImageGenerationTarget,
 } from "./image-generation";
 import type { CoreObjectStore } from "./object-store";
 import type { CoreRepository } from "./repository";
-import { resolveAgentModel } from "./agent-settings";
 
 /**
- * The lease has to outlive the slowest provider call, or a still-running
- * generation gets re-claimed by the next tick. Provider calls are bounded at
- * 120s, so this leaves room for the object-store write on top.
+ * The lease has to outlive the slowest runtime backend, or a still-running
+ * generation gets re-claimed by the next tick. It covers the five-minute Codex
+ * turn plus validation and the object-store write.
  */
-const LEASE_SECONDS = 300;
+const LEASE_SECONDS = 600;
 
 /**
  * Assets are generated a few at a time. The cap is per tick, not per project: a
@@ -37,6 +40,7 @@ export type AssetGenerationDependencies = Readonly<{
   objectStore: CoreObjectStore;
   secrets: AgentSecretStore;
   fetchImpl?: FetchLike;
+  codexImageRunner?: CodexImageRunner;
 }>;
 
 export type AssetGenerationOutcome = Readonly<{
@@ -46,6 +50,16 @@ export type AssetGenerationOutcome = Readonly<{
 }>;
 
 const IDLE: AssetGenerationOutcome = Object.freeze({ claimed: 0, generated: 0, failed: 0 });
+
+type ResolvedImageBackend = Readonly<{
+  kind: "HTTP_IMAGES";
+  target: ImageGenerationTarget;
+}> | Readonly<{
+  kind: "CODEX_IMAGEGEN";
+  authJson: string;
+  model: string;
+  runner: CodexImageRunner;
+}>;
 
 /**
  * Generate one batch of planned assets.
@@ -59,19 +73,26 @@ export async function runAssetGenerationBatch(
   signal?: AbortSignal,
 ): Promise<AssetGenerationOutcome> {
   const { repository, secrets } = dependencies;
-  // Resolve the credential once per batch rather than per asset: it is one
-  // instance-wide setting, and Vault reads are not free.
+  // Resolve the selected runtime's credential once per batch. Claude receives
+  // its Provider API key; Codex receives the official-login JSON already frozen
+  // into the same protected credential store when that runtime was selected.
   const settings = await repository.readAgentSettings();
-  if (!settings || settings.agentRuntime !== "CLAUDE_CODE") return IDLE;
-  const apiKey = await secrets.readApiKey(settings.credentialSecretRef);
-  if (!apiKey) return IDLE;
-  const target: ImageGenerationTarget = Object.freeze({
-    baseUrl: settings.baseUrl,
-    model: resolveAgentModel(settings.primaryModel, settings.modelOverrides, "image"),
-    apiKey,
-  });
+  if (!settings) return IDLE;
+  // Claude has no image backend until an explicit image model is selected. Do
+  // not read Vault on an idle scheduler tick when no generation can start.
+  if (settings.agentRuntime === "CLAUDE_CODE" && !settings.imageModel) return IDLE;
+  const credential = await secrets.readApiKey(settings.credentialSecretRef);
+  if (!credential) return IDLE;
+  const backend = resolveImageBackend(settings, credential, dependencies.codexImageRunner ?? runCodexImage);
+  if (!backend) return IDLE;
 
-  const leases = await repository.assets.claimGeneration(LEASE_SECONDS, BATCH_SIZE);
+  // A Codex ImageGen turn includes model orchestration as well as rendering, so
+  // claim one item at a time. HTTP image endpoints can safely retain the wider
+  // batch without letting unstarted Codex leases expire in the queue.
+  const leases = await repository.assets.claimGeneration(
+    LEASE_SECONDS,
+    backend.kind === "CODEX_IMAGEGEN" ? 1 : BATCH_SIZE,
+  );
   if (leases.length === 0) return IDLE;
 
   let generated = 0;
@@ -80,28 +101,56 @@ export async function runAssetGenerationBatch(
     // An abort between items leaves the rest leased; their leases expire and the
     // next process picks them up, which is why the lease exists.
     if (signal?.aborted) break;
-    const settled = await generateOne(dependencies, target, lease);
+    const settled = await generateOne(dependencies, backend, lease);
     if (settled) generated += 1;
     else failed += 1;
   }
   return Object.freeze({ claimed: leases.length, generated, failed });
 }
 
+function resolveImageBackend(
+  settings: Awaited<ReturnType<CoreRepository["readAgentSettings"]>>,
+  credential: string,
+  codexImageRunner: CodexImageRunner,
+): ResolvedImageBackend | null {
+  if (!settings) return null;
+  if (settings.agentRuntime === "CODEX_CLI") {
+    return Object.freeze({
+      kind: "CODEX_IMAGEGEN",
+      authJson: credential,
+      model: settings.primaryModel,
+      runner: codexImageRunner,
+    });
+  }
+  if (!settings.imageModel) return null;
+  return Object.freeze({
+    kind: "HTTP_IMAGES",
+    target: Object.freeze({
+      baseUrl: settings.baseUrl,
+      model: settings.imageModel,
+      apiKey: credential,
+    }),
+  });
+}
+
 async function generateOne(
   dependencies: AssetGenerationDependencies,
-  target: ImageGenerationTarget,
+  backend: ResolvedImageBackend,
   lease: AssetGenerationLease,
 ): Promise<boolean> {
   const { repository, objectStore, fetchImpl } = dependencies;
   try {
-    const image = await generateAssetImage(target, {
+    const request = {
       assetKey: lease.assetKey,
       assetType: lease.assetType,
       description: lease.description,
       generationPrompt: lease.generationPrompt,
       dimensions: lease.dimensions,
       frameCount: lease.frameCount,
-    }, fetchImpl);
+    } as const;
+    const image = backend.kind === "HTTP_IMAGES"
+      ? await generateAssetImage(backend.target, request, fetchImpl)
+      : await generateWithCodex(backend, request);
     const extension = generatedImageExtension(image.contentType);
     if (!extension) throw new Error("生成的图片格式不受支持");
     // Store first, then record: an orphaned object is swept with the project,
@@ -143,4 +192,17 @@ async function generateOne(
     }));
     return false;
   }
+}
+
+async function generateWithCodex(
+  backend: Extract<ResolvedImageBackend, { kind: "CODEX_IMAGEGEN" }>,
+  request: Parameters<typeof composeImagePrompt>[0],
+): Promise<GeneratedImage> {
+  const content = await backend.runner({
+    authJson: backend.authJson,
+    model: backend.model,
+    prompt: composeImagePrompt(request),
+    timeoutMs: 300_000,
+  });
+  return validateGeneratedImage(content);
 }

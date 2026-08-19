@@ -5,6 +5,12 @@ import type { AgentRuntimeKind } from "@/lib/product/contracts";
 import { runCodexPrompt, type CodexPromptRunner } from "./codex-cli";
 
 export const PLAYER_POLICY_STATUSES = ["CONTINUE", "GOAL_REACHED", "UNRECOVERABLE"] as const;
+// A lossless 1280x720 PNG can exceed the old 1.3 MiB allowance for visually
+// dense games. Keep one bounded raw frame below 4 MiB; Core validates its PNG
+// header and dimensions, then performs the sole half-scale transform before
+// attaching it to the Test Agent request.
+export const MAX_PLAYER_POLICY_SCREENSHOT_BYTES = 4 * 1024 * 1024;
+export const MAX_PLAYER_POLICY_REQUEST_BYTES = 6 * 1024 * 1024;
 export type PlayerPolicyStatus = typeof PLAYER_POLICY_STATUSES[number];
 
 export type PlayerPolicyAction = Readonly<Record<string, unknown> & { type: string }>;
@@ -100,7 +106,8 @@ export function parsePlayerPolicyRequest(value: unknown): PlayerPolicyRequest {
   const request = value as Record<string, unknown>;
   if (!Number.isInteger(request.rolloutIndex) || Number(request.rolloutIndex) < 0 || Number(request.rolloutIndex) > 2
     || !Number.isInteger(request.decisionIndex) || Number(request.decisionIndex) < 0 || Number(request.decisionIndex) > 39
-    || typeof request.screenshotBase64 !== "string" || request.screenshotBase64.length < 16 || request.screenshotBase64.length > 1_800_000
+    || typeof request.screenshotBase64 !== "string" || request.screenshotBase64.length < 16
+    || request.screenshotBase64.length > Math.ceil(MAX_PLAYER_POLICY_SCREENSHOT_BYTES * 4 / 3) + 4
     || typeof request.screenshotSha256 !== "string" || !/^sha256:[0-9a-f]{64}$/.test(request.screenshotSha256)
     || digestBase64(request.screenshotBase64) !== request.screenshotSha256
     || typeof request.goal !== "string" || request.goal.trim().length < 10 || request.goal.length > 4_000
@@ -189,6 +196,7 @@ export async function generateE2ePlayerDecision(input: Readonly<{
           model: input.model,
           prompt: `${PLAYER_POLICY_SYSTEM}\n\n${prompt}${correction}`,
           imageBase64: providerFrameBase64,
+          reasoningEffort: "low",
           timeoutMs: 75_000,
         }) }), { status: 200, headers: { "content-type": "application/json" } });
     } catch {
@@ -308,6 +316,7 @@ export async function verifyE2ePlayerVision(input: Readonly<{
           model: input.model,
           prompt: `Inspect the attached calibration image; do not infer colors from text.\n\n${VISION_SMOKE_PROMPT}`,
           imageBase64: testCase.png,
+          reasoningEffort: "low",
           timeoutMs: 40_000,
         }) }), { status: 200, headers: { "content-type": "application/json" } });
     } catch {
@@ -407,7 +416,7 @@ function policyPrompt(request: PlayerPolicyRequest): string {
     "Never click through, dismiss, or work around a PRODUCT_DEFECT. Return no actions so the product fails and can be repaired. Only after screenIntegrity is PASS may you identify and operate the topmost interactive layer.",
     "This rollout starts with clean user data. Prefer a visible control that creates a fresh playable session over one that requires an existing save or prior progress.",
     "When a menu, modal, toolbar, or rectangular button is visible and POINTER is allowed, click the relevant visible control. Never send a keyboard key through a blocking overlay.",
-    "Thin cyan guide lines in the observation appear every 40 pixels and correspond to every 80 pixels in the native 1280x720 client. Count from the top-left origin, then multiply observed x/y coordinates by 2 when returning pointer actions.",
+    "Estimate bounds from the top-left origin of the unmodified observation, then multiply observed x/y coordinates by 2 when returning pointer actions.",
     "Before every pointer action, describe the visible target and its approximate left, top, right, and bottom pixel bounds in observation, then place the pointer inside those bounds.",
     "Do not guess SPACE, ENTER, movement keys, or other keyboard controls from the goal or game genre. Use a keyboard action only when the current frame visibly shows that exact key or a clear keyboard hint.",
     "Unreadable or non-English button text does not make the frame unavailable: use the visible control geometry and report its approximate position.",
@@ -558,7 +567,7 @@ function messagesEndpoint(baseUrl: string): string {
 function digestBase64(value: string): string {
   let bytes: Buffer;
   try { bytes = Buffer.from(value, "base64"); } catch { throw invalid("Screenshot encoding is invalid"); }
-  if (bytes.length < 33 || bytes.length > 1_300_000 || bytes.toString("base64").replace(/=+$/, "") !== value.replace(/=+$/, "")
+  if (bytes.length < 33 || bytes.length > MAX_PLAYER_POLICY_SCREENSHOT_BYTES || bytes.toString("base64").replace(/=+$/, "") !== value.replace(/=+$/, "")
     || !bytes.subarray(0, 8).equals(Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]))
     || bytes.toString("ascii", 12, 16) !== "IHDR"
     || bytes.readUInt32BE(16) !== E2E_PLAYER_WIDTH || bytes.readUInt32BE(20) !== E2E_PLAYER_HEIGHT) {

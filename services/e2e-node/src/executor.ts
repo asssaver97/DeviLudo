@@ -350,7 +350,10 @@ async function runExternal(
   return result;
 }
 
-const MAX_E2E_EXECUTOR_PROTOCOL_FRAME_BYTES = 2 * 1024 * 1024;
+// A protocol frame carries one lossless 1280x720 screenshot plus a small
+// bounded history. Limit each line independently so long E2E streams never
+// accumulate in memory while dense game frames remain valid.
+const MAX_E2E_EXECUTOR_PROTOCOL_FRAME_BYTES = 6 * 1024 * 1024;
 
 export function parseE2eExecutorProtocolChunk(
   previous: string,

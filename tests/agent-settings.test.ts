@@ -21,7 +21,8 @@ test("Agent settings accept fixed runtimes and normalize safe provider URLs", ()
     baseUrl: "https://chatgpt.com",
     apiKey: null,
     primaryModel: "account-default",
-    modelOverrides: { design: null, development: null, test: null, image: null },
+    modelOverrides: { design: null, development: null, test: null },
+    imageModel: null,
   });
   assert.throws(() => parseAgentSettingsInput({
     agentRuntime: "CODEX_CLI",
@@ -29,8 +30,20 @@ test("Agent settings accept fixed runtimes and normalize safe provider URLs", ()
   }, "production"), /official ChatGPT login/i);
   assert.throws(() => parseAgentSettingsInput({
     agentRuntime: "CODEX_CLI",
-    modelOverrides: { design: "custom", development: "custom", test: "custom", image: "custom" },
-  }, "production"), /account default model/i);
+    imageModel: "gpt-image-1",
+  }, "production"), /built-in ImageGen/i);
+  assert.deepEqual(parseAgentSettingsInput({
+    agentRuntime: "CODEX_CLI",
+    primaryModel: "gpt-5.6-sol",
+    modelOverrides: { design: "gpt-5.6-terra", development: null, test: "gpt-5.6-luna" },
+  }, "production"), {
+    agentRuntime: "CODEX_CLI",
+    baseUrl: "https://chatgpt.com",
+    apiKey: null,
+    primaryModel: "gpt-5.6-sol",
+    modelOverrides: { design: "gpt-5.6-terra", development: null, test: "gpt-5.6-luna" },
+    imageModel: null,
+  });
   assert.throws(() => parseAgentSettingsInput({
     agentRuntime: "UNKNOWN",
     baseUrl: "https://api.example.com",
@@ -91,7 +104,8 @@ test("Claude settings.json accepts only the supported connection fields", () => 
     baseUrl: "https://gateway.example.com/anthropic",
     apiKey: "sk-gateway-secret",
     primaryModel: "claude-fable-5-max",
-    modelOverrides: { design: null, development: null, test: null, image: null },
+    modelOverrides: { design: null, development: null, test: null },
+    imageModel: null,
   });
   assert.throws(() => parseAgentSettingsInput({
     agentRuntime: "CODEX_CLI",

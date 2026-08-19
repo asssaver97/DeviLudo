@@ -410,7 +410,7 @@ export class CoreRepository {
 
   async readAgentSettings(): Promise<StoredInstanceAgentSettings | null> {
     const result = await this.database.pool.query<AgentSettingsRow>(
-        `SELECT agent_runtime::text, base_url, primary_model, model_overrides, credential_secret_ref,
+        `SELECT agent_runtime::text, base_url, primary_model, model_overrides, image_model, credential_secret_ref,
                 test_policy_ready, test_policy_checked_revision::text,
                 api_key_mask, api_key_fingerprint, credential_version::text, revision::text,
                 updated_by, updated_at::text
@@ -425,6 +425,7 @@ export class CoreRepository {
     baseUrl: string;
     primaryModel: string;
     modelOverrides: AgentModelOverrides;
+    imageModel: string | null;
     credentialSecretRef: string;
     apiKeyMask: string;
     apiKeyFingerprint: string;
@@ -433,16 +434,17 @@ export class CoreRepository {
   }>): Promise<StoredInstanceAgentSettings> {
       const result = await this.database.pool.query<AgentSettingsRow>(
         `INSERT INTO deviludo.instance_agent_settings(
-           singleton, agent_runtime, base_url, primary_model, model_overrides, credential_secret_ref,
+           singleton, agent_runtime, base_url, primary_model, model_overrides, image_model, credential_secret_ref,
            api_key_mask, api_key_fingerprint, credential_version, updated_by
          ) VALUES (
-           true, $1::deviludo.agent_runtime, $2, $3, $4::jsonb, $5, $6, $7, $8::uuid, $9
+           true, $1::deviludo.agent_runtime, $2, $3, $4::jsonb, $5, $6, $7, $8, $9::uuid, $10
          )
          ON CONFLICT (singleton) DO UPDATE SET
            agent_runtime = EXCLUDED.agent_runtime,
            base_url = EXCLUDED.base_url,
            primary_model = EXCLUDED.primary_model,
            model_overrides = EXCLUDED.model_overrides,
+           image_model = EXCLUDED.image_model,
            credential_secret_ref = EXCLUDED.credential_secret_ref,
            api_key_mask = EXCLUDED.api_key_mask,
            api_key_fingerprint = EXCLUDED.api_key_fingerprint,
@@ -452,7 +454,7 @@ export class CoreRepository {
            revision = deviludo.instance_agent_settings.revision + 1,
            updated_by = EXCLUDED.updated_by,
            updated_at = clock_timestamp()
-         RETURNING agent_runtime::text, base_url, primary_model, model_overrides, credential_secret_ref,
+         RETURNING agent_runtime::text, base_url, primary_model, model_overrides, image_model, credential_secret_ref,
                    test_policy_ready, test_policy_checked_revision::text,
                    api_key_mask, api_key_fingerprint, credential_version::text, revision::text,
                    updated_by, updated_at::text
@@ -462,6 +464,7 @@ export class CoreRepository {
           input.baseUrl,
           input.primaryModel,
           JSON.stringify(input.modelOverrides),
+          input.imageModel,
           input.credentialSecretRef,
           input.apiKeyMask,
           input.apiKeyFingerprint,
@@ -2941,6 +2944,7 @@ type AgentSettingsRow = {
   base_url: string;
   primary_model: string | null;
   model_overrides: unknown;
+  image_model: string | null;
   credential_secret_ref: string;
   test_policy_ready: boolean;
   test_policy_checked_revision: string | null;
@@ -2957,6 +2961,7 @@ export type StoredInstanceAgentSettings = Readonly<{
   baseUrl: string;
   primaryModel: string;
   modelOverrides: AgentModelOverrides;
+  imageModel: string | null;
   credentialSecretRef: string;
   testPolicyReady: boolean;
   testPolicyCheckedRevision: number | null;
@@ -2972,6 +2977,7 @@ function agentSettingsFromRow(row: AgentSettingsRow): StoredInstanceAgentSetting
   const revision = Number(row.revision);
   const primaryModel = normalizeAgentModel(row.primary_model);
   const modelOverrides = normalizeAgentModelOverrides(row.model_overrides);
+  const imageModel = row.image_model === null ? null : normalizeAgentModel(row.image_model);
   const testPolicyCheckedRevision = row.test_policy_checked_revision === null ? null : Number(row.test_policy_checked_revision);
   if (!(AGENT_RUNTIME_KINDS as readonly string[]).includes(row.agent_runtime)
     || !Number.isSafeInteger(revision) || revision < 1
@@ -2985,6 +2991,7 @@ function agentSettingsFromRow(row: AgentSettingsRow): StoredInstanceAgentSetting
     baseUrl: row.base_url,
     primaryModel,
     modelOverrides,
+    imageModel,
     credentialSecretRef: row.credential_secret_ref,
     testPolicyReady: row.test_policy_ready,
     testPolicyCheckedRevision,

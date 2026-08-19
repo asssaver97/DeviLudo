@@ -62,7 +62,8 @@ async function requestCodexName(
   prompt: string,
 ): Promise<string> {
   if (settings.agentRuntime !== "CODEX_CLI") throw new Error("Codex CLI 模型尚未配置");
-  return runCodexPrompt({ authJson, model: settings.primaryModel, prompt, timeoutMs: 30_000 });
+  const model = resolveAgentModel(settings.primaryModel, settings.modelOverrides, "design");
+  return runCodexPrompt({ authJson, model, prompt, timeoutMs: 30_000 });
 }
 
 function messagesEndpoint(baseUrl: string): string {

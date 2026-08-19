@@ -120,7 +120,7 @@ async function runFramed(executable, arguments_, parentIterator, extraEnvironmen
         // Core may spend up to 150 seconds on the bounded Provider call and its
         // single structured-output repair. Keep the transport outside that
         // budget so a healthy repair cannot be mistaken for a dead guest.
-        const next = await readProtocolLineWithTimeout(parentIterator, childClosed, 170_000);
+        const next = await readProtocolLineWithTimeout(parentIterator, childClosed, 490_000);
         if (next.done) throw new Error("Player policy relay closed before responding");
         const response = JSON.parse(next.value);
         if (response?.type !== "policy_response" || response.id !== message.id) throw new Error("Player policy relay response is invalid");

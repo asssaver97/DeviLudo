@@ -291,11 +291,34 @@ async function installGuestRuntime(ip, { rotateCredentials = true } = {}) {
 async function smokeGuestRuntime(ip) {
   const ssh = sshArguments();
   const command = "set -e; printf 'DeviLudo real-window E2E smoke\\n' > /Users/Shared/deviludo-smoke.txt; open -a TextEdit /Users/Shared/deviludo-smoke.txt; sleep 3; pid=$(pgrep -x TextEdit | head -n1); test -n \"$pid\"; /usr/local/bin/deviludo-gui-driver wait --pid \"$pid\" --width 1 --height 1; /usr/local/bin/deviludo-gui-driver event --pid \"$pid\" --event '{\"type\":\"key_press\",\"key\":\"KEY_A\"}'; /usr/local/bin/deviludo-gui-driver event --pid \"$pid\" --event '{\"type\":\"key_release\",\"key\":\"KEY_A\"}'; /usr/local/bin/deviludo-gui-driver capture --pid \"$pid\" --output /Users/Shared/deviludo-smoke.png; /usr/local/bin/node -e \"import('/usr/local/lib/deviludo/e2e-evidence.mjs').then(m=>m.inspectScreenshot('/Users/Shared/deviludo-smoke.png')).then(()=>process.stdout.write('smoke-ok'))\"; mkdir -p /Users/Shared/godot-input-smoke; cp /Users/Shared/godot-input-smoke-project.godot /Users/Shared/godot-input-smoke/project.godot; cp /Users/Shared/godot-input-smoke-main.tscn /Users/Shared/godot-input-smoke/main.tscn; cp /Users/Shared/godot-input-smoke-main.gd /Users/Shared/godot-input-smoke/main.gd; DEVILUDO_GAMEPAD_OPTIONAL=1 DEVILUDO_GAMEPAD_DRIVER=/usr/local/bin/deviludo-gamepad-driver /usr/local/bin/node /Users/Shared/godot-system-gamepad-smoke.mjs /Users/Shared/godot-input-smoke";
-  const { stdout } = await execute("ssh", [...ssh, `admin@${ip}`, command], { timeout: 120_000, maxBuffer: 2 * 1024 * 1024 });
-  if (!stdout.includes("smoke-ok") || (!stdout.includes("gamepad-smoke-ok") && !stdout.includes("gamepad-smoke-unavailable"))) throw new Error("Tart guest 截图/键鼠 smoke 未通过（检查 Screen Recording 与 Accessibility 权限）");
-  const available = stdout.includes("gamepad-smoke-ok");
-  if (!available) console.warn("Tart guest 未获得 Apple Core HID 虚拟设备 entitlement；键鼠 E2E 可用，声明 GAMEPAD 的项目将明确报基础设施不可用");
-  return available;
+  let lastError;
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    try {
+      const { stdout } = await execute("ssh", [...ssh, `admin@${ip}`, command], {
+        timeout: 120_000,
+        maxBuffer: 2 * 1024 * 1024,
+      });
+      if (!stdout.includes("smoke-ok")
+        || (!stdout.includes("gamepad-smoke-ok") && !stdout.includes("gamepad-smoke-unavailable"))) {
+        throw new Error(`Tart guest smoke receipt is incomplete: ${stdout.trim().slice(0, 1_000)}`);
+      }
+      const available = stdout.includes("gamepad-smoke-ok");
+      if (!available) console.warn("Tart guest 未获得 Apple Core HID 虚拟设备 entitlement；键鼠 E2E 可用，声明 GAMEPAD 的项目将明确报基础设施不可用");
+      return available;
+    } catch (error) {
+      const stderr = String(error?.stderr ?? "").trim();
+      const stdout = String(error?.stdout ?? "").trim();
+      lastError = new Error(
+        `Tart guest 截图/键鼠 smoke 第 ${attempt + 1} 次失败：${(stderr || stdout || error?.message || String(error)).slice(0, 2_000)}`,
+        { cause: error },
+      );
+      // loginwindow can report the desktop session before ScreenCaptureKit has
+      // finished attaching to WindowServer. Retry the whole native window,
+      // input, capture and Godot smoke rather than accepting a partial result.
+      if (attempt < 2) await delay(5_000 * (attempt + 1));
+    }
+  }
+  throw lastError ?? new Error("Tart guest 截图/键鼠 smoke 未通过");
 }
 
 async function waitForGuestSsh(ip) {

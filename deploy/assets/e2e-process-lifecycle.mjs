@@ -84,7 +84,7 @@ export function startChildProtocolWatchdog(child, options) {
   const checkMs = Number(options?.checkMs ?? Math.min(1_000, idleMs));
   const terminateGraceMs = Number(options?.terminateGraceMs ?? 2_000);
   const killProcessGroup = options?.killProcessGroup === true;
-  if (!Number.isSafeInteger(idleMs) || idleMs < 25 || idleMs > 300_000
+  if (!Number.isSafeInteger(idleMs) || idleMs < 25 || idleMs > 600_000
     || !Number.isSafeInteger(checkMs) || checkMs < 10 || checkMs > idleMs
     || !Number.isSafeInteger(terminateGraceMs) || terminateGraceMs < 1 || terminateGraceMs > 10_000) {
     throw new Error("Child protocol watchdog configuration is invalid");
@@ -112,7 +112,7 @@ export function startChildProtocolWatchdog(child, options) {
 
 export async function readProtocolLineWithTimeout(iterator, childClosed, timeoutMs) {
   if (!iterator || typeof iterator.next !== "function"
-    || !Number.isSafeInteger(timeoutMs) || timeoutMs < 1_000 || timeoutMs > 180_000) {
+    || !Number.isSafeInteger(timeoutMs) || timeoutMs < 1_000 || timeoutMs > 600_000) {
     throw new Error("Protocol response wait configuration is invalid");
   }
   let timer = null;

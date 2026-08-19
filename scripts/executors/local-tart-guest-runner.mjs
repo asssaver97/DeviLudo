@@ -60,7 +60,7 @@ const killProcessGroup = process.platform !== "win32";
 // transport watchdog must therefore stay strictly outside that window: while
 // this relay is awaiting its parent response it cannot consume guest heartbeat
 // frames, so a shorter idle deadline would kill a healthy guest mid-decision.
-const policyResponseTimeoutMs = 170_000;
+const policyResponseTimeoutMs = 490_000;
 const protocolIdleTimeoutMs = policyResponseTimeoutMs + 10_000;
 const remote = spawn("ssh", [...ssh, `${configuration.guestUser}@${ip}`, ...command], {
   stdio: ["pipe", "pipe", "pipe"], shell: false, detached: killProcessGroup,

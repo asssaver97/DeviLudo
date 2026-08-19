@@ -16,6 +16,7 @@ export type AgentSettingsInput = Readonly<{
   apiKey: string | null;
   primaryModel: string;
   modelOverrides: AgentModelOverrides;
+  imageModel: string | null;
 }>;
 
 export type AgentSecretVersion = Readonly<{
@@ -61,24 +62,29 @@ export function parseAgentSettingsInput(
     throw new Error("Agent settings must be an object");
   }
   const input = value as Record<string, unknown>;
-  const unknown = Object.keys(input).filter(key => !["agentRuntime", "baseUrl", "apiKey", "primaryModel", "modelOverrides", "settingsJson"].includes(key));
+  const unknown = Object.keys(input).filter(key => !["agentRuntime", "baseUrl", "apiKey", "primaryModel", "modelOverrides", "imageModel", "settingsJson"].includes(key));
   if (unknown.length > 0) throw new Error("Agent settings contain unsupported fields");
   if (!(AGENT_RUNTIME_KINDS as readonly unknown[]).includes(input.agentRuntime)) {
     throw new Error("Agent runtime must be Claude Code or Codex CLI");
   }
   if (input.agentRuntime === "CODEX_CLI") {
-    if (input.baseUrl !== undefined || input.apiKey !== undefined || input.primaryModel !== undefined || input.settingsJson !== undefined) {
+    if (input.baseUrl !== undefined || input.apiKey !== undefined || input.settingsJson !== undefined) {
       throw new Error("Codex CLI uses the host's official ChatGPT login; custom Provider fields are not accepted");
     }
-    if (input.modelOverrides !== undefined) {
-      throw new Error("Codex CLI uses the official account default model; custom model overrides are not accepted");
+    if (input.imageModel !== undefined && input.imageModel !== null && input.imageModel !== "") {
+      throw new Error("Codex CLI uses built-in ImageGen with gpt-image-2; imageModel is not configurable");
     }
     return Object.freeze({
       agentRuntime: "CODEX_CLI",
       baseUrl: "https://chatgpt.com",
       apiKey: null,
-      primaryModel: CODEX_ACCOUNT_DEFAULT_MODEL,
-      modelOverrides: emptyAgentModelOverrides(),
+      primaryModel: input.primaryModel === undefined
+        ? CODEX_ACCOUNT_DEFAULT_MODEL
+        : normalizeAgentModel(input.primaryModel),
+      modelOverrides: input.modelOverrides === undefined
+        ? emptyAgentModelOverrides()
+        : normalizeAgentModelOverrides(input.modelOverrides),
+      imageModel: null,
     });
   }
   const fromJson = input.settingsJson !== undefined;
@@ -108,12 +114,16 @@ export function parseAgentSettingsInput(
   const modelOverrides = input.modelOverrides === undefined
     ? emptyAgentModelOverrides()
     : normalizeAgentModelOverrides(input.modelOverrides);
+  const imageModel = input.imageModel === undefined || input.imageModel === null || input.imageModel === ""
+    ? null
+    : normalizeAgentModel(input.imageModel);
   return Object.freeze({
     agentRuntime: input.agentRuntime as AgentRuntimeKind,
     baseUrl,
     apiKey,
     primaryModel,
     modelOverrides,
+    imageModel,
   });
 }
 
@@ -168,7 +178,7 @@ export function normalizeAgentModelOverrides(value: unknown): AgentModelOverride
   const input = value as Record<string, unknown>;
   if (Object.keys(input).length !== AGENT_MODEL_OVERRIDE_ROLES.length
     || AGENT_MODEL_OVERRIDE_ROLES.some(key => !(key in input))) {
-    throw new Error("Agent model overrides must contain design, development, test, and image");
+    throw new Error("Agent model overrides must contain design, development, and test");
   }
   return Object.freeze(Object.fromEntries(AGENT_MODEL_OVERRIDE_ROLES.map(key => {
     const candidate = input[key];
@@ -179,7 +189,7 @@ export function normalizeAgentModelOverrides(value: unknown): AgentModelOverride
 }
 
 export function emptyAgentModelOverrides(): AgentModelOverrides {
-  return Object.freeze({ design: null, development: null, test: null, image: null });
+  return Object.freeze({ design: null, development: null, test: null });
 }
 
 export function resolveAgentModel(

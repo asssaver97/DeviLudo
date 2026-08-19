@@ -60,6 +60,17 @@ describe("deviludo.e2e-ui-probe", () => {
     );
   });
 
+  test("identifies the exact invalid envelope field for Agent repair evidence", () => {
+    assert.equal(
+      probeSnapshotValidationError(snapshot({ controls: null })),
+      "controls must be an array containing at most 2000 entries",
+    );
+    assert.equal(
+      probeSnapshotValidationError(snapshot({ sessionNonce: "" })),
+      "sessionNonce must be 32-128 hexadecimal characters",
+    );
+  });
+
   test("reports the last structural reason when a published snapshot never becomes valid", async () => {
     const root = await mkdtemp(join(tmpdir(), "deviludo-probe-error-test-"));
     const path = join(root, "probe.json");

@@ -19,6 +19,7 @@ x-core: &core
     DEVILUDO_CLAUDE_CODE_VERSION: "${DEVILUDO_CLAUDE_CODE_VERSION:-}"
     DEVILUDO_CODEX_CLI_VERSION: "${DEVILUDO_CODEX_CLI_VERSION:-}"
     DEVILUDO_CODEX_LOGIN_METHOD: "${DEVILUDO_CODEX_LOGIN_METHOD:-SIGNED_OUT}"
+    DEVILUDO_CODEX_ACCOUNT_DEFAULT_MODEL: "${DEVILUDO_CODEX_ACCOUNT_DEFAULT_MODEL:-}"
     DEVILUDO_CODEX_AUTH_FILE: /run/deviludo-codex/auth.json
     DEVILUDO_CODEX_PROXY_URL: http://provider-proxy:3128
     DEVILUDO_SANDBOX_CONCURRENCY: ${DEVILUDO_SANDBOX_CONCURRENCY:-1}
@@ -142,8 +143,8 @@ services:
       DEVILUDO_S3_SECRET_ACCESS_KEY: deviludo-local-secret
       DEVILUDO_ARTIFACT_BUCKET: deviludo-artifacts
       DEVILUDO_ASSET_GENERATION_POLL_SECONDS: "${DEVILUDO_ASSET_GENERATION_POLL_SECONDS:-15}"
-      # Image generation reuses the selected Agent connection credential, so the
-      # scheduler resolves that same protected reference through Vault.
+      # Image generation follows the selected runtime. Claude resolves its API
+      # key here; Codex resolves the official-login JSON saved when selected.
       DEVILUDO_VAULT_ADDR: http://vault:8200
       DEVILUDO_VAULT_TOKEN_FILE: /run/deviludo-vault/api.token
       DEVILUDO_VAULT_TOKEN_RENEW_INTERVAL_SECONDS: "3600"

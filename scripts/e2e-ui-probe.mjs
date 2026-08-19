@@ -19,15 +19,15 @@ export function validateProbeSnapshot(value, expected = {}) {
 }
 
 export function probeSnapshotValidationError(value, expected = {}) {
-  if (!value || typeof value !== "object" || Array.isArray(value)
-    || value.schema !== E2E_UI_PROBE_SCHEMA
-    || Object.hasOwn(value, "schemaVersion") || Object.hasOwn(value, "version")
-    || typeof value.sessionNonce !== "string" || !/^[0-9a-f]{32,128}$/i.test(value.sessionNonce)
-    || !Number.isSafeInteger(value.pid) || value.pid <= 1
-    || !Number.isSafeInteger(value.sequence) || value.sequence < 1
-    || typeof value.sceneId !== "string" || !stableId(value.sceneId)
-    || !plainRecord(value.state) || !plainRecord(value.progress)
-    || !Array.isArray(value.controls) || value.controls.length > 2_000) return "snapshot envelope violates the current probe contract";
+  if (!value || typeof value !== "object" || Array.isArray(value)) return "snapshot root must be a JSON object";
+  if (value.schema !== E2E_UI_PROBE_SCHEMA) return `snapshot schema must be ${E2E_UI_PROBE_SCHEMA}`;
+  if (Object.hasOwn(value, "schemaVersion") || Object.hasOwn(value, "version")) return "snapshot must not publish a legacy version field";
+  if (typeof value.sessionNonce !== "string" || !/^[0-9a-f]{32,128}$/i.test(value.sessionNonce)) return "sessionNonce must be 32-128 hexadecimal characters";
+  if (!Number.isSafeInteger(value.pid) || value.pid <= 1) return "pid must identify the launched game process";
+  if (!Number.isSafeInteger(value.sequence) || value.sequence < 1) return "sequence must be a positive safe integer";
+  if (typeof value.sceneId !== "string" || !stableId(value.sceneId)) return "sceneId must be a stable semantic ID";
+  if (!plainRecord(value.state) || !plainRecord(value.progress)) return "state and progress must be JSON objects";
+  if (!Array.isArray(value.controls) || value.controls.length > 2_000) return "controls must be an array containing at most 2000 entries";
   if (expected.sessionNonce && value.sessionNonce !== expected.sessionNonce) return "session nonce does not match the launched game";
   if (expected.pid && value.pid !== expected.pid) return "process ID does not match the launched game";
   if (expected.afterSequence !== undefined && value.sequence <= expected.afterSequence) return `sequence ${value.sequence} did not advance beyond ${expected.afterSequence}`;

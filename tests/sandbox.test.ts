@@ -98,6 +98,30 @@ test("Agent sandbox plans consume only the frozen instance configuration referen
   })), /configuration lock/i);
 });
 
+test("Codex account-default plans freeze the host-resolved model for isolated tasks", () => {
+  const previous = process.env.DEVILUDO_CODEX_ACCOUNT_DEFAULT_MODEL;
+  process.env.DEVILUDO_CODEX_ACCOUNT_DEFAULT_MODEL = "gpt-5.6-sol";
+  try {
+    const configured = sandboxPlan(Object.freeze({
+      ...baseJob,
+      payload: Object.freeze({
+        agentConfiguration: Object.freeze({
+          runtime: "CODEX_CLI",
+          baseUrl: "https://chatgpt.com",
+          model: "account-default",
+          credentialRef: "vault://instance/agent-runtime/api-key/versions/30000000-0000-4000-8000-000000000099",
+          revision: 4,
+        }),
+      }),
+    }));
+    assert.equal(configured.agentConfiguration?.model, "account-default");
+    assert.equal(configured.agentConfiguration?.environment.DEVILUDO_CODEX_MODEL, "gpt-5.6-sol");
+  } finally {
+    if (previous === undefined) delete process.env.DEVILUDO_CODEX_ACCOUNT_DEFAULT_MODEL;
+    else process.env.DEVILUDO_CODEX_ACCOUNT_DEFAULT_MODEL = previous;
+  }
+});
+
 test("Claude Code sandbox plans route every internal Claude alias through the effective model", () => {
   const configured = sandboxPlan(Object.freeze({
     ...baseJob,

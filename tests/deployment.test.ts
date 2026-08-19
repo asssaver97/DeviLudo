@@ -18,6 +18,7 @@ test("local deployment keeps Core private by default and exposes it only for exp
   assert.match(compose, /minio:[\s\S]*\$\{DEVILUDO_ARTIFACT_BIND_ADDRESS:-127\.0\.0\.1\}:\$\{DEVILUDO_MINIO_HOST_PORT:-39000\}:9000/);
   assert.match(compose, /DEVILUDO_CLAUDE_CODE_VERSION/);
   assert.match(compose, /DEVILUDO_CODEX_CLI_VERSION/);
+  assert.match(compose, /DEVILUDO_CODEX_ACCOUNT_DEFAULT_MODEL/);
   assert.match(compose, /DEVILUDO_SANDBOX_CONCURRENCY: \$\{DEVILUDO_SANDBOX_CONCURRENCY:-1\}/);
   assert.match(compose, /project-sources-init:[\s\S]*cap_add: \["CHOWN", "FOWNER", "FSETID"\][\s\S]*chmod 2770 \/var\/lib\/deviludo-projects/);
   const webSection = compose.match(/\n  web:([\s\S]*?)\nnetworks:/)?.[1] ?? "";
@@ -47,6 +48,7 @@ test("local deployment keeps Core private by default and exposes it only for exp
   assert.match(localUp, /deviludo-retained-job-runtime/);
   assert.match(localUp, /DEVILUDO_EXECUTOR_ALLOWED_IMAGES: \[\.\.\.new Set\(\[\s*\.\.\.Object\.values\(JSON\.parse\(runtimeImages\)\), imageIds\["deviludo-agent-fixture:local"\], \.\.\.retainedJobRuntimeImages/);
   assert.match(localUp, /persistLocalComposeEnvironment\(environment\)/);
+  assert.match(localUp, /resolveLocalCodexAccountDefaultModel\(codexLoginMethod, codexVersion\)/);
   assert.match(localUp, /DEVILUDO_DOCKER_GID/);
   assert.match(localUp, /BEGIN DEVILUDO LOCAL RUNTIME/);
   assert.match(localUp, /detectLocalProviderUpstreamProxy\(\)/);
@@ -152,8 +154,9 @@ test("Agent generation preserves partial work and retries transient Provider fai
   ]);
   const daemon = await readFile(new URL("../services/sandbox-executor/src/daemon.ts", import.meta.url), "utf8");
   const checkpointRestore = await readFile(new URL("../services/sandbox-executor/src/checkpoint-restore.ts", import.meta.url), "utf8");
-  assert.match(runner, /attempt <= 4/);
-  assert.match(runner, /failure\.code === "INCOMPLETE_OUTPUT"[\s\S]*\? 4[\s\S]*failure\.code === "GUIDANCE_PENDING" \? 3[\s\S]*failure\.code === "PROVIDER_ERROR" \? 4 : 2/);
+  assert.match(runner, /const maxProviderAttempts = 16/);
+  assert.match(runner, /attempt <= maxProviderAttempts/);
+  assert.match(runner, /failure\.code === "INCOMPLETE_OUTPUT"[\s\S]*\? 4[\s\S]*failure\.code === "GUIDANCE_PENDING" \? 3[\s\S]*failure\.code === "PROVIDER_ERROR" \? maxProviderAttempts : 2/);
   assert.match(runner, /readAgentGuidanceSnapshot/);
   assert.match(runner, /agentGuidanceArrivedDuringRun/);
   assert.match(runner, /TEST_MANIFEST_INVALID/);
@@ -173,6 +176,8 @@ test("Agent generation preserves partial work and retries transient Provider fai
   assert.match(runner, /idleTimeoutMs: 8 \* 60_000/);
   assert.match(runner, /classifyAgentFailure/);
   assert.match(runner, /codex_models_manager\|failed to refresh available models/);
+  assert.match(runner, /cloudflare\|cf-ray\|sorry, you have been blocked/);
+  assert.match(runner, /agentRetryDelaySeconds\(failure, attempt\)/);
   assert.match(runner, /maximum\[ _-\]\?turns\|max\[ _-\]\?turns/);
   assert.match(runner, /"--resume" : "--session-id"/);
   assert.match(runner, /Do not restart analysis or spawn background agents, background shell commands, or background tasks/);
@@ -372,7 +377,8 @@ test("Core keeps Docker authority in executord and isolates Agent and Steam egre
   assert.match(taskRunner, /Agent returned before making required source changes/);
   assert.match(taskRunner, /"INCOMPLETE_OUTPUT"/);
   assert.match(taskRunner, /failure\.code === "INCOMPLETE_OUTPUT"[\s\S]*\? 4/);
-  assert.match(taskRunner, /for \(let attempt = 1; attempt <= 4; attempt \+= 1\)/);
+  assert.match(taskRunner, /const maxProviderAttempts = 16/);
+  assert.match(taskRunner, /for \(let attempt = 1; attempt <= maxProviderAttempts; attempt \+= 1\)/);
   assert.match(taskRunner, /All[\s\S]*calls still share the single 80-minute deadline/);
   assert.match(taskRunner, /previous response stopped before changing any source files/);
   assert.match(taskRunner, /Core has already validated the existing agent\.json/);
@@ -532,6 +538,9 @@ test("CI uses the fixed no-provider Agent while local macOS requires Tart E2E", 
   assert.match(tartPrepare, /launchctl print gui\/501/);
   assert.match(tartPrepare, /attempt < 30/);
   assert.match(tartPrepare, /await smokeGuestRuntime\(rebootedIp\)/);
+  assert.match(tartPrepare, /for \(let attempt = 0; attempt < 3; attempt \+= 1\)/);
+  assert.match(tartPrepare, /loginwindow can report the desktop session before ScreenCaptureKit/);
+  assert.match(tartPrepare, /String\(error\?\.stderr \?\? ""\)\.trim\(\)/);
   assert.match(tartPrepare, /金镜像重启后真实窗口 smoke 失败/);
   assert.match(tartProvision, /\/usr\/sbin\/sysadminctl[\s\\]*-resetPasswordFor admin/);
   assert.match(tartProvision, /dscl \. -authonly admin/);
@@ -565,6 +574,7 @@ test("Godot E2E is a real-window manifest run with portable visual evidence", as
   assert.match(guest, /deviludo\.test-manifest/);
   assert.match(guest, /deviludo\.e2e-ui-probe|waitForProbeSnapshot/);
   assert.match(guest, /gameWindowArguments\(gameLogPath\)/);
+  assert.match(guest, /type: "mouse_click",[\s\S]*x: point\.x,[\s\S]*y: point\.y/);
   assert.match(guest, /"--log-file", logPath/);
   assert.match(guest, /DEVILUDO_E2E_CHECKPOINT_FILE: checkpointOutputPath/);
   assert.match(guest, /isolatedGameEnvironment\(`unit-\$\{unitIndex\}`\)/);
@@ -613,8 +623,8 @@ test("Godot E2E is a real-window manifest run with portable visual evidence", as
   assert.match(guest, /godotErrorLines/);
   assert.match(builder, /DEVILUDO_E2E_CHECKPOINT_FILE/);
   assert.match(builder, /existingManifestValid \? \[[\s\S]*checkpointEmitterInstruction/);
-  assert.match(builder, /agentRetryDelaySeconds\(failure\)/);
-  assert.match(builder, /memory overloaded[\s\S]*return 60/);
+  assert.match(builder, /agentRetryDelaySeconds\(failure, attempt\)/);
+  assert.match(builder, /memory overloaded[\s\S]*Math\.min\(120, 30 \* Math\.max\(1, attempt\)\)/);
   assert.match(evidence, /index\.html/);
   assert.match(evidence, /report\.json/);
   assert.match(evidence, /logs\/stdout\.log/);
@@ -650,10 +660,14 @@ test("Godot E2E is a real-window manifest run with portable visual evidence", as
   assert.doesNotMatch(macWait, /focus\(pid: pid\)/);
   assert.match(macDriver, /CGWindowListCopyWindowInfo\(\[\.optionAll, \.excludeDesktopElements\]/);
   assert.match(macDriver, /windowDiagnostics\(pid: pid\)/);
+  assert.match(macDriver, /case "find-pid"|command == "find-pid"/);
+  assert.match(macDriver, /NSWorkspace\.shared\.runningApplications/);
   assert.match(macDriver, /if left\.isOnScreen != right\.isOnScreen/);
   assert.match(macDriver, /NSScreen\.main\?\.backingScaleFactor/);
   assert.match(macDriver, /window\.bounds\.width \* backingScale\(\) >= width/);
   assert.match(macDriver, /CGFloat\(x\) \/ backingScale\(\)/);
+  assert.match(macDriver, /if type == "mouse_click" \{ Thread\.sleep\(forTimeInterval: 0\.05\) \}/);
+  assert.match(macDriver, /if let x = event\["x"\] as\? Int, let y = event\["y"\] as\? Int/);
   assert.match(macDriver, /window\.bounds\.width \* scale/);
   assert.doesNotMatch(macDriver, /CGWindowListCreateImage/);
   assert.match(linuxDriver, /xdotool/);
@@ -733,8 +747,10 @@ test("image generation is part of the selected Agent connection", async () => {
     readFile(new URL("../components/AssetManifestPanel.tsx", import.meta.url), "utf8"),
   ]);
   assert.doesNotMatch(page, /ImageGenerationSettings/);
-  assert.match(agent, /updateModelOverride\("image"/);
-  assert.match(agent, /Image uses the same Provider, Base URL, and credential/);
+  assert.match(agent, /setImageModel/);
+  assert.doesNotMatch(agent, /updateModelOverride\("image"/);
+  assert.match(agent, /the image-generation backend follows the selected runtime automatically/);
+  assert.match(agent, /Codex built-in ImageGen \(gpt-image-2\)/);
   assert.match(assets, /imageGenerationReady/);
 });
 
@@ -798,13 +814,16 @@ test("the API Key field stays outside browser password managers", async () => {
   assert.doesNotMatch(component, /已保存 \$\{settings\.apiKeyMasked/);
 });
 
-test("model settings use one primary model with four optional inheriting overrides", async () => {
+test("model settings let Codex choose text models while image generation follows the runtime", async () => {
   const component = await readFile(new URL("../components/AgentSettings.tsx", import.meta.url), "utf8");
   assert.match(component, /name="primaryModel"/);
-  for (const role of ["design", "development", "test", "image"]) {
+  for (const role of ["design", "development", "test"]) {
     assert.match(component, new RegExp(`updateModelOverride\\("${role}"`));
   }
-  assert.match(component, /inherits the primary model when empty/);
+  assert.match(component, /onChange=\{setImageModel\}/);
+  assert.match(component, /image generation does not inherit/);
+  assert.match(component, /Codex built-in ImageGen/);
+  assert.doesNotMatch(component, /updateModelOverride\("image"/);
   assert.doesNotMatch(component, /ModelMode|expandedModels|Opus|Sonnet|Haiku|Subagent/);
 });
 
@@ -899,7 +918,7 @@ test("auto-generate never removes the user's own way to supply an asset", async 
   // A disabled toggle with no explanation reads as a bug, so each blocking
   // condition names itself.
   assert.match(panel, /disabled=\{!autoGenerateEnabled && !imageGenerationReady\}/);
-  assert.match(panel, /Agent 连接中选择一个图片模型/);
+  assert.match(panel, /图片将由内置 ImageGen 生成/);
   assert.doesNotMatch(panel, /generationConfig|providerSupported|configComplete/);
   // Generation settles in the background with nothing to push the result, so the
   // panel polls while work is outstanding and stops when it is not.
@@ -977,7 +996,7 @@ test("asset generation runs off the delivery chain on its own cadence", async ()
   assert.match(generation, /if \(settled\) generated \+= 1;\s*\n\s*else failed \+= 1;/);
   assert.match(generation, /repository\.assets\.failGeneration/);
   // The credential is resolved once per batch, not per asset.
-  assert.match(generation, /Resolve the credential once per batch/);
+  assert.match(generation, /Resolve the selected runtime's credential once per batch/);
   // The scheduler now needs the object store, a Vault token, and egress: `data` is
   // an internal network and cannot reach a provider on its own.
   const schedulerService = compose.match(/ {2}core-scheduler:([\s\S]*?)\n {2}core-sandbox:/)?.[1] ?? "";

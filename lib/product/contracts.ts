@@ -65,6 +65,9 @@ export const AGENT_RUNTIME_KINDS = ["CLAUDE_CODE", "CODEX_CLI"] as const;
 export const CODEX_ACCOUNT_DEFAULT_MODEL = "account-default" as const;
 export type AgentRuntimeKind = typeof AGENT_RUNTIME_KINDS[number];
 
+export const IMAGE_GENERATION_BACKENDS = ["HTTP_IMAGES", "CODEX_IMAGEGEN"] as const;
+export type ImageGenerationBackend = typeof IMAGE_GENERATION_BACKENDS[number];
+
 export type AgentRuntimeAvailability = Readonly<{
   kind: AgentRuntimeKind;
   installed: boolean;
@@ -76,15 +79,14 @@ export type AgentRuntimeAvailability = Readonly<{
 export const PROJECT_AGENT_ROLES = ["DESIGN", "DEVELOPMENT", "TEST"] as const;
 export type ProjectAgentRole = typeof PROJECT_AGENT_ROLES[number];
 
-export const AGENT_MODEL_OVERRIDE_ROLES = ["design", "development", "test", "image"] as const;
+export const AGENT_MODEL_OVERRIDE_ROLES = ["design", "development", "test"] as const;
 export type AgentModelOverrideRole = typeof AGENT_MODEL_OVERRIDE_ROLES[number];
 
-/** A null override inherits the instance's primary model. */
+/** A null text-Agent override inherits the instance's primary model. */
 export type AgentModelOverrides = Readonly<{
   design: string | null;
   development: string | null;
   test: string | null;
-  image: string | null;
 }>;
 
 export type InstanceAgentSettings = Readonly<{
@@ -92,6 +94,10 @@ export type InstanceAgentSettings = Readonly<{
   baseUrl: string;
   primaryModel: string;
   modelOverrides: AgentModelOverrides;
+  /** Image generation is disabled when this explicit model is null. */
+  imageModel: string | null;
+  /** Derived from the selected runtime; it is never configured separately. */
+  imageGenerationBackend: ImageGenerationBackend | null;
   imageGenerationReady: boolean;
   apiKeyConfigured: boolean;
   apiKeyMasked: string | null;

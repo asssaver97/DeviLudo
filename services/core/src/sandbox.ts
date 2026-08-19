@@ -7,6 +7,7 @@ import {
   type AgentRuntimeKind,
 } from "@/lib/product/contracts";
 import { normalizeAgentModel, normalizeBaseUrl } from "./agent-settings";
+import { resolveCodexExecutionModel } from "./codex-cli";
 import type { CoreConfig } from "./config";
 import type { JobProtocolV4, ObjectReference } from "./contracts";
 import type { CoreRepository } from "./repository";
@@ -385,7 +386,7 @@ function agentConfigurationFromPayload(
     credentialEnvironmentVariable: input.runtime === "CLAUDE_CODE" ? "ANTHROPIC_AUTH_TOKEN" : "CODEX_AUTH_JSON",
     environment: input.runtime === "CLAUDE_CODE"
       ? claudeCodeEnvironment(baseUrl, model)
-      : Object.freeze({ DEVILUDO_CODEX_MODEL: model }),
+      : Object.freeze({ DEVILUDO_CODEX_MODEL: resolveCodexExecutionModel(model) }),
     revision: Number(input.revision),
   });
 }

@@ -9,6 +9,7 @@ import { request } from "node:http";
 import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
+import { selectCodexAccountDefaultModel } from "./local-codex-model.mjs";
 
 const execute = promisify(execFile);
 const root = new URL("..", import.meta.url);
@@ -103,6 +104,7 @@ const [claudeVersion, codexVersion, codexLoginMethod] = await Promise.all([
   detectLocalCodexAuthentication(),
 ]);
 await prepareLocalCodexOfficialLogin(codexLoginMethod);
+const codexAccountDefaultModel = await resolveLocalCodexAccountDefaultModel(codexLoginMethod, codexVersion);
 await requireCommand("docker", ["version", "--format", "{{.Server.Version}}"]);
 await requireCommand("docker", ["compose", "version"]);
 await requireCommand("git", ["--version"]);
@@ -135,6 +137,7 @@ const baseEnvironment = {
   DEVILUDO_LOCAL_PROJECT_BRIDGE_TOKEN: gitImportConfiguration.internalToken,
   DEVILUDO_LOCAL_DIRECTORY_BINDINGS: "1",
   DEVILUDO_PROVIDER_UPSTREAM_PROXY: providerUpstreamProxy,
+  DEVILUDO_CODEX_ACCOUNT_DEFAULT_MODEL: codexAccountDefaultModel ?? "",
 };
 await execute("docker", [
   "compose", "-f", "infra/docker-compose.yml", "up", "-d", "--wait", "postgres", "vault",
@@ -691,6 +694,21 @@ async function prepareLocalCodexOfficialLogin(loginMethod) {
   await chmod(target, 0o600);
 }
 
+async function resolveLocalCodexAccountDefaultModel(loginMethod, cliVersion) {
+  if (loginMethod !== "CHATGPT" || !cliVersion) return null;
+  const configuredRoot = process.env.CODEX_HOME?.trim();
+  const source = configuredRoot && isAbsolute(configuredRoot)
+    ? join(configuredRoot, "models_cache.json")
+    : join(homedir(), ".codex", "models_cache.json");
+  try {
+    const cache = JSON.parse(await readFile(source, "utf8"));
+    return selectCodexAccountDefaultModel(cache, cliVersion);
+  } catch (error) {
+    if (error?.code !== "ENOENT" && !(error instanceof SyntaxError)) throw error;
+    return null;
+  }
+}
+
 async function requireCommand(command, arguments_) {
   try {
     await execute(command, arguments_, { timeout: 10_000, maxBuffer: 64 * 1024 });
@@ -727,6 +745,7 @@ async function persistLocalComposeEnvironment(environment) {
     "DEVILUDO_CLAUDE_CODE_VERSION",
     "DEVILUDO_CODEX_CLI_VERSION",
     "DEVILUDO_CODEX_LOGIN_METHOD",
+    "DEVILUDO_CODEX_ACCOUNT_DEFAULT_MODEL",
     "DEVILUDO_EXECUTOR_ALLOWED_IMAGES",
     "DEVILUDO_EXECUTOR_FIXTURE_AGENT_IMAGE",
     "DEVILUDO_DOCKER_GID",

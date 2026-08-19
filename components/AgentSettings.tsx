@@ -23,6 +23,8 @@ const DEFAULT_SETTINGS: InstanceAgentSettings = Object.freeze({
   baseUrl: "https://api.anthropic.com",
   primaryModel: "claude-sonnet-4-5",
   modelOverrides: emptyModelOverrides(),
+  imageModel: null,
+  imageGenerationBackend: null,
   imageGenerationReady: false,
   apiKeyConfigured: false,
   testPolicyReady: false,
@@ -46,6 +48,7 @@ export function AgentSettings() {
   const [baseUrl, setBaseUrl] = useState(initialSettings.baseUrl);
   const [primaryModel, setPrimaryModel] = useState(initialSettings.primaryModel);
   const [modelOverrides, setModelOverrides] = useState<AgentModelOverrides>(initialSettings.modelOverrides);
+  const [imageModel, setImageModel] = useState(initialSettings.imageModel ?? "");
   const [apiKey, setApiKey] = useState("");
   const [configurationMode, setConfigurationMode] = useState<ConfigurationMode>("SIMPLE");
   const [settingsJson, setSettingsJson] = useState(() => formatClaudeSettingsJson(initialSettings.baseUrl, initialSettings.apiKeyMasked ?? "", initialSettings.primaryModel));
@@ -75,6 +78,7 @@ export function AgentSettings() {
         setBaseUrl(value.baseUrl);
         setPrimaryModel(value.primaryModel);
         setModelOverrides(value.modelOverrides);
+        setImageModel(value.imageModel ?? "");
         setSettingsJson(formatClaudeSettingsJson(value.baseUrl, value.apiKeyMasked ?? "", value.primaryModel));
         setRuntimes(body.runtimes);
       })
@@ -95,13 +99,14 @@ export function AgentSettings() {
         method: "PUT",
         headers: { "content-type": "application/json" },
         body: JSON.stringify(configurationMode === "SETTINGS_JSON"
-          ? { agentRuntime, settingsJson, modelOverrides }
+          ? { agentRuntime, settingsJson, modelOverrides, imageModel }
           : {
               agentRuntime,
+              primaryModel,
+              modelOverrides,
               ...(agentRuntime === "CLAUDE_CODE" ? {
                 baseUrl,
-                primaryModel,
-                modelOverrides,
+                imageModel,
                 ...(apiKey ? { apiKey } : {}),
               } : {}),
             }),
@@ -114,6 +119,7 @@ export function AgentSettings() {
       setBaseUrl(body.settings.baseUrl);
       setPrimaryModel(body.settings.primaryModel);
       setModelOverrides(body.settings.modelOverrides);
+      setImageModel(body.settings.imageModel ?? "");
       setApiKey("");
       setSettingsJson(formatClaudeSettingsJson(
         body.settings.baseUrl,
@@ -132,8 +138,9 @@ export function AgentSettings() {
     setAgentRuntime(kind);
     if (kind === "CODEX_CLI") {
       setConfigurationMode("SIMPLE");
-      setPrimaryModel("account-default");
-      setModelOverrides(emptyModelOverrides());
+      setPrimaryModel(settings.agentRuntime === "CODEX_CLI" ? settings.primaryModel : "account-default");
+      setModelOverrides(settings.agentRuntime === "CODEX_CLI" ? settings.modelOverrides : emptyModelOverrides());
+      setImageModel("");
       setApiKey("");
       return;
     }
@@ -141,6 +148,7 @@ export function AgentSettings() {
     setBaseUrl(next.baseUrl);
     setPrimaryModel(next.primaryModel);
     setModelOverrides(next.modelOverrides);
+    setImageModel(next.imageModel ?? "");
     setApiKey("");
     setSettingsJson(formatClaudeSettingsJson(next.baseUrl, next.apiKeyMasked ?? "", next.primaryModel));
   }
@@ -177,7 +185,7 @@ export function AgentSettings() {
         <div>
           <span className="eyebrow">{text("CONFIGURATION · 全局配置", "CONFIGURATION · INSTANCE GLOBAL")}</span>
           <h1>{text("Agent 设置", "AGENT SETTINGS")}</h1>
-          <p>{text("选择一个 Agent 连接，设计、开发、测试和图片生成都沿用该连接。", "Choose one Agent connection for design, development, testing, and image generation.")}</p>
+          <p>{text("选择一个 Agent 运行时；文本 Agent 可继承主模型，图片生成后端会随运行时自动切换。", "Choose one Agent runtime. Text Agents may inherit the primary model; the image-generation backend follows the selected runtime automatically.")}</p>
         </div>
         <span className="scope-badge"><ShieldIcon /> INSTANCE GLOBAL</span>
       </section>
@@ -211,13 +219,19 @@ export function AgentSettings() {
             </fieldset>
 
             {agentRuntime === "CODEX_CLI" ? (
-              <div className="agent-connection-status" role="status">
-                <ShieldIcon />
-                <div><b>{text("OpenAI 官方登录", "OFFICIAL OPENAI SIGN-IN")}</b><p>{text(
-                  "使用宿主机 Codex CLI 的 ChatGPT 登录。这里不重复填写 Provider、Base URL 或凭据。",
-                  "Uses the host Codex CLI ChatGPT session. No Provider, Base URL, or credential is duplicated here.",
-                )}</p></div>
-              </div>
+              <>
+                <div className="agent-connection-status" role="status">
+                  <ShieldIcon />
+                  <div><b>{text("OpenAI 官方登录", "OFFICIAL OPENAI SIGN-IN")}</b><p>{text(
+                    "使用宿主机 Codex CLI 的 ChatGPT 登录。Provider、Base URL 和凭据由官方登录管理，模型可在下方配置。",
+                    "Uses the host Codex CLI ChatGPT session. Official sign-in manages the Provider, Base URL, and credential; the model remains configurable below.",
+                  )}</p></div>
+                </div>
+                <label>{text("主模型", "Primary model")}
+                  <input autoCapitalize="none" autoComplete="off" disabled={loading || saving} maxLength={200} name="primaryModel" onChange={event => setPrimaryModel(event.target.value)} placeholder="account-default" required type="text" value={primaryModel} />
+                  <small className="field-help">{text("填写 Codex CLI 可用模型；使用 account-default 时由官方登录选择账户默认模型。", "Enter a model available to Codex CLI, or use account-default to let official sign-in select the account default.")}</small>
+                </label>
+              </>
             ) : configurationMode === "SIMPLE" ? (
               <>
                 <label>Provider Base URL
@@ -250,7 +264,7 @@ export function AgentSettings() {
 
                 <label>{text("主模型", "Primary model")}
                   <input autoCapitalize="none" autoComplete="off" disabled={loading || saving} maxLength={200} name="primaryModel" onChange={event => setPrimaryModel(event.target.value)} placeholder="claude-sonnet-4-5" required type="text" value={primaryModel} />
-                  <small className="field-help">{text("设计、开发、测试和图片 Agent 默认均使用主模型。", "Design, Development, Test, and Image Agents use this model by default.")}</small>
+                  <small className="field-help">{text("设计、开发和测试 Agent 默认使用主模型；图片生成不继承。", "Design, Development, and Test Agents use this model by default; image generation does not inherit it.")}</small>
                 </label>
 
               </>
@@ -260,22 +274,28 @@ export function AgentSettings() {
               </label>
             )}
 
-            {agentRuntime === "CLAUDE_CODE" ? <fieldset className="agent-model-fieldset agent-role-model-fieldset">
+            <fieldset className="agent-model-fieldset agent-role-model-fieldset">
               <legend>{text("Agent 模型", "AGENT MODELS")}</legend>
               <p className="agent-role-model-description">{text(
-                "以下均为可选覆盖；留空时自动继承主模型。开发模型同时用于代码生成，图片模型沿用同一个 Provider、Base URL 和凭据。",
-                "Every override is optional and inherits the primary model when empty. Development also generates code; Image uses the same Provider, Base URL, and credential.",
+                agentRuntime === "CLAUDE_CODE"
+                  ? "设计、开发和测试模型留空时继承主模型。Claude Code 使用当前连接的兼容 Images API；图片模型留空时关闭自动生成。"
+                  : "设计、开发和测试模型留空时继承主模型；图片生成自动使用 Codex 内置 ImageGen（gpt-image-2），沿用官方登录且无需额外 Provider。",
+                agentRuntime === "CLAUDE_CODE"
+                  ? "Design, Development, and Test inherit the primary model when empty. Claude Code uses the selected connection's compatible Images API; an empty image model disables generation."
+                  : "Design, Development, and Test inherit the primary model when empty. Image generation automatically uses Codex built-in ImageGen (gpt-image-2) with the official sign-in and no second Provider.",
               )}</p>
               <div className="agent-model-expanded">
                 <ModelInput disabled={loading || saving} inheritLabel={text("继承主模型", "Inherits primary")} label={text("设计 Agent", "Design Agent")} onChange={value => updateModelOverride("design", value)} placeholder={primaryModel} value={modelOverrides.design ?? ""} />
                 <ModelInput disabled={loading || saving} inheritLabel={text("继承主模型", "Inherits primary")} label={text("开发 Agent", "Development Agent")} onChange={value => updateModelOverride("development", value)} placeholder={primaryModel} value={modelOverrides.development ?? ""} />
                 <ModelInput disabled={loading || saving} inheritLabel={text("继承主模型", "Inherits primary")} label={text("测试 Agent", "Test Agent")} onChange={value => updateModelOverride("test", value)} placeholder={primaryModel} value={modelOverrides.test ?? ""} />
-                <ModelInput disabled={loading || saving} inheritLabel={text("继承主模型", "Inherits primary")} label={text("图片 Agent", "Image Agent")} onChange={value => updateModelOverride("image", value)} placeholder={primaryModel} value={modelOverrides.image ?? ""} />
+                {agentRuntime === "CLAUDE_CODE"
+                  ? <ModelInput disabled={loading || saving} inheritLabel={text("Images API · 留空时关闭图片生成", "Images API · empty disables generation")} label={text("图片生成模型", "Image generation model")} onChange={setImageModel} placeholder={text("例如 gpt-image-2", "For example, gpt-image-2")} value={imageModel} />
+                  : <ModelInput disabled inheritLabel={text("Codex 内置 ImageGen · 随运行时自动选择", "Codex built-in ImageGen · selected by runtime")} label={text("图片生成模型", "Image generation model")} onChange={() => undefined} placeholder="gpt-image-2" value="gpt-image-2" />}
                 <p className={`agent-config-notice ${settings.testPolicyReady ? "is-success" : ""}`} role="status">{settings.testPolicyReady
                   ? text("测试 Agent 玩家策略已通过真实视觉决策校验", "Test Agent player policy is ready for visual decisions")
                   : text("测试 Agent 玩家策略将在下一次 E2E 首次视觉决策时完成校验", "Test Agent player policy will be verified by the next E2E visual decision")}</p>
               </div>
-            </fieldset> : null}
+            </fieldset>
 
             {notice ? <p className="agent-config-notice is-success" role="status">{notice}</p> : null}
             {error ? <p className="agent-config-notice is-error" role="alert">{error}</p> : null}
@@ -397,5 +417,5 @@ function connectionFromClaudeSettingsJson(
 }
 
 function emptyModelOverrides(): AgentModelOverrides {
-  return Object.freeze({ design: null, development: null, test: null, image: null });
+  return Object.freeze({ design: null, development: null, test: null });
 }

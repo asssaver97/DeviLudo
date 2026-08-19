@@ -50,6 +50,7 @@ import {
 } from "./product-conversation";
 import {
   generateE2ePlayerDecision,
+  MAX_PLAYER_POLICY_REQUEST_BYTES,
   parsePlayerPolicyRequest,
   playerPolicyIdempotencyInput,
   verifyE2ePlayerVision,
@@ -228,6 +229,7 @@ export async function runApi(
       baseUrl: input.baseUrl,
       primaryModel: input.primaryModel,
       modelOverrides: input.modelOverrides,
+      imageModel: input.imageModel,
       credentialSecretRef: credential.secretRef,
       apiKeyMask: credential.mask,
       apiKeyFingerprint: credential.fingerprint,
@@ -1232,7 +1234,9 @@ export async function runApi(
     } });
   });
 
-  app.post<{ Params: { jobId: string } }>("/v1/e2e/jobs/:jobId/player-policy", async (request, reply) => {
+  app.post<{ Params: { jobId: string } }>("/v1/e2e/jobs/:jobId/player-policy", {
+    bodyLimit: MAX_PLAYER_POLICY_REQUEST_BYTES,
+  }, async (request, reply) => {
     const nodeId = await authorizeE2e(request, config, repository);
     const body = objectBody(request.body);
     const job = await repository.loadLeasedJob(jobIdentity(request.params.jobId, body), nodeId ? `e2e:${nodeId}` : undefined);
@@ -1275,7 +1279,10 @@ export async function runApi(
           && error.code === "PLAYER_POLICY_VISION_UNAVAILABLE"
           ? "PLAYER_POLICY_VISION_UNAVAILABLE"
           : "PLAYER_POLICY_PROVIDER";
-        request.log.warn({ failureCode: code }, "Test Agent policy request failed");
+        request.log.warn({
+          failureCode: code,
+          reason: error instanceof Error ? error.message : "Test Agent policy request failed",
+        }, "Test Agent policy request failed");
         return reply.code(503).send({
           code,
           message: code === "PLAYER_POLICY_VISION_UNAVAILABLE"
@@ -2049,6 +2056,11 @@ function publicAgentSettings(
   settings: StoredInstanceAgentSettings | null,
   apiKeyMask = settings?.apiKeyMask ?? null,
 ) {
+  const imageGenerationBackend = settings?.agentRuntime === "CODEX_CLI"
+    ? "CODEX_IMAGEGEN" as const
+    : settings?.agentRuntime === "CLAUDE_CODE" && settings.imageModel !== null
+      ? "HTTP_IMAGES" as const
+      : null;
   return Object.freeze({
     agentRuntime: settings?.agentRuntime ?? "CLAUDE_CODE",
     baseUrl: settings?.baseUrl ?? "https://api.anthropic.com",
@@ -2057,10 +2069,12 @@ function publicAgentSettings(
       design: null,
       development: null,
       test: null,
-      image: null,
     }),
-    imageGenerationReady: settings?.agentRuntime === "CLAUDE_CODE"
-      && settings.apiKeyMask !== null,
+    imageModel: settings?.imageModel ?? null,
+    imageGenerationBackend,
+    imageGenerationReady: imageGenerationBackend === "CODEX_IMAGEGEN"
+      ? settings?.apiKeyMask !== null
+      : imageGenerationBackend === "HTTP_IMAGES" && settings?.apiKeyMask !== null,
     apiKeyConfigured: settings !== null,
     apiKeyMasked: settings?.agentRuntime === "CLAUDE_CODE" ? apiKeyMask : null,
     apiKeyFingerprint: settings?.agentRuntime === "CLAUDE_CODE" ? settings.apiKeyFingerprint : null,

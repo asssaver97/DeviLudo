@@ -67,10 +67,11 @@ test("every workspace-owned table fails closed with forced row isolation", async
   assert.match(sql, /api_key_mask text NOT NULL/);
   assert.match(sql, /primary_model text NOT NULL CHECK/);
   assert.match(sql, /model_overrides jsonb NOT NULL CHECK/);
-  for (const role of ["design", "development", "test", "image"]) {
+  for (const role of ["design", "development", "test"]) {
     assert.match(sql, new RegExp(`model_overrides->'${role}'`));
   }
-  assert.doesNotMatch(sql, /opus_model|sonnet_model|haiku_model|subagent_model|role_models|image_model/);
+  assert.match(sql, /image_model text CHECK/);
+  assert.doesNotMatch(sql, /opus_model|sonnet_model|haiku_model|subagent_model|role_models/);
   assert.match(sql, /credential_secret_ref LIKE 'vault:\/\/instance\/agent-runtime\/api-key\/versions\/%'/);
   assert.doesNotMatch(sql, /instance_agent_provider_profiles/);
   assert.match(sql, /WHEN 'AGENT_GENERATION' THEN[\s\S]*p_payload \? 'repairFromE2eJobId'[\s\S]*artifact\.kind = 'E2E_REPORT'[\s\S]*repairFromE2eJobId/);
@@ -458,7 +459,7 @@ test("asset generation is leased, attempt-bounded, and never overwrites a user u
   assert.match(completeJob, /status = CASE\s*\n\s*WHEN deviludo\.asset_items\.status IN \('generated', 'uploaded'\) THEN deviludo\.asset_items\.status\s*\n\s*ELSE 'planned' END/);
 });
 
-test("image generation inherits the primary model through the selected Agent connection", async () => {
+test("image generation requires one explicit model through the selected Agent connection", async () => {
   const sql = await readFile(sqlUrl, "utf8");
   const table = sql.match(/CREATE TABLE deviludo\.instance_agent_settings \(([\s\S]*?)\n\);/)?.[1] ?? "";
   assert.match(table, /credential_secret_ref text NOT NULL/);
@@ -466,8 +467,9 @@ test("image generation inherits the primary model through the selected Agent con
   assert.match(table, /api_key_mask text NOT NULL CHECK \(api_key_mask ~ '\^\.\{3\}\\\*\{8\}\.\{4\}\$'\)/);
   assert.match(table, /primary_model text NOT NULL CHECK/);
   assert.match(table, /model_overrides jsonb NOT NULL CHECK/);
-  assert.match(table, /model_overrides->'image'/);
-  assert.doesNotMatch(table, /image_model|opus_model|sonnet_model|haiku_model|subagent_model|role_models/);
+  assert.doesNotMatch(table, /model_overrides->'image'/);
+  assert.match(table, /image_model text CHECK \(image_model IS NULL/);
+  assert.doesNotMatch(table, /opus_model|sonnet_model|haiku_model|subagent_model|role_models/);
   assert.doesNotMatch(table, /\bapi_key text\b|\bapi_key_value\b|\bsecret text\b/);
   assert.doesNotMatch(sql, /CREATE TABLE deviludo\.instance_image_generation_settings/);
   assert.match(table, /singleton boolean PRIMARY KEY DEFAULT true CHECK \(singleton\)/);
@@ -488,4 +490,12 @@ test("the primary-model migration removes obsolete Claude routes and folds image
   assert.match(migration, /DROP COLUMN opus_model[\s\S]*DROP COLUMN image_model/);
   assert.match(migration, /coalesce\(agent_settings\.model_overrides->>''development'', agent_settings\.primary_model\)/);
   assert.match(migration, /procedure\.prokind = 'f'/);
+});
+
+test("the explicit-image migration separates image generation from inheriting text models", async () => {
+  const migration = await readFile(new URL("../infra/postgres/migrations/044_explicit_image_and_codex_models.sql", import.meta.url), "utf8");
+  assert.match(migration, /ADD COLUMN image_model text/);
+  assert.match(migration, /SET image_model = model_overrides->>'image'/);
+  assert.match(migration, /model_overrides - ARRAY\['design', 'development', 'test'\]::text\[\] = '\{\}'::jsonb/);
+  assert.doesNotMatch(migration, /model_overrides->'image'/);
 });

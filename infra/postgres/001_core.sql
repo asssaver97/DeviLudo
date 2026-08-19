@@ -77,7 +77,7 @@ CREATE TABLE deviludo.schema_metadata (
   applied_at timestamptz NOT NULL DEFAULT clock_timestamp()
 );
 INSERT INTO deviludo.schema_metadata(singleton, baseline, compatibility, current_version)
-VALUES (true, '001', 'deviludo-self-hosted-v1', '043_primary_agent_model');
+VALUES (true, '001', 'deviludo-self-hosted-v1', '044_explicit_image_and_codex_models');
 
 -- Every post-baseline change is immutable and checksummed. Fresh databases are
 -- created from this full snapshot and then stamp the migrations incorporated by
@@ -224,12 +224,13 @@ CREATE TABLE deviludo.instance_agent_settings (
   primary_model text NOT NULL CHECK (primary_model ~ '^[A-Za-z0-9][A-Za-z0-9._:/-]{0,199}$'),
   model_overrides jsonb NOT NULL CHECK (
     jsonb_typeof(model_overrides) = 'object'
-    AND model_overrides ?& ARRAY['design', 'development', 'test', 'image']
+    AND model_overrides ?& ARRAY['design', 'development', 'test']
+    AND model_overrides - ARRAY['design', 'development', 'test']::text[] = '{}'::jsonb
     AND (model_overrides->'design' = 'null'::jsonb OR (model_overrides->>'design') ~ '^[A-Za-z0-9][A-Za-z0-9._:/-]{0,199}$')
     AND (model_overrides->'development' = 'null'::jsonb OR (model_overrides->>'development') ~ '^[A-Za-z0-9][A-Za-z0-9._:/-]{0,199}$')
     AND (model_overrides->'test' = 'null'::jsonb OR (model_overrides->>'test') ~ '^[A-Za-z0-9][A-Za-z0-9._:/-]{0,199}$')
-    AND (model_overrides->'image' = 'null'::jsonb OR (model_overrides->>'image') ~ '^[A-Za-z0-9][A-Za-z0-9._:/-]{0,199}$')
   ),
+  image_model text CHECK (image_model IS NULL OR image_model ~ '^[A-Za-z0-9][A-Za-z0-9._:/-]{0,199}$'),
   credential_secret_ref text NOT NULL CHECK (
     length(credential_secret_ref) BETWEEN 32 AND 1000
     AND credential_secret_ref LIKE 'vault://instance/agent-runtime/api-key/versions/%'

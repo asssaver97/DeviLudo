@@ -151,7 +151,8 @@ export class StackHarness {
         baseUrl: "https://api.example.com",
         apiKey: "sk-e2e-instance-secret",
         primaryModel: "claude-primary",
-        modelOverrides: { design: null, development: null, test: null, image: null },
+        modelOverrides: { design: null, development: null, test: null },
+        imageModel: null,
       },
     });
     expect(response.ok(), await response.text()).toBeTruthy();

@@ -187,7 +187,7 @@ test("player-policy screenshots are bounded per frame instead of across the whol
   assert.ok(totalBytes > 4 * 1024 * 1024);
   assert.equal(remainder, "");
   assert.throws(
-    () => parseE2eExecutorProtocolChunk("", "a".repeat(2 * 1024 * 1024 + 1)),
+    () => parseE2eExecutorProtocolChunk("", "a".repeat(6 * 1024 * 1024 + 1)),
     /frame exceeds/,
   );
 });
@@ -251,19 +251,35 @@ test("a transient native screenshot failure is retried before failing the E2E no
 });
 
 test("the production Guest, relay, executor and node all wire the lifecycle guards", async () => {
-  const [guest, tartRelay, executor, node, release] = await Promise.all([
+  const [guest, tartRelay, executor, node, release, lifecycle] = await Promise.all([
     readFile(new URL("../scripts/executors/godot-window-e2e-guest.mjs", import.meta.url), "utf8"),
     readFile(new URL("../scripts/executors/local-tart-guest-runner.mjs", import.meta.url), "utf8"),
     readFile(new URL("../deploy/assets/e2e-job-executor.mjs", import.meta.url), "utf8"),
     readFile(new URL("../services/e2e-node/src/executor.ts", import.meta.url), "utf8"),
     readFile(new URL("../.github/workflows/release.yml", import.meta.url), "utf8"),
+    readFile(new URL("../deploy/assets/e2e-process-lifecycle.mjs", import.meta.url), "utf8"),
   ]);
   assert.match(guest, /validateGuestInteractionScript as validInteractionScript/);
   assert.match(guest, /await runConsumerPackageSmoke\(gamePackage\)/);
   assert.match(guest, /const environment = await isolatedGameEnvironment\(runId\);[\s\S]*uninstrumented: true/);
   assert.match(guest, /PACKAGE_NOT_PLAYABLE/);
+  assert.match(guest, /driver\("find-pid", \["--executable", executable\]/);
+  assert.doesNotMatch(guest, /execute\("ps", \["-ax", "-o", "pid=,command="\]/);
   assert.match(guest, /POSTCONDITION_TRANSITION_MISSING/);
+  assert.match(guest, /let executionError = null;[\s\S]*failures\.some\(failure => failure\.startsWith\("GODOT_SCRIPT_ERROR"\)\)[\s\S]*if \(executionError\) throw executionError/);
   assert.match(guest, /decision\.screenIntegrity === "PRODUCT_DEFECT"[\s\S]*VISUAL_INTEGRITY_DEFECT/);
+  assert.match(guest, /adaptiveRollouts\.find\(rollout => rollout\.failureCode === "VISUAL_INTEGRITY_DEFECT"\)[\s\S]*throw productFailure\([\s\S]*"VISUAL_INTEGRITY_DEFECT"/);
+  assert.match(guest, /relativePointForTarget\(target, action\.x, action\.y\)[\s\S]*basis-point offsets inside the stable target/);
+  assert.match(guest, /materializeRelativePoint\(resolved, action\.relativeX, action\.relativeY\)/);
+  assert.match(guest, /if \(action\.type === "wait"\) return Number\.isInteger\(action\.duration_ms\)/);
+  assert.match(guest, /if \(decision\.stateChanged !== true\) continue;/);
+  assert.match(guest, /materializeRegressionActionWhenReady\([\s\S]*afterSequence: probe\.sequence[\s\S]*Math\.min\(1_000, remaining\)/);
+  assert.match(guest, /isRegressionTargetUnavailable\(error\)[\s\S]*E2E control \..+is missing or duplicated/);
+  assert.match(guest, /if \(!isRegressionReplayMismatch\(error\)\) throw error;[\s\S]*replayMismatch = error;[\s\S]*return false/);
+  assert.match(guest, /if \(replayMismatch\) await delay\(500\);[\s\S]*await testEnvironment\.close\(\)/);
+  assert.match(guest, /catch \(error\) \{[\s\S]*cleanupError = error;[\s\S]*finally \{[\s\S]*await launched\.terminate\(\)/);
+  assert.match(guest, /if \(cleanupError && !executionError\) throw cleanupError/);
+  assert.match(guest, /error\.message\.startsWith\("INFRASTRUCTURE:"\)\) return false/);
   assert.match(guest, /policyInput\?\.close\(\)/);
   assert.match(guest, /type: "heartbeat"/);
   assert.match(guest, /const summary = productFailureMessage\(error\.code, error\.message\)/);
@@ -276,8 +292,8 @@ test("the production Guest, relay, executor and node all wire the lifecycle guar
   assert.match(guest, /failureCode: "ACTION_TARGET_UNAVAILABLE"[\s\S]*`\$\{journey\.id\}\/\$\{event\.stepId\}: \$\{detail\}`/);
   assert.match(guest, /failureCode: "PROBE_NOT_UPDATED"[\s\S]*await captureFailedActionEvidence\(\{/);
   assert.match(guest, /failureDetail: detail/);
-  assert.match(guest, /drawgrid=width=80:height=80:thickness=1:color=cyan@0\.45/);
-  assert.match(guest, /const screenshotBytes = await readFile\(playerObservationPath\)/);
+  assert.doesNotMatch(guest, /drawgrid=|playerObservationPath/);
+  assert.match(guest, /const screenshotBytes = await readFile\(screenshotPath\)/);
   assert.doesNotMatch(guest, /scale=960:540|adaptive-policy-observations|policyScreenshot/);
   assert.match(guest, /if \(action\.type === "wait"\) return \[\{ type: "wait", delay_ms: action\.duration_ms \}\]/);
   assert.match(tartRelay, /readCliArgument\(process\.argv, name\)/);
@@ -289,18 +305,22 @@ test("the production Guest, relay, executor and node all wire the lifecycle guar
   assert.match(tartRelay, /forwardTerminationSignals\(remote, killProcessGroup\)/);
   assert.match(tartRelay, /settleChildAfterProtocolResult\(remote, remoteClosed/);
   assert.match(tartRelay, /startChildProtocolWatchdog\(remote/);
-  assert.match(tartRelay, /const policyResponseTimeoutMs = 170_000/);
+  assert.match(tartRelay, /const policyResponseTimeoutMs = 490_000/);
   assert.match(tartRelay, /const protocolIdleTimeoutMs = policyResponseTimeoutMs \+ 10_000/);
   assert.match(tartRelay, /idleMs: protocolIdleTimeoutMs/);
   assert.match(tartRelay, /readProtocolLineWithTimeout\(parentLines, remoteClosed, policyResponseTimeoutMs\)/);
   assert.match(executor, /waitForChildWithHardTimeout\(child/);
-  assert.match(executor, /readProtocolLineWithTimeout\(parentIterator, childClosed, 170_000\)/);
-  assert.match(guest, /delay\(170_000\).*Test Agent player policy timed out/s);
+  assert.match(executor, /readProtocolLineWithTimeout\(parentIterator, childClosed, 490_000\)/);
+  assert.match(guest, /delay\(490_000\).*Test Agent player policy timed out/s);
+  assert.match(guest, /type: "mouse_click", button: "LEFT", x: action\.x, y: action\.y/);
+  assert.match(lifecycle, /idleMs > 600_000/);
+  assert.match(lifecycle, /timeoutMs > 600_000/);
   assert.match(guest, /for \(let attempt = 0; attempt < 3; attempt \+= 1\)[\s\S]*requestPlayerPolicyOnce\(request\)/);
   assert.match(guest, /PLAYER_POLICY_PROVIDER\|PLAYER_POLICY_VISION_UNAVAILABLE\|player policy timed out/);
   assert.match(guest, /let policyWaitMs = 0/);
   assert.match(guest, /activeRolloutMs = \(\) => Date\.now\(\) - rolloutStartedAt - policyWaitMs/);
   assert.match(guest, /policyWaitMs \+= Date\.now\(\) - policyStartedAt/);
+  assert.match(guest, /successes \+ remaining < ADAPTIVE_REQUIRED_SUCCESSES\) break/);
   assert.doesNotMatch(guest, /Date\.now\(\) - lastProgressAt/);
   assert.match(executor, /closeChildPipesAfterExit\(child\)/);
   assert.match(executor, /forwardTerminationSignals\(child, killProcessGroup\)/);
