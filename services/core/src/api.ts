@@ -63,6 +63,7 @@ import type {
 import { E2ePkiIssuer } from "./e2e-pki";
 import { E2E_INFRASTRUCTURE_DOMAINS } from "@/lib/runtime/e2e-failure";
 import { createInitialProjectDocument, parseProjectDocumentContent } from "@/lib/product/project-document";
+import { parseResponseLanguage, type ResponseLanguage } from "@/lib/product/response-language";
 import { ProjectSourceStore } from "./project-sources";
 import {
   createSteamSecretStore,
@@ -302,6 +303,7 @@ export async function runApi(
   app.post("/v1/projects", async (request, reply) => {
     const principal = productAccess(request, config);
     const body = objectBody(request.body);
+    const responseLanguage = parseResponseLanguage(body.responseLanguage);
     const concept = typeof body.concept === "string" ? body.concept.trim() : "";
     const suppliedName = typeof body.name === "string" ? body.name.trim() : "";
     if (concept.length < 10 || concept.length > 4_000 || suppliedName.length > 200) {
@@ -321,7 +323,7 @@ export async function runApi(
       if (!workspace || !project) throw new Error("Project creation receipt is incomplete");
       return reply.send({ workspace, project });
     }
-    const name = suppliedName || await agentProjectName(concept, repository, agentSecrets);
+    const name = suppliedName || await agentProjectName(concept, repository, agentSecrets, responseLanguage);
     const workspace = currentWorkspace ?? Object.freeze({ id: randomUUID(), name, createdAt: "" });
     const projectId = deterministicProjectId(principal.actorId, idempotencyKey);
     const project = await repository.createProject({
@@ -333,6 +335,7 @@ export async function runApi(
       idempotencyKey,
       name,
       concept,
+      responseLanguage,
       specification: specificationFromConcept(name, concept),
       ...defaultWorkflowConfiguration(),
     });
@@ -362,6 +365,7 @@ export async function runApi(
         principal,
         repository,
         name: displayName,
+        responseLanguage: parseResponseLanguage(body.responseLanguage),
         source: {
           sourceKind: "LOCAL_DIRECTORY",
           localDirectoryBindingId: body.bindingId as string,
@@ -395,6 +399,7 @@ export async function runApi(
         principal,
         repository,
         name: displayName || github.displayName,
+        responseLanguage: parseResponseLanguage(body.responseLanguage),
         source: {
           sourceKind: "GIT",
           repositoryUrl: github.canonicalUrl,
@@ -430,6 +435,7 @@ export async function runApi(
         projectId: request.params.projectId,
         baseWorkflowId: body.baseWorkflowId,
         actorId: principal.actorId,
+        responseLanguage: parseResponseLanguage(body.responseLanguage),
       });
       return reply.code(result.created ? 201 : 200).send(result);
     },
@@ -772,6 +778,7 @@ export async function runApi(
       projectId: request.params.projectId,
       expectedRevision: Number(body.expectedRevision),
       content,
+      responseLanguage: parseResponseLanguage(body.responseLanguage),
     });
     return project ? reply.send({ project }) : reply.code(404).send({ code: "PROJECT_NOT_FOUND" });
   });
@@ -869,6 +876,7 @@ export async function runApi(
 
   app.post<{ Params: { projectId: string } }>("/v1/projects/:projectId/approve", async (request, reply) => {
     const principal = productAccess(request, config);
+    const body = objectBody(request.body ?? {});
     const workspace = await requireSelectedWorkspace(request, repository, principal);
     const project = await repository.readProject(workspace.id, request.params.projectId);
     if (!project) return reply.code(404).send({ code: "PROJECT_NOT_FOUND" });
@@ -887,6 +895,7 @@ export async function runApi(
       workspaceId: workspace.id,
       project,
       requestedByActorId: principal.actorId,
+      responseLanguage: parseResponseLanguage(body.responseLanguage),
     });
     return reply.code(accepted ? 202 : 200).send({ accepted });
   });
@@ -1040,6 +1049,7 @@ export async function runApi(
         stage,
         requestedBy: principal.actorLabel,
         requestedByActorId: principal.actorId,
+        responseLanguage: parseResponseLanguage(body.responseLanguage),
       },
     } as const;
     const accepted = stage === "STEAM_PUBLISH"
@@ -1428,6 +1438,7 @@ type ConversationMessageCommand = Readonly<{
   conversationId: string | null;
   projectId: string | null;
   projectIdSupplied: boolean;
+  responseLanguage: ResponseLanguage;
 }>;
 
 type ConversationMessageResult = Readonly<{
@@ -1455,6 +1466,7 @@ function conversationMessageCommand(value: unknown): ConversationMessageCommand 
     conversationId: conversationId as string | null,
     projectId: projectId as string | null,
     projectIdSupplied: body.projectId !== undefined,
+    responseLanguage: parseResponseLanguage(body.responseLanguage),
   });
 }
 
@@ -1507,7 +1519,7 @@ async function processConversationMessage(input: Readonly<{
       });
     }
     input.onStage?.("NAMING");
-    const name = await agentProjectName(command.content, repository, agentSecrets);
+    const name = await agentProjectName(command.content, repository, agentSecrets, command.responseLanguage);
     const specification = specificationFromConcept(name, command.content);
     input.onStage?.("RESPONDING");
     const agentReplies = await conversationAgentReplies({
@@ -1518,11 +1530,12 @@ async function processConversationMessage(input: Readonly<{
         concept: command.content,
         workflowState: "DRAFT",
         specification,
-        document: createInitialProjectDocument(name, command.content, specification),
+        document: createInitialProjectDocument(name, command.content, specification, command.responseLanguage),
         analysisStatus: "READY",
         discovery: null,
       }),
       allowDraftMutation: true,
+      responseLanguage: command.responseLanguage,
     }, repository, agentSecrets, { signal: input.signal, onDelta: input.onDelta });
     input.onStage?.("SAVING");
     const targetWorkspace = workspace ?? Object.freeze({ id: randomUUID(), name, createdAt: "" });
@@ -1539,7 +1552,8 @@ async function processConversationMessage(input: Readonly<{
       concept: command.content,
       specification,
       document: agentReplies.find(reply => reply.agentRole === "DESIGN")?.projectDocument
-        ?? createInitialProjectDocument(name, command.content, specification),
+        ?? createInitialProjectDocument(name, command.content, specification, command.responseLanguage),
+      responseLanguage: command.responseLanguage,
       userContent: command.content,
       assistantMessages: agentReplies.map(reply => Object.freeze({
         content: reply.content,
@@ -1558,6 +1572,7 @@ async function processConversationMessage(input: Readonly<{
         workspaceId: targetWorkspace.id,
         project: createdProject,
         requestedByActorId: principal.actorId,
+        responseLanguage: command.responseLanguage,
       });
       createdProject = await repository.readProject(targetWorkspace.id, projectId) ?? createdProject;
     }
@@ -1592,6 +1607,7 @@ async function processConversationMessage(input: Readonly<{
     history: existingConversation?.messages ?? Object.freeze([]),
     project: conversationProjectContext(project),
     allowDraftMutation: project.workflowState === "DRAFT",
+    responseLanguage: command.responseLanguage,
   }, repository, agentSecrets, { signal: input.signal, onDelta: input.onDelta });
   input.onStage?.("SAVING");
   const conversation = await repository.appendConversationTurn({
@@ -1608,6 +1624,7 @@ async function processConversationMessage(input: Readonly<{
     assistantProjectDocument: agentReplies.find(reply => reply.agentRole === "DESIGN")?.projectDocument ?? null,
     resolveImportAnalysis: project.analysisStatus === "NEEDS_INPUT"
       && agentReplies.every(reply => reply.readyForDevelopment),
+    responseLanguage: command.responseLanguage,
   });
   let updatedProject = await repository.readProject(workspace.id, projectId);
   if (!updatedProject) throw httpError(404, "PROJECT_NOT_FOUND", "项目已不存在");
@@ -1619,6 +1636,7 @@ async function processConversationMessage(input: Readonly<{
       workspaceId: workspace.id,
       project: updatedProject,
       requestedByActorId: principal.actorId,
+      responseLanguage: command.responseLanguage,
     });
     updatedProject = await repository.readProject(workspace.id, projectId) ?? updatedProject;
   }
@@ -1635,6 +1653,7 @@ async function approveProjectDevelopment(input: Readonly<{
   workspaceId: string;
   project: ProductProjectDetail;
   requestedByActorId: string;
+  responseLanguage: ResponseLanguage;
 }>): Promise<boolean> {
   const project = await input.repository.synchronizeDraftSpecificationFromDocument(
     input.workspaceId,
@@ -1655,7 +1674,11 @@ async function approveProjectDevelopment(input: Readonly<{
   return input.repository.appendSignal(input.workspaceId, project.workflowId, {
     kind: "SPEC_APPROVED",
     idempotencyKey: `spec-approved:${project.workflowId}`,
-    payload: { specificationObject, requestedByActorId: input.requestedByActorId },
+    payload: {
+      specificationObject,
+      requestedByActorId: input.requestedByActorId,
+      responseLanguage: input.responseLanguage,
+    },
   });
 }
 
@@ -1790,13 +1813,14 @@ async function agentProjectName(
   concept: string,
   repository: CoreRepository,
   agentSecrets: AgentSecretStore,
+  responseLanguage: ResponseLanguage,
 ): Promise<string> {
   const settings = await repository.readAgentSettings();
   if (!settings) throw httpError(424, "AGENT_CONFIG_REQUIRED", "请先配置全局 Agent 连接");
   const apiKey = await agentSecrets.readApiKey(settings.credentialSecretRef);
   if (!apiKey) throw httpError(424, "AGENT_CONFIG_REQUIRED", "无法读取全局 Agent 凭据，请重新保存配置");
   try {
-    return await generateProjectName({ concept, settings, apiKey });
+    return await generateProjectName({ concept, settings, apiKey, responseLanguage });
   } catch (error) {
     const message = error instanceof Error ? error.message : "Agent 项目命名失败";
     throw httpError(424, "AGENT_NAMING_FAILED", message);
@@ -1897,6 +1921,7 @@ async function queueBoundProjectImport(input: Readonly<{
   principal: LocalAccessContext;
   repository: CoreRepository;
   name: string;
+  responseLanguage: ResponseLanguage;
   source: Readonly<{
     sourceKind: "GIT" | "LOCAL_DIRECTORY";
     repositoryUrl: string | null;
@@ -1943,6 +1968,7 @@ async function queueBoundProjectImport(input: Readonly<{
     workflowId: randomUUID(),
     idempotencyKey,
     name,
+    responseLanguage: input.responseLanguage,
     source: {
       kind: input.source.sourceKind,
       repositoryUrl: input.source.repositoryUrl,
@@ -1994,7 +2020,12 @@ async function runProjectImportAnalysisWorker(input: Readonly<{
       if (!settings) throw new Error("请先在设置中配置全局 Agent 连接");
       const apiKey = await input.agentSecrets.readApiKey(settings.credentialSecretRef);
       if (!apiKey) throw new Error("无法读取全局 Agent 凭据，请重新保存配置");
-      const analysis = await analyzeImportedProject({ source, settings, apiKey });
+      const analysis = await analyzeImportedProject({
+        source,
+        settings,
+        apiKey,
+        responseLanguage: claimed.responseLanguage,
+      });
       const stored = await input.projectSources.publishFiles({
         workspaceId: claimed.workspaceId,
         projectId: claimed.projectId,
@@ -2010,6 +2041,7 @@ async function runProjectImportAnalysisWorker(input: Readonly<{
         concept: analysis.concept,
         specification: analysis.specification,
         document: analysis.document,
+        responseLanguage: claimed.responseLanguage,
         assistantContent: analysis.assistantContent,
         assistantMetadata: {
           agentRuntime: analysis.runtime,
@@ -2074,6 +2106,7 @@ async function conversationAgentReplies(
     history: readonly Pick<ProductConversation["messages"][number], "role" | "content">[];
     project: ConversationAgentProjectContext;
     allowDraftMutation: boolean;
+    responseLanguage: ResponseLanguage;
   }>,
   repository: CoreRepository,
   agentSecrets: AgentSecretStore,

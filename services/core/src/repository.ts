@@ -45,6 +45,7 @@ import {
   synchronizeSpecificationWithProjectDocument,
   type ProjectDocumentContent,
 } from "@/lib/product/project-document";
+import { parseResponseLanguage, type ResponseLanguage } from "@/lib/product/response-language";
 
 export class CoreRepository {
   constructor(private readonly database: Database) {}
@@ -657,6 +658,7 @@ export class CoreRepository {
     name: string;
     concept: string;
     specification: Readonly<Record<string, unknown>>;
+    responseLanguage?: ResponseLanguage;
     profile: "VALIDATE" | "RELEASE";
     targetPlatforms: readonly ServerOperatingSystem[];
   }>): Promise<ProductProjectDetail> {
@@ -685,6 +687,7 @@ export class CoreRepository {
           JSON.stringify({
             concept: input.concept,
             specification: input.specification,
+            responseLanguage: parseResponseLanguage(input.responseLanguage),
             iteration: initialIterationState(),
           }),
         ],
@@ -721,6 +724,7 @@ export class CoreRepository {
     workflowId: string;
     idempotencyKey: string;
     name: string;
+    responseLanguage?: ResponseLanguage;
     source: Readonly<{
       kind: "GIT" | "LOCAL_DIRECTORY";
       repositoryUrl: string | null;
@@ -731,7 +735,10 @@ export class CoreRepository {
     profile: "VALIDATE" | "RELEASE";
     targetPlatforms: readonly ServerOperatingSystem[];
   }>): Promise<ProductProjectDetail> {
-    const concept = `正在分析《${input.name}》的现有源码。`;
+    const responseLanguage = parseResponseLanguage(input.responseLanguage);
+    const concept = responseLanguage === "zh"
+      ? `正在分析《${input.name}》的现有源码。`
+      : `Analyzing the existing source for “${input.name}”.`;
     const specification = Object.freeze({ title: input.name });
     await this.database.withWorkspace(input.workspaceId, async client => {
       await client.query(
@@ -750,6 +757,7 @@ export class CoreRepository {
         name: input.name,
         concept,
         specification,
+        responseLanguage,
       });
       await client.query(
         `INSERT INTO deviludo.workflow_instances(
@@ -758,6 +766,7 @@ export class CoreRepository {
         [input.workspaceId, input.workflowId, input.projectId, input.profile, input.targetPlatforms, JSON.stringify({
           concept,
           specification,
+          responseLanguage,
           source: {
             ...input.source,
             fileCount: 0,
@@ -803,7 +812,13 @@ export class CoreRepository {
       [leaseSeconds],
     );
     const row = result.rows[0];
-    return row ? Object.freeze({
+    if (!row) return null;
+    const languageResult = await this.database.withWorkspace(row.workspaceId, async client => client.query<{ response_language: unknown }>(
+      `SELECT state_data->'responseLanguage' AS response_language
+         FROM deviludo.workflow_instances WHERE id = $1::uuid`,
+      [row.workflowId],
+    ));
+    return Object.freeze({
       workspaceId: row.workspaceId,
       projectId: row.projectId,
       workflowId: row.workflowId,
@@ -814,7 +829,8 @@ export class CoreRepository {
       localDirectoryBindingId: row.localDirectoryBindingId,
       gitBranch: row.gitBranch,
       displayName: row.displayName,
-    }) : null;
+      responseLanguage: parseResponseLanguage(languageResult.rows[0]?.response_language),
+    });
   }
 
   async completeProjectImportAnalysis(input: Readonly<{
@@ -826,6 +842,7 @@ export class CoreRepository {
     concept: string;
     specification: Readonly<Record<string, unknown>>;
     document: ProjectDocumentContent;
+    responseLanguage?: ResponseLanguage;
     assistantContent: string;
     assistantMetadata: Readonly<Record<string, unknown>>;
     discovery: ProjectDiscoveryReport;
@@ -861,7 +878,11 @@ export class CoreRepository {
       );
       const revision = Number(currentDocument.rows[0]?.revision ?? 0) + 1;
       const document = parseProjectDocumentContent(input.document);
-      const markdown = projectDocumentMarkdown(row.project_name, document);
+      const markdown = projectDocumentMarkdown(
+        row.project_name,
+        document,
+        parseResponseLanguage(input.responseLanguage ?? row.state_data.responseLanguage),
+      );
       await client.query(
         `UPDATE deviludo.project_documents
             SET revision = $2::bigint, content = $3::jsonb, markdown = $4,
@@ -1058,6 +1079,7 @@ export class CoreRepository {
     concept: string;
     specification: Readonly<Record<string, unknown>>;
     document: ProjectDocumentContent;
+    responseLanguage?: ResponseLanguage;
     userContent: string;
     assistantMessages: readonly Readonly<{
       content: string;
@@ -1091,6 +1113,7 @@ export class CoreRepository {
           JSON.stringify({
             concept: input.concept,
             specification: input.specification,
+            responseLanguage: parseResponseLanguage(input.responseLanguage),
             iteration: initialIterationState(),
           }),
         ],
@@ -1307,6 +1330,7 @@ export class CoreRepository {
     projectId: string;
     baseWorkflowId: string;
     actorId: string;
+    responseLanguage?: ResponseLanguage;
   }>): Promise<Readonly<{ project: ProductProjectDetail; created: boolean }>> {
     if (!UUID.test(input.projectId) || !UUID.test(input.baseWorkflowId) || !UUID.test(input.actorId)) {
       throw iterationError("INVALID_PROJECT_ITERATION", "项目迭代请求无效", 400);
@@ -1379,6 +1403,7 @@ export class CoreRepository {
       const stateData = {
         concept: typeof previousState.concept === "string" ? previousState.concept : "",
         specification: productSpecificationFromState(previousState),
+        responseLanguage: parseResponseLanguage(input.responseLanguage ?? previousState.responseLanguage),
         ...(previousState.source && typeof previousState.source === "object"
           ? { source: previousState.source }
           : {}),
@@ -1562,6 +1587,7 @@ export class CoreRepository {
     projectId: string;
     expectedRevision: number;
     content: ProjectDocumentContent;
+    responseLanguage?: ResponseLanguage;
   }>): Promise<ProductProjectDetail | null> {
     await this.database.withWorkspace(input.workspaceId, async client => {
       const project = await client.query<{ name: string }>(
@@ -1580,7 +1606,11 @@ export class CoreRepository {
         });
       }
       const content = parseProjectDocumentContent(input.content);
-      const markdown = projectDocumentMarkdown(project.rows[0].name, content);
+      const markdown = projectDocumentMarkdown(
+        project.rows[0].name,
+        content,
+        parseResponseLanguage(input.responseLanguage),
+      );
       const revision = input.expectedRevision + 1;
       await touchProjectActivity(client, input.workspaceId, input.projectId);
       await client.query(
@@ -1985,6 +2015,7 @@ export class CoreRepository {
     assistantApplyToDraft: boolean;
     assistantProjectDocument: ProjectDocumentContent | null;
     resolveImportAnalysis: boolean;
+    responseLanguage?: ResponseLanguage;
   }>): Promise<ProductConversation> {
     return this.database.withWorkspace(input.workspaceId, async client => {
       const existing = await client.query<ProductConversationRow>(
@@ -2026,6 +2057,15 @@ export class CoreRepository {
           stateData: workflowResult.rows[0].state_data,
         };
       }
+      const responseLanguage = parseResponseLanguage(input.responseLanguage);
+      await client.query(
+        `UPDATE deviludo.workflow_instances
+            SET state_data = coalesce(state_data, '{}'::jsonb)
+                  || jsonb_build_object('responseLanguage', $2::text),
+                updated_at = clock_timestamp()
+          WHERE id = $1::uuid`,
+        [project.workflowId, responseLanguage],
+      );
       if (project.workflowState !== input.expectedWorkflowState) {
         throw Object.assign(new Error("项目状态已变化，请重试本次对话"), {
           statusCode: 409,
@@ -2096,7 +2136,11 @@ export class CoreRepository {
         if (!current) throw new Error("Project document not found");
         if (JSON.stringify(current.content) !== JSON.stringify(content)) {
           const revision = Number(current.revision) + 1;
-          const markdown = projectDocumentMarkdown(project.name, content);
+          const markdown = projectDocumentMarkdown(
+            project.name,
+            content,
+            parseResponseLanguage(input.responseLanguage),
+          );
           await client.query(
             `UPDATE deviludo.project_documents
                 SET revision = $2::bigint, content = $3::jsonb, markdown = $4,
@@ -2648,6 +2692,16 @@ export class CoreRepository {
         [workflowId],
       );
       if (workflow.rows[0]) await touchProjectActivity(client, workspaceId, workflow.rows[0].project_id);
+      if (workflow.rows[0] && (signal.payload.responseLanguage === "en" || signal.payload.responseLanguage === "zh")) {
+        await client.query(
+          `UPDATE deviludo.workflow_instances
+              SET state_data = coalesce(state_data, '{}'::jsonb)
+                    || jsonb_build_object('responseLanguage', $2::text),
+                  updated_at = clock_timestamp()
+            WHERE id = $1::uuid`,
+          [workflowId, signal.payload.responseLanguage],
+        );
+      }
       if (signal.kind === "SPEC_APPROVED" && workflow.rows[0]) {
         await client.query(
           `UPDATE deviludo.workflow_instances target
@@ -2846,6 +2900,7 @@ export class CoreRepository {
       timeoutSeconds: row.timeout_seconds,
       payload: Object.freeze({
         ...row.payload,
+        responseLanguage: parseResponseLanguage(row.workflow_state_data?.responseLanguage),
         ...(row.kind === "AGENT_GENERATION" && localDirectoryBindingId ? { localDirectoryBindingId } : {}),
       }),
       lease: Object.freeze({
@@ -3269,6 +3324,7 @@ export type PendingProjectImportAnalysis = Readonly<{
   localDirectoryBindingId: string;
   gitBranch: string | null;
   displayName: string;
+  responseLanguage: ResponseLanguage;
 }>;
 
 type PendingProjectImportAnalysisRow = {
@@ -3644,12 +3700,17 @@ async function insertInitialProjectDocument(
     concept: string;
     specification: Readonly<Record<string, unknown>>;
     document?: ProjectDocumentContent;
+    responseLanguage?: ResponseLanguage;
   }>,
 ): Promise<void> {
   const content = input.document
     ? parseProjectDocumentContent(input.document)
-    : createInitialProjectDocument(input.name, input.concept, input.specification);
-  const markdown = projectDocumentMarkdown(input.name, content);
+    : createInitialProjectDocument(input.name, input.concept, input.specification, parseResponseLanguage(input.responseLanguage));
+  const markdown = projectDocumentMarkdown(
+    input.name,
+    content,
+    parseResponseLanguage(input.responseLanguage),
+  );
   await client.query(
     `INSERT INTO deviludo.project_documents(
        workspace_id, project_id, content, markdown, maintained_by, last_agent_maintained_at

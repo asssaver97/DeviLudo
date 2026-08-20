@@ -49,7 +49,7 @@ test("project linking is reachable from Home and separates local and GitHub sour
   assert.match(studio, /text\("已有项目分析", "PROJECT ANALYSIS"\)/);
   assert.match(studio, /analysisStatus === "NEEDS_INPUT"/);
   assert.match(projectImport, /completedWork.*remainingWork.*startupFlow.*startupIssues.*recommendedPlan.*questions/s);
-  assert.match(projectImport, /直接进入进行中的对局、残局、测试\/调试状态/);
+  assert.match(projectImport, /enters an in-progress match, late-game state, test\/debug state/);
   assert.match(repository, /status: input\.discovery\.questions\.length \? "NEEDS_INPUT" : "READY"/);
   assert.match(repository, /state_data #>> '\{importAnalysis,status\}' = 'NEEDS_INPUT'/);
   assert.match(core, /project\.analysisStatus === "NEEDS_INPUT"[\s\S]*agentReplies\.every\(reply => reply\.readyForDevelopment\)/);

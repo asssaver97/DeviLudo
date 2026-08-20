@@ -23,7 +23,7 @@ export class ConversationStreamError extends Error {
 }
 
 export async function sendConversationMessageStream(
-  body: Readonly<{ content: string; conversationId?: string; projectId?: string | null }>,
+  body: Readonly<{ content: string; conversationId?: string; projectId?: string | null; responseLanguage?: "en" | "zh" }>,
   idempotencyKey: string,
   onDelta: (agentRole: ProjectAgentRole, delta: string) => void,
   onProjectDocument?: (project: ProductProjectDetail) => void,

@@ -32,7 +32,7 @@ export async function generateMetadata(): Promise<Metadata> {
 
 export default async function RootLayout({ children }: Readonly<{ children: React.ReactNode }>) {
   const storedLocale = (await cookies()).get("deviludo_locale")?.value;
-  const initialLocale: Locale = storedLocale === "en" ? "en" : "zh";
+  const initialLocale: Locale = storedLocale === "zh" ? "zh" : "en";
   return (
     <html lang={initialLocale === "en" ? "en" : "zh-CN"} suppressHydrationWarning>
       <head><script dangerouslySetInnerHTML={{ __html: themeBootstrap }} /></head>

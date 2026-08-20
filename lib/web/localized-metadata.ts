@@ -7,7 +7,7 @@ export async function localizedMetadata(
   chineseDescription?: string,
   englishDescription?: string,
 ): Promise<Metadata> {
-  const english = (await cookies()).get("deviludo_locale")?.value === "en";
+  const english = (await cookies()).get("deviludo_locale")?.value !== "zh";
   return {
     title: english ? englishTitle : chineseTitle,
     ...(chineseDescription && englishDescription

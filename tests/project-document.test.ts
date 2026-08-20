@@ -12,13 +12,22 @@ test("new projects receive a structured collaborative game document", () => {
   const content = createInitialProjectDocument("时间群岛", "一款时间循环解谜冒险游戏", {
     coreLoop: ["探索场景", "收集线索", "重置时间线"],
     acceptanceCriteria: ["可完成一轮循环"],
-  });
+  }, "zh");
   assert.equal(content.introduction, "一款时间循环解谜冒险游戏");
   assert.match(content.gameplay, /探索场景/);
   assert.deepEqual(content.categories, ["待 Agent 分类"]);
   assert.deepEqual(content.features, ["可完成一轮循环"]);
-  const markdown = projectDocumentMarkdown("时间群岛", content);
+  const markdown = projectDocumentMarkdown("时间群岛", content, "zh");
   for (const heading of ["游戏介绍", "玩法", "游戏分类", "主要特性"]) assert.match(markdown, new RegExp(heading));
+});
+
+test("project documents default to English when no UI language is supplied", () => {
+  const content = createInitialProjectDocument("Untitled", "A new game", {});
+  assert.deepEqual(content.categories, ["Pending Agent classification"]);
+  const markdown = projectDocumentMarkdown("Untitled", content);
+  for (const heading of ["Game overview", "Gameplay", "Categories", "Key features"]) {
+    assert.match(markdown, new RegExp(heading));
+  }
 });
 
 test("project documents fail closed when required collaboration fields are missing", () => {

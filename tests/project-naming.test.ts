@@ -37,6 +37,25 @@ test("Claude-compatible naming uses the configured instance endpoint and primary
   assert.equal(requestedUrl, "https://gateway.example.com/anthropic/v1/messages");
   assert.equal(requestedBody.model, "claude-primary");
   assert.equal(requestedBody.max_tokens, 512);
+  const prompt = String((requestedBody.messages as { content: string }[])[0]?.content);
+  assert.match(prompt, /Generate a concise, distinctive project name/);
+  assert.doesNotMatch(prompt, /请用中文回答/);
+});
+
+test("Chinese UI injects an answer-language instruction into project naming", async () => {
+  let requestedBody: Record<string, unknown> = {};
+  await generateProjectName({
+    concept: "一款海上探索游戏",
+    settings,
+    apiKey: "sk-local-secret-value",
+    responseLanguage: "zh",
+    fetchImpl: (async (_input, init) => {
+      requestedBody = JSON.parse(String(init?.body)) as Record<string, unknown>;
+      return Response.json({ content: [{ type: "text", text: "潮汐航路" }] });
+    }) as typeof fetch,
+  });
+  const prompt = String((requestedBody.messages as { content: string }[])[0]?.content);
+  assert.match(prompt, /请用中文回答/);
 });
 
 test("generated project names fail closed when the provider returns invalid text", () => {

@@ -789,12 +789,13 @@ test("settings and project details use unnumbered sections and Codex remains sel
   assert.match(settingsPage, /settings-secondary-grid/);
 });
 
-test("English mode localizes settings, assets, metadata, and server error fallbacks", async () => {
-  const [agentSettings, assetPanel, language, layout, proxy] = await Promise.all([
+test("English mode is the first-run default and localizes settings, assets, metadata, and server fallbacks", async () => {
+  const [agentSettings, assetPanel, language, layout, metadata, proxy] = await Promise.all([
     readFile(new URL("../components/AgentSettings.tsx", import.meta.url), "utf8"),
     readFile(new URL("../components/AssetManifestPanel.tsx", import.meta.url), "utf8"),
     readFile(new URL("../components/i18n/LanguageProvider.tsx", import.meta.url), "utf8"),
     readFile(new URL("../app/layout.tsx", import.meta.url), "utf8"),
+    readFile(new URL("../lib/web/localized-metadata.ts", import.meta.url), "utf8"),
     readFile(new URL("../app/api/[...segments]/route.ts", import.meta.url), "utf8"),
   ]);
   for (const component of [agentSettings, assetPanel]) {
@@ -803,6 +804,9 @@ test("English mode localizes settings, assets, metadata, and server error fallba
   }
   assert.match(language, /locale === "en" && \/\\p\{Script=Han\}\//);
   assert.match(layout, /localizedMetadata\(/);
+  assert.match(layout, /storedLocale === "zh" \? "zh" : "en"/);
+  assert.match(metadata, /value !== "zh"/);
+  assert.match(proxy, /=== "zh" \? chinese : english/);
   assert.match(proxy, /requestText\(request, "请求来源校验失败", "Request origin validation failed"\)/);
 });
 

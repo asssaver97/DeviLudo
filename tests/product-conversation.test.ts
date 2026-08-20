@@ -101,9 +101,10 @@ test("project group chat invokes design, development, and test Agents with indep
 
   assert.deepEqual(models, ["design-model", "development-model", "test-model"]);
   assert.deepEqual(replies.map(reply => reply.agentRole), ["DESIGN", "DEVELOPMENT", "TEST"]);
-  assert.match(prompts[0], /设计 Agent/);
-  assert.match(prompts[1], /开发 Agent/);
-  assert.match(prompts[2], /测试 Agent/);
+  assert.match(prompts[0], /Design Agent/);
+  assert.match(prompts[1], /Development Agent/);
+  assert.match(prompts[2], /Test Agent/);
+  assert.ok(prompts.every(prompt => !prompt.includes("请用中文回答")));
   assert.match(histories[1], /design-model 的意见/);
   assert.match(histories[2], /development-model 的意见/);
 });
@@ -119,6 +120,7 @@ test("Claude design Agent receives project context and conversation history", as
     ]),
     project,
     allowDraftMutation: true,
+    responseLanguage: "zh",
     settings: claudeSettings(7, Object.freeze({ design: "claude-sonnet", development: null, test: null, image: null })),
     apiKey: "sk-test-secret",
     fetchImpl: async (url, init) => {
@@ -147,6 +149,7 @@ test("Claude design Agent receives project context and conversation history", as
   assert.match(String(requestedBody.system), /星港维修队/);
   assert.match(String(requestedBody.system), /十分钟一局/);
   assert.match(String(requestedBody.system), /projectDocumentPatch/);
+  assert.match(String(requestedBody.system), /请用中文回答/);
   assert.deepEqual((requestedBody.messages as { role: string; content: string }[]).map(message => message.role), [
     "user", "assistant", "user",
   ]);
@@ -190,7 +193,7 @@ test("Codex design Agent uses the official CLI session and cannot mutate a locke
     },
   });
 
-  assert.match(requestedPrompt, /applyToDraft 必须为 false/);
+  assert.match(requestedPrompt, /applyToDraft must be false/);
   assert.equal(result.applyToDraft, false);
   assert.equal(result.content, "当前交付已锁定，我会把它作为下一轮建议。");
   assert.deepEqual(result.options, []);

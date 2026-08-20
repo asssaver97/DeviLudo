@@ -93,8 +93,8 @@ export function HomeChat() {
     setContent("");
     try {
       const body = previousConversation && !previousConversation.id.startsWith("pending-")
-        ? { conversationId: previousConversation.id, content: message }
-        : { projectId: selectedProjectId || null, content: message };
+        ? { conversationId: previousConversation.id, content: message, responseLanguage: locale }
+        : { projectId: selectedProjectId || null, content: message, responseLanguage: locale };
       const result = await sendConversationMessageStream(
         body,
         `conversation:${crypto.randomUUID()}`,
@@ -147,7 +147,7 @@ export function HomeChat() {
       const response = await fetch(`/api/projects/${encodeURIComponent(activeProject.id)}/approve`, {
         method: "POST",
         headers: { "content-type": "application/json" },
-        body: "{}",
+        body: JSON.stringify({ responseLanguage: locale }),
       });
       const payload = await response.json().catch(() => ({})) as { message?: string };
       if (!response.ok) throw new Error(errorText(payload.message, `操作失败 (${response.status})`, `Operation failed (${response.status})`));

@@ -86,7 +86,7 @@ export function ProductDashboard({
       const response = await fetch("/api/projects", {
         method: "POST",
         headers: { "content-type": "application/json", "idempotency-key": `project:${crypto.randomUUID()}` },
-        body: JSON.stringify({ name: name.trim(), concept: concept.trim() }),
+        body: JSON.stringify({ name: name.trim(), concept: concept.trim(), responseLanguage: locale }),
       });
       const payload = await readJson(response, errorText) as { workspace: WorkspaceSummary; project: ProductProjectSummary };
       cacheProjectSummary(payload.project);
@@ -118,6 +118,7 @@ export function ProductDashboard({
         body: JSON.stringify({
           name: local.name,
           bindingId: local.bindingId,
+          responseLanguage: locale,
           ...(local.gitBranch ? { gitBranch: local.gitBranch } : {}),
         }),
       });
@@ -160,6 +161,7 @@ export function ProductDashboard({
           name: local.name,
           repositoryUrl,
           bindingId: local.bindingId,
+          responseLanguage: locale,
           ...(local.gitBranch ? { gitBranch: local.gitBranch } : {}),
         }),
       });

@@ -12,6 +12,7 @@ import type { JobProtocolV4 } from "./contracts";
 import type { ArtifactRecord } from "@/lib/product/contracts";
 import { createHash } from "node:crypto";
 import { parseProjectDocumentContent, projectDocumentMarkdown } from "@/lib/product/project-document";
+import { parseResponseLanguage } from "@/lib/product/response-language";
 import { specificationRequirementCatalog, validateTestManifest } from "@/lib/product/test-manifest";
 
 export class CoreObjectStore {
@@ -192,7 +193,10 @@ export class CoreObjectStore {
     }
     const content = parseProjectDocumentContent(parsed.content);
     const projectName = typeof job.payload.projectName === "string" ? job.payload.projectName : "游戏项目";
-    return Object.freeze({ content, markdown: projectDocumentMarkdown(projectName, content) });
+    return Object.freeze({
+      content,
+      markdown: projectDocumentMarkdown(projectName, content, parseResponseLanguage(job.payload.responseLanguage)),
+    });
   }
 
   /**

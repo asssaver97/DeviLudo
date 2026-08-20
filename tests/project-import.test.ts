@@ -142,7 +142,10 @@ test("import analysis creates the collaborative document and development specifi
     settings,
     apiKey: "sk-test-secret",
     fetchImpl: (async (_input, init) => {
-      assert.match(String(init?.body), /reset_timeline/);
+      const body = JSON.parse(String(init?.body)) as { system?: string; messages?: { content?: string }[] };
+      assert.match(JSON.stringify(body.messages), /reset_timeline/);
+      assert.match(String(body.system), /existing-game project analysis Agent/);
+      assert.doesNotMatch(String(body.system), /请用中文回答/);
       return Response.json({ content: [{ type: "text", text: JSON.stringify({
         name: "时序回廊",
         introduction: "一款围绕时间循环展开的像素解谜游戏。",

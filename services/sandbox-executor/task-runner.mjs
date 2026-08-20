@@ -227,6 +227,7 @@ async function runAgent(plan) {
     `Builder failure summary: ${JSON.stringify(upstreamFailureSummary)}`,
     "",
   ] : [];
+  const languageInstruction = promptLanguageInstruction(plan.job.payload.responseLanguage);
   const prompt = [
     importedSource || restoredCheckpoint
       ? "Continue developing the existing Godot 4 project in /workspace/project. Inspect and preserve its working structure before changing it."
@@ -256,6 +257,7 @@ async function runAgent(plan) {
     ] : []),
     "During development, repeatedly check /run/deviludo/guidance.ndjson. It is an append-only stream of live player guidance. Incorporate every new entry before the next major change and never overwrite it. The latest live guidance is the highest-priority scope constraint: stop broader analysis immediately when it narrows the requested change.",
     "Briefly report what you are inspecting, changing, and validating while you work; these updates are shown live to the player.",
+    ...(languageInstruction ? [languageInstruction] : []),
     ...specificationInstructions,
   ].join("\n");
   const completedCheckpoint = checkpointMetadata?.state === "AGENT_COMPLETE"
@@ -1415,6 +1417,7 @@ async function runProjectDocumentMaintenance(plan) {
   if (!configuration) throw new Error("Agent configuration is required");
   const apiKey = (await readFile("/run/deviludo/provider.key", "utf8")).trim();
   const payload = plan.job.payload;
+  const languageInstruction = promptLanguageInstruction(payload.responseLanguage);
   if (payload.maintenanceReason !== "PROJECT_IDLE"
     || typeof payload.projectName !== "string"
     || !Number.isSafeInteger(payload.baseRevision)
@@ -1428,6 +1431,7 @@ async function runProjectDocumentMaintenance(plan) {
     "Write /workspace/project/project-document.json as one JSON object with exactly these fields:",
     'introduction: non-empty string; gameplay: non-empty string; categories: non-empty string array; features: non-empty string array.',
     "Keep the writing concise, current, and useful to multiple collaborators. Do not write any other file.",
+    ...(languageInstruction ? [languageInstruction] : []),
     `Project name: ${payload.projectName}`,
     `Current document: ${JSON.stringify(payload.document)}`,
     `Current specification: ${JSON.stringify(payload.specification)}`,
@@ -1445,6 +1449,12 @@ async function runProjectDocumentMaintenance(plan) {
     content,
   }), "utf8");
   await manifest([{ file: "project-document.json", kind: "PROJECT_DOCUMENT", contentType: "application/json" }]);
+}
+
+function promptLanguageInstruction(value) {
+  return value === "zh"
+    ? "请用中文回答。Keep code, file paths, schema names, JSON property names, and enum values unchanged."
+    : null;
 }
 
 async function runConfiguredAgent(configuration, apiKey, prompt) {

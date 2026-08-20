@@ -13,14 +13,19 @@ export function createInitialProjectDocument(
   projectName: string,
   concept: string,
   specification: Readonly<Record<string, unknown>>,
+  responseLanguage: "en" | "zh" = "en",
 ): ProjectDocumentContent {
   const coreLoop = stringList(specification.coreLoop);
   const acceptance = stringList(specification.acceptanceCriteria);
   return Object.freeze({
     introduction: concept,
-    gameplay: coreLoop.length > 0 ? coreLoop.join("\n") : "待 Agent 根据项目实现补充玩法说明。",
-    categories: Object.freeze(["待 Agent 分类"]),
-    features: Object.freeze(acceptance.length > 0 ? acceptance : [`完成《${projectName}》的核心游戏循环`]),
+    gameplay: coreLoop.length > 0
+      ? coreLoop.join("\n")
+      : responseLanguage === "zh" ? "待 Agent 根据项目实现补充玩法说明。" : "The Agent will complete the gameplay description from the implementation.",
+    categories: Object.freeze([responseLanguage === "zh" ? "待 Agent 分类" : "Pending Agent classification"]),
+    features: Object.freeze(acceptance.length > 0
+      ? acceptance
+      : [responseLanguage === "zh" ? `完成《${projectName}》的核心游戏循环` : `Complete the core gameplay loop of “${projectName}”`]),
   });
 }
 
@@ -60,23 +65,30 @@ export function normalizeAgentProjectDocumentContent(value: unknown): ProjectDoc
   });
 }
 
-export function projectDocumentMarkdown(projectName: string, content: ProjectDocumentContent): string {
+export function projectDocumentMarkdown(
+  projectName: string,
+  content: ProjectDocumentContent,
+  responseLanguage: "en" | "zh" = "en",
+): string {
+  const headings = responseLanguage === "zh"
+    ? ["游戏介绍", "玩法", "游戏分类", "主要特性"]
+    : ["Game overview", "Gameplay", "Categories", "Key features"];
   return [
     `# ${projectName}`,
     "",
-    "## 游戏介绍",
+    `## ${headings[0]}`,
     "",
     content.introduction,
     "",
-    "## 玩法",
+    `## ${headings[1]}`,
     "",
     content.gameplay,
     "",
-    "## 游戏分类",
+    `## ${headings[2]}`,
     "",
     ...content.categories.map(category => `- ${category}`),
     "",
-    "## 主要特性",
+    `## ${headings[3]}`,
     "",
     ...content.features.map(feature => `- ${feature}`),
     "",

@@ -1,6 +1,11 @@
 import type { StoredInstanceAgentSettings } from "./repository";
 import { runCodexPrompt } from "./codex-cli";
 import { resolveAgentModel } from "./agent-settings";
+import {
+  parseResponseLanguage,
+  responseLanguageInstruction,
+  type ResponseLanguage,
+} from "@/lib/product/response-language";
 
 type FetchLike = typeof fetch;
 
@@ -8,14 +13,18 @@ export async function generateProjectName(input: Readonly<{
   concept: string;
   settings: StoredInstanceAgentSettings;
   apiKey: string;
+  responseLanguage?: ResponseLanguage;
   fetchImpl?: FetchLike;
 }>): Promise<string> {
   if (process.env.NODE_ENV === "test" && process.env.DEVILUDO_PROJECT_NAMING_TEST_RESPONSE) {
     return normalizeGeneratedProjectName(process.env.DEVILUDO_PROJECT_NAMING_TEST_RESPONSE);
   }
+  const language = parseResponseLanguage(input.responseLanguage);
+  const languageInstruction = responseLanguageInstruction(language);
   const prompt = [
-    "为下面的游戏构想生成一个简洁、独特的中文项目名称。",
-    "只输出名称，不要引号、解释、标点或 Markdown；长度 2 到 40 个字符。",
+    "Generate a concise, distinctive project name for the game concept below.",
+    "Return only the name, with no quotation marks, explanation, punctuation, or Markdown. Use 2 to 40 characters.",
+    ...(languageInstruction ? [languageInstruction] : []),
     "",
     input.concept,
   ].join("\n");

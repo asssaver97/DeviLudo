@@ -67,7 +67,7 @@ test("the project page separates continuing requirements from rerunning a comple
     readFile(new URL("../components/ProjectStudio.tsx", import.meta.url), "utf8"),
     readFile(new URL("../components/ProductDashboard.tsx", import.meta.url), "utf8"),
   ]);
-  assert.match(studio, /body: JSON\.stringify\(\{ baseWorkflowId: project\.workflowId \}\)/);
+  assert.match(studio, /body: JSON\.stringify\(\{ baseWorkflowId: project\.workflowId, responseLanguage: locale \}\)/);
   assert.match(studio, /text\("继续修改", "CONTINUE EDITING"\)/);
   assert.match(studio, /text\("调整需求并重新开发", "REVISE & DEVELOP AGAIN"\)/);
   assert.match(studio, /mutate\("rerun-stage", \{ stage: kind \}\)/);

@@ -395,7 +395,7 @@ export function ProjectStudio({ projectId }: { projectId: string }) {
       const response = await fetch(`/api/projects/${encodeURIComponent(projectId)}/iterations`, {
         method: "POST",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify({ baseWorkflowId: project.workflowId }),
+        body: JSON.stringify({ baseWorkflowId: project.workflowId, responseLanguage: locale }),
       });
       const payload = await response.json().catch(() => ({})) as {
         project?: ProductProjectDetail;
@@ -443,8 +443,8 @@ export function ProjectStudio({ projectId }: { projectId: string }) {
     try {
       const payload = await sendConversationMessageStream(
         previousConversation && !previousConversation.id.startsWith("pending-")
-          ? { conversationId: previousConversation.id, content }
-          : { projectId, content },
+          ? { conversationId: previousConversation.id, content, responseLanguage: locale }
+          : { projectId, content, responseLanguage: locale },
         `conversation:${crypto.randomUUID()}`,
         (agentRole, delta) => setStreamingReplies(current => ({
           ...current,
@@ -504,7 +504,7 @@ export function ProjectStudio({ projectId }: { projectId: string }) {
           ...(path === "rerun-stage" ? { "idempotency-key": `stage-rerun:${String(body?.stage)}:${crypto.randomUUID()}` } : {}),
           ...(path === "cancel" ? { "idempotency-key": `cancel:${crypto.randomUUID()}` } : {}),
         },
-        body: JSON.stringify(body ?? {}),
+        body: JSON.stringify({ ...(body ?? {}), responseLanguage: locale }),
       });
       const payload = await response.json().catch(() => ({})) as { code?: string; message?: string };
       if (payload.code === "AGENT_CONFIG_REQUIRED") {
@@ -541,6 +541,7 @@ export function ProjectStudio({ projectId }: { projectId: string }) {
         headers: { "content-type": "application/json" },
         body: JSON.stringify({
           expectedRevision: project.document.revision,
+          responseLanguage: locale,
           content: {
             introduction: documentDraft.introduction.trim(),
             gameplay: documentDraft.gameplay.trim(),

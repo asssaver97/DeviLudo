@@ -161,7 +161,7 @@ function cookieValue(header: string | null, name: string): string | null {
 }
 
 function requestText(request: Request, chinese: string, english: string): string {
-  return cookieValue(request.headers.get("cookie"), "deviludo_locale") === "en" ? english : chinese;
+  return cookieValue(request.headers.get("cookie"), "deviludo_locale") === "zh" ? chinese : english;
 }
 
 export const GET = proxy;
