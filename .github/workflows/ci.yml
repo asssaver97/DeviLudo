@@ -40,7 +40,7 @@ jobs:
         run: npm run local:database:test
       - name: Capture diagnostics
         if: failure()
-        run: npm run local:status && npm run local:logs
+        run: npm run local:status && npm run local:logs -- --no-follow
       - name: Remove local stack and volumes
         if: always()
         run: npm run local:reset

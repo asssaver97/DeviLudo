@@ -449,6 +449,7 @@ test("CI uses the fixed no-provider Agent while local macOS requires Tart E2E", 
   const tartProvision = await readFile(new URL("../scripts/local-tart-provision.sh", import.meta.url), "utf8");
   assert.match(workflow, /DEVILUDO_LOCAL_CI: "1"/);
   assert.match(workflow, /DEVILUDO_SKIP_NATIVE_E2E: "1"/);
+  assert.match(workflow, /npm run local:logs -- --no-follow/);
   assert.match(localUp, /prepareLocalTartE2e\(\{ refresh: refreshE2eVm \}\)/);
   assert.match(localUp, /error\?\.code !== "ENOENT"/);
   assert.match(localUp, /hash\.update\("missing", "utf8"\)/);
