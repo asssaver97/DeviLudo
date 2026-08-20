@@ -370,20 +370,16 @@ async function runDatabaseSmoke(url) {
     await owner.query(`UPDATE deviludo.workflow_instances SET state = 'SUCCEEDED'
       WHERE workspace_id = $1::uuid AND id = $2::uuid`, [workspaceIds[0], workflowIds[0]]);
     const assetRerunKey = `asset-rerun-smoke:${workflowIds[0]}`;
-    const rerun = await withWorkspace(api, workspaceIds[0], client => client.query(`
-      SELECT accepted, queued, remaining
-        FROM deviludo.request_asset_rerun(
-          $1::uuid, $2::uuid, $3,
-          jsonb_build_object('requestedBy', 'database smoke', 'requestedByActorId', $4::text)
-        )
-    `, [workflowIds[0], projectIds[0], assetRerunKey, actorId]));
+    const { rerun, duplicateRerun } = await requestAssetRerunWithTemporaryImageConfiguration(owner, {
+      workspaceId: workspaceIds[0],
+      workflowId: workflowIds[0],
+      projectId: projectIds[0],
+      idempotencyKey: assetRerunKey,
+      actorId,
+    });
     if (rerun.rows[0]?.accepted !== true || rerun.rows[0]?.queued !== 1 || rerun.rows[0]?.remaining !== 1) {
       throw new Error(`Asset rerun was not accepted atomically: ${JSON.stringify(rerun.rows[0])}`);
     }
-    const duplicateRerun = await withWorkspace(api, workspaceIds[0], client => client.query(`
-      SELECT accepted, queued, remaining
-        FROM deviludo.request_asset_rerun($1::uuid, $2::uuid, $3, '{}'::jsonb)
-    `, [workflowIds[0], projectIds[0], assetRerunKey]));
     if (duplicateRerun.rows[0]?.accepted !== false || duplicateRerun.rows[0]?.queued !== 0) {
       throw new Error("Duplicate asset rerun was not idempotent");
     }
@@ -586,6 +582,77 @@ async function withWorkspace(pool, workspaceId, callback) {
     await client.query("COMMIT");
     return result;
   } catch (error) {
+    await client.query("ROLLBACK").catch(() => undefined);
+    throw error;
+  } finally {
+    client.release();
+  }
+}
+
+async function requestAssetRerunWithTemporaryImageConfiguration(owner, input) {
+  const client = await owner.connect();
+  let roleChanged = false;
+  try {
+    await client.query("BEGIN");
+    await client.query("SELECT set_config('app.workspace_id', $1, true)", [input.workspaceId]);
+    const current = await client.query(`
+      SELECT agent_runtime::text, image_model
+        FROM deviludo.instance_agent_settings
+       WHERE singleton = true
+       FOR UPDATE
+    `);
+    const inserted = current.rowCount === 0;
+    const patchedClaude = current.rows[0]?.agent_runtime === "CLAUDE_CODE"
+      && current.rows[0]?.image_model === null;
+    if (inserted) {
+      await client.query(`
+        INSERT INTO deviludo.instance_agent_settings(
+          singleton, agent_runtime, base_url, primary_model, model_overrides, image_model,
+          credential_secret_ref, api_key_mask, api_key_fingerprint, credential_version, updated_by
+        ) VALUES (
+          true, 'CODEX_CLI', 'https://chatgpt.com/backend-api/codex', 'database-smoke',
+          '{"design":null,"development":null,"test":null}'::jsonb, NULL,
+          'vault://instance/agent-runtime/api-key/versions/' || $1::text,
+          'db-********test', 'sha256:000000000000', $1::uuid, 'database smoke'
+        )
+      `, [randomUUID()]);
+    } else if (patchedClaude) {
+      await client.query(`
+        UPDATE deviludo.instance_agent_settings
+           SET image_model = 'database-smoke-image'
+         WHERE singleton = true
+      `);
+    }
+
+    await client.query("SET LOCAL ROLE deviludo_api");
+    roleChanged = true;
+    const rerun = await client.query(`
+      SELECT accepted, queued, remaining
+        FROM deviludo.request_asset_rerun(
+          $1::uuid, $2::uuid, $3,
+          jsonb_build_object('requestedBy', 'database smoke', 'requestedByActorId', $4::text)
+        )
+    `, [input.workflowId, input.projectId, input.idempotencyKey, input.actorId]);
+    const duplicateRerun = await client.query(`
+      SELECT accepted, queued, remaining
+        FROM deviludo.request_asset_rerun($1::uuid, $2::uuid, $3, '{}'::jsonb)
+    `, [input.workflowId, input.projectId, input.idempotencyKey]);
+    await client.query("RESET ROLE");
+    roleChanged = false;
+
+    if (inserted) {
+      await client.query("DELETE FROM deviludo.instance_agent_settings WHERE singleton = true");
+    } else if (patchedClaude) {
+      await client.query(`
+        UPDATE deviludo.instance_agent_settings
+           SET image_model = NULL
+         WHERE singleton = true AND image_model = 'database-smoke-image'
+      `);
+    }
+    await client.query("COMMIT");
+    return { rerun, duplicateRerun };
+  } catch (error) {
+    if (roleChanged) await client.query("RESET ROLE").catch(() => undefined);
     await client.query("ROLLBACK").catch(() => undefined);
     throw error;
   } finally {
