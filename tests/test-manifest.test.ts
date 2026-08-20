@@ -215,9 +215,10 @@ describe("test-manifest", () => {
     const manifest = completeManifest();
     const withoutRegression = planE2eExecution(manifest);
     const withRegression = planE2eExecution(manifest, 300_000);
-    assert.equal(withoutRegression.plannedTimeoutMs, 40 * 60_000);
+    assert.equal(withoutRegression.plannedTimeoutMs, 55 * 60_000);
     assert.ok(withRegression.plannedTimeoutMs >= withoutRegression.plannedTimeoutMs);
     assert.equal(withRegression.adaptiveMs, 3 * manifest.adaptivePlayer.rolloutTimeoutMs);
+    assert.equal(withRegression.adaptivePolicyMs, withRegression.adaptiveMs);
     assert.equal(withRegression.solidificationMs, 2 * manifest.adaptivePlayer.rolloutTimeoutMs);
 
     const expensiveUnits = Array.from({ length: 20 }, (_, index) => ({

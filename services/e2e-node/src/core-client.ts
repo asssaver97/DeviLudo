@@ -115,7 +115,9 @@ export class CoreE2eClient {
       // recovering transport, structured output, and lost image attachments.
       // Do not abandon the HTTP request while Core still owns its idempotency
       // lock, otherwise the guest retry queues behind work that is still alive.
-      timeout: path.includes("/player-policy") || path.includes("/test-plan") ? 480_000 : 10_000,
+      timeout: path.includes("/test-plan") ? 540_000
+        : path.includes("/player-policy") ? 480_000
+          : 10_000,
     };
     return await new Promise<T>((resolve, reject) => {
       const requester = url.protocol === "https:" ? httpsRequest : httpRequest;

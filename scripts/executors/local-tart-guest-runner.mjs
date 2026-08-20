@@ -58,23 +58,26 @@ const command = [
   action, remoteArtifact, "--job-id", jobId, "--test-plan", remoteTestPlan, "--json",
   ...(remoteRegression ? ["--regression", remoteRegression] : []),
 ];
-const killProcessGroup = process.platform !== "win32";
 // A Test Agent decision is allowed up to 160 seconds end-to-end. The SSH
 // transport watchdog must therefore stay strictly outside that window: while
 // this relay is awaiting its parent response it cannot consume guest heartbeat
 // frames, so a shorter idle deadline would kill a healthy guest mid-decision.
 const policyResponseTimeoutMs = 490_000;
 const protocolIdleTimeoutMs = policyResponseTimeoutMs + 10_000;
+// This runner is already launched as its own process group by the framed job
+// executor. Keep ssh in that group instead of creating a nested group: if the
+// executor has to force-kill the runner, the transport must die with it.
+const remoteKillProcessGroup = false;
 const remote = spawn("ssh", [...ssh, `${configuration.guestUser}@${ip}`, ...command], {
-  stdio: ["pipe", "pipe", "pipe"], shell: false, detached: killProcessGroup,
+  stdio: ["pipe", "pipe", "pipe"], shell: false, detached: false,
 });
-const stopForwardingTermination = forwardTerminationSignals(remote, killProcessGroup);
+const stopForwardingTermination = forwardTerminationSignals(remote, remoteKillProcessGroup);
 const stopClosingRemotePipes = closeChildPipesAfterExit(remote);
 const protocolWatchdog = startChildProtocolWatchdog(remote, {
   idleMs: protocolIdleTimeoutMs,
   checkMs: 1_000,
   terminateGraceMs: 2_000,
-  killProcessGroup,
+  killProcessGroup: remoteKillProcessGroup,
 });
 const remoteStderrChunks = [];
 const remoteStderrLimit = 64 * 1024;
@@ -88,13 +91,13 @@ remote.stderr.on("data", chunk => {
 });
 const frozenTimeoutSeconds = Number(process.env.DEVILUDO_E2E_FROZEN_TIMEOUT_SECONDS);
 if (!Number.isSafeInteger(frozenTimeoutSeconds) || frozenTimeoutSeconds < 1800 || frozenTimeoutSeconds > 5400) {
-  terminateChildProcess(remote, "SIGKILL", killProcessGroup);
+  terminateChildProcess(remote, "SIGKILL", remoteKillProcessGroup);
   throw new Error("Local Tart guest hard timeout is invalid");
 }
 const remoteClosed = waitForChildWithHardTimeout(remote, {
   timeoutMs: frozenTimeoutSeconds * 1_000 + 60_000,
   terminateGraceMs: 2_000,
-  killProcessGroup,
+  killProcessGroup: remoteKillProcessGroup,
 });
 void remoteClosed.catch(() => undefined);
 const parentInput = createInterface({ input: process.stdin, crlfDelay: Infinity });
@@ -118,7 +121,7 @@ try {
     }
   }
   const remoteSettlement = receipt
-    ? await settleChildAfterProtocolResult(remote, remoteClosed, { graceMs: 500, killProcessGroup })
+    ? await settleChildAfterProtocolResult(remote, remoteClosed, { graceMs: 500, killProcessGroup: remoteKillProcessGroup })
     : { result: await remoteClosed, transportTerminated: false };
   const remoteExit = remoteSettlement.result;
   if (remoteExit.timedOut) throw new Error("Tart guest exceeded its frozen E2E hard deadline and was terminated");
@@ -151,5 +154,5 @@ try {
   remoteLines.close();
   closeLineInput(parentInput, process.stdin);
   remote.stdin.end();
-  terminateChildProcess(remote, "SIGKILL", killProcessGroup);
+  terminateChildProcess(remote, "SIGKILL", remoteKillProcessGroup);
 }

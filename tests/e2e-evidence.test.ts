@@ -125,6 +125,12 @@ describe("E2E evidence", () => {
         platform: "macos",
         outcome: "PASSED",
         summary: "核心循环通过",
+        performance: {
+          schema: "deviludo.e2e-performance.v1", passed: true,
+          thresholds: { criticalMinimumFps: 5, minimumMedianFps: 30, maximumP95InputResponseMs: 1500 },
+          frameRate: { sampleCount: 12, minimumFps: 55, medianFps: 60 },
+          inputResponse: { sampleCount: 4, p95Ms: 120 },
+        },
         checkpoints: [{ checkpointId: "game-start", status: "PASSED", screenshot: "screenshots/game-start.png" }],
       };
       const bundle = await createEvidenceBundle({ outputRoot: directory, jobId, platform: "macos", report, stdout: "ok", stderr: "", screenshots: [{ id: "game-start", path: screenshot }] });
@@ -139,6 +145,9 @@ describe("E2E evidence", () => {
       assert.match(html, /Current Regression Trace/);
       assert.match(html, /完整游戏视频/);
       assert.match(html, /Complete Gameplay Videos/);
+      assert.match(html, /游戏流畅度/);
+      assert.match(html, /Runtime Smoothness/);
+      assert.match(html, /55/);
       assert.match(html, /data-i18n="completeVideos"/);
       assert.match(html, /p\.get\("locale"\)===\"en\"/);
       assert.ok((validated.manifest.files as unknown[]).length >= 5);

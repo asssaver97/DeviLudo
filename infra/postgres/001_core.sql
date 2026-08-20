@@ -77,7 +77,7 @@ CREATE TABLE deviludo.schema_metadata (
   applied_at timestamptz NOT NULL DEFAULT clock_timestamp()
 );
 INSERT INTO deviludo.schema_metadata(singleton, baseline, compatibility, current_version)
-VALUES (true, '001', 'deviludo-self-hosted-v1', '052_e2e_node_preparation_progress');
+VALUES (true, '001', 'deviludo-self-hosted-v1', '054_asset_replan_existing_source_consistency');
 
 -- Every post-baseline change is immutable and checksummed. Fresh databases are
 -- created from this full snapshot and then stamp the migrations incorporated by
@@ -892,6 +892,27 @@ CREATE TABLE deviludo.asset_items (
   ),
   CHECK ((status = 'existing') = (source_path IS NOT NULL))
 );
+
+-- Re-planning an existing-source item changes its status before the repository
+-- can reconcile the new source tree. Clear the old path in that same statement
+-- so the row never crosses the status/source-path invariant in an invalid state.
+CREATE OR REPLACE FUNCTION deviludo.normalize_asset_item_existing_source()
+RETURNS trigger
+LANGUAGE plpgsql
+SECURITY INVOKER
+SET search_path = pg_catalog, deviludo
+AS $$
+BEGIN
+  IF NEW.status <> 'existing' THEN
+    NEW.source_path := NULL;
+  END IF;
+  RETURN NEW;
+END
+$$;
+CREATE TRIGGER asset_items_normalize_existing_source
+BEFORE INSERT OR UPDATE OF status, source_path ON deviludo.asset_items
+FOR EACH ROW EXECUTE FUNCTION deviludo.normalize_asset_item_existing_source();
+REVOKE ALL ON FUNCTION deviludo.normalize_asset_item_existing_source() FROM PUBLIC;
 
 CREATE INDEX asset_items_manifest_status
   ON deviludo.asset_items (workspace_id, manifest_id, status);
@@ -2711,6 +2732,9 @@ BEGIN
             status = CASE
               WHEN deviludo.asset_items.status IN ('generated', 'uploaded') THEN deviludo.asset_items.status
               ELSE 'planned' END,
+            source_path = CASE
+              WHEN deviludo.asset_items.status IN ('generated', 'uploaded') THEN deviludo.asset_items.source_path
+              ELSE NULL END,
             error_message = CASE
               WHEN deviludo.asset_items.status IN ('generated', 'uploaded') THEN deviludo.asset_items.error_message
               ELSE NULL END,
@@ -3288,7 +3312,11 @@ GRANT SELECT, INSERT, UPDATE ON deviludo.instance_agent_settings TO deviludo_api
 -- connection has an image model before it decides between asset preparation and
 -- the Builder, so the sandbox role needs this narrow read as part of its commit.
 GRANT SELECT ON deviludo.instance_agent_settings TO deviludo_scheduler, deviludo_sandbox;
-GRANT INSERT ON deviludo.object_cleanup_queue TO deviludo_api, deviludo_sandbox;
+-- complete_job queues replaced regression objects with ON CONFLICT DO NOTHING.
+-- PostgreSQL requires SELECT on the conflict-key columns in addition to INSERT;
+-- keep that read capability column-scoped instead of exposing cleanup details.
+GRANT SELECT (workspace_id, bucket, object_key), INSERT ON deviludo.object_cleanup_queue
+  TO deviludo_api, deviludo_sandbox;
 GRANT SELECT, INSERT, DELETE ON deviludo.project_creation_receipts TO deviludo_api;
 GRANT SELECT, INSERT, UPDATE ON
   deviludo.projects, deviludo.project_source_revisions,

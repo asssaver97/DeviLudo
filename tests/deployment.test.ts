@@ -81,13 +81,14 @@ test("local deployment keeps Core private by default and exposes it only for exp
 });
 
 test("local shutdown and E2E recovery reap resources after interrupted work", async () => {
-  const [down, e2eDaemon, tartPreparation, tartRecovery, runner, executor, compose, systemdExecutor] = await Promise.all([
+  const [down, e2eDaemon, tartPreparation, tartRecovery, runner, executor, codexCli, compose, systemdExecutor] = await Promise.all([
     readFile(new URL("../scripts/local-down.mjs", import.meta.url), "utf8"),
     readFile(new URL("../scripts/local-e2e-daemon.mjs", import.meta.url), "utf8"),
     readFile(new URL("../scripts/local-tart-prepare.mjs", import.meta.url), "utf8"),
     readFile(new URL("../scripts/local-tart-orphans.mjs", import.meta.url), "utf8"),
     readFile(new URL("../services/e2e-node/src/runner.ts", import.meta.url), "utf8"),
     readFile(new URL("../services/sandbox-executor/src/daemon.ts", import.meta.url), "utf8"),
+    readFile(new URL("../services/core/src/codex-cli.ts", import.meta.url), "utf8"),
     readFile(new URL("../infra/docker-compose.yml", import.meta.url), "utf8"),
     readFile(new URL("../deploy/assets/deviludo-executord.service", import.meta.url), "utf8"),
   ]);
@@ -100,8 +101,13 @@ test("local shutdown and E2E recovery reap resources after interrupted work", as
   assert.match(tartPreparation, /signal = null[\s\S]*signal\?\.throwIfAborted/);
   assert.match(tartPreparation, /finally \{[\s\S]*\["stop", stagingName\]/);
   assert.match(tartRecovery, /jobVmName[\s\S]*stagingName[\s\S]*\["stop", name\][\s\S]*\["delete", name\]/);
+  assert.match(e2eDaemon, /for \(const pid of pids\) signalProcessGroup\(pid, "SIGTERM"\)/);
+  assert.match(e2eDaemon, /for \(const pid of survivors\) signalProcessGroup\(pid, "SIGKILL"\)/);
   assert.match(runner, /await isolation\.reap\(\);[\s\S]*finally \{[\s\S]*await isolation\.reap\(\)/);
   assert.ok(executor.indexOf("for (const execution of liveExecutions) execution.abort()") < executor.indexOf("await serverClosed"));
+  assert.match(codexCli, /detached: killProcessGroup/);
+  assert.match(codexCli, /process\.kill\(-Number\(child\.pid\), signal\)/);
+  assert.match(codexCli, /Codex CLI timed out after \$\{timeoutMs\} ms/);
   assert.match(compose, /sandbox-executord:[\s\S]*stop_grace_period: 90s/);
   assert.match(systemdExecutor, /docker stop --time 90/);
 });
@@ -584,6 +590,8 @@ test("CI uses the fixed no-provider Agent while local macOS requires Tart E2E", 
   assert.match(tartPrepare, /"admin\\n", 45 \* 60_000/);
   assert.doesNotMatch(tartProvision, /^\s*\/opt\/homebrew\/bin\/brew install ffmpeg/m);
   assert.match(tartPrepare, /gui-event-batches\.mjs"\), "\/Users\/Shared\/gui-event-batches\.mjs"/);
+  assert.match(tartPrepare, /e2e-regression-actions\.mjs"\), "\/Users\/Shared\/e2e-regression-actions\.mjs"/);
+  assert.match(tartPrepare, /e2e-performance\.mjs"\), "\/Users\/Shared\/e2e-performance\.mjs"/);
   assert.match(tartPrepare, /randomBytes\(12\)\.toString\("hex"\)/);
   assert.doesNotMatch(tartPrepare, /\/Users\/Shared\/macos-gui-driver\.swift/);
   assert.match(tartPrepare, /const rebootedVm = spawn\("tart"/);
@@ -604,6 +612,8 @@ test("CI uses the fixed no-provider Agent while local macOS requires Tart E2E", 
   assert.match(tartProvision, /kcpassword_size=.*stat -f/);
   assert.match(tartProvision, /sudo sync/);
   assert.match(tartProvision, /gui-event-batches\.mjs \"\$guest_root\/executors\/gui-event-batches\.mjs\"/);
+  assert.match(tartProvision, /e2e-regression-actions\.mjs \"\$guest_root\/e2e-regression-actions\.mjs\"/);
+  assert.match(tartProvision, /e2e-performance\.mjs/);
   assert.doesNotMatch(tartProvision, /sysadminctl[\s\\]*-autologin set/);
   assert.match(smoke, /deviludo-agent-fixture:local/);
   assert.match(smoke, /skipRealWindowE2e \? null : await runTartMacE2e/);
@@ -616,7 +626,7 @@ test("CI uses the fixed no-provider Agent while local macOS requires Tart E2E", 
 });
 
 test("Godot E2E plans at the platform node and runs a real window with portable visual evidence", async () => {
-  const [guest, evidence, builder, macDriver, linuxDriver, windowsDriver, linuxIsolation, planner, nodeExecutor, hostExecutor] = await Promise.all([
+  const [guest, evidence, builder, macDriver, linuxDriver, windowsDriver, linuxIsolation, planner, nodeExecutor, hostExecutor, performance] = await Promise.all([
     readFile(new URL("../scripts/executors/godot-window-e2e-guest.mjs", import.meta.url), "utf8"),
     readFile(new URL("../scripts/e2e-evidence.mjs", import.meta.url), "utf8"),
     readFile(new URL("../services/sandbox-executor/task-runner.mjs", import.meta.url), "utf8"),
@@ -627,6 +637,7 @@ test("Godot E2E plans at the platform node and runs a real window with portable 
     readFile(new URL("../services/core/src/e2e-test-plan.ts", import.meta.url), "utf8"),
     readFile(new URL("../services/e2e-node/src/executor.ts", import.meta.url), "utf8"),
     readFile(new URL("../deploy/assets/e2e-job-executor.mjs", import.meta.url), "utf8"),
+    readFile(new URL("../scripts/e2e-performance.mjs", import.meta.url), "utf8"),
   ]);
   assert.match(nodeExecutor, /verifyPlayerPolicy\(job\)[\s\S]*generateTestPlan\(job\)/);
   assert.match(nodeExecutor, /testPlan: generatedPlan/);
@@ -640,6 +651,21 @@ test("Godot E2E plans at the platform node and runs a real window with portable 
   assert.match(guest, /deviludo\.test-manifest/);
   assert.match(guest, /deviludo\.e2e-ui-probe|waitForProbeSnapshot/);
   assert.match(guest, /gameWindowArguments\(gameLogPath\)/);
+  assert.match(guest, /measurePerformance \? \["--debug", "--print-fps"\]/);
+  assert.match(guest, /--print-fps/);
+  assert.match(performance, /GAME_STUTTER_DETECTED/);
+  assert.match(guest, /summarizeE2ePerformance/);
+  assert.match(guest, /conclusivePerformanceFailure[\s\S]*GAME_STUTTER_DETECTED/);
+  assert.match(guest, /catch \(error\)[\s\S]*measuredStutter[\s\S]*primaryFailure = productFailure/);
+  assert.match(guest, /isGameWindowReadinessTimeout[\s\S]*PACKAGE_WINDOW_TIMEOUT/);
+  assert.match(guest, /PACKAGE_WINDOW_TIMEOUT[\s\S]*startupRuntimeDiagnostic/);
+  assert.match(evidence, /Runtime Smoothness/);
+  assert.match(builder, /PERFORMANCE REPAIR/);
+  assert.match(builder, /Do not change E2E thresholds/);
+  assert.match(builder, /PACKAGE_WINDOW_TIMEOUT[\s\S]*product startup failure/);
+  assert.match(builder, /renderer and device names reported by a virtualized runner as environment context/);
+  assert.match(builder, /preserve application launch, window creation, and compatible fallbacks/);
+  assert.ok(builder.indexOf("const SOURCE_IMAGE_EXTENSIONS") < builder.indexOf("await mkdir(\"/workspace/inputs\""));
   assert.match(guest, /type: "mouse_click",[\s\S]*x: point\.x,[\s\S]*y: point\.y/);
   assert.match(guest, /"--log-file", logPath/);
   assert.match(guest, /DEVILUDO_E2E_CHECKPOINT_FILE: checkpointOutputPath/);
@@ -655,6 +681,8 @@ test("Godot E2E plans at the platform node and runs a real window with portable 
   assert.match(guest, /checkpointOutputSeen\(\[await readOptionalLog\(gameLogPath\), await readOptionalLog\(checkpointOutputPath\)\]/);
   assert.match(guest, /waitForCheckpointOutput\([\s\S]*CHECKPOINT_VISUAL_SETTLE_MS/);
   assert.match(guest, /MIN_STATE_TRANSITION_DIFFERENCE_RATIO\s*=\s*0\.001/);
+  assert.match(guest, /MIN_FULL_FRAME_TRANSITION_PIXELS\s*=\s*32/);
+  assert.match(guest, /FULL_FRAME_FALLBACK/);
   assert.match(guest, /CHECKPOINT_VISUAL_STATE_UNCHANGED/);
   assert.match(guest, /--windowed/);
   assert.doesNotMatch(guest.match(/async function runJourney[\s\S]*?(?=async function runVisualCheck)/)?.[0] ?? "", /--headless/);
@@ -664,6 +692,10 @@ test("Godot E2E plans at the platform node and runs a real window with portable 
   assert.match(guest, /testEnvironment\.sequence\(nativeEvents/);
   assert.match(guest, /ACTION_STATE_UNCHANGED/);
   assert.match(guest, /MACOS_LAUNCH_SERVICES/);
+  assert.match(guest, /"-n", "-o", stdoutPath, "--stderr", stderrPath/);
+  assert.match(guest, /Godot's[\s\S]*--print-fps output is stdout-only/);
+  assert.match(guest, /process\.kill\(pid, "SIGINT"\)/);
+  assert.match(guest, /recordFrameRateRun\(runId, await readOptionalLog\(gameLogPath\), logs\.stdout\)/);
   assert.match(guest, /launchArguments\.push\("--env"/);
   assert.match(guest, /execute\("\/usr\/bin\/open", launchArguments/);
   assert.doesNotMatch(guest, /"launchctl", \["setenv"/);
@@ -675,6 +707,7 @@ test("Godot E2E plans at the platform node and runs a real window with portable 
   assert.match(guest, /PLAYER_STUCK/);
   assert.match(guest, /solidifyRegression/);
   assert.match(guest, /compactRegressionActions/);
+  assert.match(guest, /plannedCoreRegressionCandidates/);
   assert.match(guest, /resolveProbeControlAtPoint/);
   assert.match(guest, /所有成功候选轨迹均未能连续完成两次干净语义回放/);
   assert.doesNotMatch(guest, /find\(rollout => rollout\.decisions\.flatMap\(decision => decision\.semanticActions\)/);

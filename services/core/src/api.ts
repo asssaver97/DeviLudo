@@ -1368,11 +1368,41 @@ export async function runApi(
     });
     const apiKey = await agentSecrets.readApiKey(policy.credentialSecretRef);
     if (!apiKey) return reply.code(503).send({ code: "PLAYER_POLICY_CREDENTIAL_UNAVAILABLE" });
-    const context = await repository.readE2ePlanningContext({
-      workspaceId: job.workspaceId,
-      workflowId: job.workflowId,
-      projectId: job.projectId,
-      platform: job.targetOperatingSystem,
+    const [storedContext, contractHintObject, regressionTraceObject] = await Promise.all([
+      repository.readE2ePlanningContext({
+        workspaceId: job.workspaceId,
+        workflowId: job.workflowId,
+        projectId: job.projectId,
+        platform: job.targetOperatingSystem,
+      }),
+      repository.readProjectE2eContractHintObject({
+        workspaceId: job.workspaceId,
+        workflowId: job.workflowId,
+        projectId: job.projectId,
+      }),
+      repository.readProjectE2eRegressionObject({
+        workspaceId: job.workspaceId,
+        projectId: job.projectId,
+        platform: job.targetOperatingSystem,
+      }),
+    ]);
+    let projectTestContract: Readonly<Record<string, unknown>> | null = null;
+    let regressionTrace: Readonly<Record<string, unknown>> | null = null;
+    try {
+      [projectTestContract, regressionTrace] = await Promise.all([
+        objectStore.readProjectE2eContractHint(contractHintObject),
+        objectStore.readProjectE2eRegressionTrace(regressionTraceObject),
+      ]);
+    } catch (error) {
+      request.log.warn({
+        event: "e2e_project_contract_hint_ignored",
+        reason: error instanceof Error ? error.message : "Project E2E contract hint could not be read",
+      }, "Ignoring an unreadable historical project E2E contract");
+    }
+    const context = Object.freeze({
+      ...storedContext,
+      ...(projectTestContract ? { projectTestContract } : {}),
+      ...(regressionTrace ? { regressionTrace } : {}),
     });
     try {
       const plan = await generateE2eTestPlan({

@@ -249,6 +249,18 @@ test("upgraded schedulers can inspect idempotent workflow signals", async () => 
   );
 });
 
+test("E2E completion can idempotently queue a replaced regression object", async () => {
+  const sql = await readFile(new URL("../infra/postgres/001_core.sql", import.meta.url), "utf8");
+  const migration = await readFile(
+    new URL("../infra/postgres/migrations/053_e2e_regression_cleanup_conflict_privilege.sql", import.meta.url),
+    "utf8",
+  );
+  const conflictKeyPrivilege = /GRANT SELECT \(workspace_id, bucket, object_key\)(?:, INSERT)?\s+ON deviludo\.object_cleanup_queue\s+TO deviludo_api, deviludo_sandbox/;
+  assert.match(sql, conflictKeyPrivilege);
+  assert.match(migration, conflictKeyPrivilege);
+  assert.doesNotMatch(migration, /GRANT SELECT ON deviludo\.object_cleanup_queue/);
+});
+
 test("the protocol scheduler definer can route its idempotent rerun signal", async () => {
   const [sql, migration] = await Promise.all([
     readFile(new URL("../infra/postgres/001_core.sql", import.meta.url), "utf8"),
@@ -458,6 +470,8 @@ test("asset generation is leased, attempt-bounded, and never overwrites a user u
   assert.match(claim, /IF NOT EXISTS \([\s\S]*SELECT 1 FROM deviludo\.instance_agent_settings[\s\S]*agent_runtime = 'CODEX_CLI'[\s\S]*agent_runtime = 'CLAUDE_CODE' AND image_model IS NOT NULL[\s\S]*\) THEN RETURN; END IF;/);
   assert.match(sql, /status IN \('planned', 'generating', 'generated', 'uploaded', 'existing', 'failed'\)/);
   assert.match(sql, /\(status = 'existing'\) = \(source_path IS NOT NULL\)/);
+  assert.match(sql, /CREATE TRIGGER asset_items_normalize_existing_source[\s\S]*BEFORE INSERT OR UPDATE OF status, source_path/);
+  assert.match(sql, /normalize_asset_item_existing_source\(\)[\s\S]*IF NEW\.status <> 'existing' THEN[\s\S]*NEW\.source_path := NULL/);
 
   // A user upload that lands mid-generation wins: settlement only applies to items
   // still leased, so a generated image cannot replace the art they chose.
@@ -493,6 +507,18 @@ test("asset generation is leased, attempt-bounded, and never overwrites a user u
   const completeJob = sql.match(/CREATE OR REPLACE FUNCTION deviludo\.complete_job\([\s\S]*?(?=CREATE OR REPLACE FUNCTION deviludo\.fail_job\()/)?.[0] ?? "";
   assert.match(completeJob, /generation_attempt = CASE\s*\n\s*WHEN deviludo\.asset_items\.status IN \('generated', 'uploaded'\) THEN deviludo\.asset_items\.generation_attempt\s*\n\s*ELSE 0 END/);
   assert.match(completeJob, /status = CASE\s*\n\s*WHEN deviludo\.asset_items\.status IN \('generated', 'uploaded'\) THEN deviludo\.asset_items\.status\s*\n\s*ELSE 'planned' END/);
+  assert.match(completeJob, /source_path = CASE\s*\n\s*WHEN deviludo\.asset_items\.status IN \('generated', 'uploaded'\) THEN deviludo\.asset_items\.source_path\s*\n\s*ELSE NULL END/);
+});
+
+test("asset re-plan migration atomically clears stale existing-source paths", async () => {
+  const migration = await readFile(
+    new URL("../infra/postgres/migrations/054_asset_replan_existing_source_consistency.sql", import.meta.url),
+    "utf8",
+  );
+  assert.match(migration, /CREATE OR REPLACE FUNCTION deviludo\.normalize_asset_item_existing_source\(\)/);
+  assert.match(migration, /IF NEW\.status <> 'existing' THEN\s*NEW\.source_path := NULL/);
+  assert.match(migration, /BEFORE INSERT OR UPDATE OF status, source_path ON deviludo\.asset_items/);
+  assert.match(migration, /REVOKE ALL ON FUNCTION deviludo\.normalize_asset_item_existing_source\(\) FROM PUBLIC/);
 });
 
 test("asset reruns atomically invalidate downstream work and resume the delivery chain", async () => {

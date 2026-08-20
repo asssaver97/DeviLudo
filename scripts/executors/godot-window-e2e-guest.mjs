@@ -35,6 +35,8 @@ import {
   validateGuestInteractionScript as validInteractionScript,
   validateProbeAssertion as validProbeAssertion,
 } from "../e2e-interaction-contract.mjs";
+import { plannedCoreRegressionCandidates } from "../e2e-regression-actions.mjs";
+import { parseGodotFpsSamples, summarizeE2ePerformance } from "../e2e-performance.mjs";
 import { checkpointOutputSeen } from "./gui-event-batches.mjs";
 import { GameTestEnvironment, gamepadEventCount } from "./game-test-environment.mjs";
 
@@ -51,8 +53,10 @@ const testPlanPath = testPlanArgument >= 0 ? process.argv[testPlanArgument + 1] 
 const platform = process.platform === "darwin" ? "macos" : process.platform === "win32" ? "windows" : "linux";
 const CHECKPOINT_OUTPUT_TIMEOUT_MS = 15_000;
 const CHECKPOINT_VISUAL_SETTLE_MS = 1_500;
+const ADAPTIVE_VISUAL_SETTLE_MS = 250;
 const PROBE_TIMEOUT_MS = 15_000;
 const MIN_STATE_TRANSITION_DIFFERENCE_RATIO = 0.001;
+const MIN_FULL_FRAME_TRANSITION_PIXELS = 32;
 const MAX_SCREENSHOTS = 64;
 const ADAPTIVE_ROLLOUT_COUNT = 3;
 const ADAPTIVE_REQUIRED_SUCCESSES = 2;
@@ -91,7 +95,10 @@ const coveredPlayerRequirements = new Set();
 const failures = [];
 const launchRecords = [];
 const adaptiveRollouts = [];
+const frameRateRuns = [];
+const inputResponses = [];
 let currentRegressionResult = null;
+let performanceSummary = null;
 let keyboardMouseInputCount = 0;
 let gamepadInputCount = 0;
 let playerPolicy = null;
@@ -141,6 +148,16 @@ try {
       currentRegressionResult = { status: "FAILED", digest: jsonDigest(currentRegression), reason: error instanceof Error ? error.message : String(error) };
     }
   }
+  // A measured stutter in a deterministic journey cannot be repaired by
+  // running more adaptive-player rollouts. Fail as soon as the evidence is
+  // conclusive so the Agent receives the report without spending another
+  // 12–15 minutes on visual-policy calls. Missing evidence still waits for the
+  // final gate because later runs may supply it.
+  performanceSummary = summarizeE2ePerformance({ frameRateRuns, inputResponses });
+  const conclusivePerformanceFailure = performanceSummary.failures.find(item => item.code === "GAME_STUTTER_DETECTED");
+  if (conclusivePerformanceFailure) {
+    throw productFailure(conclusivePerformanceFailure.code, conclusivePerformanceFailure.message);
+  }
   for (let rolloutIndex = 0; rolloutIndex < ADAPTIVE_ROLLOUT_COUNT; rolloutIndex += 1) {
     const successes = adaptiveRollouts.filter(rollout => rollout.outcome === "PASSED").length;
     const remaining = ADAPTIVE_ROLLOUT_COUNT - rolloutIndex;
@@ -164,12 +181,29 @@ try {
     throw productFailure("ADAPTIVE_PLAYABILITY_FAILED", `Test Agent 仅有 ${adaptiveSuccesses.length}/${ADAPTIVE_ROLLOUT_COUNT} 次完成核心循环`);
   }
   await solidifyRegression(gamePackage, manifest, adaptiveSuccesses);
+  performanceSummary = summarizeE2ePerformance({ frameRateRuns, inputResponses });
+  if (!performanceSummary.passed) {
+    const failure = performanceSummary.failures[0];
+    throw productFailure(failure.code, failure.message);
+  }
 
-  await finish("PASSED", null, "玩家需求、原生包启动、确定性真实输入和自适应游玩均已通过", manifest);
+  await finish("PASSED", null, "玩家需求、原生包启动、确定性真实输入、自适应游玩和运行时流畅度均已通过", manifest);
 } catch (error) {
   if (!isProductFailure(error)) throw error;
-  const summary = productFailureMessage(error.code, error.message);
-  failures.push(`${error.code}: ${summary}`);
+  // A visual or semantic assertion can throw before the normal performance
+  // gate even though the completed real-window runs already prove severe
+  // stutter. Preserve that assertion as supporting evidence, but make the
+  // measured runtime defect the primary failure so the repair Agent and UI do
+  // not hide it behind whichever assertion happened to throw first.
+  performanceSummary = summarizeE2ePerformance({ frameRateRuns, inputResponses });
+  const measuredStutter = performanceSummary.failures.find(item => item.code === "GAME_STUTTER_DETECTED");
+  let primaryFailure = error;
+  if (measuredStutter && error.code !== measuredStutter.code) {
+    failures.push(`${error.code}: ${productFailureMessage(error.code, error.message)}`);
+    primaryFailure = productFailure(measuredStutter.code, measuredStutter.message);
+  }
+  const summary = productFailureMessage(primaryFailure.code, primaryFailure.message);
+  failures.push(`${primaryFailure.code}: ${summary}`);
   gameExitCode = gameExitCode || 1;
   await finish("FAILED", "PRODUCT", summary, activeManifest);
 } finally {
@@ -215,9 +249,12 @@ async function runConsumerPackageSmoke(gamePackage) {
   // a player would, so a package that only works with Probe/scenario/test
   // settings can never pass delivery.
   const { launched, testEnvironment } = await launchManagedGame(
-    gamePackage, gameWindowArguments(gameLogPath), environment, runId, false,
+    gamePackage, gameWindowArguments(gameLogPath, false), environment, runId, false,
   );
   launchRecords.push({ journeyId: runId, runLabel: "consumer-package", uninstrumented: true, ...launched.record });
+  let smokeFailure = null;
+  let startupStdout = "";
+  let startupStderr = "";
   try {
     await testEnvironment.prepare();
     await delay(2_000);
@@ -226,16 +263,44 @@ async function runConsumerPackageSmoke(gamePackage) {
     await mkdir(dirname(screenshotPath), { recursive: true });
     await captureAndInspectScreenshot(screenshotPath, path => testEnvironment.capture(path));
     screenshots.push({ id: runId, path: screenshotPath });
+  } catch (error) {
+    smokeFailure = error;
   } finally {
     await testEnvironment.close();
     await launched.terminate();
     const logs = await launched.logs();
     const gameLog = await readOptionalLog(gameLogPath);
-    const stdout = [logs.stdout, gameLog.toString("utf8")].filter(Boolean).join("\n");
-    stdoutLogs.push(stdout); stderrLogs.push(logs.stderr);
-    const errors = godotErrorLines(stdout, logs.stderr);
+    startupStdout = [logs.stdout, gameLog.toString("utf8")].filter(Boolean).join("\n");
+    startupStderr = logs.stderr;
+    stdoutLogs.push(startupStdout); stderrLogs.push(startupStderr);
+    const errors = godotErrorLines(startupStdout, startupStderr);
     if (errors.length) throw productFailure("GODOT_SCRIPT_ERROR", errors[0]);
   }
+  if (smokeFailure) {
+    if (isGameWindowReadinessTimeout(smokeFailure)) {
+      const diagnostic = startupRuntimeDiagnostic(startupStdout, startupStderr);
+      throw productFailure(
+        "PACKAGE_WINDOW_TIMEOUT",
+        `交付包进程已启动，但未在时限内创建可操作的 1280x720 游戏窗口${diagnostic ? `；运行日志：${diagnostic}` : ""}`,
+      );
+    }
+    throw smokeFailure;
+  }
+}
+
+function isGameWindowReadinessTimeout(error) {
+  const cause = error instanceof Error && error.cause && typeof error.cause === "object" ? error.cause : null;
+  return error instanceof Error
+    && error.message.startsWith("INFRASTRUCTURE: GUI driver wait failed:")
+    && cause?.killed === true
+    && cause?.signal === "SIGTERM";
+}
+
+function startupRuntimeDiagnostic(...logs) {
+  return logs.flatMap(log => String(log ?? "").split(/\r?\n/))
+    .map(line => line.trim())
+    .find(line => /^(?:ERROR|WARNING|SCRIPT ERROR|CRASH):/i.test(line))
+    ?.slice(0, 500) ?? "";
 }
 
 async function readCurrentRegression() {
@@ -386,11 +451,15 @@ async function executeJourney(gamePackage, journey, runLabel, recordEvidence) {
         keyboardMouseInputCount += nativeEvents.length - gamepadCount;
         priorInputs.push({ stepId: event.stepId, type: event.type, intent: event.intent, ...targetRecord });
         let postconditionResult;
+        const responseStartedAt = Date.now();
+        let inputResponseMs;
         try {
           postconditionResult = await waitForProbePostconditions(probePath, {
             sessionNonce, pid: launched.pid, afterSequence: before.sequence,
           }, before, event.postconditions, PROBE_TIMEOUT_MS);
         } catch (error) {
+          inputResponseMs = Date.now() - responseStartedAt;
+          inputResponses.push({ runId, stepId: event.stepId, source: "DETERMINISTIC", latencyMs: inputResponseMs });
           const detail = error instanceof Error ? error.message : String(error);
           const assertions = evaluateProbeAssertions(event.postconditions, before, before);
           if (recordEvidence) {
@@ -400,7 +469,7 @@ async function executeJourney(gamePackage, journey, runLabel, recordEvidence) {
               coversRequirementIds: event.coversRequirementIds, target: targetRecord,
               before: { sequence: before.sequence, sceneId: before.sceneId, digest },
               after: { sequence: before.sequence, sceneId: before.sceneId, digest },
-              assertions, status: "FAILED", failureCode: "PROBE_NOT_UPDATED", failureDetail: detail,
+              assertions, inputResponseMs, status: "FAILED", failureCode: "PROBE_NOT_UPDATED", failureDetail: detail,
             });
             await captureFailedActionEvidence({
               testEnvironment, journey, event, probe: before, assertions, priorInputs,
@@ -409,6 +478,8 @@ async function executeJourney(gamePackage, journey, runLabel, recordEvidence) {
           }
           throw productFailure("PROBE_NOT_UPDATED", `${journey.id}/${event.stepId}: ${detail}`);
         }
+        inputResponseMs = Date.now() - responseStartedAt;
+        inputResponses.push({ runId, stepId: event.stepId, source: "DETERMINISTIC", latencyMs: inputResponseMs });
         const after = postconditionResult.snapshot;
         const assertions = postconditionResult.assertions;
         const beforeDigest = probeStateDigest(before);
@@ -423,7 +494,7 @@ async function executeJourney(gamePackage, journey, runLabel, recordEvidence) {
             coversRequirementIds: event.coversRequirementIds, target: targetRecord,
             before: { sequence: before.sequence, sceneId: before.sceneId, digest: beforeDigest },
             after: { sequence: after.sequence, sceneId: after.sceneId, digest: afterDigest },
-            assertions, status: assertionsPassed && stateChanged && transitionProven ? "PASSED" : "FAILED",
+            assertions, inputResponseMs, status: assertionsPassed && stateChanged && transitionProven ? "PASSED" : "FAILED",
           });
         }
         if (!assertionsPassed || !stateChanged || !transitionProven) {
@@ -466,19 +537,39 @@ async function executeJourney(gamePackage, journey, runLabel, recordEvidence) {
         const changeRegion = event.changeTargetId
           ? resolveProbeControl(currentProbe, event.changeTargetId, { requireEnabled: false }).control.rect
           : null;
-        const comparison = changeRegion
+        const regionalComparison = changeRegion
           ? await compareScreenshotRegion(screenshotPath, previousCheckpoint.path, changeRegion)
           : await compareScreenshots(screenshotPath, previousCheckpoint.path, null, 1);
+        // A semantic action can update a broad board/HUD while leaving its
+        // small trigger button visually unchanged. The Probe transition still
+        // proves which action completed; accept visible change elsewhere in
+        // the same game frame instead of misclassifying that UI style as a
+        // product failure.
+        const fullFrameComparison = changeRegion
+          && regionalComparison.differenceRatio < MIN_STATE_TRANSITION_DIFFERENCE_RATIO
+          ? await compareScreenshots(screenshotPath, previousCheckpoint.path, null, 1)
+          : null;
+        const comparison = fullFrameComparison
+          && fullFrameComparison.differentPixels >= MIN_FULL_FRAME_TRANSITION_PIXELS
+          ? fullFrameComparison
+          : regionalComparison;
+        const passed = comparison === fullFrameComparison
+          ? comparison.differentPixels >= MIN_FULL_FRAME_TRANSITION_PIXELS
+          : comparison.differenceRatio >= MIN_STATE_TRANSITION_DIFFERENCE_RATIO;
         stateTransition = {
           previousCheckpointId: previousCheckpoint.id,
           differenceRatio: comparison.differenceRatio,
           minimumDifferenceRatio: MIN_STATE_TRANSITION_DIFFERENCE_RATIO,
+          ...(comparison === fullFrameComparison ? { minimumDifferentPixels: MIN_FULL_FRAME_TRANSITION_PIXELS } : {}),
+          comparisonScope: comparison === fullFrameComparison ? "FULL_FRAME_FALLBACK" : changeRegion ? "SEMANTIC_REGION" : "FULL_FRAME",
           ...(changeRegion ? { changeTargetId: event.changeTargetId, region: changeRegion } : {}),
-          passed: comparison.differenceRatio >= MIN_STATE_TRANSITION_DIFFERENCE_RATIO,
+          passed,
         };
         if (!stateTransition.passed) {
           const diffPath = join(workspace, "evidence-diff", `${evidenceId}-state.png`);
-          if (changeRegion) await compareScreenshotRegion(screenshotPath, previousCheckpoint.path, changeRegion, diffPath);
+          if (changeRegion && comparison !== fullFrameComparison) {
+            await compareScreenshotRegion(screenshotPath, previousCheckpoint.path, changeRegion, diffPath);
+          }
           else await compareScreenshots(screenshotPath, previousCheckpoint.path, diffPath, 0);
           diffs.push({ id: `${evidenceId}-state`, path: diffPath });
         }
@@ -529,6 +620,7 @@ async function executeJourney(gamePackage, journey, runLabel, recordEvidence) {
     const gameLog = await readOptionalLog(gameLogPath);
     const checkpointOutput = await readOptionalLog(checkpointOutputPath);
     const stdout = [logs.stdout, gameLog.toString("utf8"), checkpointOutput.toString("utf8")].filter(Boolean).join("\n");
+    recordFrameRateRun(runId, gameLog, logs.stdout);
     stdoutLogs.push(stdout); stderrLogs.push(logs.stderr);
     const errors = godotErrorLines(stdout, logs.stderr);
     if (errors.length) failures.push(`GODOT_SCRIPT_ERROR: ${errors[0]}`);
@@ -600,6 +692,7 @@ async function runAdaptiveRollout(gamePackage, manifest, rolloutIndex) {
   const history = [];
   const decisions = [];
   const loopSignatures = new Map();
+  const visitedProbeDigests = new Set();
   let currentProbe;
   let initialProbe;
   let madeVerifiedProgress = false;
@@ -617,9 +710,14 @@ async function runAdaptiveRollout(gamePackage, manifest, rolloutIndex) {
     await testEnvironment.prepare();
     currentProbe = await waitForProbeSnapshot(probePath, { sessionNonce, pid: launched.pid }, PROBE_TIMEOUT_MS);
     initialProbe = currentProbe;
+    visitedProbeDigests.add(probeStateDigest(currentProbe));
     for (let decisionIndex = 0; decisionIndex < contract.maxDecisions; decisionIndex += 1) {
       assertPlatformBudget();
       if (activeRolloutMs() > contract.rolloutTimeoutMs) { failureCode = "ADAPTIVE_TIMEOUT"; break; }
+      // Probe is written during the state transition and can lead the rendered
+      // window by a frame. Let pixels catch up before asking the visual policy,
+      // otherwise it may act twice on a modal that has already closed.
+      if (decisionIndex > 0) await delay(ADAPTIVE_VISUAL_SETTLE_MS);
       if (!await processAlive(launched.pid)) { failureCode = "GAME_CRASHED"; break; }
       const success = evaluateProbeAssertions(contract.successAssertions, initialProbe, currentProbe);
       if (decisions.length > 0 && madeVerifiedProgress && success.every(assertion => assertion.passed)) {
@@ -636,8 +734,8 @@ async function runAdaptiveRollout(gamePackage, manifest, rolloutIndex) {
       );
       // Player-policy vision must see the same unmodified client pixels as a
       // player. An earlier coordinate grid was mistaken for game UI and could
-      // manufacture lifecycle defects. Core performs the only transformation:
-      // a deterministic half-scale resize that preserves the full frame.
+      // manufacture lifecycle defects. Core forwards this exact full frame so
+      // visual bounds and native input share one coordinate space.
       const screenshotBytes = await readFile(screenshotPath);
       const playerObservationSha256 = `sha256:${createHash("sha256").update(screenshotBytes).digest("hex")}`;
       const policyRequest = {
@@ -687,14 +785,21 @@ async function runAdaptiveRollout(gamePackage, manifest, rolloutIndex) {
         keyboardMouseInputCount += nativeEvents.length - gamepadCount;
       }
       let after = currentProbe;
+      const responseStartedAt = nativeEvents.length > 0 ? Date.now() : null;
       if (nativeEvents.length > 0) {
         after = await waitForProbeSnapshot(probePath, { sessionNonce, pid: launched.pid, afterSequence: currentProbe.sequence }, PROBE_TIMEOUT_MS)
           .catch(() => currentProbe);
       }
+      const inputResponseMs = responseStartedAt === null ? null : Date.now() - responseStartedAt;
       const afterDigest = probeStateDigest(after);
       const changed = after.sequence > currentProbe.sequence && beforeDigest !== afterDigest;
-      if (changed) {
-        madeVerifiedProgress = true;
+      if (changed && inputResponseMs !== null) {
+        inputResponses.push({ runId, stepId: `decision-${decisionIndex}`, source: "ADAPTIVE", latencyMs: inputResponseMs });
+      }
+      if (changed) madeVerifiedProgress = true;
+      const reachedNewState = changed && !visitedProbeDigests.has(afterDigest);
+      visitedProbeDigests.add(afterDigest);
+      if (reachedNewState) {
         noProgressDecisions = 0;
         lastProgressActiveMs = activeRolloutMs();
         recovery = false;
@@ -718,12 +823,16 @@ async function runAdaptiveRollout(gamePackage, manifest, rolloutIndex) {
         actions: decision.actions, semanticActions: semanticizePolicyActions(decision.actions, currentProbe),
         before: { sequence: currentProbe.sequence, sceneId: currentProbe.sceneId, digest: beforeDigest },
         after: { sequence: after.sequence, sceneId: after.sceneId, digest: afterDigest },
-        stateChanged: changed, recovery,
+        stateChanged: changed, inputResponseMs: changed ? inputResponseMs : null, recovery,
         oracle: { success: successOracle, failure: failureOracle }, policy: policyResponse.policy,
       };
       await appendFile(trajectoryPath, `${JSON.stringify(record)}\n`, { mode: 0o600 });
       decisions.push(record);
-      history.push({ decisionIndex, observation: decision.observation, actions: decision.actions, result: changed ? "state changed" : "no verified progress" });
+      history.push({
+        decisionIndex, observation: decision.observation, actions: decision.actions,
+        result: reachedNewState ? "new verified state reached" : changed
+          ? "returned to a previously observed state; no verified progress" : "no verified progress",
+      });
       currentProbe = after;
       if (decision.status === "UNRECOVERABLE") { failureCode = "PLAYER_UNRECOVERABLE"; break; }
       if (decision.status === "GOAL_REACHED"
@@ -753,6 +862,7 @@ async function runAdaptiveRollout(gamePackage, manifest, rolloutIndex) {
     const logs = await launched.logs();
     const gameLog = await readOptionalLog(gameLogPath);
     const stdout = [logs.stdout, gameLog.toString("utf8")].filter(Boolean).join("\n");
+    recordFrameRateRun(runId, gameLog, logs.stdout);
     stdoutLogs.push(stdout); stderrLogs.push(logs.stderr);
     const errors = godotErrorLines(stdout, logs.stderr);
     if (errors.length) throw productFailure("GODOT_SCRIPT_ERROR", errors[0]);
@@ -765,11 +875,20 @@ async function runAdaptiveRollout(gamePackage, manifest, rolloutIndex) {
 }
 
 async function solidifyRegression(gamePackage, manifest, successfulRollouts) {
-  const candidates = [...successfulRollouts]
-    .map(rollout => ({ rollout, actions: compactRegressionActions(rollout.decisions) }))
+  const adaptiveCandidates = [...successfulRollouts]
+    .map(rollout => ({
+      source: "ADAPTIVE_ROLLOUT",
+      estimatedDurationMs: rollout.durationMs,
+      actions: compactRegressionActions(rollout.decisions),
+    }))
     .filter(candidate => candidate.actions.length > 0)
     .sort((left, right) => left.actions.length - right.actions.length
-      || left.rollout.durationMs - right.rollout.durationMs);
+      || left.estimatedDurationMs - right.estimatedDurationMs);
+  // The exact core journey has already passed both its primary execution and
+  // stable replay in this run. Try that deterministic semantic sequence first;
+  // adaptive Probe snapshots are periodic and can attribute a delayed state
+  // transition to the following harmless exploratory action.
+  const candidates = [...plannedCoreRegressionCandidates(manifest), ...adaptiveCandidates];
   if (!candidates.length) throw productFailure("REGRESSION_CANDIDATE_MISSING", "成功游玩不包含可安全语义回放的玩家轨迹");
 
   let trace = null;
@@ -777,7 +896,7 @@ async function solidifyRegression(gamePackage, manifest, successfulRollouts) {
     const proposed = {
       schema: "deviludo.e2e-regression", contractDigest: jsonDigest({ testManifest: manifest, runner: "adaptive-real-input" }),
       inputProfile: manifest.primaryInputProfile,
-      estimatedDurationMs: Math.min(300_000, Math.max(1, candidate.rollout.durationMs)),
+      estimatedDurationMs: Math.min(300_000, Math.max(1, candidate.estimatedDurationMs)),
       goal: manifest.adaptivePlayer.goal, actions: candidate.actions,
       successAssertions: manifest.adaptivePlayer.successAssertions,
     };
@@ -866,7 +985,19 @@ async function replayRegression(gamePackage, trace, replayIndex) {
       probe = ready.probe;
       const concrete = ready.action;
       await testEnvironment.sequence(policyNativeEvents([concrete]), Math.min(30_000, remainingPlatformBudget()));
-      probe = await waitForProbeSnapshot(probePath, { sessionNonce, pid: launched.pid, afterSequence: probe.sequence }, PROBE_TIMEOUT_MS);
+      if (Array.isArray(action.postconditions) && action.postconditions.length > 0) {
+        const transition = await waitForProbePostconditions(
+          probePath,
+          { sessionNonce, pid: launched.pid, afterSequence: probe.sequence },
+          probe,
+          action.postconditions,
+          PROBE_TIMEOUT_MS,
+        );
+        probe = transition.snapshot;
+        if (!transition.passed) return false;
+      } else {
+        probe = await waitForProbeSnapshot(probePath, { sessionNonce, pid: launched.pid, afterSequence: probe.sequence }, PROBE_TIMEOUT_MS);
+      }
     }
     return evaluateProbeAssertions(trace.successAssertions, null, probe).every(assertion => assertion.passed);
   } catch (error) {
@@ -894,6 +1025,8 @@ async function replayRegression(gamePackage, trace, replayIndex) {
     } finally {
       await launched.terminate();
     }
+    const logs = await launched.logs();
+    recordFrameRateRun(runId, await readOptionalLog(gameLogPath), logs.stdout);
     // Preserve the original action/probe result. In particular, an expected
     // candidate mismatch can finish before the diagnostic recorder has two
     // frames; that must continue to the next learned candidate rather than be
@@ -1093,11 +1226,13 @@ function planExecution(manifest, currentRegressionMs) {
   const unitMs = [...unitByPath.values()].reduce((sum, value) => sum + value, 0);
   const deterministicMs = manifest.features.filter(item => item.verificationMethod === "interactive").reduce((sum, item) => sum + item.timeoutMs, 0);
   const visualMs = manifest.features.filter(item => item.verificationMethod === "visual").reduce((sum, item) => sum + (item.expectedVisual.captureDelay ?? 1000) + 30000, 0);
+  const adaptiveMs = 3 * manifest.adaptivePlayer.rolloutTimeoutMs;
+  const adaptivePolicyMs = adaptiveMs;
   const raw = Math.ceil(1.25 * (180000 + unitMs + deterministicMs + visualMs + currentRegressionMs
-    + 3 * manifest.adaptivePlayer.rolloutTimeoutMs + 2 * manifest.adaptivePlayer.rolloutTimeoutMs + 180000));
+    + adaptiveMs + adaptivePolicyMs + 2 * manifest.adaptivePlayer.rolloutTimeoutMs + 180000));
   const plannedTimeoutMs = Math.ceil(Math.max(30 * 60000, raw) / 60000) * 60000;
   if (plannedTimeoutMs > 90 * 60000) throw productFailure("E2E_PLAN_EXCEEDS_LIMIT", "冻结的单平台 E2E 计划超过 90 分钟");
-  return { plannedTimeoutMs, unitMs, deterministicMs, visualMs, currentRegressionMs };
+  return { plannedTimeoutMs, unitMs, deterministicMs, visualMs, currentRegressionMs, adaptiveMs, adaptivePolicyMs };
 }
 
 function jsonDigest(value) {
@@ -1180,11 +1315,7 @@ async function launchNativeGame(gamePackage, arguments_, environment) {
   return {
     pid: child.pid,
     record: { mode: platform === "windows" ? "WINDOWS_FINAL_EXE" : "LINUX_RELEASE_EXECUTABLE", packagePath: gamePackage.packagePath },
-    terminate: async () => {
-      if (child.exitCode === null) child.kill("SIGTERM");
-      await Promise.race([new Promise(resolvePromise => child.once("close", resolvePromise)), delay(5_000)]);
-      if (child.exitCode === null) child.kill("SIGKILL");
-    },
+    terminate: async () => terminateGameProcess(child.pid),
     logs: async () => ({ stdout: Buffer.concat(stdout).toString("utf8"), stderr: Buffer.concat(stderr).toString("utf8") }),
   };
 }
@@ -1207,7 +1338,17 @@ async function launchManagedGame(gamePackage, arguments_, environment, runId, us
 
 async function launchMacosApp(gamePackage, arguments_, environment) {
   const exported = Object.entries(environment).filter(([key]) => key.startsWith("DEVILUDO_") || ["HOME", "TMPDIR", "XDG_DATA_HOME", "XDG_CONFIG_HOME", "XDG_CACHE_HOME"].includes(key));
-  const launchArguments = ["-n"];
+  const logIndex = arguments_.indexOf("--log-file");
+  const requestedLogPath = logIndex >= 0 ? arguments_[logIndex + 1] : "";
+  if (!isAbsolute(requestedLogPath) || !requestedLogPath.startsWith(`${workspace}/`)) {
+    throw new Error("INFRASTRUCTURE: macOS native launch log path is invalid");
+  }
+  // LaunchServices otherwise connects app stdout/stderr to /dev/null. Godot's
+  // --print-fps output is stdout-only in exported macOS games, so preserve both
+  // streams in runner-owned files without changing normal player launch args.
+  const stdoutPath = `${requestedLogPath}.stdout`;
+  const stderrPath = `${requestedLogPath}.stderr`;
+  const launchArguments = ["-n", "-o", stdoutPath, "--stderr", stderrPath];
   for (const [key, value] of exported) {
     const text = String(value);
     if (text.includes("\0") || text.includes("\n") || !/^[A-Z0-9_]+$/.test(key)) {
@@ -1221,8 +1362,11 @@ async function launchMacosApp(gamePackage, arguments_, environment) {
   return {
     pid,
     record: { mode: "MACOS_LAUNCH_SERVICES", packagePath: gamePackage.packagePath },
-    terminate: async () => { try { process.kill(pid, "SIGTERM"); } catch {} await delay(1_000); },
-    logs: async () => ({ stdout: "", stderr: "" }),
+    terminate: async () => terminateGameProcess(pid),
+    logs: async () => ({
+      stdout: (await readOptionalLog(stdoutPath)).toString("utf8"),
+      stderr: (await readOptionalLog(stderrPath)).toString("utf8"),
+    }),
   };
 }
 
@@ -1384,6 +1528,7 @@ function assertManifest(value) {
 async function finish(outcome, failureDomain, summary, manifest) {
   const scopedRequirements = manifest?.requirements ?? [];
   const playerRequirementCount = scopedRequirements.filter(item => item.verificationClass === "PLAYER_INTERACTION").length;
+  performanceSummary = summarizeE2ePerformance({ frameRateRuns, inputResponses });
   const report = {
     schema: E2E_EVIDENCE_SCHEMA, jobId, platform, action, outcome, failureDomain, summary,
     packageLaunches: launchRecords,
@@ -1418,7 +1563,7 @@ async function finish(outcome, failureDomain, summary, manifest) {
         evidenceSteps, ...(requirement.exemptionReason ? { exemptionReason: requirement.exemptionReason } : {}),
       };
     }),
-    steps, checkpoints, adaptiveRollouts, playerPolicy,
+    steps, checkpoints, adaptiveRollouts, playerPolicy, performance: performanceSummary,
     regression: {
       currentReplay: currentRegressionResult,
       replacement: outcome === "PASSED" && regressions[0]
@@ -1452,6 +1597,14 @@ async function finish(outcome, failureDomain, summary, manifest) {
       coveredPlayerRequirementCount: coveredPlayerRequirements.size,
       playerRequirementCount, screenshotCount: screenshots.length, visualBaselineCount: baselines.length,
       videoCount: videos.length, hasVisualDiff: diffs.length > 0,
+      frameRateSampleCount: performanceSummary.frameRate.sampleCount,
+      minimumFps: performanceSummary.frameRate.minimumFps,
+      p10Fps: performanceSummary.frameRate.p10Fps,
+      medianFps: performanceSummary.frameRate.medianFps,
+      inputResponseSampleCount: performanceSummary.inputResponse.sampleCount,
+      p95InputResponseMs: performanceSummary.inputResponse.p95Ms,
+      maxInputResponseMs: performanceSummary.inputResponse.maximumMs,
+      performancePassed: performanceSummary.passed,
       testManifestDigest: jsonDigest(manifest),
       regressionTraceDigest: regressionBytes ? `sha256:${createHash("sha256").update(regressionBytes).digest("hex")}` : null,
       regressionContractDigest: regressionTrace?.contractDigest ?? null,
@@ -1529,7 +1682,48 @@ function assertPlatformBudget() { if (Date.now() >= platformDeadline) throw prod
 function remainingPlatformBudget() { return Math.max(1, platformDeadline - Date.now()); }
 async function processAlive(pid) { try { process.kill(pid, 0); return true; } catch { return false; } }
 async function readOptionalLog(path) { return readFile(path).catch(() => Buffer.alloc(0)); }
-function gameWindowArguments(logPath) { return ["--log-file", logPath, "--windowed", "--resolution", `${E2E_CLIENT_WIDTH}x${E2E_CLIENT_HEIGHT}`, "--position", "40,40"]; }
+function gameWindowArguments(logPath, measurePerformance = true) {
+  // Exported projects may disable stdout in project settings. --debug restores
+  // the engine's local stdout logger in release exports so --print-fps remains
+  // observable; consumer-package smoke intentionally keeps exact player args.
+  return ["--log-file", logPath, ...(measurePerformance ? ["--debug", "--print-fps"] : []), "--windowed", "--resolution", `${E2E_CLIENT_WIDTH}x${E2E_CLIENT_HEIGHT}`, "--position", "40,40"];
+}
+async function terminateGameProcess(pid) {
+  if (!await processAlive(pid)) return;
+  // Godot flushes its FPS stream on an orderly shutdown. SIGTERM/SIGKILL can
+  // discard the final buffered samples, so request the platform's graceful
+  // close first and retain a bounded hard-stop fallback for hung games.
+  if (platform === "windows") {
+    await execute("taskkill", ["/PID", String(pid)], { timeout: 10_000, maxBuffer: 1024 * 1024 }).catch(() => undefined);
+  } else {
+    try { process.kill(pid, "SIGINT"); } catch {}
+  }
+  if (await waitForGameProcessExit(pid, 5_000)) return;
+  if (platform === "windows") {
+    await execute("taskkill", ["/F", "/PID", String(pid)], { timeout: 10_000, maxBuffer: 1024 * 1024 }).catch(() => undefined);
+  } else {
+    try { process.kill(pid, "SIGTERM"); } catch {}
+  }
+  if (await waitForGameProcessExit(pid, 2_000)) return;
+  if (platform !== "windows") try { process.kill(pid, "SIGKILL"); } catch {}
+}
+async function waitForGameProcessExit(pid, timeoutMs) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    if (!await processAlive(pid)) return true;
+    await delay(100);
+  }
+  return !await processAlive(pid);
+}
+function recordFrameRateRun(runId, ...logs) {
+  if (frameRateRuns.some(run => run.runId === runId)) return;
+  let samples = [];
+  for (const log of logs) {
+    samples = parseGodotFpsSamples(log);
+    if (samples.length > 0) break;
+  }
+  frameRateRuns.push({ runId, samples });
+}
 function checkpointEvidenceId(journeyId, checkpointId) { return `journey-${journeyId.length}-${journeyId}-${checkpointId}`; }
 function safeGodotPath(value) { return typeof value === "string" && /^res:\/\/[A-Za-z0-9][A-Za-z0-9._/-]{0,219}\.gd$/.test(value) && !/(^|\/)\.{1,2}(\/|$)|\/\//.test(value.slice(6)); }
 function productFailureMessage(code, message) {

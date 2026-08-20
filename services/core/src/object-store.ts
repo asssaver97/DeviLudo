@@ -8,7 +8,7 @@ import {
   S3Client,
 } from "@aws-sdk/client-s3";
 import { getSignedUrl } from "@aws-sdk/s3-request-presigner";
-import type { JobProtocolV4 } from "./contracts";
+import type { JobProtocolV4, ObjectReference } from "./contracts";
 import type { ArtifactRecord } from "@/lib/product/contracts";
 import { createHash } from "node:crypto";
 import { parseProjectDocumentContent, projectDocumentMarkdown } from "@/lib/product/project-document";
@@ -212,6 +212,33 @@ export class CoreObjectStore {
       throw new Error("Agent output must contain an asset manifest and leave test planning to E2E");
     }
     return Object.freeze({ assetManifest: parsed.assetManifest });
+  }
+
+  async readProjectE2eContractHint(object: ObjectReference | null): Promise<Readonly<Record<string, unknown>> | null> {
+    if (!object) return null;
+    if (object.kind !== "SPECIFICATION" || object.bucket !== this.bucket
+      || !object.key.startsWith("workspaces/") || object.sizeBytes > 2 * 1024 * 1024) {
+      throw new Error("Project E2E contract hint object is invalid");
+    }
+    const parsed = await this.readJsonOutput([object], "SPECIFICATION", 2 * 1024 * 1024, "Agent manifest");
+    const hint = parsed.testManifest;
+    return hint && typeof hint === "object" && !Array.isArray(hint)
+      ? Object.freeze(hint as Record<string, unknown>)
+      : null;
+  }
+
+  async readProjectE2eRegressionTrace(object: ObjectReference | null): Promise<Readonly<Record<string, unknown>> | null> {
+    if (!object) return null;
+    if (object.kind !== "E2E_REGRESSION" || object.bucket !== this.bucket
+      || !object.key.startsWith("workspaces/") || object.sizeBytes > 2 * 1024 * 1024) {
+      throw new Error("Project E2E regression trace object is invalid");
+    }
+    const parsed = await this.readJsonOutput([object], "E2E_REGRESSION", 2 * 1024 * 1024, "E2E regression trace");
+    if (parsed.schema !== "deviludo.e2e-regression"
+      || !Array.isArray(parsed.actions) || !Array.isArray(parsed.successAssertions)) {
+      throw new Error("Project E2E regression trace schema is invalid");
+    }
+    return Object.freeze(parsed);
   }
 
   private async readJsonOutput(

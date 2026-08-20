@@ -38,3 +38,189 @@ test("the cross-platform E2E planner freezes regression, change-impact, UI, and 
   assert.match(plan.contractDigest, /^sha256:[0-9a-f]{64}$/);
   assert.ok(plan.executionPlan.plannedTimeoutMs >= 30 * 60_000);
 });
+
+test("the cross-platform E2E planner does not multiply Provider or CLI failures", async () => {
+  let attempts = 0;
+  await assert.rejects(generateE2eTestPlan({
+    context: planningContext(),
+    runtime: "CODEX_CLI",
+    baseUrl: "https://fixture.invalid",
+    apiKey: "{}",
+    model: "fixture-model",
+    codexRunner: async input => {
+      attempts += 1;
+      assert.equal(input.reasoningEffort, "low");
+      assert.equal(input.timeoutMs, 360_000);
+      assert.deepEqual(input.outputSchema?.required, ["semanticJourney", "coverage"]);
+      assert.deepEqual(
+        (input.outputSchema?.properties as Record<string, Record<string, unknown>>)?.semanticJourney?.required,
+        ["startAction", "primaryAction", "completeAction", "primaryProgressKey", "completionProgressKey", "changeTargetId"],
+      );
+      assert.deepEqual(
+        (input.outputSchema?.properties as Record<string, Record<string, unknown>>)?.coverage?.required,
+        ["regressionOperations", "regressionUi", "changeImpact", "assetApplication"],
+      );
+      assert.match(input.prompt, /Return only one JSON object shaped \{semanticJourney,coverage\}/);
+      throw new Error("fixture Provider unavailable");
+    },
+  }), /Test Agent provider request failed: fixture Provider unavailable/);
+  assert.equal(attempts, 1);
+});
+
+test("the cross-platform E2E planner rejects invented generic controls when the Provider plan is invalid", async () => {
+  let attempts = 0;
+  await assert.rejects(generateE2eTestPlan({
+    context: planningContext(),
+    runtime: "CODEX_CLI",
+    baseUrl: "https://fixture.invalid",
+    apiKey: "{}",
+    model: "fixture-model",
+    codexRunner: async () => {
+      attempts += 1;
+      return "{}";
+    },
+  }), /Test Agent returned an invalid project plan/);
+  assert.equal(attempts, 1);
+});
+
+test("the cross-platform E2E planner never executes generic semantic controls as a product plan", async () => {
+  await assert.rejects(generateE2eTestPlan({
+    context: planningContext(),
+    runtime: "CODEX_CLI",
+    baseUrl: "https://fixture.invalid",
+    apiKey: "{}",
+    model: "fixture-model",
+    codexRunner: async () => JSON.stringify({
+      semanticJourney: {
+        startAction: semanticAction("new-game"),
+        primaryAction: semanticAction("primary-control"),
+        completeAction: semanticAction("complete-loop"),
+        primaryProgressKey: "core-loop-action",
+        completionProgressKey: "core-loop-completion",
+        changeTargetId: "game-viewport",
+      },
+      coverage: planningCoverage(),
+    }),
+  }), /plan still contains schema-template controls/);
+});
+
+test("the cross-platform E2E planner deterministically repairs a semantic journey envelope", async () => {
+  const plan = await generateE2eTestPlan({
+    context: planningContext(),
+    runtime: "CODEX_CLI",
+    baseUrl: "https://fixture.invalid",
+    apiKey: "{}",
+    model: "fixture-model",
+    codexRunner: async () => JSON.stringify({
+      semanticJourney: {
+        startAction: semanticAction("start-campaign"),
+        primaryAction: semanticAction("territory-board"),
+        completeAction: semanticAction("end-turn-button"),
+        primaryProgressKey: "campaign-action",
+        completionProgressKey: "campaign-turn",
+        changeTargetId: "territory-board",
+      },
+      coverage: planningCoverage(),
+    }),
+  });
+  assert.equal(validateTestManifest(plan.testManifest), true);
+  assert.deepEqual(plan.testManifest.requirements.map(item => item.requirementId), [
+    "req-feature-001-fb00a811",
+    "req-acceptance-001-213f5922",
+  ]);
+  assert.match(JSON.stringify(plan.testManifest), /"targetId":"territory-board"/);
+  assert.doesNotMatch(JSON.stringify(plan.testManifest), /"targetId":"(?:primary-control|complete-loop)"|fixture-/);
+});
+
+test("the cross-platform E2E planner prefers the prior successful regression region for visual progress", async () => {
+  const plan = await generateE2eTestPlan({
+    context: Object.freeze({
+      ...planningContext(),
+      regressionTrace: Object.freeze({
+        schema: "deviludo.e2e-regression",
+        actions: Object.freeze([
+          Object.freeze({ type: "click", targetId: "start-campaign" }),
+          Object.freeze({ type: "click", targetId: "campaign-board" }),
+          Object.freeze({ type: "click", targetId: "end-turn-button" }),
+        ]),
+        successAssertions: Object.freeze([{ source: "PROGRESS", key: "campaign-turn", operator: "CHANGED" }]),
+      }),
+    }),
+    runtime: "CODEX_CLI",
+    baseUrl: "https://fixture.invalid",
+    apiKey: "{}",
+    model: "fixture-model",
+    codexRunner: async () => JSON.stringify({
+      semanticJourney: {
+        startAction: semanticAction("start-campaign"),
+        primaryAction: semanticAction("roll-dice"),
+        completeAction: semanticAction("end-turn-button"),
+        primaryProgressKey: "move-budget",
+        completionProgressKey: "campaign-turn",
+        changeTargetId: "tiny-roll-indicator",
+      },
+      coverage: planningCoverage(),
+    }),
+  });
+  const feature = plan.testManifest.features[0];
+  assert.ok(feature);
+  assert.ok(feature.interactionScript);
+  const progress = feature.interactionScript.events.find(event => event.type === "checkpoint" && event.role === "PROGRESS");
+  assert.ok(progress?.type === "checkpoint");
+  assert.equal(progress.changeTargetId, "campaign-board");
+});
+
+test("the cross-platform E2E planner revalidates and reuses a matching project semantic contract", async () => {
+  const fixture = await generateE2eTestPlan({
+    context: planningContext(),
+    runtime: "CODEX_CLI",
+    baseUrl: "https://fixture.invalid",
+    apiKey: "{}",
+    model: "fixture-model",
+    testFixture: true,
+  });
+  let attempts = 0;
+  const plan = await generateE2eTestPlan({
+    context: Object.freeze({ ...planningContext(), projectTestContract: fixture.testManifest }),
+    runtime: "CODEX_CLI",
+    baseUrl: "https://fixture.invalid",
+    apiKey: "{}",
+    model: "fixture-model",
+    codexRunner: async () => {
+      attempts += 1;
+      throw new Error("a validated project contract must not be replaced by invented controls");
+    },
+  });
+  assert.equal(attempts, 0);
+  assert.deepEqual(plan.testManifest, fixture.testManifest);
+  assert.equal(validateTestManifest(plan.testManifest), true);
+});
+
+function planningContext() {
+  return Object.freeze({
+    projectName: "Generic fixture",
+    iterationNumber: 1,
+    platform: "macos",
+    approvedSpecification: Object.freeze({
+      coreLoop: Object.freeze(["Start a session and complete one turn"]),
+      acceptanceCriteria: Object.freeze(["The HUD updates after the player action"]),
+    }),
+    previousSpecification: null,
+    revisionNotes: Object.freeze([]),
+    regression: Object.freeze({ available: false }),
+    assets: Object.freeze([]),
+  });
+}
+
+function semanticAction(targetId: string) {
+  return { type: "click", targetId, key: null, button: null, durationMs: null };
+}
+
+function planningCoverage() {
+  return {
+    regressionOperations: ["Start and complete one turn"],
+    regressionUi: ["Verify the campaign HUD"],
+    changeImpact: ["Verify the current core loop"],
+    assetApplication: ["No materialized image assets are present in this build"],
+  };
+}

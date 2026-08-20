@@ -315,6 +315,8 @@ async function installGuestRuntime(ip, { rotateCredentials = true } = {}) {
     [resolve(root, "scripts/e2e-evidence.mjs"), "/Users/Shared/e2e-evidence.mjs"],
     [resolve(root, "scripts/e2e-ui-probe.mjs"), "/Users/Shared/e2e-ui-probe.mjs"],
     [resolve(root, "scripts/e2e-interaction-contract.mjs"), "/Users/Shared/e2e-interaction-contract.mjs"],
+    [resolve(root, "scripts/e2e-regression-actions.mjs"), "/Users/Shared/e2e-regression-actions.mjs"],
+    [resolve(root, "scripts/e2e-performance.mjs"), "/Users/Shared/e2e-performance.mjs"],
     [resolve(root, "scripts/executors/godot-system-gamepad-smoke.mjs"), "/Users/Shared/godot-system-gamepad-smoke.mjs"],
     [resolve(root, "fixtures/godot-input-smoke/project.godot"), "/Users/Shared/godot-input-smoke-project.godot"],
     [resolve(root, "fixtures/godot-input-smoke/main.tscn"), "/Users/Shared/godot-input-smoke-main.tscn"],
@@ -408,7 +410,7 @@ function sshArguments() { return ["-i", keyFile, "-o", "BatchMode=yes", "-o", "S
 async function configurationFingerprint(baseImageDigest) {
   const hash = createHash("sha256").update("deviludo-tart-adaptive-e2e\0tahoe-26\0node-22.22.0\0godot-4.5.1\0ffmpeg\0memory-6144\0display-1440x900\0swift-Onone\0").update(baseImageDigest);
   hash.update(await readFile(`${keyFile}.pub`));
-  for (const file of ["scripts/executors/godot-window-e2e-guest.mjs", "scripts/executors/game-test-environment.mjs", "scripts/executors/gui-event-batches.mjs", "scripts/executors/godot-system-gamepad-smoke.mjs", "scripts/e2e-evidence.mjs", "scripts/e2e-ui-probe.mjs", "scripts/e2e-interaction-contract.mjs", "scripts/executors/macos-gui-driver.swift", "scripts/executors/macos-gamepad-driver.swift", "fixtures/godot-input-smoke/project.godot", "fixtures/godot-input-smoke/main.tscn", "fixtures/godot-input-smoke/main.gd", "scripts/local-tart-provision.sh"]) hash.update(await readFile(resolve(root, file)));
+  for (const file of ["scripts/executors/godot-window-e2e-guest.mjs", "scripts/executors/game-test-environment.mjs", "scripts/executors/gui-event-batches.mjs", "scripts/executors/godot-system-gamepad-smoke.mjs", "scripts/e2e-evidence.mjs", "scripts/e2e-ui-probe.mjs", "scripts/e2e-interaction-contract.mjs", "scripts/e2e-regression-actions.mjs", "scripts/e2e-performance.mjs", "scripts/executors/macos-gui-driver.swift", "scripts/executors/macos-gamepad-driver.swift", "fixtures/godot-input-smoke/project.godot", "fixtures/godot-input-smoke/main.tscn", "fixtures/godot-input-smoke/main.gd", "scripts/local-tart-provision.sh"]) hash.update(await readFile(resolve(root, file)));
   return `sha256:${hash.digest("hex")}`;
 }
 async function tartVmExists(name) {

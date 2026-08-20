@@ -8,6 +8,14 @@ import { StringDecoder } from "node:string_decoder";
 let progressWrites = Promise.resolve();
 let agentOutputBuffer = "";
 let sawPartialAgentOutput = false;
+// The task entrypoint awaits runAgent before module evaluation reaches later
+// declarations. Keep inventory constants initialized above that first await so
+// Agent completion cannot read these bindings before initialization.
+const SOURCE_IMAGE_EXTENSIONS = /\.(?:png|jpe?g|webp|svg)$/i;
+const SOURCE_IMAGE_IGNORED_DIRECTORIES = new Set([
+  ".git", ".godot", ".deviludo-export", ".deviludo-e2e",
+  "node_modules", "build", "dist", "coverage",
+]);
 
 await mkdir("/workspace/inputs", { recursive: true });
 await mkdir("/workspace/project", { recursive: true });
@@ -107,11 +115,13 @@ async function runAgent(plan) {
   const isRepairPass = e2eRepairContext !== null || upstreamFailureSummary !== null;
   const checkpointEmitterInstruction = "A DEVILUDO_E2E_CHECKPOINT:<checkpoint-id> runtime marker is optional synchronization metadata only and can never satisfy an assertion by itself. If used, emit it only after the real semantic state exists and append it to DEVILUDO_E2E_CHECKPOINT_FILE when that environment variable is non-empty.";
   const probeInstruction = "Implement the read-only deviludo.e2e-ui-probe contract in the actual game. Atomically replace DEVILUDO_E2E_UI_PROBE_FILE after each visible/state/progress change. Include asynchronous UI lifecycle changes: a window, popup, dialog, overlay, animation, or deferred layout must publish again from its real visibility/layout signal or a completed draw frame, not only from the synchronous input handler that requested the change. Show and hide must both advance the sequence, and the snapshot must read the actual rendered state. Every state object must publish the fixed lifecycle fields screen_mode (MENU, PLAYING, PAUSED or RESULT), session_active, gameplay_input_enabled and blocking_layer_count. MENU means no session, no gameplay input, zero blocking layers; PLAYING means an active session, enabled gameplay input and zero blocking layers; PAUSED means an active session and disabled gameplay input, with blocking_layer_count reflecting the actual visible blocking layers rather than assuming one exists. Every control must declare scope NAVIGATION, GAMEPLAY, OVERLAY or STATUS. MENU must never publish an enabled visible GAMEPLAY control. Map every control and embedded Window/Popup rectangle against the root game client viewport before converting to 1280x720; never use a child window's own content size as the root scale, clamp an invalid rectangle, or publish an out-of-client snapshot. A node detached from the scene tree or without a live root viewport must never be published as visible or enabled: wait until it is attached and laid out, or publish the truthful non-actionable state using the last valid in-client rectangle. Never invent a fallback viewport size to make a detached node appear actionable. If real dialog content exceeds the root client, fix the production UI with a bounded window and scrollable content; never shrink, clip, or substitute only the Probe rectangle. Every control reported visible and enabled for an action must be connected to its production input handler. After real OS input, successful, rejected, and asynchronously completed actions must all converge on a final UI refresh and publish a newer Probe with the truthful outcome, so an action can never silently leave the previous sequence in place. Every snapshot uses schema deviludo.e2e-ui-probe and must contain the current DEVILUDO_E2E_SESSION_NONCE, OS process id, a strictly increasing sequence, sceneId, flat state and progress objects, and unique stable controls with id, scope, visible, enabled, text/value, and 1280x720 client-relative rect. The probe may describe state but must never invoke actions, complete gameplay, or fake results.";
+  const performanceInstruction = "Cross-platform E2E launches the real exported game with Godot --print-fps and measures native-input-to-truthful-Probe response latency under fixed runner-owned thresholds. Keep normal gameplay responsive: avoid blocking work, synchronous disk or network I/O, repeated scene/layout rebuilds, per-frame allocations, unbounded searches, and synchronous resource loading in input or frame callbacks. Treat renderer and device names reported by a virtualized runner as environment context, not as a standalone root cause. Do not switch rendering backends merely because the runner reports a software or virtual GPU; any renderer change must preserve application launch, window creation, and compatible fallbacks on every configured E2E target. Never suppress or forge FPS output, publish Probe state before the real rendered state exists, or add test-only shortcuts to evade performance evidence.";
   const manifestInstructions = [
     "The cross-platform E2E node owns test-plan generation. Do not create, update, or preserve testManifest in agent.json; remove that field if it exists.",
     "Implement the real game behavior, deterministic hooks, and read-only UI Probe needed for later native-input testing, but do not decide E2E journeys or assertions here.",
     probeInstruction,
     checkpointEmitterInstruction,
+    performanceInstruction,
     "agent.json must contain exactly the current assetManifest planning object plus any non-test metadata required by the source; it must not contain testManifest.",
     "assetManifest uses schemaVersion deviludo.asset-manifest.v1 and 1-500 unique items. Each item needs assetKey, assetType, description, generationPrompt, nullable frameCount, and nullable dimensions.",
     "Plan every image used by gameplay or UI. The game must load controlled assets from res://assets/generated/<assetKey>.png, .jpg, or .webp and use a deliberate placeholder only when none exists.",
@@ -127,6 +137,11 @@ async function runAgent(plan) {
     "Open only the exact source/test file named by the evidence first, locate the reported symbol or behavior, and make the smallest concrete source edit immediately. Inspect wider code only when that edit genuinely requires it.",
     "This is an automatic repair pass after a trusted E2E product failure. Reproduce the reported game behavior from the existing source, fix the game content, scripts, scenes, or project configuration, and preserve unrelated working behavior.",
     "Do not dismiss the report as infrastructure failure and do not merely rewrite the report. Make concrete source changes that address its diagnostics.",
+    "If the report contains PACKAGE_WINDOW_TIMEOUT, treat an alive process that never creates an operable window as a product startup failure. Inspect the included startup logs first and fix the initialization loop, resource error storm, or blocking startup work; preserve a real player launch and window.",
+    ...((e2eRepairContext.report ?? e2eRepairContext).performance?.passed === false ? [
+      "PERFORMANCE REPAIR: use report.performance to identify the slow run and input step, then fix the real runtime hotspot in game scripts, scenes, resources, rendering, or project configuration. Profile the narrow path suggested by the evidence; preserve gameplay behavior and visual quality unless the approved design itself causes the hotspot.",
+      "Do not change E2E thresholds, remove --print-fps, reduce measured coverage, pre-publish Probe results, or replace production work with E2E-only behavior. The next exported build will repeat the same independent measurement.",
+    ] : []),
     ...((e2eRepairContext.report ?? e2eRepairContext).testDetails?.failures?.length > 0 ? [
       `Failed feature checks: ${(e2eRepairContext.report ?? e2eRepairContext).testDetails.failures.join(", ")}`,
       "Review the named failing test only as needed to understand the intended behavior. Fix game logic or configuration first; do not modify test assertions unless they are objectively incorrect.",
@@ -299,12 +314,6 @@ function validPlannedAsset(item) {
     && (item.dimensions == null || (typeof item.dimensions === "string" && /^[0-9]{1,5}x[0-9]{1,5}$/.test(item.dimensions)));
 }
 
-const SOURCE_IMAGE_EXTENSIONS = /\.(?:png|jpe?g|webp|svg)$/i;
-const SOURCE_IMAGE_IGNORED_DIRECTORIES = new Set([
-  ".git", ".godot", ".deviludo-export", ".deviludo-e2e",
-  "node_modules", "build", "dist", "coverage",
-]);
-
 /**
  * Merge a deterministic source-tree image inventory into the Agent plan.
  *
@@ -440,6 +449,44 @@ function e2eRepairPromptSummary(context) {
       .map(checkpoint => String(checkpoint.id ?? checkpoint.checkpointId ?? "unknown"))
       .slice(0, 20)
     : [];
+  const measuredPerformance = report.performance && typeof report.performance === "object"
+    ? report.performance
+    : null;
+  const frameRate = measuredPerformance?.frameRate && typeof measuredPerformance.frameRate === "object"
+    ? measuredPerformance.frameRate
+    : null;
+  const inputResponse = measuredPerformance?.inputResponse && typeof measuredPerformance.inputResponse === "object"
+    ? measuredPerformance.inputResponse
+    : null;
+  const performance = measuredPerformance ? {
+    schema: measuredPerformance.schema,
+    passed: measuredPerformance.passed,
+    thresholds: measuredPerformance.thresholds,
+    failures: Array.isArray(measuredPerformance.failures) ? measuredPerformance.failures.slice(0, 10) : [],
+    frameRate: frameRate ? {
+      sampleCount: frameRate.sampleCount,
+      minimumFps: frameRate.minimumFps,
+      p10Fps: frameRate.p10Fps,
+      medianFps: frameRate.medianFps,
+      slowSampleCount: frameRate.slowSampleCount,
+      slowSampleRatio: frameRate.slowSampleRatio,
+      runs: Array.isArray(frameRate.runs) ? frameRate.runs.slice(0, 50).map(run => ({
+        runId: run.runId,
+        sampleCount: run.sampleCount,
+        minimumFps: run.minimumFps,
+        p10Fps: run.p10Fps,
+        medianFps: run.medianFps,
+      })) : [],
+    } : null,
+    inputResponse: inputResponse ? {
+      sampleCount: inputResponse.sampleCount,
+      p95Ms: inputResponse.p95Ms,
+      maximumMs: inputResponse.maximumMs,
+      slowest: Array.isArray(inputResponse.samples) ? [...inputResponse.samples]
+        .sort((left, right) => Number(right?.latencyMs ?? 0) - Number(left?.latencyMs ?? 0))
+        .slice(0, 20) : [],
+    } : null,
+  } : null;
   return {
     schema: report.schema,
     platform: report.platform,
@@ -450,6 +497,7 @@ function e2eRepairPromptSummary(context) {
     failedCheckpoints,
     screenshotCount: report.screenshotCount,
     visualDiff: report.visualDiff,
+    performance,
   };
 }
 

@@ -372,6 +372,16 @@ async function evidenceHtml(report, imagesInput, stdout, stderr, videosInput) {
       adaptivePlay: "自适应游玩",
       gamepadInputs: "手柄输入",
       videos: "视频",
+      frameRateSamples: "帧率样本",
+      minimumFps: "最低 FPS",
+      medianFps: "中位 FPS",
+      inputResponseP95: "输入响应 P95",
+      runtimePerformance: "游戏流畅度",
+      metric: "指标",
+      observed: "实测",
+      gate: "门禁",
+      performancePassed: "通过",
+      performanceFailed: "失败",
       requirement: "需求",
       status: "状态",
       realInputEvidence: "真实操作证据",
@@ -382,6 +392,7 @@ async function evidenceHtml(report, imagesInput, stdout, stderr, videosInput) {
       input: "输入",
       semanticTarget: "语义目标",
       probeSequence: "Probe 序号",
+      inputResponse: "输入响应",
       noRealInputSteps: "无真实输入步骤",
       testAgentPlay: "Test Agent 自适应游玩与 Oracle",
       rollout: "Rollout",
@@ -418,6 +429,16 @@ async function evidenceHtml(report, imagesInput, stdout, stderr, videosInput) {
       adaptivePlay: "Adaptive Play",
       gamepadInputs: "Gamepad Inputs",
       videos: "Videos",
+      frameRateSamples: "Frame-rate Samples",
+      minimumFps: "Minimum FPS",
+      medianFps: "Median FPS",
+      inputResponseP95: "Input Response P95",
+      runtimePerformance: "Runtime Smoothness",
+      metric: "Metric",
+      observed: "Observed",
+      gate: "Gate",
+      performancePassed: "Passed",
+      performanceFailed: "Failed",
       requirement: "Requirement",
       status: "Status",
       realInputEvidence: "Real-input Evidence",
@@ -428,6 +449,7 @@ async function evidenceHtml(report, imagesInput, stdout, stderr, videosInput) {
       input: "Input",
       semanticTarget: "Semantic Target",
       probeSequence: "Probe Sequence",
+      inputResponse: "Input Response",
       noRealInputSteps: "No real-input steps",
       testAgentPlay: "Test Agent Adaptive Play & Oracles",
       rollout: "Rollout",
@@ -464,6 +486,10 @@ async function evidenceHtml(report, imagesInput, stdout, stderr, videosInput) {
     : videosInput;
   const videos = orderedVideos.map(item => `<figure${item === primaryVideo ? " class=\"is-primary\"" : ""}><video controls preload="metadata" src="videos/${escapeHtml(item.id)}.mp4"></video><figcaption>gameplay · ${escapeHtml(item.id)}</figcaption></figure>`).join("");
   const coverage = report.coverage ?? {};
+  const performance = report.performance ?? {};
+  const frameRate = performance.frameRate ?? {};
+  const inputResponse = performance.inputResponse ?? {};
+  const thresholds = performance.thresholds ?? {};
   const stats = [
     ["headlessChecks", coverage.headlessCheckCount ?? 0],
     ["realPlayerJourneys", coverage.interactiveJourneyCount ?? 0],
@@ -473,10 +499,19 @@ async function evidenceHtml(report, imagesInput, stdout, stderr, videosInput) {
     ["stableBaselines", coverage.visualBaselineCount ?? 0],
     ["adaptivePlay", `${coverage.adaptiveSuccessCount ?? 0}/${coverage.adaptiveRolloutCount ?? 0}`],
     ["gamepadInputs", coverage.gamepadInputCount ?? 0],
+    ["frameRateSamples", frameRate.sampleCount ?? 0],
+    ["minimumFps", frameRate.minimumFps ?? "-"],
+    ["medianFps", frameRate.medianFps ?? "-"],
+    ["inputResponseP95", inputResponse.p95Ms === null || inputResponse.p95Ms === undefined ? "-" : `${inputResponse.p95Ms} ms`],
     ["videos", videosInput.length],
   ].map(([label, value]) => `<article><strong>${t(label)}</strong><span>${escapeHtml(value)}</span></article>`).join("");
   const requirementRows = (report.requirementCoverage ?? []).map(requirement => `<tr><td>${escapeHtml(requirement.requirementId)}</td><td>${escapeHtml(requirement.status)}</td><td>${escapeHtml((requirement.evidenceSteps ?? []).join(", ") || requirement.exemptionReason || "-")}</td></tr>`).join("");
-  const stepRows = (report.steps ?? []).map(step => `<tr><td>${escapeHtml(step.journeyId)}</td><td>${escapeHtml(step.stepId)}</td><td>${escapeHtml(step.type)}</td><td>${step.target?.controls?.length ? escapeHtml(step.target.controls.map(control => control.id).join(", ")) : t("keyboard")}</td><td>${escapeHtml(`${step.before?.sequence ?? "-"} → ${step.after?.sequence ?? "-"}`)}</td></tr>`).join("");
+  const stepRows = (report.steps ?? []).map(step => `<tr><td>${escapeHtml(step.journeyId)}</td><td>${escapeHtml(step.stepId)}</td><td>${escapeHtml(step.type)}</td><td>${step.target?.controls?.length ? escapeHtml(step.target.controls.map(control => control.id).join(", ")) : t("keyboard")}</td><td>${escapeHtml(`${step.before?.sequence ?? "-"} → ${step.after?.sequence ?? "-"}`)}</td><td>${step.inputResponseMs === undefined ? "-" : escapeHtml(`${step.inputResponseMs} ms`)}</td></tr>`).join("");
+  const performanceRows = [
+    ["minimumFps", frameRate.minimumFps, `≥ ${thresholds.criticalMinimumFps ?? "-"}`],
+    ["medianFps", frameRate.medianFps, `≥ ${thresholds.minimumMedianFps ?? "-"}`],
+    ["inputResponseP95", inputResponse.p95Ms === null || inputResponse.p95Ms === undefined ? null : `${inputResponse.p95Ms} ms`, `≤ ${thresholds.maximumP95InputResponseMs ?? "-"} ms`],
+  ].map(([label, observed, gate]) => `<tr><td>${t(label)}</td><td>${escapeHtml(observed ?? "-")}</td><td>${escapeHtml(gate)}</td></tr>`).join("");
   const rolloutRows = (report.adaptiveRollouts ?? []).map(rollout => {
     const recoveries = (rollout.decisions ?? []).filter(decision => decision.recovery === true).length;
     const oracle = rollout.outcome === "PASSED" ? t("oraclePassed") : escapeHtml(rollout.failureCode ?? copy.zh.oracleFailed);
@@ -487,7 +522,7 @@ async function evidenceHtml(report, imagesInput, stdout, stderr, videosInput) {
   const replacementRegression = regression.replacement?.stored ? t("replacementStored") : t("noReplacementTrace");
   const pageTitleKey = report.outcome === "PASSED" ? "pagePassed" : "pageFailed";
   const serializedCopy = JSON.stringify(copy).replaceAll("<", "\\u003c");
-  return `<!doctype html><html lang="zh-CN" data-locale="zh" data-theme="dark"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width"><title>${escapeHtml(copy.zh[pageTitleKey])}</title><script>(()=>{const p=new URLSearchParams(location.search),l=p.get("locale")==="en"?"en":p.get("locale")==="zh"?"zh":navigator.language.toLowerCase().startsWith("en")?"en":"zh",t=p.get("theme")==="light"?"light":"dark",e=document.documentElement;e.lang=l==="en"?"en":"zh-CN";e.dataset.locale=l;e.dataset.theme=t;e.style.colorScheme=t})()</script><style>:root{--bg:#07111e;--surface:#0b1928;--surface-strong:#050b13;--ink:#e8f1ff;--line:#32506f;--line-soft:#253f5c;--accent:#57e3b2;--danger:#ff718d;--muted:#9eb1c7}html[data-theme="light"]{--bg:#f2f6fb;--surface:#fff;--surface-strong:#e8eef6;--ink:#15243a;--line:#a8bfd8;--line-soft:#cfdae7;--accent:#087c65;--danger:#c33857;--muted:#52657a}body{margin:0;background:var(--bg);color:var(--ink);font:16px ui-monospace,monospace}main{max-width:1200px;margin:auto;padding:32px}header,article,figure,table{border:1px solid var(--line)}header{padding:24px;background:var(--surface)}h1{color:${report.outcome === "PASSED" ? "var(--accent)" : "var(--danger)"}}h2{margin-top:40px}.stats,section{display:grid;grid-template-columns:repeat(auto-fit,minmax(240px,1fr));gap:20px;margin-top:24px}.video-grid figure.is-primary{grid-column:1/-1}.image-grid{grid-template-columns:repeat(auto-fit,minmax(360px,1fr))}.stats article{padding:16px;background:var(--surface)}.stats strong,.stats span{display:block}.stats article>span{font-size:28px;color:var(--accent);margin-top:8px}figure{margin:0;padding:12px;background:var(--surface)}img,video{width:100%;height:auto;display:block}figcaption{padding-top:10px;color:var(--muted)}table{width:100%;border-collapse:collapse;background:var(--surface)}th,td{padding:10px;border:1px solid var(--line-soft);text-align:left}pre{white-space:pre-wrap;overflow-wrap:anywhere;background:var(--surface-strong);padding:16px}</style></head><body><main><header><h1>${t(titleKey)}</h1><p>${escapeHtml(report.summary ?? "")}</p><p>${escapeHtml(report.platform ?? "")}</p></header><div class="stats">${stats}</div><h2>${t("requirementCoverage")}</h2><table><thead><tr><th>${t("requirement")}</th><th>${t("status")}</th><th>${t("realInputEvidence")}</th></tr></thead><tbody>${requirementRows || `<tr><td colspan="3">${t("noCoveredRequirements")}</td></tr>`}</tbody></table><h2>${t("deterministicJourneys")}</h2><table><thead><tr><th>${t("journey")}</th><th>${t("step")}</th><th>${t("input")}</th><th>${t("semanticTarget")}</th><th>${t("probeSequence")}</th></tr></thead><tbody>${stepRows || `<tr><td colspan="5">${t("noRealInputSteps")}</td></tr>`}</tbody></table><h2>${t("testAgentPlay")}</h2><table><thead><tr><th>${t("rollout")}</th><th>${t("seed")}</th><th>${t("result")}</th><th>${t("decisions")}</th><th>${t("recoveries")}</th><th>Oracle</th></tr></thead><tbody>${rolloutRows || `<tr><td colspan="6">${t("noAdaptivePlay")}</td></tr>`}</tbody></table><h2>${t("currentRegression")}</h2><table><tbody><tr><th>${t("existingReplay")}</th><td>${currentRegression}</td></tr><tr><th>${t("successfulTrace")}</th><td>${replacementRegression}</td></tr></tbody></table><h2>${t("completeVideos")}</h2><section class="video-grid">${videos || `<p>${t("noVideos")}</p>`}</section><h2>${t("screenshotsAndDiffs")}</h2><section class="image-grid">${images.join("")}</section><h2>${t("structuredResult")}</h2><pre>${escapeHtml(JSON.stringify(report, null, 2))}</pre><h2>stdout</h2><pre>${escapeHtml(stdout)}</pre><h2>stderr</h2><pre>${escapeHtml(stderr)}</pre></main><script>(()=>{const copy=${serializedCopy},l=document.documentElement.dataset.locale||"zh",t=copy[l];document.title=t.${pageTitleKey};for(const node of document.querySelectorAll("[data-i18n]")){const value=t[node.dataset.i18n];if(value)node.textContent=value}})()</script></body></html>`;
+  return `<!doctype html><html lang="zh-CN" data-locale="zh" data-theme="dark"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width"><title>${escapeHtml(copy.zh[pageTitleKey])}</title><script>(()=>{const p=new URLSearchParams(location.search),l=p.get("locale")==="en"?"en":p.get("locale")==="zh"?"zh":navigator.language.toLowerCase().startsWith("en")?"en":"zh",t=p.get("theme")==="light"?"light":"dark",e=document.documentElement;e.lang=l==="en"?"en":"zh-CN";e.dataset.locale=l;e.dataset.theme=t;e.style.colorScheme=t})()</script><style>:root{--bg:#07111e;--surface:#0b1928;--surface-strong:#050b13;--ink:#e8f1ff;--line:#32506f;--line-soft:#253f5c;--accent:#57e3b2;--danger:#ff718d;--muted:#9eb1c7}html[data-theme="light"]{--bg:#f2f6fb;--surface:#fff;--surface-strong:#e8eef6;--ink:#15243a;--line:#a8bfd8;--line-soft:#cfdae7;--accent:#087c65;--danger:#c33857;--muted:#52657a}body{margin:0;background:var(--bg);color:var(--ink);font:16px ui-monospace,monospace}main{max-width:1200px;margin:auto;padding:32px}header,article,figure,table{border:1px solid var(--line)}header{padding:24px;background:var(--surface)}h1{color:${report.outcome === "PASSED" ? "var(--accent)" : "var(--danger)"}}h2{margin-top:40px}.stats,section{display:grid;grid-template-columns:repeat(auto-fit,minmax(240px,1fr));gap:20px;margin-top:24px}.video-grid figure.is-primary{grid-column:1/-1}.image-grid{grid-template-columns:repeat(auto-fit,minmax(360px,1fr))}.stats article{padding:16px;background:var(--surface)}.stats strong,.stats span{display:block}.stats article>span{font-size:28px;color:var(--accent);margin-top:8px}figure{margin:0;padding:12px;background:var(--surface)}img,video{width:100%;height:auto;display:block}figcaption{padding-top:10px;color:var(--muted)}table{width:100%;border-collapse:collapse;background:var(--surface)}th,td{padding:10px;border:1px solid var(--line-soft);text-align:left}pre{white-space:pre-wrap;overflow-wrap:anywhere;background:var(--surface-strong);padding:16px}</style></head><body><main><header><h1>${t(titleKey)}</h1><p>${escapeHtml(report.summary ?? "")}</p><p>${escapeHtml(report.platform ?? "")}</p></header><div class="stats">${stats}</div><h2>${t("requirementCoverage")}</h2><table><thead><tr><th>${t("requirement")}</th><th>${t("status")}</th><th>${t("realInputEvidence")}</th></tr></thead><tbody>${requirementRows || `<tr><td colspan="3">${t("noCoveredRequirements")}</td></tr>`}</tbody></table><h2>${t("deterministicJourneys")}</h2><table><thead><tr><th>${t("journey")}</th><th>${t("step")}</th><th>${t("input")}</th><th>${t("semanticTarget")}</th><th>${t("probeSequence")}</th><th>${t("inputResponse")}</th></tr></thead><tbody>${stepRows || `<tr><td colspan="6">${t("noRealInputSteps")}</td></tr>`}</tbody></table><h2>${t("runtimePerformance")} · ${performance.passed ? t("performancePassed") : t("performanceFailed")}</h2><table><thead><tr><th>${t("metric")}</th><th>${t("observed")}</th><th>${t("gate")}</th></tr></thead><tbody>${performanceRows}</tbody></table><h2>${t("testAgentPlay")}</h2><table><thead><tr><th>${t("rollout")}</th><th>${t("seed")}</th><th>${t("result")}</th><th>${t("decisions")}</th><th>${t("recoveries")}</th><th>Oracle</th></tr></thead><tbody>${rolloutRows || `<tr><td colspan="6">${t("noAdaptivePlay")}</td></tr>`}</tbody></table><h2>${t("currentRegression")}</h2><table><tbody><tr><th>${t("existingReplay")}</th><td>${currentRegression}</td></tr><tr><th>${t("successfulTrace")}</th><td>${replacementRegression}</td></tr></tbody></table><h2>${t("completeVideos")}</h2><section class="video-grid">${videos || `<p>${t("noVideos")}</p>`}</section><h2>${t("screenshotsAndDiffs")}</h2><section class="image-grid">${images.join("")}</section><h2>${t("structuredResult")}</h2><pre>${escapeHtml(JSON.stringify(report, null, 2))}</pre><h2>stdout</h2><pre>${escapeHtml(stdout)}</pre><h2>stderr</h2><pre>${escapeHtml(stderr)}</pre></main><script>(()=>{const copy=${serializedCopy},l=document.documentElement.dataset.locale||"zh",t=copy[l];document.title=t.${pageTitleKey};for(const node of document.querySelectorAll("[data-i18n]")){const value=t[node.dataset.i18n];if(value)node.textContent=value}})()</script></body></html>`;
 }
 
 async function regularFiles(root, maximumBytes = Number.MAX_SAFE_INTEGER) {

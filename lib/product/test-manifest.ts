@@ -96,6 +96,7 @@ export type E2eExecutionPlan = Readonly<{
   visualMs: number;
   currentRegressionMs: number;
   adaptiveMs: number;
+  adaptivePolicyMs: number;
   solidificationMs: number;
   evidenceMs: number;
 }>;
@@ -239,16 +240,21 @@ export function planE2eExecution(manifest: TestManifest, currentRegressionMs = 0
   const visualMs = manifest.features.filter(item => item.verificationMethod === "visual")
     .reduce((sum, item) => sum + (item.expectedVisual?.captureDelay ?? 1_000) + 30_000, 0);
   const adaptiveMs = ADAPTIVE_ROLLOUT_COUNT * manifest.adaptivePlayer.rolloutTimeoutMs;
+  // The rollout timeout measures active gameplay and intentionally pauses
+  // while the visual policy is thinking. Reserve a separate, equally bounded
+  // wall-clock allowance so valid exploration is not killed by the platform
+  // deadline merely because inference is slower than native input.
+  const adaptivePolicyMs = adaptiveMs;
   const solidificationMs = 2 * manifest.adaptivePlayer.rolloutTimeoutMs;
   const raw = Math.ceil(1.25 * (setupMs + unitMs + deterministicMs + visualMs
-    + currentRegressionMs + adaptiveMs + solidificationMs + evidenceMs));
+    + currentRegressionMs + adaptiveMs + adaptivePolicyMs + solidificationMs + evidenceMs));
   const plannedTimeoutMs = Math.ceil(Math.max(MIN_PLATFORM_E2E_TIMEOUT_MS, raw) / 60_000) * 60_000;
   if (plannedTimeoutMs > MAX_PLATFORM_E2E_TIMEOUT_MS) {
     throw Object.assign(new Error("E2E_PLAN_EXCEEDS_LIMIT"), { code: "E2E_PLAN_EXCEEDS_LIMIT", plannedTimeoutMs });
   }
   return Object.freeze({
     plannedTimeoutMs, setupMs, unitMs, deterministicMs, visualMs, currentRegressionMs,
-    adaptiveMs, solidificationMs, evidenceMs,
+    adaptiveMs, adaptivePolicyMs, solidificationMs, evidenceMs,
   });
 }
 

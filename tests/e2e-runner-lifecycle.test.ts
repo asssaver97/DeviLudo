@@ -273,6 +273,8 @@ test("the production Guest, relay, executor and node all wire the lifecycle guar
   assert.match(guest, /materializeRelativePoint\(resolved, action\.relativeX, action\.relativeY\)/);
   assert.match(guest, /if \(action\.type === "wait"\) return Number\.isInteger\(action\.duration_ms\)/);
   assert.match(guest, /if \(decision\.stateChanged !== true\) continue;/);
+  assert.match(guest, /const visitedProbeDigests = new Set\(\);[\s\S]*reachedNewState = changed && !visitedProbeDigests\.has\(afterDigest\)[\s\S]*returned to a previously observed state; no verified progress/);
+  assert.match(guest, /if \(decisionIndex > 0\) await delay\(ADAPTIVE_VISUAL_SETTLE_MS\)/);
   assert.match(guest, /materializeRegressionActionWhenReady\([\s\S]*afterSequence: probe\.sequence[\s\S]*Math\.min\(1_000, remaining\)/);
   assert.match(guest, /isRegressionTargetUnavailable\(error\)[\s\S]*E2E control \..+is missing or duplicated/);
   assert.match(guest, /if \(!isRegressionReplayMismatch\(error\)\) throw error;[\s\S]*replayMismatch = error;[\s\S]*return false/);
@@ -282,7 +284,9 @@ test("the production Guest, relay, executor and node all wire the lifecycle guar
   assert.match(guest, /error\.message\.startsWith\("INFRASTRUCTURE:"\)\) return false/);
   assert.match(guest, /policyInput\?\.close\(\)/);
   assert.match(guest, /type: "heartbeat"/);
-  assert.match(guest, /const summary = productFailureMessage\(error\.code, error\.message\)/);
+  assert.match(guest, /const measuredStutter = performanceSummary\.failures\.find\(item => item\.code === "GAME_STUTTER_DETECTED"\)/);
+  assert.match(guest, /if \(measuredStutter && error\.code !== measuredStutter\.code\)[\s\S]*primaryFailure = productFailure\(measuredStutter\.code, measuredStutter\.message\)/);
+  assert.match(guest, /const summary = productFailureMessage\(primaryFailure\.code, primaryFailure\.message\)/);
   assert.match(guest, /detail \|\| `\$\{code\} 未提供详细错误`/);
   assert.match(guest, /finish\("FAILED", "PRODUCT", summary, activeManifest\)/);
   assert.match(guest, /Buffer\.isBuffer\(error\?\.stderr\)[\s\S]*error\.stderr\.toString\("utf8"\)\.trim\(\)/);
@@ -302,7 +306,9 @@ test("the production Guest, relay, executor and node all wire the lifecycle guar
   assert.match(tartRelay, /remote\.stderr\.on\("data"/);
   assert.match(tartRelay, /remoteStderrLimit = 64 \* 1024/);
   assert.match(tartRelay, /const reason = protocolWatchdog\.expired\(\)[\s\S]*Tart guest runner failed or omitted its result/);
-  assert.match(tartRelay, /forwardTerminationSignals\(remote, killProcessGroup\)/);
+  assert.match(tartRelay, /const remoteKillProcessGroup = false/);
+  assert.match(tartRelay, /detached: false/);
+  assert.match(tartRelay, /forwardTerminationSignals\(remote, remoteKillProcessGroup\)/);
   assert.match(tartRelay, /settleChildAfterProtocolResult\(remote, remoteClosed/);
   assert.match(tartRelay, /startChildProtocolWatchdog\(remote/);
   assert.match(tartRelay, /const policyResponseTimeoutMs = 490_000/);

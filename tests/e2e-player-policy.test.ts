@@ -14,7 +14,7 @@ import type { CodexPromptInput } from "@/services/core/src/codex-cli";
 
 test("E2E node preserves the complete player-policy provider budget", async () => {
   const source = await readFile(new URL("../services/e2e-node/src/core-client.ts", import.meta.url), "utf8");
-  assert.match(source, /path\.includes\("\/player-policy"\) \|\| path\.includes\("\/test-plan"\) \? 480_000 : 10_000/);
+  assert.match(source, /path\.includes\("\/test-plan"\) \? 540_000[\s\S]*path\.includes\("\/player-policy"\) \? 480_000/);
 });
 
 test("Core reuses a successful visual capability check for the same settings revision", async () => {
@@ -208,7 +208,7 @@ describe("E2E Test Agent policy", () => {
     }] }), /unsafe action/i);
   });
 
-  test("uses one exact client coordinate space for screenshots, history and model decisions", () => {
+  test("keeps history and decisions in full-client coordinates", () => {
     const parsed = parsePlayerPolicyRequest({
       ...request(),
       history: [{
@@ -291,20 +291,22 @@ describe("E2E Test Agent policy", () => {
     const providerInput = JSON.stringify(calls);
     assert.doesNotMatch(providerInput, /uiProbe|godotLogs|stderr|stdout/i);
     const providerPng = Buffer.from(calls[0]?.imageBase64 ?? "", "base64");
-    assert.equal(providerPng.readUInt32BE(16), 640);
-    assert.equal(providerPng.readUInt32BE(20), 360);
-    assert.match(providerInput, /attached 640x360 image is an exact half-scale observation/);
+    assert.equal(providerPng.readUInt32BE(16), 1280);
+    assert.equal(providerPng.readUInt32BE(20), 720);
+    assert.match(providerInput, /attached 1280x720 image is the exact current game client frame/);
     assert.match(providerInput, /at least one concrete visual fact/);
     assert.match(providerInput, /Do not repeatedly wait on a rendered, unchanged interface/);
-    assert.match(providerInput, /share this one coordinate space/);
-    assert.match(providerInput, /top-left origin of the unmodified observation/);
+    assert.match(providerInput, /attached frame, returned pointer actions, and action history all use integer coordinates in the same full 1280x720 client/);
+    assert.doesNotMatch(providerInput, /screenshot, action history, and returned inputs all share this one coordinate space/);
+    assert.match(providerInput, /top-left origin of the unmodified frame/);
     assert.doesNotMatch(providerInput, /guide lines|drawgrid/i);
-    assert.match(providerInput, /multiply observed x\/y coordinates by 2/);
+    assert.doesNotMatch(providerInput, /multiply observed x\/y coordinates by 2/);
     assert.match(providerInput, /approximate left, top, right, and bottom pixel bounds/);
     assert.match(providerInput, /topmost interactive layer/);
     assert.match(providerInput, /starts with clean user data/);
     assert.match(providerInput, /fresh playable session/);
     assert.match(providerInput, /title\/menu over passive artwork is valid/);
+    assert.match(providerInput, /tutorial, help, pause, confirmation, or settings modal over a dimmed active game is also a legitimate topmost interaction layer/);
     assert.match(providerInput, /active board, HUD, tutorial, gameplay controls/);
     assert.match(providerInput, /Never click through, dismiss, or work around a PRODUCT_DEFECT/);
     assert.match(providerInput, /Never send a keyboard key through a blocking overlay/);
@@ -335,9 +337,8 @@ describe("E2E Test Agent policy", () => {
     assert.match(prompts[1]?.prompt ?? "", /Validation error: Test Agent decision shape is invalid/);
   });
 
-  test("repairs repeated no-progress clicks into exploration of a different visible control", async () => {
-    const prompts: CodexPromptInput[] = [];
-    let attempts = 0;
+  test("accepts a grounded repeated click so the bounded guest loop detector can recover", async () => {
+    let calls = 0;
     const result = await generateE2ePlayerDecision({
       request: parsePlayerPolicyRequest({
         ...request(),
@@ -352,17 +353,13 @@ describe("E2E Test Agent policy", () => {
       baseUrl: "https://provider.example/v1",
       apiKey: "secret",
       model: "test-model",
-      codexRunner: async input => {
-        prompts.push(input);
-        attempts += 1;
-        const actions = attempts === 1
-          ? [{ type: "double_click", x: 650, y: 400 }]
-          : [{ type: "click", x: 300, y: 220 }];
-        return decision(actions);
+      codexRunner: async () => {
+        calls += 1;
+        return decision([{ type: "double_click", x: 650, y: 400 }]);
       },
     });
-    assert.deepEqual(result.decision.actions[0], { type: "click", x: 300, y: 220 });
-    assert.match(prompts[1]?.prompt ?? "", /repeated an action that made no verified progress/);
+    assert.equal(calls, 1);
+    assert.deepEqual(result.decision.actions[0], { type: "double_click", x: 650, y: 400 });
   });
 
   test("repairs consecutive no-progress waits instead of accepting an infinite loading loop", async () => {

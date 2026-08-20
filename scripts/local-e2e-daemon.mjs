@@ -76,12 +76,15 @@ async function waitForProcessExit(pid, timeoutMs) {
 async function stopManagedGuestRunners() {
   const { stdout } = await execute("ps", ["-ax", "-o", "pid=,ppid=,command="]);
   const pids = parseManagedGuestRunnerPids(stdout);
-  for (const pid of pids) signalProcess(pid, "SIGTERM");
+  // Guest runners are session leaders and own ssh/scp/Tart descendants. Stop
+  // their process groups so cancelling a node cannot reparent a live transfer
+  // or remote transport to launchd.
+  for (const pid of pids) signalProcessGroup(pid, "SIGTERM");
   for (let attempt = 0; attempt < 30 && (await matchingGuestRunners(pids)).length; attempt += 1) {
     await new Promise(resolveDelay => setTimeout(resolveDelay, 100));
   }
   const survivors = await matchingGuestRunners(pids);
-  for (const pid of survivors) signalProcess(pid, "SIGKILL");
+  for (const pid of survivors) signalProcessGroup(pid, "SIGKILL");
   if (survivors.length) await new Promise(resolveDelay => setTimeout(resolveDelay, 100));
   const remaining = await matchingGuestRunners(survivors);
   if (remaining.length) throw new Error(`Local E2E guest runners did not stop: ${remaining.join(", ")}`);

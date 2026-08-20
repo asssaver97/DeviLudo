@@ -1,14 +1,13 @@
 import { createHash } from "node:crypto";
 import { crc32, deflateSync } from "node:zlib";
-import sharp from "sharp";
 import type { AgentRuntimeKind } from "@/lib/product/contracts";
 import { runCodexPrompt, type CodexPromptRunner } from "./codex-cli";
 
 export const PLAYER_POLICY_STATUSES = ["CONTINUE", "GOAL_REACHED", "UNRECOVERABLE"] as const;
 // A lossless 1280x720 PNG can exceed the old 1.3 MiB allowance for visually
 // dense games. Keep one bounded raw frame below 4 MiB; Core validates its PNG
-// header and dimensions, then performs the sole half-scale transform before
-// attaching it to the Test Agent request.
+// header and dimensions, then attaches those exact pixels to the Test Agent
+// request so visual and native-input coordinates cannot diverge.
 export const MAX_PLAYER_POLICY_SCREENSHOT_BYTES = 4 * 1024 * 1024;
 export const MAX_PLAYER_POLICY_REQUEST_BYTES = 6 * 1024 * 1024;
 export type PlayerPolicyStatus = typeof PLAYER_POLICY_STATUSES[number];
@@ -153,7 +152,7 @@ export async function generateE2ePlayerDecision(input: Readonly<{
   const prompt = policyPrompt(input.request);
   const fetchImpl = input.fetchImpl ?? fetch;
   const codexRunner = input.codexRunner ?? runCodexPrompt;
-  const providerFrameBase64 = await downsamplePlayerFrame(input.request.screenshotBase64);
+  const providerFrameBase64 = input.request.screenshotBase64;
   let lastRaw = "";
   let inputTokens = 0;
   let outputTokens = 0;
@@ -409,14 +408,15 @@ function validatePolicyAction(
 
 function policyPrompt(request: PlayerPolicyRequest): string {
   return [
-    `The attached ${E2E_PROVIDER_WIDTH}x${E2E_PROVIDER_HEIGHT} image is an exact half-scale observation of the current ${E2E_PLAYER_WIDTH}x${E2E_PLAYER_HEIGHT} game client. Inspect this image before choosing actions.`,
+    `The attached ${E2E_PLAYER_WIDTH}x${E2E_PLAYER_HEIGHT} image is the exact current game client frame. Inspect this image before choosing actions.`,
     "Describe at least one concrete visual fact from the current image: visible text, color, shape, texture, or an element with its screen location. Generic claims that no control is discernible are invalid visual inspection.",
     "If the frame is still loading, ground that conclusion in a visible logo, progress indicator, background color, or other concrete pixel detail. Do not repeatedly wait on a rendered, unchanged interface.",
-    "First make an independent screen-integrity judgment. A clean title/menu over passive artwork is valid. A title, start menu, save selector, or new-game dialog drawn over a visibly active board, HUD, tutorial, gameplay controls, in-progress world, or contradictory state is a PRODUCT_DEFECT. A crash dialog, error screen, missing essential UI, or unusable layout is also a PRODUCT_DEFECT.",
+    "First make an independent screen-integrity judgment. A clean title/menu over passive artwork is valid. A single coherent tutorial, help, pause, confirmation, or settings modal over a dimmed active game is also a legitimate topmost interaction layer; use its visible close, continue, or confirm control. A title, start menu, save selector, or new-game dialog drawn over a visibly active board, HUD, tutorial, gameplay controls, in-progress world, or contradictory state is a PRODUCT_DEFECT. A crash dialog, error screen, missing essential UI, or unusable layout is also a PRODUCT_DEFECT.",
     "Never click through, dismiss, or work around a PRODUCT_DEFECT. Return no actions so the product fails and can be repaired. Only after screenIntegrity is PASS may you identify and operate the topmost interactive layer.",
     "This rollout starts with clean user data. Prefer a visible control that creates a fresh playable session over one that requires an existing save or prior progress.",
     "When a menu, modal, toolbar, or rectangular button is visible and POINTER is allowed, click the relevant visible control. Never send a keyboard key through a blocking overlay.",
-    "Estimate bounds from the top-left origin of the unmodified observation, then multiply observed x/y coordinates by 2 when returning pointer actions.",
+    "After selecting a world, map, board, or inventory target, prefer the visible labeled action/confirm button that advances the goal instead of selecting another nearby target. Use a visible enabled end/finish/next-turn control after the core action is complete.",
+    "Estimate bounds from the top-left origin of the unmodified frame and return pointer coordinates directly in that same frame.",
     "Before every pointer action, describe the visible target and its approximate left, top, right, and bottom pixel bounds in observation, then place the pointer inside those bounds.",
     "Do not guess SPACE, ENTER, movement keys, or other keyboard controls from the goal or game genre. Use a keyboard action only when the current frame visibly shows that exact key or a clear keyboard hint.",
     "Unreadable or non-English button text does not make the frame unavailable: use the visible control geometry and report its approximate position.",
@@ -427,7 +427,7 @@ function policyPrompt(request: PlayerPolicyRequest): string {
     "Return only JSON: {\"screenIntegrity\":\"PASS|PRODUCT_DEFECT\",\"screenIntegrityReason\":\"brief independent visual judgment\",\"status\":\"CONTINUE|GOAL_REACHED|UNRECOVERABLE\",\"observation\":\"brief visible facts\",\"rationale\":\"brief action reason\",\"actions\":[up to 4 actions]}.",
     "Action JSON forms: wait(duration_ms), key_tap/key_hold(key,duration_ms), text_input(text), click/double_click(x,y), scroll(x,y,deltaY), drag(fromX,fromY,toX,toY,duration_ms), gamepad_button_tap/gamepad_button_hold(button,duration_ms), gamepad_axis(axis,value), gamepad_trigger(trigger,value), gamepad_release_all.",
     "UNRECOVERABLE is only valid after the runner has entered recovery mode. If the frame is still loading or no safe control is clear before recovery, CONTINUE with a short wait and inspect the next frame.",
-    `Pointer actions use integer coordinates directly in this same ${E2E_PLAYER_WIDTH}x${E2E_PLAYER_HEIGHT} client. The screenshot, action history, and returned inputs all share this one coordinate space. Never use OS shortcuts. Use only action groups listed above.`,
+    `The attached frame, returned pointer actions, and action history all use integer coordinates in the same full ${E2E_PLAYER_WIDTH}x${E2E_PLAYER_HEIGHT} client. Never use OS shortcuts. Use only action groups listed above.`,
   ].join("\n");
 }
 
@@ -541,8 +541,6 @@ function playerDecisionTool(allowedGroups: PlayerPolicyRequest["allowedActions"]
 
 const E2E_PLAYER_WIDTH = 1280;
 const E2E_PLAYER_HEIGHT = 720;
-const E2E_PROVIDER_WIDTH = 640;
-const E2E_PROVIDER_HEIGHT = 360;
 const PLAYER_POLICY_KEYS = Object.freeze([
   ..."ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789",
   "SPACE", "ENTER", "TAB", "ESCAPE", "LEFT", "RIGHT", "UP", "DOWN", "MINUS", "EQUAL",
@@ -574,18 +572,6 @@ function digestBase64(value: string): string {
     throw invalid("Screenshot encoding is invalid");
   }
   return `sha256:${createHash("sha256").update(bytes).digest("hex")}`;
-}
-
-async function downsamplePlayerFrame(value: string): Promise<string> {
-  try {
-    const resized = await sharp(Buffer.from(value, "base64"), { limitInputPixels: E2E_PLAYER_WIDTH * E2E_PLAYER_HEIGHT })
-      .resize(E2E_PROVIDER_WIDTH, E2E_PROVIDER_HEIGHT, { fit: "fill", kernel: "lanczos3" })
-      .png({ compressionLevel: 9, adaptiveFiltering: true })
-      .toBuffer();
-    return resized.toString("base64");
-  } catch {
-    throw providerFailure("Core could not prepare the downsampled Test Agent frame");
-  }
 }
 
 function invalid(message: string): Error { return Object.assign(new Error(message), { code: "INVALID_PLAYER_POLICY_REQUEST", statusCode: 400 }); }
@@ -623,26 +609,10 @@ function assertUnrecoverableFollowsRecovery(decision: PlayerPolicyDecision, requ
 function assertDecisionExploresAfterNoProgress(decision: PlayerPolicyDecision, request: PlayerPolicyRequest): void {
   const recent = request.history.slice(-3).filter(item => /no verified progress/i.test(item.result));
   if (recent.length === 0 || decision.status !== "CONTINUE") return;
-  const previousActions = recent.flatMap(item => item.actions);
   if (decision.actions.every(action => action.type === "wait")
     && recent.at(-1)?.actions.every(action => action.type === "wait")) {
     throw new Error("Test Agent repeated a wait after no verified progress; inspect the current pixels and choose a different visible action");
   }
-  for (const action of decision.actions) {
-    if (previousActions.some(previous => equivalentNoProgressAction(action, previous))) {
-      throw new Error("Test Agent repeated an action that made no verified progress; choose a different visible control or input");
-    }
-  }
-}
-
-function equivalentNoProgressAction(left: PlayerPolicyAction, right: PlayerPolicyAction): boolean {
-  const pointerTypes = new Set(["click", "double_click"]);
-  if (pointerTypes.has(left.type) && pointerTypes.has(right.type)) {
-    return typeof left.x === "number" && typeof left.y === "number"
-      && typeof right.x === "number" && typeof right.y === "number"
-      && Math.abs(left.x - right.x) <= 32 && Math.abs(left.y - right.y) <= 32;
-  }
-  return JSON.stringify(left) === JSON.stringify(right);
 }
 function safeTokenCount(value: unknown): number {
   return Number.isSafeInteger(value) && Number(value) >= 0 ? Number(value) : 0;

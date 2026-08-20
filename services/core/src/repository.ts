@@ -622,6 +622,81 @@ export class CoreRepository {
     });
   }
 
+  /**
+   * Projects created before E2E planning moved to the test node can contain a
+   * semantic test contract in their last successful Agent manifest. It is an
+   * untrusted planning hint only: the E2E planner revalidates its schema and
+   * frozen requirements before it can be used.
+   */
+  async readProjectE2eContractHintObject(input: Readonly<{
+    workspaceId: string;
+    workflowId: string;
+    projectId: string;
+  }>): Promise<ObjectReference | null> {
+    return this.database.withWorkspace(input.workspaceId, async client => {
+      const result = await client.query<{
+        bucket: string;
+        object_key: string;
+        sha256: `sha256:${string}`;
+        size_bytes: string;
+      }>(
+        `SELECT artifact.bucket, artifact.object_key, artifact.sha256, artifact.size_bytes::text
+           FROM deviludo.artifacts artifact
+           JOIN deviludo.jobs producer
+             ON producer.workspace_id = artifact.workspace_id
+            AND producer.id = artifact.producing_job_id
+          WHERE artifact.workspace_id = $1::uuid
+            AND artifact.workflow_id = $2::uuid
+            AND artifact.project_id = $3::uuid
+            AND artifact.kind = 'SPECIFICATION'
+            AND producer.kind = 'AGENT_GENERATION'
+            AND producer.state = 'SUCCEEDED'
+          ORDER BY artifact.created_at DESC, artifact.id DESC
+          LIMIT 1`,
+        [input.workspaceId, input.workflowId, input.projectId],
+      );
+      const row = result.rows[0];
+      return row ? Object.freeze({
+        kind: "SPECIFICATION",
+        bucket: row.bucket,
+        key: row.object_key,
+        sha256: row.sha256,
+        sizeBytes: Number(row.size_bytes),
+      }) : null;
+    });
+  }
+
+  async readProjectE2eRegressionObject(input: Readonly<{
+    workspaceId: string;
+    projectId: string;
+    platform: ServerOperatingSystem;
+  }>): Promise<ObjectReference | null> {
+    return this.database.withWorkspace(input.workspaceId, async client => {
+      const result = await client.query<{
+        bucket: string;
+        object_key: string;
+        sha256: `sha256:${string}`;
+        size_bytes: string;
+      }>(
+        `SELECT artifact.bucket, artifact.object_key, artifact.sha256, artifact.size_bytes::text
+           FROM deviludo.e2e_regression_traces trace
+           JOIN deviludo.artifacts artifact
+             ON artifact.workspace_id = trace.workspace_id AND artifact.id = trace.artifact_id
+          WHERE trace.workspace_id = $1::uuid AND trace.project_id = $2::uuid
+            AND trace.target_platform = $3::deviludo.server_os`,
+        [input.workspaceId, input.projectId, input.platform],
+      );
+      const row = result.rows[0];
+      return row ? Object.freeze({
+        kind: "E2E_REGRESSION",
+        bucket: row.bucket,
+        key: row.object_key,
+        sha256: row.sha256,
+        sizeBytes: Number(row.size_bytes),
+      }) : null;
+    });
+  }
+
   async readE2ePlayerDecision(input: Readonly<{
     workspaceId: string;
     jobId: string;
@@ -3772,12 +3847,21 @@ function e2eEvidenceSummary(value: unknown): ArtifactRecord["e2eEvidence"] | nul
     "headlessCheckCount", "interactiveJourneyCount", "deterministicInputCount", "realInputCount",
     "keyboardMouseInputCount", "gamepadInputCount", "adaptiveRolloutCount", "adaptiveSuccessCount",
     "adaptiveDecisionCount", "coveredPlayerRequirementCount", "playerRequirementCount", "visualBaselineCount", "videoCount",
+    "frameRateSampleCount", "inputResponseSampleCount",
   ] as const;
   if (summary.schema !== "deviludo.e2e-evidence" || Object.hasOwn(summary, "protocol")
     || counts.some(key => !Number.isSafeInteger(summary[key]) || Number(summary[key]) < 0)
     || Number(summary.coveredPlayerRequirementCount) > Number(summary.playerRequirementCount)
     || Number(summary.adaptiveRolloutCount) > 3
     || Number(summary.adaptiveSuccessCount) > Number(summary.adaptiveRolloutCount)
+    || !nullableNonNegativeNumber(summary.minimumFps)
+    || !nullableNonNegativeNumber(summary.p10Fps)
+    || !nullableNonNegativeNumber(summary.medianFps)
+    || !nullableNonNegativeNumber(summary.p95InputResponseMs)
+    || !nullableNonNegativeNumber(summary.maxInputResponseMs)
+    || typeof summary.performancePassed !== "boolean"
+    || !metricsMatchSampleCount(Number(summary.frameRateSampleCount), [summary.minimumFps, summary.p10Fps, summary.medianFps])
+    || !metricsMatchSampleCount(Number(summary.inputResponseSampleCount), [summary.p95InputResponseMs, summary.maxInputResponseMs])
     || (summary.regressionTraceDigest !== null && !/^sha256:[0-9a-f]{64}$/.test(String(summary.regressionTraceDigest)))
     || ![null, "KEYBOARD_MOUSE", "GAMEPAD"].includes(summary.regressionInputProfile as never)
     || (summary.regressionEstimatedDurationMs !== null
@@ -3796,11 +3880,25 @@ function e2eEvidenceSummary(value: unknown): ArtifactRecord["e2eEvidence"] | nul
     coveredPlayerRequirementCount: Number(summary.coveredPlayerRequirementCount),
     playerRequirementCount: Number(summary.playerRequirementCount), screenshotCount: Number(summary.screenshotCount),
     visualBaselineCount: Number(summary.visualBaselineCount), videoCount: Number(summary.videoCount), hasVisualDiff: summary.hasVisualDiff,
+    frameRateSampleCount: Number(summary.frameRateSampleCount), minimumFps: summary.minimumFps as number | null,
+    p10Fps: summary.p10Fps as number | null, medianFps: summary.medianFps as number | null,
+    inputResponseSampleCount: Number(summary.inputResponseSampleCount), p95InputResponseMs: summary.p95InputResponseMs as number | null,
+    maxInputResponseMs: summary.maxInputResponseMs as number | null, performancePassed: summary.performancePassed,
     regressionTraceDigest: summary.regressionTraceDigest as string | null,
     regressionInputProfile: summary.regressionInputProfile as "KEYBOARD_MOUSE" | "GAMEPAD" | null,
     regressionEstimatedDurationMs: summary.regressionEstimatedDurationMs as number | null,
     packageLaunchMode: summary.packageLaunchMode as "MACOS_LAUNCH_SERVICES" | "WINDOWS_FINAL_EXE" | "LINUX_RELEASE_EXECUTABLE" | null,
   });
+}
+
+function nullableNonNegativeNumber(value: unknown): boolean {
+  return value === null || (typeof value === "number" && Number.isFinite(value) && value >= 0);
+}
+
+function metricsMatchSampleCount(count: number, metrics: readonly unknown[]): boolean {
+  return count === 0
+    ? metrics.every(value => value === null)
+    : metrics.every(value => typeof value === "number" && Number.isFinite(value));
 }
 
 function agentProgressEventFromRow(row: AgentProgressEventRow): AgentProgressEvent {

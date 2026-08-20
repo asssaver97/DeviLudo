@@ -14,6 +14,8 @@ install -m 0444 "$source_root/scripts/executors/game-test-environment.mjs" /usr/
 install -m 0444 "$source_root/scripts/e2e-evidence.mjs" /usr/local/lib/deviludo/e2e-evidence.mjs
 install -m 0444 "$source_root/scripts/e2e-ui-probe.mjs" /usr/local/lib/deviludo/e2e-ui-probe.mjs
 install -m 0444 "$source_root/scripts/e2e-interaction-contract.mjs" /usr/local/lib/deviludo/e2e-interaction-contract.mjs
+install -m 0444 "$source_root/scripts/e2e-regression-actions.mjs" /usr/local/lib/deviludo/e2e-regression-actions.mjs
+install -m 0444 "$source_root/scripts/e2e-performance.mjs" /usr/local/lib/deviludo/e2e-performance.mjs
 groupadd --system deviludo-input 2>/dev/null || true
 usermod -aG deviludo-input "$guest_user"
 printf 'uinput\n' > /etc/modules-load.d/deviludo-uinput.conf

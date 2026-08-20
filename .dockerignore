@@ -32,6 +32,7 @@ deploy
 scripts/**
 !scripts/bootstrap-instance.mjs
 !scripts/migrate-postgres.mjs
+!scripts/local-database-smoke.mjs
 !scripts/register-runtime-images.mjs
 !scripts/register-executor-identity.mjs
 !scripts/bootstrap-vault.mjs

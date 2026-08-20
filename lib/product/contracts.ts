@@ -52,6 +52,14 @@ export type ArtifactRecord = Readonly<{
     visualBaselineCount: number;
     videoCount: number;
     hasVisualDiff: boolean;
+    frameRateSampleCount: number;
+    minimumFps: number | null;
+    p10Fps: number | null;
+    medianFps: number | null;
+    inputResponseSampleCount: number;
+    p95InputResponseMs: number | null;
+    maxInputResponseMs: number | null;
+    performancePassed: boolean;
     regressionTraceDigest: string | null;
     regressionInputProfile: "KEYBOARD_MOUSE" | "GAMEPAD" | null;
     regressionEstimatedDurationMs: number | null;

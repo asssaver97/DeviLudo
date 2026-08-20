@@ -1,4 +1,4 @@
-import { spawn } from "node:child_process";
+import { spawn, type ChildProcess } from "node:child_process";
 import { mkdtemp, readFile, readdir, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -9,6 +9,7 @@ export type CodexPromptInput = Readonly<{
   model: string;
   prompt: string;
   imageBase64?: string;
+  outputSchema?: Readonly<Record<string, unknown>>;
   reasoningEffort?: "low" | "medium" | "high" | "xhigh";
   timeoutMs?: number;
 }>;
@@ -25,6 +26,9 @@ export type CodexImageInput = Readonly<{
 export type CodexImageRunner = (input: CodexImageInput) => Promise<Buffer>;
 
 const MAX_CODEX_IMAGE_BYTES = 8 * 1024 * 1024;
+const MAX_CODEX_OUTPUT_BYTES = 8 * 1024 * 1024;
+const MAX_CODEX_DIAGNOSTIC_BYTES = 64 * 1024;
+const CODEX_TERMINATION_GRACE_MS = 2_000;
 
 export function resolveCodexExecutionModel(
   requestedModel: string,
@@ -54,6 +58,13 @@ export async function runCodexPrompt(input: CodexPromptInput): Promise<string> {
       const image = join(root, "frame.png");
       await writeFile(image, Buffer.from(input.imageBase64, "base64"), { mode: 0o600 });
       args.push("--image", image);
+    }
+    if (input.outputSchema) {
+      const schema = join(root, "output-schema.json");
+      const serialized = JSON.stringify(input.outputSchema);
+      if (serialized.length > 256 * 1024) throw new Error("Codex output schema exceeds the size limit");
+      await writeFile(schema, serialized, { mode: 0o600 });
+      args.push("--output-schema", schema);
     }
     args.push("-");
     return await executeCodex(args, input.prompt, root, input.timeoutMs ?? 180_000);
@@ -164,9 +175,14 @@ function executeCodex(
     if (proxy && !/^http:\/\/[a-z0-9.-]+:\d+$/i.test(proxy)) {
       return reject(new Error("Codex CLI proxy configuration is invalid"));
     }
+    const killProcessGroup = process.platform !== "win32";
     const child = spawn("codex", args, {
       shell: false,
       stdio: ["pipe", "pipe", "pipe"],
+      // The npm entrypoint starts the native Codex binary as a child process.
+      // Give the invocation its own process group so a deadline terminates both
+      // processes instead of leaving the native binary running in Core.
+      detached: killProcessGroup,
       env: {
         ...process.env,
         CODEX_HOME: codexHome,
@@ -175,26 +191,96 @@ function executeCodex(
     });
     const stdout: Buffer[] = [];
     const stderr: Buffer[] = [];
-    let bytes = 0;
-    const timer = setTimeout(() => child.kill("SIGKILL"), timeoutMs);
+    let stdoutBytes = 0;
+    let stderrBytes = 0;
+    let termination: "timeout" | "output-limit" | null = null;
+    let forceTimer: NodeJS.Timeout | null = null;
+    let settled = false;
+    const terminate = (reason: "timeout" | "output-limit") => {
+      if (termination) return;
+      termination = reason;
+      signalCodexProcessTree(child, "SIGTERM", killProcessGroup);
+      forceTimer = setTimeout(
+        () => signalCodexProcessTree(child, "SIGKILL", killProcessGroup),
+        CODEX_TERMINATION_GRACE_MS,
+      );
+      forceTimer.unref?.();
+    };
+    const timer = setTimeout(() => terminate("timeout"), timeoutMs);
+    timer.unref?.();
+    const cleanup = () => {
+      clearTimeout(timer);
+      if (forceTimer) clearTimeout(forceTimer);
+    };
     child.stdout.on("data", chunk => {
-      bytes += chunk.length;
-      if (bytes <= 8 * 1024 * 1024) stdout.push(Buffer.from(chunk));
-      else child.kill("SIGKILL");
+      stdoutBytes += chunk.length;
+      if (stdoutBytes <= MAX_CODEX_OUTPUT_BYTES) stdout.push(Buffer.from(chunk));
+      else terminate("output-limit");
     });
     child.stderr.on("data", chunk => {
-      if (Buffer.concat(stderr).length < 64 * 1024) stderr.push(Buffer.from(chunk));
+      if (stderrBytes >= MAX_CODEX_DIAGNOSTIC_BYTES) return;
+      const buffered = Buffer.from(chunk).subarray(0, MAX_CODEX_DIAGNOSTIC_BYTES - stderrBytes);
+      stderrBytes += buffered.length;
+      stderr.push(buffered);
     });
-    child.once("error", error => { clearTimeout(timer); reject(error); });
-    child.once("close", code => {
-      clearTimeout(timer);
-      if (code !== 0) return reject(new Error(`Codex CLI failed (${code ?? "signal"}): ${Buffer.concat(stderr).toString("utf8").slice(0, 500)}`));
-      const text = extractAgentMessage(Buffer.concat(stdout).toString("utf8"));
+    child.once("error", error => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      reject(error);
+    });
+    child.once("close", (code, signal) => {
+      if (settled) return;
+      settled = true;
+      // Also signal the group after the npm entrypoint exits: a descendant may
+      // have closed its inherited pipes but still be alive in the same group.
+      if (termination) signalCodexProcessTree(child, "SIGKILL", killProcessGroup);
+      cleanup();
+      const stdoutText = Buffer.concat(stdout).toString("utf8");
+      const diagnostic = (
+        Buffer.concat(stderr).toString("utf8").trim()
+        || extractCodexFailure(stdoutText)
+      ).slice(0, 500);
+      if (termination === "timeout") {
+        return reject(new Error(`Codex CLI timed out after ${timeoutMs} ms${diagnostic ? `: ${diagnostic}` : ""}`));
+      }
+      if (termination === "output-limit") return reject(new Error("Codex CLI output exceeded the size limit"));
+      if (code !== 0) return reject(new Error(`Codex CLI failed (${code ?? signal ?? "signal"}): ${diagnostic}`));
+      const text = extractAgentMessage(stdoutText);
       if (!text && requireAgentMessage) return reject(new Error("Codex CLI did not return an Agent message"));
       resolve(text ?? "");
     });
     child.stdin.end(prompt);
   });
+}
+
+function signalCodexProcessTree(child: ChildProcess, signal: NodeJS.Signals, killProcessGroup: boolean): void {
+  if (killProcessGroup && Number.isSafeInteger(child.pid)) {
+    try {
+      process.kill(-Number(child.pid), signal);
+      return;
+    } catch { /* The group may already have exited; fall back to the entrypoint. */ }
+  }
+  try {
+    if (child.exitCode === null && child.signalCode === null) child.kill(signal);
+  } catch { /* Process termination is best effort and close/error settles the call. */ }
+}
+
+function extractCodexFailure(output: string): string {
+  for (const line of output.split(/\r?\n/).reverse()) {
+    if (!line.trim()) continue;
+    try {
+      const event = JSON.parse(line) as Record<string, unknown>;
+      if (typeof event.message === "string" && /error|fail/i.test(String(event.type ?? ""))) {
+        return event.message;
+      }
+      const error = event.error && typeof event.error === "object" && !Array.isArray(event.error)
+        ? event.error as Record<string, unknown>
+        : null;
+      if (typeof error?.message === "string") return error.message;
+    } catch { /* Ignore non-JSON transport diagnostics. */ }
+  }
+  return "Codex exited without an error diagnostic";
 }
 
 export function extractAgentMessage(output: string): string | null {

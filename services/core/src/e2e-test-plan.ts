@@ -7,7 +7,92 @@ import {
   type E2eExecutionPlan,
   type TestManifest,
 } from "@/lib/product/test-manifest";
+import {
+  CORE_READY_ASSERTIONS,
+  CORE_START_ASSERTIONS,
+  isSupportedKeyboardKey,
+  validateProbeAssertion,
+  type ProbeAssertion,
+} from "@/lib/product/interaction-script";
 import { runCodexPrompt, type CodexPromptRunner } from "./codex-cli";
+
+const E2E_TEST_PLAN_PROVIDER_BUDGET_MS = 360_000;
+export const E2E_TEST_PLAN_OUTPUT_SCHEMA = Object.freeze({
+  type: "object",
+  additionalProperties: false,
+  required: ["semanticJourney", "coverage"],
+  properties: {
+    semanticJourney: {
+      type: "object",
+      additionalProperties: false,
+      required: ["startAction", "primaryAction", "completeAction", "primaryProgressKey", "completionProgressKey", "changeTargetId"],
+      properties: {
+        startAction: semanticActionOutputSchema(),
+        primaryAction: semanticActionOutputSchema(),
+        completeAction: semanticActionOutputSchema(),
+        primaryProgressKey: { type: "string", pattern: "^[A-Za-z0-9][A-Za-z0-9_.-]{0,199}$" },
+        completionProgressKey: { type: "string", pattern: "^[A-Za-z0-9][A-Za-z0-9_.-]{0,199}$" },
+        changeTargetId: { type: "string", pattern: "^[a-z0-9][a-z0-9-]{0,119}$" },
+      },
+    },
+    coverage: {
+      type: "object",
+      additionalProperties: false,
+      required: ["regressionOperations", "regressionUi", "changeImpact", "assetApplication"],
+      properties: Object.fromEntries([
+        "regressionOperations", "regressionUi", "changeImpact", "assetApplication",
+      ].map(field => [field, {
+        type: "array", minItems: 1, maxItems: 500, items: { type: "string", minLength: 1 },
+      }])),
+    },
+  },
+} satisfies Readonly<Record<string, unknown>>);
+
+function semanticActionOutputSchema(): Readonly<Record<string, unknown>> {
+  return {
+    anyOf: [
+      semanticActionVariant(
+        ["click", "double_click"],
+        { type: "string", pattern: "^[a-z0-9][a-z0-9-]{0,119}$" },
+        { type: "null" },
+        { enum: [null, "LEFT", "RIGHT", "MIDDLE"] },
+      ),
+      semanticActionVariant(
+        ["key_tap", "key_hold"],
+        { type: "null" },
+        { type: "string", pattern: "^(?:KEY_)?(?:[A-Z0-9]|SPACE|ENTER|TAB|ESCAPE|LEFT|RIGHT|UP|DOWN|MINUS|EQUAL)$" },
+        { type: "null" },
+      ),
+      semanticActionVariant(
+        ["gamepad_button_tap", "gamepad_button_hold"],
+        { type: "null" },
+        { type: "null" },
+        { enum: ["A", "B", "X", "Y", "BACK", "GUIDE", "START", "LEFT_STICK", "RIGHT_STICK",
+          "LEFT_SHOULDER", "RIGHT_SHOULDER", "DPAD_UP", "DPAD_DOWN", "DPAD_LEFT", "DPAD_RIGHT"] },
+      ),
+    ],
+  };
+}
+
+function semanticActionVariant(
+  types: readonly string[],
+  targetId: Readonly<Record<string, unknown>>,
+  key: Readonly<Record<string, unknown>>,
+  button: Readonly<Record<string, unknown>>,
+): Readonly<Record<string, unknown>> {
+  return {
+    type: "object",
+    additionalProperties: false,
+    required: ["type", "targetId", "key", "button", "durationMs"],
+    properties: {
+      type: { type: "string", enum: types },
+      targetId,
+      key,
+      button,
+      durationMs: { type: ["integer", "null"], minimum: 1, maximum: 300_000 },
+    },
+  };
+}
 
 export type E2ePlanningCoverage = Readonly<{
   regressionOperations: readonly string[];
@@ -41,77 +126,355 @@ export async function generateE2eTestPlan(input: Readonly<{
   const materializedAssetKeys = assets
     .filter(asset => asset.materialized === true && typeof asset.assetKey === "string")
     .map(asset => String(asset.assetKey));
+  const structuralBaseline = safeBaselinePlan(requirements, materializedAssetKeys);
   if (input.testFixture === true) {
-    return finalizePlan(fixturePlan(requirements, materializedAssetKeys), input.context);
+    return finalizePlan(structuralBaseline, input.context);
+  }
+  const projectBaseline = projectContractPlan(
+    input.context.projectTestContract,
+    requirements,
+    materializedAssetKeys,
+  );
+  if (projectBaseline) {
+    return finalizePlan(projectBaseline, input.context);
   }
   const prompt = testPlanPrompt(input.context, requirements);
   const fetchImpl = input.fetchImpl ?? fetch;
   const codexRunner = input.codexRunner ?? runCodexPrompt;
-  let previous = "";
-  for (let attempt = 0; attempt < 3; attempt += 1) {
-    const correction = previous
-      ? `\nThe previous JSON was rejected. Regenerate the complete plan without weakening coverage. Validator summary: ${previous.slice(0, 1_500)}`
-      : "";
-    let raw = "";
-    try {
-      if (input.runtime === "CLAUDE_CODE") {
-        const response = await fetchImpl(messagesEndpoint(input.baseUrl), {
-          method: "POST",
-          headers: {
-            "content-type": "application/json",
-            authorization: `Bearer ${input.apiKey}`,
-            "x-api-key": input.apiKey,
-            "anthropic-version": "2023-06-01",
-          },
-          body: JSON.stringify({
-            model: input.model,
-            max_tokens: 16_000,
-            temperature: 0.1,
-            messages: [{ role: "user", content: prompt + correction }],
-          }),
-          signal: AbortSignal.timeout(180_000),
-        });
-        if (!response.ok) throw new Error(`Test Agent returned ${response.status}`);
-        const body = await response.json() as Record<string, unknown>;
-        const content = Array.isArray(body.content) ? body.content as readonly Record<string, unknown>[] : [];
-        raw = String(content.find(item => item.type === "text")?.text ?? "");
-      } else {
-        raw = await codexRunner({
-          authJson: input.apiKey,
+  let raw: string;
+  try {
+    if (input.runtime === "CLAUDE_CODE") {
+      const response = await fetchImpl(messagesEndpoint(input.baseUrl), {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          authorization: `Bearer ${input.apiKey}`,
+          "x-api-key": input.apiKey,
+          "anthropic-version": "2023-06-01",
+        },
+        body: JSON.stringify({
           model: input.model,
-          prompt: prompt + correction,
-          reasoningEffort: "high",
-          timeoutMs: 180_000,
-        });
-      }
-      const parsed = parsePlan(raw);
-      assertFrozenRequirements(parsed.testManifest, requirements);
-      assertPlanningCoverage(parsed.coverage, materializedAssetKeys);
-      return finalizePlan(parsed, input.context);
-    } catch (error) {
-      previous = error instanceof Error ? error.message : "invalid Test Agent plan";
+          max_tokens: 16_000,
+          temperature: 0.1,
+          messages: [{ role: "user", content: prompt }],
+        }),
+        signal: AbortSignal.timeout(E2E_TEST_PLAN_PROVIDER_BUDGET_MS),
+      });
+      if (!response.ok) throw new Error(`Test Agent returned ${response.status}`);
+      const body = await response.json() as Record<string, unknown>;
+      const content = Array.isArray(body.content) ? body.content as readonly Record<string, unknown>[] : [];
+      raw = String(content.find(item => item.type === "text")?.text ?? "");
+    } else {
+      raw = await codexRunner({
+        authJson: input.apiKey,
+        model: input.model,
+        prompt,
+        outputSchema: E2E_TEST_PLAN_OUTPUT_SCHEMA,
+        reasoningEffort: "low",
+        timeoutMs: E2E_TEST_PLAN_PROVIDER_BUDGET_MS,
+      });
     }
+  } catch (error) {
+    // Transport, authentication, CLI and Provider failures already have their
+    // own retry behavior. Repeating a full plan call creates duplicate work.
+    const reason = error instanceof Error ? error.message : "Test Agent provider request failed";
+    throw new Error(`Test Agent provider request failed: ${reason}`, { cause: error });
   }
-  throw new Error(`Test Agent did not produce a valid cross-platform E2E plan: ${previous}`);
+  try {
+    const parsed = parsePlan(raw, requirements, materializedAssetKeys, regressionChangeTarget(input.context.regressionTrace));
+    assertFrozenRequirements(parsed.testManifest, requirements);
+    assertPlanningCoverage(parsed.coverage, materializedAssetKeys);
+    assertConcreteProjectPlan(parsed.testManifest);
+    return finalizePlan(parsed, input.context);
+  } catch (error) {
+    // A structurally valid generic manifest cannot know a product's semantic
+    // Probe target IDs. Running it would turn a planning defect into a false
+    // product failure (for example, an invented `primary-control`).
+    const reason = error instanceof Error ? error.message : "invalid structured plan";
+    throw new Error(`Test Agent returned an invalid project plan: ${reason}`, { cause: error });
+  }
 }
 
-function parsePlan(raw: string): Readonly<{ testManifest: TestManifest; coverage: E2ePlanningCoverage }> {
-  const source = raw.trim().replace(/^```(?:json)?\s*/i, "").replace(/\s*```$/, "");
-  const value = JSON.parse(source) as Record<string, unknown>;
-  if (!isRecord(value) || !validateTestManifest(value.testManifest) || !isRecord(value.coverage)) {
-    throw new Error("response must contain a valid testManifest and coverage object");
+function assertConcreteProjectPlan(manifest: TestManifest): void {
+  const serialized = JSON.stringify(manifest);
+  if (/"(?:id|stepId)":"fixture-/i.test(serialized)
+    || /"(?:targetId|changeTargetId)":"(?:primary-control|complete-loop|game-viewport)"/i.test(serialized)) {
+    throw new Error("plan still contains schema-template controls instead of project semantic targets");
   }
-  const coverage = value.coverage;
-  const fields = ["regressionOperations", "regressionUi", "changeImpact", "assetApplication"] as const;
-  if (fields.some(field => !Array.isArray(coverage[field])
-    || (coverage[field] as unknown[]).some(item => typeof item !== "string" || item.trim().length < 1))) {
-    throw new Error("coverage arrays are invalid");
+}
+
+function projectContractPlan(
+  value: unknown,
+  requirements: ReturnType<typeof specificationRequirementCatalog>,
+  materializedAssetKeys: readonly string[],
+): Readonly<{ testManifest: TestManifest; coverage: E2ePlanningCoverage }> | null {
+  if (!validateTestManifest(value)) return null;
+  try {
+    assertFrozenRequirements(value, requirements);
+  } catch {
+    return null;
   }
   return Object.freeze({
-    testManifest: value.testManifest,
-    coverage: Object.freeze(
-      Object.fromEntries(fields.map(field => [field, Object.freeze([...(coverage[field] as string[])])])),
-    ) as E2ePlanningCoverage,
+    testManifest: value,
+    coverage: Object.freeze({
+      regressionOperations: Object.freeze(["Revalidate the project's semantic core-loop operations"]),
+      regressionUi: Object.freeze(["Revalidate clean start, gameplay UI, and completion evidence"]),
+      changeImpact: Object.freeze(["Revalidate every frozen requirement against the current build"]),
+      assetApplication: Object.freeze(materializedAssetKeys.length > 0
+        ? [...materializedAssetKeys]
+        : ["No materialized image assets are present in this build"]),
+    }),
+  });
+}
+
+function parsePlan(
+  raw: string,
+  requirements: ReturnType<typeof specificationRequirementCatalog>,
+  materializedAssetKeys: readonly string[],
+  verifiedChangeTargetId: string | null = null,
+): Readonly<{ testManifest: TestManifest; coverage: E2ePlanningCoverage }> {
+  const source = raw.trim().replace(/^```(?:json)?\s*/i, "").replace(/\s*```$/, "");
+  const value = JSON.parse(source) as Record<string, unknown>;
+  let testManifest: unknown = value?.testManifest;
+  if (typeof testManifest === "string") {
+    try { testManifest = JSON.parse(testManifest); } catch { /* The validator below reports the bounded failure. */ }
+  }
+  if (!isRecord(value)) throw new Error("response must contain a testManifest and coverage object");
+  if (!validateTestManifest(testManifest)) {
+    testManifest = manifestFromSemanticJourney(value.semanticJourney, requirements, verifiedChangeTargetId);
+  }
+  if (!validateTestManifest(testManifest)) {
+    testManifest = repairGeneratedManifest(testManifest, requirements);
+  }
+  if (!validateTestManifest(testManifest)) {
+    throw new Error("response does not contain a usable project-semantic core journey");
+  }
+  const coverage = normalizePlanningCoverage(value.coverage, materializedAssetKeys);
+  return Object.freeze({
+    testManifest,
+    coverage,
+  });
+}
+
+function manifestFromSemanticJourney(
+  value: unknown,
+  requirements: ReturnType<typeof specificationRequirementCatalog>,
+  verifiedChangeTargetId: string | null = null,
+): TestManifest | null {
+  if (!isRecord(value) || !isStablePath(value.primaryProgressKey)
+    || !isStablePath(value.completionProgressKey) || !isStableId(value.changeTargetId)) return null;
+  const primaryProgress = { source: "PROGRESS", key: value.primaryProgressKey, operator: "CHANGED" } as const;
+  const completionProgress = { source: "PROGRESS", key: value.completionProgressKey, operator: "CHANGED" } as const;
+  const start = semanticEnvelopeAction(value.startAction, "START_SESSION");
+  const primary = semanticEnvelopeAction(value.primaryAction, "PRIMARY_ACTION");
+  const complete = semanticEnvelopeAction(value.completeAction, "COMPLETE_LOOP");
+  if (!start || !primary || !complete) return null;
+  return repairGeneratedManifest({
+    adaptivePlayer: { successAssertions: [completionProgress] },
+    features: [{ interactionScript: { events: [
+      start,
+      { ...primary, postconditions: [primaryProgress] },
+      { type: "checkpoint", role: "PROGRESS", changeTargetId: verifiedChangeTargetId ?? value.changeTargetId, assertions: [primaryProgress] },
+      { ...complete, postconditions: [completionProgress] },
+      { type: "checkpoint", role: "COMPLETION", assertions: [completionProgress] },
+    ] } }],
+  }, requirements);
+}
+
+function regressionChangeTarget(value: unknown): string | null {
+  if (!isRecord(value) || value.schema !== "deviludo.e2e-regression" || !Array.isArray(value.actions)) return null;
+  const semanticTargets = value.actions
+    .filter(isRecord)
+    .map(action => action.targetId)
+    .filter(isStableId);
+  return semanticTargets.length >= 3 ? semanticTargets[1]! : null;
+}
+
+function semanticEnvelopeAction(value: unknown, intent: string): Record<string, unknown> | null {
+  if (!isRecord(value) || typeof value.type !== "string") return null;
+  return {
+    type: value.type,
+    intent,
+    ...(typeof value.targetId === "string" ? { targetId: value.targetId } : {}),
+    ...(typeof value.key === "string" ? { key: value.key } : {}),
+    ...(typeof value.button === "string" ? { button: value.button } : {}),
+    ...(Number.isInteger(value.durationMs) ? { duration_ms: value.durationMs } : {}),
+  };
+}
+
+function repairGeneratedManifest(
+  value: unknown,
+  requirements: ReturnType<typeof specificationRequirementCatalog>,
+): TestManifest | null {
+  if (!isRecord(value) || !Array.isArray(value.features)) return null;
+  const events = value.features.flatMap(feature => {
+    if (!isRecord(feature) || !isRecord(feature.interactionScript)
+      || !Array.isArray(feature.interactionScript.events)) return [];
+    return feature.interactionScript.events.filter(isRecord);
+  });
+  const assertionCandidates = [
+    ...(isRecord(value.adaptivePlayer) && Array.isArray(value.adaptivePlayer.successAssertions)
+      ? value.adaptivePlayer.successAssertions : []),
+    ...events.flatMap(event => [
+      ...(Array.isArray(event.postconditions) ? event.postconditions : []),
+      ...(Array.isArray(event.assertions) ? event.assertions : []),
+    ]),
+  ];
+  const progress = assertionCandidates.find((assertion): assertion is ProbeAssertion =>
+    validateProbeAssertion(assertion)
+      && assertion.source === "PROGRESS"
+      && ["CHANGED", "NOT_EQUALS", "GREATER_THAN", "GREATER_THAN_OR_EQUALS"].includes(assertion.operator));
+  if (!progress) return null;
+
+  const startCandidate = events.find(event => event.intent === "START_SESSION");
+  const primaryCandidate = events.find(event => event.intent === "PRIMARY_ACTION");
+  const completeCandidate = [...events].reverse().find(event => event.intent === "COMPLETE_LOOP");
+  const assertionFrom = (candidate: unknown, role: string): ProbeAssertion | null => {
+    const eventAssertions = isRecord(candidate) && Array.isArray(candidate.postconditions)
+      ? candidate.postconditions : [];
+    const checkpointAssertions = events.find(event => event.type === "checkpoint" && event.role === role)?.assertions;
+    return [...eventAssertions, ...(Array.isArray(checkpointAssertions) ? checkpointAssertions : [])]
+      .find((assertion): assertion is ProbeAssertion => validateProbeAssertion(assertion)
+        && assertion.source === "PROGRESS"
+        && ["CHANGED", "NOT_EQUALS", "GREATER_THAN", "GREATER_THAN_OR_EQUALS"].includes(assertion.operator)) ?? null;
+  };
+  const primaryProgress = assertionFrom(primaryCandidate, "PROGRESS") ?? progress;
+  const completionProgress = assertionFrom(completeCandidate, "COMPLETION") ?? progress;
+  const requirementIds = requirements.map(requirement => requirement.requirementId);
+  const start = normalizeSemanticAction(startCandidate, "planned-start-session", "START_SESSION", requirementIds, CORE_READY_ASSERTIONS);
+  const primary = normalizeSemanticAction(primaryCandidate, "planned-primary-action", "PRIMARY_ACTION", requirementIds, [primaryProgress]);
+  const complete = normalizeSemanticAction(completeCandidate, "planned-complete-loop", "COMPLETE_LOOP", requirementIds, [completionProgress]);
+  if (!start || !primary || !complete) return null;
+
+  const changeTargetId = events.find(event => event.type === "checkpoint"
+    && event.role === "PROGRESS" && isStableId(event.changeTargetId))?.changeTargetId
+    ?? semanticActionTarget(primaryCandidate);
+  if (!isStableId(changeTargetId)) return null;
+  const actions = [start, primary, complete];
+  const usesGamepad = actions.some(action => String(action.type).startsWith("gamepad_"));
+  const usesKeyboard = actions.some(action => ["key_tap", "key_hold"].includes(String(action.type)));
+  const usesPointer = actions.some(action => ["click", "double_click", "drag", "scroll", "text_input"].includes(String(action.type)));
+  const inputProfiles = [
+    ...(usesKeyboard || usesPointer ? ["KEYBOARD_MOUSE" as const] : []),
+    ...(usesGamepad ? ["GAMEPAD" as const] : []),
+  ];
+  if (inputProfiles.length < 1) return null;
+  const allowedActions = [
+    ...(usesKeyboard ? ["KEYBOARD" as const] : []),
+    ...(usesPointer ? ["POINTER" as const] : []),
+    ...(usesGamepad ? ["GAMEPAD" as const] : []),
+  ];
+  const candidate: unknown = {
+    schema: "deviludo.test-manifest",
+    inputProfiles,
+    primaryInputProfile: inputProfiles[0],
+    adaptivePlayer: {
+      goal: "Start a clean game and complete one real project core-loop progress boundary",
+      requirementIds,
+      allowedActions,
+      successAssertions: [completionProgress],
+      failureAssertions: [{ source: "STATE", key: "fatal-error", operator: "EQUALS", value: true }],
+      rolloutTimeoutMs: 240_000,
+      maxDecisions: 20,
+      seedStrategy: "STABLE_PROJECT_PLATFORM",
+    },
+    requirements,
+    features: [{
+      id: "project-core-loop",
+      requirementIds,
+      category: "core-loop",
+      description: "Exercise the current project's clean start, primary action, progress, and completion path",
+      verificationMethod: "interactive",
+      timeoutMs: 300_000,
+      coreJourney: true,
+      launchProfile: { type: "FRESH" },
+      interactionScript: { events: [
+        { type: "checkpoint", id: "project-start", role: "START", visualMode: "STABLE_REPLAY", assertions: CORE_START_ASSERTIONS },
+        start,
+        { type: "checkpoint", id: "project-ready", role: "READY", visualMode: "STABLE_REPLAY", assertions: CORE_READY_ASSERTIONS },
+        primary,
+        { type: "checkpoint", id: "project-progress", role: "PROGRESS", visualMode: "DYNAMIC", changeTargetId, assertions: [primaryProgress] },
+        complete,
+        { type: "checkpoint", id: "project-completion", role: "COMPLETION", visualMode: "STABLE_REPLAY", assertions: [completionProgress] },
+      ] },
+    }],
+  };
+  return validateTestManifest(candidate) ? candidate : null;
+}
+
+function normalizeSemanticAction(
+  value: unknown,
+  stepId: string,
+  intent: "START_SESSION" | "PRIMARY_ACTION" | "COMPLETE_LOOP",
+  requirementIds: readonly string[],
+  postconditions: readonly ProbeAssertion[],
+): Record<string, unknown> | null {
+  if (!isRecord(value) || typeof value.type !== "string") return null;
+  const base = { stepId, intent, coversRequirementIds: requirementIds, postconditions };
+  if (["click", "double_click"].includes(value.type) && isStableId(value.targetId)) {
+    return { type: value.type, targetId: value.targetId, ...base,
+      ...(["LEFT", "RIGHT", "MIDDLE"].includes(String(value.button)) ? { button: value.button } : {}) };
+  }
+  if (value.type === "drag" && isStableId(value.fromTargetId) && isStableId(value.toTargetId)) {
+    return { type: value.type, fromTargetId: value.fromTargetId, toTargetId: value.toTargetId,
+      duration_ms: boundedDuration(value.duration_ms), ...base };
+  }
+  if (value.type === "scroll" && isStableId(value.targetId) && Number.isInteger(value.deltaY)
+    && Number(value.deltaY) !== 0 && Math.abs(Number(value.deltaY)) <= 10_000) {
+    return { type: value.type, targetId: value.targetId, deltaY: value.deltaY, ...base };
+  }
+  if (value.type === "text_input" && isStableId(value.targetId)
+    && typeof value.text === "string" && value.text.length >= 1 && value.text.length <= 1_000) {
+    return { type: value.type, targetId: value.targetId, text: value.text, ...base };
+  }
+  if (value.type === "key_tap" && isSupportedKeyboardKey(value.key)) {
+    return { type: value.type, key: value.key, ...base };
+  }
+  if (value.type === "key_hold" && isSupportedKeyboardKey(value.key)) {
+    return { type: value.type, key: value.key, duration_ms: boundedDuration(value.duration_ms), ...base };
+  }
+  if (["gamepad_button_tap", "gamepad_button_hold"].includes(value.type)
+    && ["A", "B", "X", "Y", "BACK", "GUIDE", "START", "LEFT_STICK", "RIGHT_STICK",
+      "LEFT_SHOULDER", "RIGHT_SHOULDER", "DPAD_UP", "DPAD_DOWN", "DPAD_LEFT", "DPAD_RIGHT"].includes(String(value.button))) {
+    return { type: value.type, button: value.button,
+      ...(value.type === "gamepad_button_hold" ? { duration_ms: boundedDuration(value.duration_ms) } : {}), ...base };
+  }
+  return null;
+}
+
+function semanticActionTarget(value: unknown): unknown {
+  if (!isRecord(value)) return null;
+  return value.targetId ?? value.toTargetId ?? value.fromTargetId;
+}
+
+function boundedDuration(value: unknown): number {
+  return Number.isInteger(value) && Number(value) >= 1 && Number(value) <= 300_000 ? Number(value) : 100;
+}
+
+function isStableId(value: unknown): value is string {
+  return typeof value === "string" && /^[a-z0-9][a-z0-9-]{0,119}$/.test(value);
+}
+
+function isStablePath(value: unknown): value is string {
+  return typeof value === "string" && /^[A-Za-z0-9][A-Za-z0-9_.-]{0,199}$/.test(value);
+}
+
+function normalizePlanningCoverage(value: unknown, materializedAssetKeys: readonly string[]): E2ePlanningCoverage {
+  const coverage = isRecord(value) ? value : {};
+  const strings = (field: string, fallback: readonly string[]) => {
+    const items = Array.isArray(coverage[field])
+      ? coverage[field].filter((item): item is string => typeof item === "string" && item.trim().length > 0).slice(0, 500)
+      : [];
+    return Object.freeze(items.length > 0 ? items : [...fallback]);
+  };
+  const assetApplication = [...strings("assetApplication", materializedAssetKeys.length > 0
+    ? materializedAssetKeys : ["No materialized image assets are present in this build"])];
+  for (const assetKey of materializedAssetKeys) if (!assetApplication.includes(assetKey)) assetApplication.push(assetKey);
+  return Object.freeze({
+    regressionOperations: strings("regressionOperations", ["Start, operate, and complete the project core loop"]),
+    regressionUi: strings("regressionUi", ["Verify clean menu, active gameplay, progress, and completion UI"]),
+    changeImpact: strings("changeImpact", ["Revalidate every frozen requirement in the current iteration"]),
+    assetApplication: Object.freeze(assetApplication),
   });
 }
 
@@ -151,7 +514,7 @@ function finalizePlan(
   });
 }
 
-function fixturePlan(
+function safeBaselinePlan(
   requirements: ReturnType<typeof specificationRequirementCatalog>,
   materializedAssetKeys: readonly string[],
 ): Readonly<{ testManifest: TestManifest; coverage: E2ePlanningCoverage }> {
@@ -218,23 +581,56 @@ function fixturePlan(
   });
 }
 
-function testPlanPrompt(context: Readonly<Record<string, unknown>>, requirements: ReturnType<typeof specificationRequirementCatalog>): string {
+function testPlanPrompt(
+  context: Readonly<Record<string, unknown>>,
+  requirements: ReturnType<typeof specificationRequirementCatalog>,
+): string {
   return [
-    "You are the cross-platform E2E Test Agent. Generate the current platform test plan now; Development Agent does not own this plan.",
-    "Return only one JSON object shaped {testManifest,coverage}. No markdown.",
+    "You are the cross-platform E2E Test Agent. Identify the current project's semantic core-loop controls and progress signal; Development Agent does not own this plan.",
+    "Return only one JSON object shaped {semanticJourney,coverage}. No markdown and no testManifest.",
+    "Core will freeze requirements and deterministically build the full validated manifest. You own only project-specific semanticJourney values.",
+    "semanticJourney needs startAction, primaryAction, completeAction, primaryProgressKey, completionProgressKey, and changeTargetId. Each action needs type plus targetId/key/button/durationMs; set fields unused by that action to null.",
+    "Prefer click or double_click with a real Probe control targetId. Use key_tap/key_hold or gamepad_button_tap/gamepad_button_hold only when the game has no Probe control for that action. Do not use coordinates.",
+    "primaryProgressKey must be the real Probe PROGRESS key changed immediately by primaryAction. completionProgressKey must be the real Probe PROGRESS key changed by completeAction. They may differ. changeTargetId must be the real visible Probe control/region whose rendered pixels change after primaryAction.",
     "The plan must test the installed/exported game through real OS keyboard, pointer, and declared gamepad input. Probe data is an oracle only and must never invoke actions.",
-    "testManifest.schema is deviludo.test-manifest and has no version fields. It needs inputProfiles, primaryInputProfile, adaptivePlayer, the exact frozen requirements, and features.",
-    "Every PLAYER_INTERACTION requirement needs at least one interactive action with coversRequirementIds and a postcondition proving a real state/progress/control/scene change.",
-    "Create a short FRESH core-loop journey with START, READY, PROGRESS, and COMPLETION screenshots; START must prove a clean MENU with no active gameplay behind it, then real START_SESSION, PRIMARY_ACTION, and COMPLETE_LOOP inputs must cross a genuine progress boundary.",
-    "Use only semantic Probe target IDs, never fixed coordinates or unrelated keys. Use coherent separate journeys for mutually exclusive modes.",
-    "Checkpoint assertions must validate UI structure and lifecycle. Dynamic checkpoints must identify the changed semantic target. Include at least three valid screenshots and a STABLE_REPLAY launch checkpoint.",
-    "adaptivePlayer must cover all CORE_LOOP requirements, use allowed native action groups, include real progress success assertions and failure assertions, use STABLE_PROJECT_PLATFORM, 240000-300000 rolloutTimeoutMs, and 8-40 maxDecisions.",
+    "When priorRegressionTrace is present, treat its previously successful semantic targets, actions, and assertions as the strongest evidence. Preserve them unless the current specification explicitly changes that player path.",
     "coverage.regressionOperations lists prior and full-project player operations exercised; coverage.regressionUi lists menus, overlays, HUD/layout and clean-start regressions; coverage.changeImpact lists every risk from the current iteration versus the previous specification; coverage.assetApplication lists every materialized assetKey and the plan must verify it is loaded, visible in the correct game/UI context, correctly cropped/aspected, and not merely present on disk.",
-    "Do not declare referenceImage paths: the E2E node owns a final build, not the source worktree. Verify rendered assets with Probe-linked screenshot regions, state changes, and stable replay instead.",
-    "Do not invent a unit-test path. Prefer real interactive journeys and Probe assertions; add unit checks only when the supplied context explicitly names an existing script.",
     `Frozen requirements: ${JSON.stringify(requirements)}`,
-    `Frozen planning context: ${JSON.stringify(context)}`,
+    `Frozen planning context: ${JSON.stringify(compactPlanningContext(context))}`,
   ].join("\n");
+}
+
+function compactPlanningContext(context: Readonly<Record<string, unknown>>): Readonly<Record<string, unknown>> {
+  const assets = Array.isArray(context.assets) ? context.assets.filter(isRecord) : [];
+  return Object.freeze({
+    projectName: context.projectName,
+    iterationNumber: context.iterationNumber,
+    platform: context.platform,
+    concept: context.concept,
+    approvedSpecification: context.approvedSpecification,
+    previousSpecification: context.previousSpecification,
+    revisionNotes: context.revisionNotes,
+    regression: context.regression,
+    priorRegressionTrace: compactRegressionTrace(context.regressionTrace),
+    materializedAssets: Object.freeze(assets
+      .filter(asset => asset.materialized === true)
+      .map(asset => Object.freeze({
+        assetKey: asset.assetKey,
+        assetType: asset.assetType,
+        description: asset.description,
+      }))),
+  });
+}
+
+function compactRegressionTrace(value: unknown): unknown {
+  if (!isRecord(value) || value.schema !== "deviludo.e2e-regression") return null;
+  return Object.freeze({
+    inputProfile: value.inputProfile,
+    goal: value.goal,
+    actions: Array.isArray(value.actions) ? Object.freeze(value.actions.slice(0, 50)) : Object.freeze([]),
+    successAssertions: Array.isArray(value.successAssertions)
+      ? Object.freeze(value.successAssertions.slice(0, 32)) : Object.freeze([]),
+  });
 }
 
 function messagesEndpoint(baseUrl: string): string {

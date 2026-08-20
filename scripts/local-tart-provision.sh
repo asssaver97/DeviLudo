@@ -11,6 +11,8 @@ sudo install -m 0444 /Users/Shared/gui-event-batches.mjs "$guest_root/executors/
 sudo install -m 0444 /Users/Shared/e2e-evidence.mjs "$guest_root/e2e-evidence.mjs"
 sudo install -m 0444 /Users/Shared/e2e-ui-probe.mjs "$guest_root/e2e-ui-probe.mjs"
 sudo install -m 0444 /Users/Shared/e2e-interaction-contract.mjs "$guest_root/e2e-interaction-contract.mjs"
+sudo install -m 0444 /Users/Shared/e2e-regression-actions.mjs "$guest_root/e2e-regression-actions.mjs"
+sudo install -m 0444 /Users/Shared/e2e-performance.mjs "$guest_root/e2e-performance.mjs"
 sudo install -m 0555 /Users/Shared/deviludo-gui-driver /usr/local/bin/deviludo-gui-driver
 sudo install -m 0555 /Users/Shared/deviludo-gamepad-driver /usr/local/bin/deviludo-gamepad-driver
 if [[ ! -x /opt/homebrew/bin/ffmpeg ]]; then

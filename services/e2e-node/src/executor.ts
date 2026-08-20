@@ -199,6 +199,8 @@ export function validateExecutionReceipt(job: JobProtocolV4, receipt: Readonly<R
   }
   {
     const evidence = receipt.evidence as Record<string, unknown> | undefined;
+    const evidenceIssue = diagnoseE2eEvidenceReceipt(receipt, evidence);
+    if (evidenceIssue) throw new Error(`Godot E2E evidence receipt is invalid (${evidenceIssue})`);
     if (!evidence || typeof evidence !== "object" || Array.isArray(evidence)
       || evidence.schema !== "deviludo.e2e-evidence" || Object.hasOwn(evidence, "protocol") || evidence.result !== receipt.outcome
       || !Number.isSafeInteger(evidence.headlessCheckCount) || Number(evidence.headlessCheckCount) < 0
@@ -218,6 +220,16 @@ export function validateExecutionReceipt(job: JobProtocolV4, receipt: Readonly<R
       || (receipt.outcome === "PASSED" && Number(evidence.screenshotCount) < 3)
       || !Number.isSafeInteger(evidence.visualBaselineCount) || Number(evidence.visualBaselineCount) < 0
       || !Number.isSafeInteger(evidence.videoCount) || Number(evidence.videoCount) < 0
+      || !Number.isSafeInteger(evidence.frameRateSampleCount) || Number(evidence.frameRateSampleCount) < 0
+      || !nullableNonNegativeNumber(evidence.minimumFps)
+      || !nullableNonNegativeNumber(evidence.p10Fps)
+      || !nullableNonNegativeNumber(evidence.medianFps)
+      || !Number.isSafeInteger(evidence.inputResponseSampleCount) || Number(evidence.inputResponseSampleCount) < 0
+      || !nullableNonNegativeNumber(evidence.p95InputResponseMs)
+      || !nullableNonNegativeNumber(evidence.maxInputResponseMs)
+      || typeof evidence.performancePassed !== "boolean"
+      || !metricsMatchSampleCount(Number(evidence.frameRateSampleCount), [evidence.minimumFps, evidence.p10Fps, evidence.medianFps])
+      || !metricsMatchSampleCount(Number(evidence.inputResponseSampleCount), [evidence.p95InputResponseMs, evidence.maxInputResponseMs])
       || typeof evidence.testManifestDigest !== "string" || !/^sha256:[0-9a-f]{64}$/.test(evidence.testManifestDigest)
       || (evidence.regressionTraceDigest !== null && !/^sha256:[0-9a-f]{64}$/.test(String(evidence.regressionTraceDigest)))
       || ![null, "KEYBOARD_MOUSE", "GAMEPAD"].includes(evidence.regressionInputProfile as never)
@@ -230,6 +242,14 @@ export function validateExecutionReceipt(job: JobProtocolV4, receipt: Readonly<R
         || Number(evidence.interactiveJourneyCount) < 1
         || Number(evidence.realInputCount) < 2
         || Number(evidence.adaptiveSuccessCount) < 2
+        || Number(evidence.frameRateSampleCount) < 5
+        || Number(evidence.inputResponseSampleCount) < 2
+        || evidence.performancePassed !== true
+        || Number(evidence.minimumFps) < 5
+        || Number(evidence.p10Fps) < 20
+        || Number(evidence.medianFps) < 30
+        || Number(evidence.p95InputResponseMs) > 1_500
+        || Number(evidence.maxInputResponseMs) > 3_000
         || Number(evidence.videoCount) < 1
         || Number(evidence.coveredPlayerRequirementCount) !== Number(evidence.playerRequirementCount)))
       || typeof evidence.hasVisualDiff !== "boolean"
@@ -256,6 +276,74 @@ export function validateExecutionReceipt(job: JobProtocolV4, receipt: Readonly<R
       throw new Error("Godot guest receipt testDetails is invalid");
     }
   }
+}
+
+function diagnoseE2eEvidenceReceipt(
+  receipt: Readonly<Record<string, unknown>>,
+  evidence: Record<string, unknown> | undefined,
+): string | null {
+  if (!evidence || typeof evidence !== "object" || Array.isArray(evidence)) return "EVIDENCE_OBJECT";
+  if (evidence.schema !== "deviludo.e2e-evidence" || Object.hasOwn(evidence, "protocol")
+    || evidence.result !== receipt.outcome) return "EVIDENCE_IDENTITY";
+  const nonNegativeIntegers = [
+    "headlessCheckCount", "interactiveJourneyCount", "realInputCount", "deterministicInputCount",
+    "keyboardMouseInputCount", "gamepadInputCount", "adaptiveRolloutCount", "adaptiveSuccessCount",
+    "adaptiveDecisionCount", "coveredPlayerRequirementCount", "playerRequirementCount", "screenshotCount",
+    "visualBaselineCount", "videoCount", "frameRateSampleCount", "inputResponseSampleCount",
+  ];
+  for (const field of nonNegativeIntegers) {
+    if (!Number.isSafeInteger(evidence[field]) || Number(evidence[field]) < 0) return `NON_NEGATIVE_INTEGER:${field}`;
+  }
+  if (Number(evidence.adaptiveRolloutCount) > 3
+    || Number(evidence.adaptiveSuccessCount) > Number(evidence.adaptiveRolloutCount)) return "ADAPTIVE_COUNTS";
+  if (Number(evidence.coveredPlayerRequirementCount) > Number(evidence.playerRequirementCount)) return "REQUIREMENT_COUNTS";
+  for (const field of ["minimumFps", "p10Fps", "medianFps", "p95InputResponseMs", "maxInputResponseMs"]) {
+    if (!nullableNonNegativeNumber(evidence[field])) return `NON_NEGATIVE_METRIC:${field}`;
+  }
+  if (typeof evidence.performancePassed !== "boolean") return "PERFORMANCE_RESULT";
+  if (!metricsMatchSampleCount(Number(evidence.frameRateSampleCount), [evidence.minimumFps, evidence.p10Fps, evidence.medianFps])) {
+    return "FRAME_RATE_METRIC_COUNT";
+  }
+  if (!metricsMatchSampleCount(Number(evidence.inputResponseSampleCount), [evidence.p95InputResponseMs, evidence.maxInputResponseMs])) {
+    return "INPUT_RESPONSE_METRIC_COUNT";
+  }
+  if (typeof evidence.testManifestDigest !== "string" || !/^sha256:[0-9a-f]{64}$/.test(evidence.testManifestDigest)) return "MANIFEST_DIGEST";
+  if (evidence.regressionTraceDigest !== null && !/^sha256:[0-9a-f]{64}$/.test(String(evidence.regressionTraceDigest))) return "REGRESSION_DIGEST";
+  if (![null, "KEYBOARD_MOUSE", "GAMEPAD"].includes(evidence.regressionInputProfile as never)) return "REGRESSION_INPUT_PROFILE";
+  if (evidence.regressionEstimatedDurationMs !== null
+    && (!Number.isSafeInteger(evidence.regressionEstimatedDurationMs)
+      || Number(evidence.regressionEstimatedDurationMs) < 1 || Number(evidence.regressionEstimatedDurationMs) > 300_000)) {
+    return "REGRESSION_DURATION";
+  }
+  if ((evidence.regressionTraceDigest === null) !== (evidence.regressionInputProfile === null)
+    || (evidence.regressionTraceDigest === null) !== (evidence.regressionEstimatedDurationMs === null)) return "REGRESSION_FIELDS";
+  if (receipt.outcome === "PASSED" && Number(evidence.screenshotCount) < 3) return "PASSED_SCREENSHOTS";
+  if (receipt.outcome === "PASSED" && (Number(evidence.adaptiveRolloutCount) !== 3
+    || Number(evidence.interactiveJourneyCount) < 1 || Number(evidence.realInputCount) < 2
+    || Number(evidence.adaptiveSuccessCount) < 2 || Number(evidence.frameRateSampleCount) < 5
+    || Number(evidence.inputResponseSampleCount) < 2 || evidence.performancePassed !== true
+    || Number(evidence.minimumFps) < 5 || Number(evidence.p10Fps) < 20 || Number(evidence.medianFps) < 30
+    || Number(evidence.p95InputResponseMs) > 1_500 || Number(evidence.maxInputResponseMs) > 3_000
+    || Number(evidence.videoCount) < 1
+    || Number(evidence.coveredPlayerRequirementCount) !== Number(evidence.playerRequirementCount))) return "PASSED_GATE";
+  if (typeof evidence.hasVisualDiff !== "boolean") return "VISUAL_DIFF";
+  if (![null, "MACOS_LAUNCH_SERVICES", "WINDOWS_FINAL_EXE", "LINUX_RELEASE_EXECUTABLE"].includes(evidence.packageLaunchMode as never)) {
+    return "PACKAGE_LAUNCH_MODE";
+  }
+  if (typeof receipt.outputPath !== "string" || !isAbsolute(receipt.outputPath)) return "OUTPUT_PATH";
+  if (typeof receipt.outputSha256 !== "string" || !/^sha256:[0-9a-f]{64}$/.test(receipt.outputSha256)) return "OUTPUT_DIGEST";
+  if (!Number.isSafeInteger(receipt.outputSizeBytes) || Number(receipt.outputSizeBytes) < 1) return "OUTPUT_SIZE";
+  return null;
+}
+
+function nullableNonNegativeNumber(value: unknown): boolean {
+  return value === null || (typeof value === "number" && Number.isFinite(value) && value >= 0);
+}
+
+function metricsMatchSampleCount(count: number, metrics: readonly unknown[]): boolean {
+  return count === 0
+    ? metrics.every(value => value === null)
+    : metrics.every(value => typeof value === "number" && Number.isFinite(value));
 }
 
 async function runUnprivileged(
