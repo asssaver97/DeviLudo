@@ -46,6 +46,15 @@ const PIPELINE = [
   ["E2E_TEST", "跨平台 E2E", "Cross-platform E2E"],
   ["STEAM_PUBLISH", "Steam 上传", "Steam Upload"],
 ] as const;
+const ACTIVE_PIPELINE_STAGE: Readonly<Record<string, (typeof PIPELINE)[number][0]>> = Object.freeze({
+  AGENT_RUNNING: "AGENT_GENERATION",
+  // Asset generation is an asynchronous gate after Agent generation. While it
+  // is active, every serial stage after Agent is still waiting for its input.
+  ASSET_GENERATING: "AGENT_GENERATION",
+  ARTIFACT_BUILDING: "ARTIFACT_BUILD",
+  E2E_TESTING: "E2E_TEST",
+  STEAM_PUBLISHING: "STEAM_PUBLISH",
+});
 const RERUNNABLE_WORKFLOW_STATES = new Set(["RELEASE_DECISION_PENDING", "FAILED", "SUCCEEDED", "CANCELLED"]);
 const ITERATION_TERMINAL_STATES = new Set(["FAILED", "SUCCEEDED", "CANCELLED"]);
 const ASSET_RERUN_WORKFLOW_STATES = new Set([
@@ -691,7 +700,7 @@ export function ProjectStudio({ projectId }: { projectId: string }) {
   const deliveryActive = !["DRAFT", "RELEASE_DECISION_PENDING", "SUCCEEDED", "FAILED", "CANCELLED"].includes(project.workflowState);
   const viewedDeliveryActive = !["DRAFT", "RELEASE_DECISION_PENDING", "SUCCEEDED", "FAILED", "CANCELLED"].includes(viewedWorkflowState);
   const latestFailedJob = viewedWorkflowState === "FAILED"
-    ? latestPipelineJobs(viewedJobs).find(job => job.state === "FAILED") ?? null
+    ? latestPipelineJobs(currentPipelineJobs(viewedJobs)).find(job => job.state === "FAILED") ?? null
     : null;
   const pipelineFailure = latestFailedJob ? jobFailurePresentation(latestFailedJob, text) : null;
   const profileStages = new Set<string>(PIPELINE.map(([kind]) => kind));
@@ -862,12 +871,15 @@ export function ProjectStudio({ projectId }: { projectId: string }) {
               ) : null}
             </li>
             {PIPELINE.map(([kind, chineseLabel, englishLabel]) => {
-              const jobs = latestPipelineJobs(viewedJobs.filter(job => job.kind === kind));
+              const jobs = latestPipelineJobs(currentPipelineJobs(viewedJobs.filter(job => job.kind === kind)));
               const stageArtifacts = artifactsByStage.get(kind) ?? Object.freeze([]);
               const inProfile = profileStages.has(kind);
               const state = aggregateJobState(jobs.map(job => job.state));
-              const view = inProfile ? pipelineStageView(state, text) : OUT_OF_PROFILE_STAGE_VIEW(text);
-              const finishedAt = inProfile ? pipelineStageFinishedAt(jobs) : null;
+              const waitingForPredecessor = inProfile && pipelineStageWaitsForPredecessor(kind, viewedWorkflowState);
+              const view = inProfile
+                ? waitingForPredecessor ? waitingPipelineStageView(text) : pipelineStageView(state, text)
+                : OUT_OF_PROFILE_STAGE_VIEW(text);
+              const finishedAt = inProfile && !waitingForPredecessor ? pipelineStageFinishedAt(jobs) : null;
               return (
                 <li className={`product-delivery-stage status-${view.kind}`} data-stage-kind={kind} data-stage-status={view.kind} key={kind}>
                   <div className="product-delivery-stage-marker" aria-hidden="true">{view.symbol}</div>
@@ -875,7 +887,9 @@ export function ProjectStudio({ projectId }: { projectId: string }) {
                   <b>{text(chineseLabel, englishLabel)}</b>
                   <strong>{view.label}</strong>
                   <small>{inProfile
-                    ? pipelineJobDetails(jobs, text)
+                    ? waitingForPredecessor
+                      ? text("等待上一步完成", "Waiting for previous stage")
+                      : pipelineJobDetails(jobs, text)
                     : text("当前为验证流程，不含此阶段", "Not part of the current VALIDATE run")}</small>
                   {finishedAt ? (
                     <time className="product-delivery-stage-finished-at" dateTime={finishedAt}>
@@ -1292,6 +1306,23 @@ function pipelineStageView(state: string, text: (chinese: string, english: strin
   return { kind: "pending", label: text("未开始", "NOT STARTED"), symbol: "○" };
 }
 
+function waitingPipelineStageView(text: (chinese: string, english: string) => string): PipelineStageView {
+  return { kind: "pending", label: text("等待中", "WAITING"), symbol: "○" };
+}
+
+/**
+ * A running stage owns the only current work. Later stages have not been
+ * cancelled; they are waiting for the new upstream result, even when their old
+ * attempts were cancelled as superseded by a rerun.
+ */
+export function pipelineStageWaitsForPredecessor(stage: string, workflowState: string): boolean {
+  const activeStage = ACTIVE_PIPELINE_STAGE[workflowState];
+  if (!activeStage) return false;
+  const activeIndex = PIPELINE.findIndex(([kind]) => kind === activeStage);
+  const stageIndex = PIPELINE.findIndex(([kind]) => kind === stage);
+  return activeIndex >= 0 && stageIndex > activeIndex;
+}
+
 /**
  * A stage the current profile never reaches. It stays on the track so the chain
  * reads as a whole, but it is not "not started" — this run will never run it.
@@ -1313,6 +1344,14 @@ function latestPipelineJobs(jobs: ProductProjectDetail["jobs"]): ProductProjectD
     if (!current || Date.parse(current.createdAt) <= Date.parse(job.createdAt)) latest.set(key, job);
   }
   return Object.freeze([...latest.values()]);
+}
+
+/** Superseded attempts stay in job history, but they are not the current run. */
+export function currentPipelineJobs(jobs: ProductProjectDetail["jobs"]): ProductProjectDetail["jobs"] {
+  return Object.freeze(jobs.filter(job => !(
+    job.state === "CANCELLED"
+    && job.lastError?.startsWith("superseded by ") === true
+  )));
 }
 
 export function pipelineStageFinishedAt(jobs: ProductProjectDetail["jobs"]): string | null {

@@ -1,6 +1,11 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { pipelineEventFinishedAt, pipelineStageFinishedAt } from "../components/ProjectStudio";
+import {
+  currentPipelineJobs,
+  pipelineEventFinishedAt,
+  pipelineStageFinishedAt,
+  pipelineStageWaitsForPredecessor,
+} from "../components/ProjectStudio";
 import type { ProductEvent, ProductJob } from "../lib/product/contracts";
 
 function job(state: string, updatedAt: string, targetOperatingSystem: string | null = null): ProductJob {
@@ -38,6 +43,23 @@ test("failed and cancelled terminal stages retain their finish time", () => {
   assert.equal(pipelineStageFinishedAt([
     job("CANCELLED", "2026-08-16T01:03:04.000Z"),
   ]), "2026-08-16T01:03:04.000Z");
+});
+
+test("superseded attempts are excluded from the current pipeline stage", () => {
+  const superseded = {
+    ...job("CANCELLED", "2026-08-16T01:03:04.000Z", "macos"),
+    lastError: "superseded by stage rerun from ARTIFACT_BUILD",
+  };
+  const explicitlyCancelled = job("CANCELLED", "2026-08-16T01:04:05.000Z", "linux");
+  assert.deepEqual(currentPipelineJobs([superseded, explicitlyCancelled]), [explicitlyCancelled]);
+});
+
+test("stages after the active delivery stage wait for their predecessor", () => {
+  assert.equal(pipelineStageWaitsForPredecessor("E2E_TEST", "ARTIFACT_BUILDING"), true);
+  assert.equal(pipelineStageWaitsForPredecessor("STEAM_PUBLISH", "ARTIFACT_BUILDING"), true);
+  assert.equal(pipelineStageWaitsForPredecessor("ARTIFACT_BUILD", "ARTIFACT_BUILDING"), false);
+  assert.equal(pipelineStageWaitsForPredecessor("E2E_TEST", "E2E_TESTING"), false);
+  assert.equal(pipelineStageWaitsForPredecessor("E2E_TEST", "FAILED"), false);
 });
 
 test("the requirements or analysis node uses the latest approval event as its finish time", () => {

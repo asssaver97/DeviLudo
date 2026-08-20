@@ -34,6 +34,10 @@ const environment = {
   DEVILUDO_PUBLIC_BASE_URL: `http://127.0.0.1:${webPort}`,
   DEVILUDO_WEB_CORE_TOKEN: "local-web-to-core-token-0000000000000001",
   DEVILUDO_E2E_NODE_TOKEN: "local-e2e-node-token",
+  // Browser fixtures must satisfy Core's launcher-owned machine identity
+  // contract without reporting synthetic test activity to the real collector.
+  DEVILUDO_INSTALLATION_ID: "00000000-0000-5000-8000-000000000001",
+  DEVILUDO_TELEMETRY_ENDPOINT: "http://127.0.0.1:9/v1/active-installations",
   DEVILUDO_DOCKER_GID: dockerSocketGid,
   DEVILUDO_CORE_EXECUTOR_PUBLIC_KEY_FILE: resolve(root, ".deviludo/local/executor-ed25519.pub"),
   DEVILUDO_EXECUTOR_SOCKET_VOLUME: `${projectName}-executor-socket`,

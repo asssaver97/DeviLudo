@@ -131,14 +131,17 @@ test("local deployment terminal output is English", async () => {
 });
 
 test("production Core derives one anonymous installation ID from the host machine", async () => {
-  const [compose, deploy] = await Promise.all([
+  const [compose, deploy, e2e] = await Promise.all([
     readFile(new URL("../deploy/assets/core.compose.yaml", import.meta.url), "utf8"),
     readFile(new URL("../deploy/core/deploy.sh", import.meta.url), "utf8"),
+    readFile(new URL("../scripts/run-e2e.mjs", import.meta.url), "utf8"),
   ]);
   assert.match(compose, /DEVILUDO_INSTALLATION_ID: \$\{DEVILUDO_INSTALLATION_ID:\?machine installation ID is required\}/);
   assert.match(deploy, /< \/etc\/machine-id/);
   assert.match(deploy, /deviludo\.machine-installation\.v1\\0linux\\0/);
   assert.match(deploy, /DEVILUDO_INSTALLATION_ID=%s/);
+  assert.match(e2e, /DEVILUDO_INSTALLATION_ID: "00000000-0000-5000-8000-000000000001"/);
+  assert.match(e2e, /DEVILUDO_TELEMETRY_ENDPOINT: "http:\/\/127\.0\.0\.1:9\/v1\/active-installations"/);
 });
 
 test("Core sandbox concurrency is bounded and assigns independent worker ids", async () => {
@@ -1183,7 +1186,7 @@ test("every delivery node stays visible, including stages this run will not reac
   assert.match(studio, /text\("已有项目分析", "PROJECT ANALYSIS"\)/);
   assert.doesNotMatch(studio, /visibleStages/);
   assert.match(studio, /const inProfile = profileStages\.has\(kind\);/);
-  assert.match(studio, /view = inProfile \? pipelineStageView\(state, text\) : OUT_OF_PROFILE_STAGE_VIEW\(text\)/);
+  assert.match(studio, /const view = inProfile[\s\S]*waitingForPredecessor \? waitingPipelineStageView\(text\) : pipelineStageView\(state, text\)[\s\S]*: OUT_OF_PROFILE_STAGE_VIEW\(text\)/);
   // An out-of-profile stage is not merely "not started": this run never runs it.
   assert.match(studio, /label: text\("不适用", "NOT APPLICABLE"\)/);
   // A failed stage outside the profile must not be offered as a retry target.
@@ -1296,7 +1299,8 @@ test("project delivery is a top horizontal pipeline without the game specificati
   assert.match(studio, /<AssetAutoGenerationSetting[\s\S]*projectId=\{projectId\}/);
   assert.match(styles, /\.product-delivery-configuration > summary:hover[\s\S]*\.product-delivery-configuration\[open\]/);
   assert.match(studio, /!editingLocalBranch[\s\S]*修改分支/);
-  assert.match(studio, /label: text\("已完成", "COMPLETED"\)[\s\S]*label: text\("进行中", "IN PROGRESS"\)[\s\S]*label: text\("未开始", "NOT STARTED"\)/);
+  assert.match(studio, /label: text\("已完成", "COMPLETED"\)[\s\S]*label: text\("进行中", "IN PROGRESS"\)[\s\S]*label: text\("未开始", "NOT STARTED"\)[\s\S]*label: text\("等待中", "WAITING"\)/);
+  assert.match(studio, /currentPipelineJobs\(viewedJobs\.filter[\s\S]*pipelineStageWaitsForPredecessor\(kind, viewedWorkflowState\)/);
   assert.match(styles, /\.product-delivery-track\s*\{[\s\S]*display:\s*flex/);
   assert.match(styles, /\.product-delivery-stage\.status-completed/);
   assert.match(styles, /\.product-delivery-stage\.status-active/);
