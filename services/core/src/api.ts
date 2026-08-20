@@ -55,6 +55,7 @@ import {
   playerPolicyIdempotencyInput,
   verifyE2ePlayerVision,
 } from "./e2e-player-policy";
+import { generateE2eTestPlan } from "./e2e-test-plan";
 import type {
   CoreRepository,
   PendingProjectImportAnalysis,
@@ -1027,7 +1028,7 @@ export async function runApi(
     const idempotencyKey = requestIdempotencyKey(request, `stage-rerun:${stage}`);
     // Superseding downstream jobs would race executors that still hold leases,
     // so a rerun only makes sense once the delivery has come to rest.
-    if (!["FAILED", "SUCCEEDED", "CANCELLED"].includes(project.workflowState)) {
+    if (!["RELEASE_DECISION_PENDING", "FAILED", "SUCCEEDED", "CANCELLED"].includes(project.workflowState)) {
       if (await repository.workflowSignalExists(workspace.id, project.workflowId, idempotencyKey)) {
         return reply.send({ accepted: false });
       }
@@ -1059,7 +1060,7 @@ export async function runApi(
           idempotencyKey,
           requestedByActorId: principal.actorId,
         })
-      : await repository.appendSignal(workspace.id, project.workflowId, signalInput);
+      : await repository.rerunStage(workspace.id, project.workflowId, signalInput);
     return reply.code(accepted ? 202 : 200).send({ accepted, stage });
   });
 
@@ -1322,6 +1323,56 @@ export async function runApi(
       settingsRevision: policy.settingsRevision,
       model: policy.model,
     } });
+  });
+
+  app.post<{ Params: { jobId: string } }>("/v1/e2e/jobs/:jobId/test-plan", async (request, reply) => {
+    const nodeId = await authorizeE2e(request, config, repository);
+    const body = objectBody(request.body);
+    const job = await repository.loadLeasedJob(jobIdentity(request.params.jobId, body), nodeId ? `e2e:${nodeId}` : undefined);
+    if (job.jobKind !== "E2E_TEST" || !job.targetOperatingSystem) {
+      return reply.code(409).send({ code: "E2E_TEST_PLAN_JOB_INVALID" });
+    }
+    const settings = await repository.readAgentSettings();
+    if (!settings) return reply.code(503).send({ code: "PLAYER_POLICY_NOT_CONFIGURED" });
+    const model = resolveAgentModel(settings.primaryModel, settings.modelOverrides, "test");
+    const configurationDigest = jsonDigest({
+      runtime: settings.agentRuntime, baseUrl: settings.baseUrl, model,
+      settingsRevision: settings.revision, credentialVersion: settings.credentialVersion,
+    });
+    const policy = await repository.lockE2ePlayerPolicy({
+      workspaceId: job.workspaceId, jobId: job.jobId, settingsRevision: settings.revision,
+      runtime: settings.agentRuntime, baseUrl: settings.baseUrl, model,
+      credentialSecretRef: settings.credentialSecretRef, configurationDigest,
+    });
+    const apiKey = await agentSecrets.readApiKey(policy.credentialSecretRef);
+    if (!apiKey) return reply.code(503).send({ code: "PLAYER_POLICY_CREDENTIAL_UNAVAILABLE" });
+    const context = await repository.readE2ePlanningContext({
+      workspaceId: job.workspaceId,
+      workflowId: job.workflowId,
+      projectId: job.projectId,
+      platform: job.targetOperatingSystem,
+    });
+    try {
+      const plan = await generateE2eTestPlan({
+        context, runtime: policy.runtime, baseUrl: policy.baseUrl, apiKey, model: policy.model,
+        testFixture: process.env.NODE_ENV === "test" && process.env.DEVILUDO_E2E_TEST_PLAN_FIXTURE === "1",
+      });
+      return reply.send({ plan, policy: {
+        configurationDigest: policy.configurationDigest,
+        settingsRevision: policy.settingsRevision,
+        model: policy.model,
+      } });
+    } catch (error) {
+      request.log.warn({
+        event: "e2e_test_plan_failed",
+        jobId: job.jobId,
+        reason: error instanceof Error ? error.message : "Test Agent plan generation failed",
+      }, "Cross-platform E2E plan generation failed");
+      return reply.code(503).send({
+        code: "E2E_TEST_PLAN_PROVIDER",
+        message: error instanceof Error ? error.message : "Test Agent 未生成有效 E2E 测试计划",
+      });
+    }
   });
 
   app.post<{ Params: { jobId: string } }>("/v1/e2e/jobs/:jobId/player-policy", {

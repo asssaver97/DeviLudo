@@ -82,17 +82,6 @@ async function runAgent(plan) {
     await command("tar", ["-xzf", "/workspace/inputs/checkpoint.tar.gz", "-C", "/workspace/project"], safeEnvironment());
     emitProgress("PHASE", "上次尝试的源码检查点已恢复，Agent 将从现有成果继续");
   }
-  const requirementCatalog = specificationRequirementCatalog(specification);
-  if (requirementCatalog.length < 1) {
-    throw new Error("Approved specification does not contain testable coreLoop or acceptanceCriteria requirements");
-  }
-  let existingAgentManifest = null;
-  try {
-    existingAgentManifest = await readGeneratedAgentManifest(requirementCatalog);
-  } catch {
-    // A missing or retired contract is regenerated from the frozen catalog.
-  }
-  const existingManifestValid = existingAgentManifest !== null;
   const e2eReportObject = plan.job.inputObjects.find(input => input.kind === "E2E_REPORT");
   let e2eRepairContext = null;
   if (e2eReportObject) {
@@ -118,93 +107,20 @@ async function runAgent(plan) {
   const isRepairPass = e2eRepairContext !== null || upstreamFailureSummary !== null;
   const checkpointEmitterInstruction = "A DEVILUDO_E2E_CHECKPOINT:<checkpoint-id> runtime marker is optional synchronization metadata only and can never satisfy an assertion by itself. If used, emit it only after the real semantic state exists and append it to DEVILUDO_E2E_CHECKPOINT_FILE when that environment variable is non-empty.";
   const probeInstruction = "Implement the read-only deviludo.e2e-ui-probe contract in the actual game. Atomically replace DEVILUDO_E2E_UI_PROBE_FILE after each visible/state/progress change. Include asynchronous UI lifecycle changes: a window, popup, dialog, overlay, animation, or deferred layout must publish again from its real visibility/layout signal or a completed draw frame, not only from the synchronous input handler that requested the change. Show and hide must both advance the sequence, and the snapshot must read the actual rendered state. Every state object must publish the fixed lifecycle fields screen_mode (MENU, PLAYING, PAUSED or RESULT), session_active, gameplay_input_enabled and blocking_layer_count. MENU means no session, no gameplay input, zero blocking layers; PLAYING means an active session, enabled gameplay input and zero blocking layers; PAUSED means an active session and disabled gameplay input, with blocking_layer_count reflecting the actual visible blocking layers rather than assuming one exists. Every control must declare scope NAVIGATION, GAMEPLAY, OVERLAY or STATUS. MENU must never publish an enabled visible GAMEPLAY control. Map every control and embedded Window/Popup rectangle against the root game client viewport before converting to 1280x720; never use a child window's own content size as the root scale, clamp an invalid rectangle, or publish an out-of-client snapshot. A node detached from the scene tree or without a live root viewport must never be published as visible or enabled: wait until it is attached and laid out, or publish the truthful non-actionable state using the last valid in-client rectangle. Never invent a fallback viewport size to make a detached node appear actionable. If real dialog content exceeds the root client, fix the production UI with a bounded window and scrollable content; never shrink, clip, or substitute only the Probe rectangle. Every control reported visible and enabled for an action must be connected to its production input handler. After real OS input, successful, rejected, and asynchronously completed actions must all converge on a final UI refresh and publish a newer Probe with the truthful outcome, so an action can never silently leave the previous sequence in place. Every snapshot uses schema deviludo.e2e-ui-probe and must contain the current DEVILUDO_E2E_SESSION_NONCE, OS process id, a strictly increasing sequence, sceneId, flat state and progress objects, and unique stable controls with id, scope, visible, enabled, text/value, and 1280x720 client-relative rect. The probe may describe state but must never invoke actions, complete gameplay, or fake results.";
-  const coherentJourneyInstructions = [
-    "Every interactive journey must represent one coherent, uninterrupted player objective. After an action leaves a menu, mode, scene, or session, never target controls from that previous context unless the journey contains a real visible action that returns there.",
-    "Keep the FRESH coreJourney to the shortest real core loop that crosses one genuine progress boundary. Put acceptance criteria for mutually exclusive modes, alternate entry paths, destructive/settings flows, or long end states in separate journeys instead of concatenating every requirement into one script.",
-  ];
-  const manifestInstructions = existingManifestValid ? [
-    "Core has already validated the existing agent.json as a complete deviludo.test-manifest and asset manifest. Preserve its coverage and assertions unless the current change genuinely requires an update.",
-    checkpointEmitterInstruction,
+  const manifestInstructions = [
+    "The cross-platform E2E node owns test-plan generation. Do not create, update, or preserve testManifest in agent.json; remove that field if it exists.",
+    "Implement the real game behavior, deterministic hooks, and read-only UI Probe needed for later native-input testing, but do not decide E2E journeys or assertions here.",
     probeInstruction,
-    ...coherentJourneyInstructions,
-    ...(e2eRepairContext ? [
-      "This repair does not need broad manifest work, but the failing journey and step must remain coherent with every preceding visible state transition.",
-      "For a missing, hidden, disabled, or duplicated action target, inspect the failing step, preceding actions, Probe snapshot, and screenshot before editing. If the script targets a control from an exited or mutually exclusive context, split or reorder the journey; never keep an unrelated old-context control globally visible merely to satisfy the script.",
-    ] : [
-      "After implementing and testing this revision, make only the minimal existing agent.json edits needed to map genuinely new check names.",
-    ]),
-  ] : [
-    "IMPORTANT: The generated agent.json must include a complete testManifest AND an assetManifest.",
-    "",
-    "testManifest structure:",
-    "- schema: \"deviludo.test-manifest\". Do not emit schemaVersion or any version field.",
-    "- Do not emit retired top-level suite or gdsTestPath fields; test paths belong only to unit feature objects.",
-    "- inputProfiles: one or both of KEYBOARD_MOUSE and GAMEPAD; primaryInputProfile must be one declared profile. Every declared profile must appear in deterministic real-input coverage.",
-    "- adaptivePlayer: goal, requirementIds including every CORE_LOOP requirement, allowedActions (KEYBOARD, POINTER and/or GAMEPAD), non-empty successAssertions and failureAssertions, rolloutTimeoutMs 240000-300000, maxDecisions 8-40, seedStrategy STABLE_PROJECT_PLATFORM. successAssertions must include a PROGRESS CHANGED/NOT_EQUALS/GREATER_THAN/GREATER_THAN_OR_EQUALS assertion proving a real progress boundary relative to the clean rollout start.",
-    "- requirements: copy the exact requirementId, description, source and default verificationClass pairs below; every CORE_LOOP remains PLAYER_INTERACTION. An ACCEPTANCE item may be SYSTEM only for DATA, RUNTIME or NETWORK and must include systemCategory plus a concrete exemptionReason of at least 10 characters.",
-    "- features: array of feature objects, each with:",
-    "  - id: unique kebab-case identifier (e.g. \"collect-ember\")",
-    "  - requirementIds: one or more IDs from the exact frozen requirement catalog below",
-    "  - category: one of core-loop, player-control, data-integrity, runtime-quality, ui, audio",
-    "  - description: human-readable feature description",
-    "  - verificationMethod: unit, interactive, visual, or manual; manual must never be the only automated coverage for a requirement",
-    "  - gdsTestPath: path to test script (typically \"res://tests/e2e.gd\")",
-    "  - checkNames: array of assertion names that verify this feature; every unit feature also requires timeoutMs no more than 300000",
-    "  - A unit timeoutMs budgets the complete Godot process for its gdsTestPath, not one logical feature. When multiple features share a script that runs a combined suite, their effective maximum timeout must cover the whole suite while remaining within 300000ms; never shorten the hard timeout by dividing the suite budget across feature entries.",
-    "- At least one feature must be category core-loop, verificationMethod interactive, coreJourney true, launchProfile {type:\"FRESH\"}, and timeoutMs no more than 300000. Non-core scenario journeys must use the exact launchProfile shape {type:\"SCENARIO\",scenarioId:\"stable-kebab-case-id\"}; no alias fields are accepted. Scenario fixtures may initialize state but never perform the tested action, and every scenario journey needs at least one STABLE_REPLAY checkpoint. A scenario must enter the truthful player-visible context declared by its first READY checkpoint with no unrelated menu, modal, or overlay blocking the target; the final tested transition still requires real OS input.",
-    ...coherentJourneyInstructions.map(instruction => `- ${instruction}`),
-    "- Its interactionScript contains only events and no version field, with no more than 200 events. Use semantic target IDs only; fixed x/y coordinates and unrelated key presses are forbidden.",
-    "- Action event types are key_tap, key_hold, click, double_click, drag, scroll, text_input, gamepad_button_tap, gamepad_button_hold, gamepad_axis, gamepad_trigger and gamepad_release_all. Every action requires a unique stepId, intent, coversRequirementIds and at least one postcondition. Click/drag/scroll/text targets use stable probe control IDs.",
-    "- Generic example: {\"type\":\"click\",\"stepId\":\"activate-primary-control\",\"intent\":\"PRIMARY_ACTION\",\"targetId\":\"primary-control\",\"coversRequirementIds\":[\"req-feature-001-...\"],\"postconditions\":[{\"source\":\"PROGRESS\",\"key\":\"primary-progress\",\"operator\":\"CHANGED\"}],\"delay_ms\":100}. Replace every identifier with semantics discovered from the current project; never copy the example identifiers into a project contract.",
-    "- Probe assertions use source STATE, PROGRESS, CONTROL or SCENE and operator EQUALS, NOT_EQUALS, GREATER_THAN, GREATER_THAN_OR_EQUALS, LESS_THAN, LESS_THAN_OR_EQUALS, CONTAINS, EXISTS or CHANGED.",
-    "- STATE and PROGRESS assertions require key and forbid targetId/property. CONTROL assertions require targetId plus property (visible, enabled, text, or value) and forbid key. SCENE assertions forbid key, targetId, and property.",
-    "- EXISTS and CHANGED assertions must not contain value. Every other Probe operator must contain a string, number, or boolean value.",
-    "- Every PLAYER_INTERACTION requirement must be covered by at least one real action inside a feature that maps that requirement, and every such action must verify an operation-after state change through postconditions.",
-    "- The fresh core journey must cross a real progress boundary and include at least two real actions with PRIMARY_ACTION and COMPLETE_LOOP intents.",
-    "- The core journey is an ordered lifecycle proof: START must be the first non-wait event; navigation may follow; exactly one START_SESSION action must create the session; READY comes next; then PRIMARY_ACTION, PROGRESS, COMPLETE_LOOP and COMPLETION in that order. START and READY both use STABLE_REPLAY. START asserts screen_mode=MENU, session_active=false, gameplay_input_enabled=false and blocking_layer_count=0. The START_SESSION postconditions and READY checkpoint assert screen_mode=PLAYING, session_active=true, gameplay_input_enabled=true and blocking_layer_count=0.",
-    "- A clean launch is defective if a start/menu layer is drawn over an already-active board, HUD, tutorial or enabled gameplay controls. Do not hide the contradiction in Probe metadata or teach the Test Agent to click through it; fix the production startup state so only the current lifecycle layer is rendered and interactive.",
-    "- If a checkpoint emits expectedOutput, it must be exactly DEVILUDO_E2E_CHECKPOINT:<that checkpoint's id>. Rename the checkpoint id or runtime marker together; aliases are not supported.",
-    "- Every DYNAMIC ACTION, PROGRESS or COMPLETION checkpoint must declare changeTargetId for a stable semantic control or viewport region whose pixels must change after the preceding real input.",
-    "- A checkpoint requires non-empty assertions. expectedOutput is optional auxiliary synchronization and, if present, must equal DEVILUDO_E2E_CHECKPOINT:<checkpoint-id>.",
     checkpointEmitterInstruction,
-    probeInstruction,
-    "- A checkpoint may declare referenceImage as a safe project-relative PNG and threshold from 0 to 1; the default threshold is 0.01.",
-    "- Across the manifest: at most 500 requirements, 500 features, 32 interactive journeys, and 64 checkpoints. Each journey is at most 300 seconds. Core freezes a calculated 30-90 minute platform budget before E2E begins.",
-    `- Frozen requirement catalog: ${JSON.stringify(requirementCatalog)}`,
-    "",
-    "assetManifest structure:",
-    "- schemaVersion: \"deviludo.asset-manifest.v1\"",
-    "- items: array of required game assets, each with:",
-    "  - assetKey: unique path identifier (e.g. \"sprites/player_idle\", \"backgrounds/menu\")",
-    "  - assetType: one of sprite, animation, background, ui, icon, tileset",
-    "  - description: precise user-facing description of what this asset looks like (e.g. \"Player character idle animation, 4 frames, pixel art style, 32x32, facing right\")",
-    "  - generationPrompt: detailed technical prompt for image generation model (e.g. \"pixel art sprite sheet, 4 frames of idle animation, character facing right, 32x32 per frame, transparent background, retro game style\")",
-    "  - frameCount: number of frames if animation (null for single sprites)",
-    "  - dimensions: recommended size like \"32x32\" or \"128x128\"",
-    "",
-    "Asset planning guidelines:",
-    "- List ALL sprites, backgrounds, UI elements, and tilesets the game needs",
-    "- assetKey is an ASCII relative path without a file extension; use only letters, digits, dots, underscores, hyphens, and slashes",
-    "- For animations, specify exact frame count and describe the motion sequence",
-    "- The controlled builder materializes supplied images at res://assets/generated/<assetKey>.png, .jpg, or .webp",
-    "- Game code must try those three generated paths at runtime and use its placeholder only when none exists",
-    "- Write descriptions assuming the player may upload custom art or use image generation",
-    "- generationPrompt should be optimized for DALL-E 3 or Stable Diffusion XL",
-    "",
-    "Test script requirements (res://tests/e2e.gd):",
-    "1. Must extend SceneTree and run all tests in _initialize()",
-    "2. Use check(condition: bool, name: String) for each assertion",
-    "3. Assertion names must be kebab-case and match checkNames in testManifest",
-    "4. Must output: print(\"DEVILUDO_E2E_RESULT:\", JSON.stringify({suite, checks, failures, duration_ms}))",
-    "5. Must exit with: quit(0 if failures.is_empty() else 1)",
-    "",
-    "Reference implementation: fixtures/godot-smoke/tests/e2e.gd demonstrates the required pattern.",
-    "",
-    "Every player-operable feature declared in the project document must have corresponding real system-level keyboard/mouse actions and postconditions. Headless unit checks remain appropriate only for data, runtime, network and deterministic algorithm details.",
+    "agent.json must contain exactly the current assetManifest planning object plus any non-test metadata required by the source; it must not contain testManifest.",
+    "assetManifest uses schemaVersion deviludo.asset-manifest.v1 and 1-500 unique items. Each item needs assetKey, assetType, description, generationPrompt, nullable frameCount, and nullable dimensions.",
+    "Plan every image used by gameplay or UI. The game must load controlled assets from res://assets/generated/<assetKey>.png, .jpg, or .webp and use a deliberate placeholder only when none exists.",
+    "Make every planned and existing asset visibly connected to the actual scene or control that uses it; the E2E node will verify texture placement, visibility, aspect, and gameplay/UI context.",
   ];
-  const specificationInstructions = existingManifestValid
-    ? [`Current revision notes: ${JSON.stringify(specification.revisionNotes ?? [])}`]
-    : [`Specification: ${JSON.stringify(specification)}`];
+  const specificationInstructions = [
+    `Specification: ${JSON.stringify(specification)}`,
+    `Current revision notes: ${JSON.stringify(specification.revisionNotes ?? [])}`,
+  ];
   const e2eRepairInstructions = e2eRepairContext ? [
     "",
     "BLOCKING E2E REPAIR: fix the verified product failure before any broad audit, manifest review, refactor, or explanation.",
@@ -306,7 +222,7 @@ async function runAgent(plan) {
       // and edit pass instead of paying for several interrupted resumptions.
       isRepairPass ? 8 * 60_000 : undefined,
       async () => {
-        await readGeneratedAgentManifest(requirementCatalog);
+        await readGeneratedAgentManifest();
       },
     );
     flushAgentOutput();
@@ -316,7 +232,7 @@ async function runAgent(plan) {
   // source so Core can ingest its test and asset manifests from the trusted,
   // digest-checked output object.
   const agentManifest = await mergeDiscoveredSourceImages(
-    await readGeneratedAgentManifest(requirementCatalog),
+    await readGeneratedAgentManifest(),
     "/workspace/project",
   );
   // Keep the deterministic inventory in both the published source and the
@@ -345,7 +261,7 @@ async function readCheckpointMetadata() {
   return value;
 }
 
-async function readGeneratedAgentManifest(requirementCatalog) {
+async function readGeneratedAgentManifest() {
   let value;
   try {
     value = JSON.parse(await readFile("/workspace/project/agent.json", "utf8"));
@@ -355,14 +271,7 @@ async function readGeneratedAgentManifest(requirementCatalog) {
   if (!value || typeof value !== "object" || Array.isArray(value)) {
     throw new Error("Agent did not produce a valid agent.json");
   }
-  const testManifest = value.testManifest;
-  const testManifestIssues = testManifestValidationIssues(testManifest, requirementCatalog);
-  if (testManifestIssues.length > 0) {
-    throw Object.assign(
-      new Error(`Agent testManifest is invalid: ${testManifestIssues.join("; ")}`),
-      { code: "TEST_MANIFEST_INVALID" },
-    );
-  }
+  if (Object.hasOwn(value, "testManifest")) throw new Error("Agent must leave E2E test-plan generation to the E2E node");
   const assetManifest = value.assetManifest;
   if (!assetManifest || typeof assetManifest !== "object" || Array.isArray(assetManifest)
     || assetManifest.schemaVersion !== "deviludo.asset-manifest.v1"
@@ -392,7 +301,7 @@ function validPlannedAsset(item) {
 
 const SOURCE_IMAGE_EXTENSIONS = /\.(?:png|jpe?g|webp|svg)$/i;
 const SOURCE_IMAGE_IGNORED_DIRECTORIES = new Set([
-  ".git", ".godot", ".deviludo-export", ".deviludo-e2e", ".deviludo-e2e-package",
+  ".git", ".godot", ".deviludo-export", ".deviludo-e2e",
   "node_modules", "build", "dist", "coverage",
 ]);
 
@@ -503,607 +412,6 @@ function inferSourceAssetType(sourcePath) {
   if (/(^|[\/_-])(ui|hud|button|panel|menu)([\/_-]|\.)/.test(path)) return "ui";
   if (/(^|[\/_-])(animation|anim|sheet)([\/_-]|\.)/.test(path)) return "animation";
   return "sprite";
-}
-
-function specificationRequirementCatalog(specification) {
-  const catalog = [];
-  for (const [kind, value] of [["feature", specification.coreLoop], ["acceptance", specification.acceptanceCriteria]]) {
-    if (!Array.isArray(value)) continue;
-    value.forEach((item, index) => {
-      if (typeof item !== "string" || !item.trim()) return;
-      catalog.push({
-        requirementId: stableRequirementId(kind, index, item),
-        description: item.trim(),
-        source: kind === "feature" ? "CORE_LOOP" : "ACCEPTANCE",
-        verificationClass: "PLAYER_INTERACTION",
-      });
-    });
-  }
-  return catalog;
-}
-
-function stableRequirementId(kind, index, text) {
-  let hash = 0x811c9dc5;
-  for (const character of `${kind}\0${index}\0${text.normalize("NFKC").trim()}`) {
-    hash ^= character.codePointAt(0) ?? 0;
-    hash = Math.imul(hash, 0x01000193) >>> 0;
-  }
-  return `req-${kind}-${String(index + 1).padStart(3, "0")}-${hash.toString(16).padStart(8, "0")}`;
-}
-
-function validTestManifest(value, expectedRequirements = null) {
-  if (!value || typeof value !== "object" || Array.isArray(value)
-    || value.schema !== "deviludo.test-manifest" || Object.hasOwn(value, "schemaVersion")
-    || Object.hasOwn(value, "version") || Object.hasOwn(value, "suite") || Object.hasOwn(value, "gdsTestPath")
-    || !Array.isArray(value.requirements) || value.requirements.length < 1 || value.requirements.length > 500
-    || !Array.isArray(value.features) || value.features.length < 1 || value.features.length > 500) return false;
-  if (!Array.isArray(value.inputProfiles) || value.inputProfiles.length < 1 || value.inputProfiles.length > 2
-    || value.inputProfiles.some(profile => !["KEYBOARD_MOUSE", "GAMEPAD"].includes(profile))
-    || new Set(value.inputProfiles).size !== value.inputProfiles.length
-    || !value.inputProfiles.includes(value.primaryInputProfile)) return false;
-  const requirementIds = new Set();
-  const playerRequirementIds = new Set();
-  const coreRequirementIds = new Set();
-  for (const requirement of value.requirements) {
-    if (!requirement || typeof requirement !== "object" || Array.isArray(requirement)
-      || typeof requirement.requirementId !== "string" || !stableId(requirement.requirementId)
-      || requirementIds.has(requirement.requirementId)
-      || typeof requirement.description !== "string" || requirement.description.trim().length < 1 || requirement.description.length > 2000
-      || !["CORE_LOOP", "ACCEPTANCE"].includes(requirement.source)
-      || !["PLAYER_INTERACTION", "SYSTEM"].includes(requirement.verificationClass)) return false;
-    if (requirement.source === "CORE_LOOP" && requirement.verificationClass !== "PLAYER_INTERACTION") return false;
-    if (requirement.verificationClass === "SYSTEM") {
-      if (requirement.source !== "ACCEPTANCE"
-        || !["DATA", "RUNTIME", "NETWORK"].includes(requirement.systemCategory)
-        || typeof requirement.exemptionReason !== "string" || requirement.exemptionReason.trim().length < 10
-        || requirement.exemptionReason.length > 1000) return false;
-    } else if (requirement.systemCategory !== undefined || requirement.exemptionReason !== undefined) return false;
-    requirementIds.add(requirement.requirementId);
-    if (requirement.verificationClass === "PLAYER_INTERACTION") playerRequirementIds.add(requirement.requirementId);
-    if (requirement.source === "CORE_LOOP") coreRequirementIds.add(requirement.requirementId);
-  }
-  const adaptive = value.adaptivePlayer;
-  if (!adaptive || typeof adaptive !== "object" || Array.isArray(adaptive)
-    || typeof adaptive.goal !== "string" || adaptive.goal.trim().length < 10 || adaptive.goal.length > 4000
-    || !Array.isArray(adaptive.requirementIds) || adaptive.requirementIds.length < 1
-    || adaptive.requirementIds.some(id => !playerRequirementIds.has(id))
-    || [...coreRequirementIds].some(id => !adaptive.requirementIds.includes(id))
-    || !Array.isArray(adaptive.allowedActions) || adaptive.allowedActions.length < 1
-    || adaptive.allowedActions.some(item => !["KEYBOARD", "POINTER", "GAMEPAD"].includes(item))
-    || !Array.isArray(adaptive.successAssertions) || adaptive.successAssertions.length < 1 || !adaptive.successAssertions.every(validProbeAssertion)
-    || !adaptive.successAssertions.some(assertion => assertion && assertion.source === "PROGRESS"
-      && ["CHANGED", "NOT_EQUALS", "GREATER_THAN", "GREATER_THAN_OR_EQUALS"].includes(assertion.operator))
-    || !Array.isArray(adaptive.failureAssertions) || adaptive.failureAssertions.length < 1 || !adaptive.failureAssertions.every(validProbeAssertion)
-    || !Number.isInteger(adaptive.rolloutTimeoutMs) || adaptive.rolloutTimeoutMs < 240000 || adaptive.rolloutTimeoutMs > 300000
-    || !Number.isInteger(adaptive.maxDecisions) || adaptive.maxDecisions < 8 || adaptive.maxDecisions > 40
-    || adaptive.seedStrategy !== "STABLE_PROJECT_PLATFORM"
-    || adaptive.allowedActions.includes("GAMEPAD") !== value.inputProfiles.includes("GAMEPAD")
-    || (adaptive.allowedActions.includes("KEYBOARD") || adaptive.allowedActions.includes("POINTER")) !== value.inputProfiles.includes("KEYBOARD_MOUSE")) return false;
-  if (expectedRequirements) {
-    if (value.requirements.length !== expectedRequirements.length) return false;
-    const actual = new Map(value.requirements.map(item => [item.requirementId, item]));
-    if (expectedRequirements.some(item => {
-      const received = actual.get(item.requirementId);
-      return !received || received.description !== item.description || received.source !== item.source
-        || (item.source === "CORE_LOOP" && received.verificationClass !== "PLAYER_INTERACTION");
-    })) return false;
-  }
-  const featureIds = new Set();
-  const checkNames = new Set();
-  const automatedCoverage = new Set();
-  let journeys = 0;
-  let checkpoints = 0;
-  let coreJourney = false;
-  const interactiveCoverage = new Set();
-  const exercisedInputProfiles = new Set();
-  for (const feature of value.features) {
-    if (!feature || typeof feature !== "object" || Array.isArray(feature)
-      || typeof feature.id !== "string" || !stableId(feature.id) || featureIds.has(feature.id)
-      || !["core-loop", "player-control", "data-integrity", "runtime-quality", "ui", "audio", "network"].includes(feature.category)
-      || typeof feature.description !== "string" || feature.description.trim().length < 1 || feature.description.length > 2000
-      || !["unit", "interactive", "visual", "manual"].includes(feature.verificationMethod)
-      || !Array.isArray(feature.requirementIds) || feature.requirementIds.length < 1
-      || feature.requirementIds.some(id => typeof id !== "string" || !requirementIds.has(id))) return false;
-    featureIds.add(feature.id);
-    if (feature.verificationMethod !== "manual") for (const id of feature.requirementIds) automatedCoverage.add(id);
-    if (feature.verificationMethod === "unit") {
-      if (typeof feature.gdsTestPath !== "string"
-        || !/^res:\/\/[A-Za-z0-9][A-Za-z0-9._/-]{0,219}\.gd$/.test(feature.gdsTestPath)
-        || /(^|\/)\.{1,2}(\/|$)|\/\//.test(feature.gdsTestPath.slice(6))
-        || !Array.isArray(feature.checkNames) || feature.checkNames.length < 1
-        || !Number.isInteger(feature.timeoutMs) || feature.timeoutMs < 1 || feature.timeoutMs > 300000
-        || feature.checkNames.some(name => typeof name !== "string" || !stableId(name) || checkNames.has(name))) return false;
-      for (const name of feature.checkNames) checkNames.add(name);
-    } else if (feature.verificationMethod === "interactive") {
-      if (!validInteractionScript(feature.interactionScript)
-        || !Number.isInteger(feature.timeoutMs) || feature.timeoutMs < 1 || feature.timeoutMs > 300000
-        || !validLaunchProfile(feature.launchProfile)) return false;
-      journeys += 1;
-      const checkpointEvents = feature.interactionScript.events.filter(event => event.type === "checkpoint");
-      if (feature.launchProfile.type === "SCENARIO"
-        && !checkpointEvents.some(event => event.visualMode === "STABLE_REPLAY")) return false;
-      checkpoints += checkpointEvents.length;
-      const actionEvents = feature.interactionScript.events.filter(event => isInteractionActionType(event.type));
-      for (const event of actionEvents) exercisedInputProfiles.add(event.type.startsWith("gamepad_") ? "GAMEPAD" : "KEYBOARD_MOUSE");
-      for (const action of actionEvents) {
-        for (const requirementId of action.coversRequirementIds) {
-          if (!feature.requirementIds.includes(requirementId) || !playerRequirementIds.has(requirementId)) return false;
-          interactiveCoverage.add(requirementId);
-        }
-      }
-      if (feature.coreJourney === true && feature.category === "core-loop") {
-        const roles = new Set(checkpointEvents.map(event => event.role));
-        const intents = new Set(actionEvents.map(event => event.intent));
-        const assertionsComplete = checkpointEvents.every(event => event.assertions.length > 0
-          && (event.referenceImage || event.expectedOutput === undefined || event.expectedOutput === checkpointOutputMarker(event.id)));
-        if (feature.launchProfile.type === "FRESH"
-          && ["START", "READY", "PROGRESS", "COMPLETION"].every(role => roles.has(role))
-          && checkpointEvents.some(event => event.visualMode === "STABLE_REPLAY")
-          && assertionsComplete && intents.has("PRIMARY_ACTION") && intents.has("COMPLETE_LOOP")
-          && actionEvents.length >= 2 && validCoreJourneyLifecycle(feature.interactionScript.events)) coreJourney = true;
-      }
-    } else if (feature.verificationMethod === "visual") {
-      if (!validVisualSpec(feature.expectedVisual)) return false;
-      checkpoints += 1;
-    }
-  }
-  return journeys >= 1 && journeys <= 32 && checkpoints >= 3 && checkpoints <= 64 && coreJourney
-    && value.inputProfiles.every(profile => exercisedInputProfiles.has(profile))
-    && [...requirementIds].every(id => automatedCoverage.has(id))
-    && [...playerRequirementIds].every(id => interactiveCoverage.has(id));
-}
-
-function testManifestValidationIssues(value, expectedRequirements = null) {
-  if (validTestManifest(value, expectedRequirements)) return [];
-  const issues = [];
-  const add = issue => {
-    if (issues.length < 24 && !issues.includes(issue)) issues.push(issue);
-  };
-  if (!value || typeof value !== "object" || Array.isArray(value)) {
-    return ["testManifest must be an object"];
-  }
-  if (value.schema !== "deviludo.test-manifest") add('schema must equal "deviludo.test-manifest"');
-  for (const field of ["schemaVersion", "version", "suite", "gdsTestPath"]) {
-    if (Object.hasOwn(value, field)) add(`${field} is not part of the current testManifest contract and must be removed`);
-  }
-  if (!Array.isArray(value.inputProfiles) || value.inputProfiles.length < 1
-    || value.inputProfiles.length > 2
-    || value.inputProfiles.some(profile => !["KEYBOARD_MOUSE", "GAMEPAD"].includes(profile))
-    || new Set(value.inputProfiles).size !== value.inputProfiles.length) {
-    add("inputProfiles must contain one or both unique current input profiles: KEYBOARD_MOUSE, GAMEPAD");
-  } else if (!value.inputProfiles.includes(value.primaryInputProfile)) {
-    add("primaryInputProfile must be present in inputProfiles");
-  }
-
-  const requirements = Array.isArray(value.requirements) ? value.requirements : [];
-  if (requirements.length < 1 || requirements.length > 500) add("requirements must contain 1-500 entries");
-  const requirementIds = new Set();
-  const playerRequirementIds = new Set();
-  const coreRequirementIds = new Set();
-  const invalidRequirementFields = [];
-  for (let index = 0; index < requirements.length; index += 1) {
-    const requirement = requirements[index];
-    const path = `requirements[${index}]`;
-    if (!requirement || typeof requirement !== "object" || Array.isArray(requirement)) {
-      invalidRequirementFields.push(`${path} must be an object`);
-      continue;
-    }
-    if (typeof requirement.requirementId !== "string" || !stableId(requirement.requirementId)) {
-      invalidRequirementFields.push(`${path}.requirementId must be a stable kebab-case id`);
-      continue;
-    }
-    if (requirementIds.has(requirement.requirementId)) invalidRequirementFields.push(`${path}.requirementId is duplicated`);
-    requirementIds.add(requirement.requirementId);
-    if (typeof requirement.description !== "string" || requirement.description.trim().length < 1 || requirement.description.length > 2000) {
-      invalidRequirementFields.push(`${path}.description must contain 1-2000 characters`);
-    }
-    if (!["CORE_LOOP", "ACCEPTANCE"].includes(requirement.source)) {
-      invalidRequirementFields.push(`${path}.source must be CORE_LOOP or ACCEPTANCE`);
-    }
-    if (!["PLAYER_INTERACTION", "SYSTEM"].includes(requirement.verificationClass)) {
-      invalidRequirementFields.push(`${path}.verificationClass must be PLAYER_INTERACTION or SYSTEM`);
-    }
-    if (requirement.source === "CORE_LOOP" && requirement.verificationClass !== "PLAYER_INTERACTION") {
-      invalidRequirementFields.push(`${path} CORE_LOOP must use PLAYER_INTERACTION`);
-    }
-    if (requirement.verificationClass === "SYSTEM") {
-      if (requirement.source !== "ACCEPTANCE" || !["DATA", "RUNTIME", "NETWORK"].includes(requirement.systemCategory)
-        || typeof requirement.exemptionReason !== "string" || requirement.exemptionReason.trim().length < 10
-        || requirement.exemptionReason.length > 1000) {
-        invalidRequirementFields.push(`${path} SYSTEM requires an ACCEPTANCE source, DATA/RUNTIME/NETWORK systemCategory, and a concrete exemptionReason`);
-      }
-    } else if (requirement.systemCategory !== undefined || requirement.exemptionReason !== undefined) {
-      invalidRequirementFields.push(`${path} PLAYER_INTERACTION must not contain SYSTEM exemption fields`);
-    }
-    if (requirement.verificationClass === "PLAYER_INTERACTION") playerRequirementIds.add(requirement.requirementId);
-    if (requirement.source === "CORE_LOOP") coreRequirementIds.add(requirement.requirementId);
-  }
-  if (invalidRequirementFields.length > 0) {
-    add(`${invalidRequirementFields.length} requirement field error(s): ${invalidRequirementFields.slice(0, 6).join(", ")}`);
-  }
-  if (expectedRequirements) {
-    const actual = new Map(requirements
-      .filter(item => item && typeof item === "object" && typeof item.requirementId === "string")
-      .map(item => [item.requirementId, item]));
-    const mismatches = expectedRequirements.filter(expected => {
-      const received = actual.get(expected.requirementId);
-      return !received || received.description !== expected.description || received.source !== expected.source
-        || (expected.source === "CORE_LOOP" && received.verificationClass !== "PLAYER_INTERACTION");
-    });
-    if (requirements.length !== expectedRequirements.length || mismatches.length > 0) {
-      add(`requirements must match the frozen catalog exactly; mismatched IDs: ${mismatches.slice(0, 8).map(item => item.requirementId).join(", ") || "count mismatch"}`);
-    }
-  }
-
-  const adaptive = value.adaptivePlayer;
-  if (!adaptive || typeof adaptive !== "object" || Array.isArray(adaptive)) {
-    add("adaptivePlayer must be an object");
-  } else {
-    const adaptiveRequirementIds = Array.isArray(adaptive.requirementIds) ? adaptive.requirementIds : [];
-    const adaptiveSuccessAssertions = Array.isArray(adaptive.successAssertions) ? adaptive.successAssertions : [];
-    if (typeof adaptive.goal !== "string" || adaptive.goal.trim().length < 10 || adaptive.goal.length > 4000) add("adaptivePlayer.goal must contain 10-4000 characters");
-    if (adaptiveRequirementIds.length < 1
-      || adaptiveRequirementIds.some(id => !playerRequirementIds.has(id))) add("adaptivePlayer.requirementIds may contain only PLAYER_INTERACTION requirement IDs");
-    if ([...coreRequirementIds].some(id => !adaptiveRequirementIds.includes(id))) add("adaptivePlayer.requirementIds must include every CORE_LOOP requirement");
-    if (!Array.isArray(adaptive.allowedActions) || adaptive.allowedActions.length < 1
-      || adaptive.allowedActions.some(action => !["KEYBOARD", "POINTER", "GAMEPAD"].includes(action))) add("adaptivePlayer.allowedActions contains an unsupported action group");
-    if (adaptiveSuccessAssertions.length < 1
-      || !adaptiveSuccessAssertions.every(validProbeAssertion)) add("adaptivePlayer.successAssertions must contain valid current Probe assertions");
-    if (!Array.isArray(adaptive.failureAssertions) || adaptive.failureAssertions.length < 1
-      || !adaptive.failureAssertions.every(validProbeAssertion)) add("adaptivePlayer.failureAssertions must contain valid current Probe assertions");
-    if (!adaptiveSuccessAssertions.some(assertion => assertion?.source === "PROGRESS"
-      && ["CHANGED", "NOT_EQUALS", "GREATER_THAN", "GREATER_THAN_OR_EQUALS"].includes(assertion.operator))) add("adaptivePlayer.successAssertions must prove a real PROGRESS boundary");
-    if (!Number.isInteger(adaptive.rolloutTimeoutMs) || adaptive.rolloutTimeoutMs < 240000 || adaptive.rolloutTimeoutMs > 300000) add("adaptivePlayer.rolloutTimeoutMs must be 240000-300000");
-    if (!Number.isInteger(adaptive.maxDecisions) || adaptive.maxDecisions < 8 || adaptive.maxDecisions > 40) add("adaptivePlayer.maxDecisions must be 8-40");
-    if (adaptive.seedStrategy !== "STABLE_PROJECT_PLATFORM") add("adaptivePlayer.seedStrategy must be STABLE_PROJECT_PLATFORM");
-  }
-
-  const features = Array.isArray(value.features) ? value.features : [];
-  if (features.length < 1 || features.length > 500) add("features must contain 1-500 entries");
-  const automatedCoverage = new Set();
-  const interactiveCoverage = new Set();
-  const exercisedInputProfiles = new Set();
-  let journeys = 0;
-  let checkpoints = 0;
-  let coreJourney = false;
-  const featureIds = new Set();
-  const checkNames = new Set();
-  for (let index = 0; index < features.length; index += 1) {
-    const feature = features[index];
-    const path = `features[${index}]`;
-    if (!feature || typeof feature !== "object" || Array.isArray(feature)) {
-      add(`${path} must be an object`);
-      continue;
-    }
-    if (!stableId(feature.id) || featureIds.has(feature.id)) add(`${path}.id must be a unique stable kebab-case id`);
-    else featureIds.add(feature.id);
-    if (!["core-loop", "player-control", "data-integrity", "runtime-quality", "ui", "audio", "network"].includes(feature.category)) add(`${path}.category is not supported`);
-    if (typeof feature.description !== "string" || feature.description.trim().length < 1 || feature.description.length > 2000) add(`${path}.description must contain 1-2000 characters`);
-    if (!["unit", "interactive", "visual", "manual"].includes(feature.verificationMethod)) add(`${path}.verificationMethod is not supported`);
-    if (!Array.isArray(feature.requirementIds) || feature.requirementIds.length < 1
-      || feature.requirementIds.some(id => !requirementIds.has(id))) add(`${path}.requirementIds must reference declared requirements`);
-    else if (feature.verificationMethod !== "manual") for (const id of feature.requirementIds) automatedCoverage.add(id);
-    if (feature.verificationMethod === "unit") {
-      if (typeof feature.gdsTestPath !== "string" || !/^res:\/\/[A-Za-z0-9][A-Za-z0-9._/-]{0,219}\.gd$/.test(feature.gdsTestPath)) add(`${path}.gdsTestPath is invalid`);
-      if (!Array.isArray(feature.checkNames) || feature.checkNames.length < 1) add(`${path}.checkNames must not be empty`);
-      else for (const name of feature.checkNames) {
-        if (!stableId(name) || checkNames.has(name)) add(`${path}.checkNames contains an invalid or duplicate name: ${String(name)}`);
-        else checkNames.add(name);
-      }
-      if (!Number.isInteger(feature.timeoutMs) || feature.timeoutMs < 1 || feature.timeoutMs > 300000) add(`${path}.timeoutMs must be 1-300000`);
-    } else if (feature.verificationMethod === "interactive") {
-      journeys += 1;
-      const scriptIssues = interactionScriptValidationIssues(feature.interactionScript, `${path}.interactionScript`);
-      for (const issue of scriptIssues) add(issue);
-      if (!Number.isInteger(feature.timeoutMs) || feature.timeoutMs < 1 || feature.timeoutMs > 300000) add(`${path}.timeoutMs must be 1-300000`);
-      if (!validLaunchProfile(feature.launchProfile)) add(`${path}.launchProfile is invalid`);
-      if (!feature.interactionScript || !Array.isArray(feature.interactionScript.events)) continue;
-      const checkpointEvents = feature.interactionScript.events.filter(event => event?.type === "checkpoint");
-      const actionEvents = feature.interactionScript.events.filter(event => isInteractionActionType(event?.type));
-      const featureRequirementIds = Array.isArray(feature.requirementIds) ? feature.requirementIds : [];
-      checkpoints += checkpointEvents.length;
-      for (const event of actionEvents) {
-        exercisedInputProfiles.add(event.type.startsWith("gamepad_") ? "GAMEPAD" : "KEYBOARD_MOUSE");
-        if (!Array.isArray(event.coversRequirementIds)) continue;
-        for (const requirementId of event.coversRequirementIds) {
-          if (featureRequirementIds.includes(requirementId) && playerRequirementIds.has(requirementId)) interactiveCoverage.add(requirementId);
-        }
-      }
-      if (feature.coreJourney === true && feature.category === "core-loop") {
-        const roles = new Set(checkpointEvents.map(event => event.role));
-        const intents = new Set(actionEvents.map(event => event.intent));
-        if (feature.launchProfile?.type === "FRESH"
-          && ["START", "READY", "PROGRESS", "COMPLETION"].every(role => roles.has(role))
-          && checkpointEvents.some(event => event.visualMode === "STABLE_REPLAY")
-          && checkpointEvents.every(event => Array.isArray(event.assertions) && event.assertions.length > 0)
-          && intents.has("PRIMARY_ACTION") && intents.has("COMPLETE_LOOP") && actionEvents.length >= 2
-          && validCoreJourneyLifecycle(feature.interactionScript.events)) coreJourney = true;
-      }
-    } else if (feature.verificationMethod === "visual") {
-      checkpoints += 1;
-      if (!validVisualSpec(feature.expectedVisual)) add(`${path}.expectedVisual is invalid`);
-    }
-  }
-  if (journeys < 1 || journeys > 32) add("the manifest must contain 1-32 interactive journeys");
-  if (checkpoints < 3 || checkpoints > 64) add("the manifest must contain 3-64 screenshot checkpoints");
-  if (!coreJourney) add("a FRESH core-loop journey must prove the ordered MENU -> START_SESSION -> PLAYING -> PRIMARY_ACTION -> PROGRESS -> COMPLETE_LOOP -> COMPLETION lifecycle");
-  const missingAutomated = [...requirementIds].filter(id => !automatedCoverage.has(id));
-  if (missingAutomated.length > 0) add(`requirements missing automated feature coverage: ${missingAutomated.slice(0, 10).join(", ")}`);
-  const missingInteractive = [...playerRequirementIds].filter(id => !interactiveCoverage.has(id));
-  if (missingInteractive.length > 0) add(`PLAYER_INTERACTION requirements missing real-input coverage: ${missingInteractive.slice(0, 10).join(", ")}`);
-  const missingProfiles = Array.isArray(value.inputProfiles) ? value.inputProfiles.filter(profile => !exercisedInputProfiles.has(profile)) : [];
-  if (missingProfiles.length > 0) add(`declared input profiles missing deterministic real-input coverage: ${missingProfiles.join(", ")}`);
-  if (issues.length === 0) add("testManifest violates the current contract; regenerate it from the frozen catalog instead of preserving an older shape");
-  return issues;
-}
-
-function interactionScriptValidationIssues(value, path) {
-  if (validInteractionScript(value)) return [];
-  const issues = [];
-  if (!value || typeof value !== "object" || Array.isArray(value)) return [`${path} must be an object`];
-  if (Object.hasOwn(value, "version") || Object.hasOwn(value, "schemaVersion")) issues.push(`${path} must not contain a version field`);
-  if (!Array.isArray(value.events) || value.events.length < 1 || value.events.length > 200) return [...issues, `${path}.events must contain 1-200 events`];
-  const checkpointIds = new Set();
-  const stepIds = new Set();
-  value.events.forEach((event, index) => {
-    if (issues.length >= 8) return;
-    const eventPath = `${path}.events[${index}]`;
-    if (!event || typeof event !== "object" || Array.isArray(event)) {
-      issues.push(`${eventPath} must be an object`);
-      return;
-    }
-    if (event.delay_ms === undefined ? event.type === "wait" : !Number.isInteger(event.delay_ms) || event.delay_ms < 0 || event.delay_ms > 300000) issues.push(`${eventPath}.delay_ms is invalid`);
-    if (isInteractionActionType(event.type)) {
-      if (!stableId(event.stepId) || stepIds.has(event.stepId)) issues.push(`${eventPath}.stepId must be unique kebab-case`);
-      else stepIds.add(event.stepId);
-      if (!["START_SESSION", "NAVIGATION", "PRIMARY_ACTION", "FEATURE_ACTION", "COMPLETE_LOOP"].includes(event.intent)) issues.push(`${eventPath}.intent is invalid`);
-      if (!Array.isArray(event.coversRequirementIds) || event.coversRequirementIds.length > 500
-        || event.coversRequirementIds.some(id => typeof id !== "string" || !stableId(id))
-        || new Set(event.coversRequirementIds).size !== event.coversRequirementIds.length) {
-        issues.push(`${eventPath}.coversRequirementIds must contain unique stable requirement IDs`);
-      }
-      if (!Array.isArray(event.postconditions) || event.postconditions.length < 1 || event.postconditions.length > 32) {
-        issues.push(`${eventPath}.postconditions must contain 1-32 current Probe assertions`);
-      } else {
-        event.postconditions.forEach((assertion, assertionIndex) => {
-          const assertionIssue = probeAssertionValidationIssue(assertion);
-          if (assertionIssue) issues.push(`${eventPath}.postconditions[${assertionIndex}] ${assertionIssue}`);
-        });
-      }
-      if (event.type === "key_tap" && !validKeyboardKey(event.key)) issues.push(`${eventPath}.key is invalid`);
-      if (event.type === "key_hold" && (!validKeyboardKey(event.key) || !validDuration(event.duration_ms))) issues.push(`${eventPath} requires a valid key and duration_ms`);
-      if (["click", "double_click"].includes(event.type)
-        && (!stableId(event.targetId) || (event.button !== undefined && !["LEFT", "RIGHT", "MIDDLE"].includes(event.button)))) {
-        issues.push(`${eventPath} requires a semantic targetId and an optional LEFT/RIGHT/MIDDLE button`);
-      }
-      if (event.type === "drag" && (!stableId(event.fromTargetId) || !stableId(event.toTargetId)
-        || !validDuration(event.duration_ms) || (event.button !== undefined && event.button !== "LEFT"))) {
-        issues.push(`${eventPath} requires semantic fromTargetId/toTargetId and duration_ms`);
-      }
-      if (event.type === "scroll" && (!stableId(event.targetId) || !Number.isInteger(event.deltaY)
-        || event.deltaY === 0 || Math.abs(event.deltaY) > 10000)) issues.push(`${eventPath} requires targetId and non-zero deltaY within 10000`);
-      if (event.type === "text_input" && (!stableId(event.targetId) || typeof event.text !== "string"
-        || event.text.length < 1 || event.text.length > 1000)) issues.push(`${eventPath} requires targetId and 1-1000 text characters`);
-      if (["gamepad_button_tap", "gamepad_button_hold"].includes(event.type)
-        && (!["A", "B", "X", "Y", "BACK", "GUIDE", "START", "LEFT_STICK", "RIGHT_STICK", "LEFT_SHOULDER", "RIGHT_SHOULDER", "DPAD_UP", "DPAD_DOWN", "DPAD_LEFT", "DPAD_RIGHT"].includes(event.button)
-          || (event.type === "gamepad_button_hold" && !validDuration(event.duration_ms)))) issues.push(`${eventPath}.button or duration_ms is invalid`);
-      if (event.type === "gamepad_axis" && (!["LEFT_X", "LEFT_Y", "RIGHT_X", "RIGHT_Y"].includes(event.axis)
-        || typeof event.value !== "number" || event.value < -1 || event.value > 1
-        || (event.duration_ms !== undefined && !validDuration(event.duration_ms)))) issues.push(`${eventPath}.axis, value, or duration_ms is invalid`);
-      if (event.type === "gamepad_trigger" && (!["LEFT", "RIGHT"].includes(event.trigger)
-        || typeof event.value !== "number" || event.value < 0 || event.value > 1
-        || (event.duration_ms !== undefined && !validDuration(event.duration_ms)))) issues.push(`${eventPath}.trigger, value, or duration_ms is invalid`);
-      return;
-    }
-    if (event.type === "wait") return;
-    if (event.type !== "checkpoint") {
-      issues.push(`${eventPath}.type is not a current interaction event`);
-      return;
-    }
-    if (!stableId(event.id) || checkpointIds.has(event.id)) issues.push(`${eventPath}.id must be unique kebab-case`);
-    else checkpointIds.add(event.id);
-    if (!["START", "READY", "ACTION", "PROGRESS", "COMPLETION"].includes(event.role)) issues.push(`${eventPath}.role is invalid`);
-    if (!Array.isArray(event.assertions) || event.assertions.length < 1 || event.assertions.length > 32) {
-      issues.push(`${eventPath}.assertions must contain 1-32 current Probe assertions`);
-    } else {
-      event.assertions.forEach((assertion, assertionIndex) => {
-        const assertionIssue = probeAssertionValidationIssue(assertion);
-        if (assertionIssue) issues.push(`${eventPath}.assertions[${assertionIndex}] ${assertionIssue}`);
-      });
-    }
-    if (!["DYNAMIC", "STABLE_REPLAY"].includes(event.visualMode)) issues.push(`${eventPath}.visualMode is invalid`);
-    if (event.visualMode === "DYNAMIC" && ["ACTION", "PROGRESS", "COMPLETION"].includes(event.role) && !stableId(event.changeTargetId)) issues.push(`${eventPath}.changeTargetId is required for a dynamic state-changing checkpoint`);
-    if (event.changeTargetId !== undefined && !stableId(event.changeTargetId)) issues.push(`${eventPath}.changeTargetId is invalid`);
-    if (event.referenceImage !== undefined && !safeProjectPngPath(event.referenceImage)) issues.push(`${eventPath}.referenceImage is invalid`);
-    if (event.expectedOutput !== undefined && event.expectedOutput !== checkpointOutputMarker(event.id)) {
-      issues.push(`${eventPath}.expectedOutput must equal ${checkpointOutputMarker(event.id)}`);
-    }
-    if (event.threshold !== undefined && (typeof event.threshold !== "number" || !Number.isFinite(event.threshold)
-      || event.threshold < 0 || event.threshold > 1)) issues.push(`${eventPath}.threshold must be between 0 and 1`);
-  });
-  return issues.length > 0 ? issues : [`${path} violates the current interaction contract`];
-}
-
-function validInteractionScript(value) {
-  if (!value || typeof value !== "object" || Array.isArray(value) || Object.hasOwn(value, "version")
-    || !Array.isArray(value.events) || value.events.length < 1 || value.events.length > 200) return false;
-  const checkpointIds = new Set();
-  const stepIds = new Set();
-  return value.events.every(event => {
-    if (!event || typeof event !== "object" || Array.isArray(event) || typeof event.type !== "string") return false;
-    const delayRequired = event.type === "wait";
-    if (event.delay_ms === undefined ? delayRequired : !Number.isInteger(event.delay_ms) || event.delay_ms < 0 || event.delay_ms > 300000) return false;
-    if (isInteractionActionType(event.type)) {
-      if (!stableId(event.stepId) || stepIds.has(event.stepId)
-        || !["START_SESSION", "NAVIGATION", "PRIMARY_ACTION", "FEATURE_ACTION", "COMPLETE_LOOP"].includes(event.intent)
-        || !Array.isArray(event.coversRequirementIds) || event.coversRequirementIds.length > 500
-        || event.coversRequirementIds.some(id => typeof id !== "string" || !stableId(id))
-        || new Set(event.coversRequirementIds).size !== event.coversRequirementIds.length
-        || !Array.isArray(event.postconditions) || event.postconditions.length < 1 || event.postconditions.length > 32
-        || !event.postconditions.every(validProbeAssertion)) return false;
-      stepIds.add(event.stepId);
-      if (event.type === "key_tap") return validKeyboardKey(event.key);
-      if (event.type === "key_hold") return validKeyboardKey(event.key) && validDuration(event.duration_ms);
-      if (["click", "double_click"].includes(event.type)) return stableId(event.targetId)
-        && (event.button === undefined || ["LEFT", "RIGHT", "MIDDLE"].includes(event.button));
-      if (event.type === "drag") return stableId(event.fromTargetId) && stableId(event.toTargetId)
-        && validDuration(event.duration_ms) && (event.button === undefined || event.button === "LEFT");
-      if (event.type === "scroll") return stableId(event.targetId) && Number.isInteger(event.deltaY)
-        && event.deltaY !== 0 && Math.abs(event.deltaY) <= 10000;
-      if (event.type === "text_input") return stableId(event.targetId) && typeof event.text === "string" && event.text.length >= 1 && event.text.length <= 1000;
-      if (["gamepad_button_tap", "gamepad_button_hold"].includes(event.type)) return ["A", "B", "X", "Y", "BACK", "GUIDE", "START", "LEFT_STICK", "RIGHT_STICK", "LEFT_SHOULDER", "RIGHT_SHOULDER", "DPAD_UP", "DPAD_DOWN", "DPAD_LEFT", "DPAD_RIGHT"].includes(event.button)
-        && (event.type !== "gamepad_button_hold" || validDuration(event.duration_ms));
-      if (event.type === "gamepad_axis") return ["LEFT_X", "LEFT_Y", "RIGHT_X", "RIGHT_Y"].includes(event.axis)
-        && typeof event.value === "number" && event.value >= -1 && event.value <= 1
-        && (event.duration_ms === undefined || validDuration(event.duration_ms));
-      if (event.type === "gamepad_trigger") return ["LEFT", "RIGHT"].includes(event.trigger)
-        && typeof event.value === "number" && event.value >= 0 && event.value <= 1
-        && (event.duration_ms === undefined || validDuration(event.duration_ms));
-      return event.type === "gamepad_release_all";
-    }
-    if (event.type === "wait") return true;
-    if (event.type !== "checkpoint" || typeof event.id !== "string" || !stableId(event.id)
-      || checkpointIds.has(event.id) || !["START", "READY", "ACTION", "PROGRESS", "COMPLETION"].includes(event.role)
-      || !Array.isArray(event.assertions) || event.assertions.length < 1 || event.assertions.length > 32
-      || !event.assertions.every(validProbeAssertion)
-      || !["DYNAMIC", "STABLE_REPLAY"].includes(event.visualMode)
-      || (event.changeTargetId !== undefined && !stableId(event.changeTargetId))
-      || (event.visualMode === "DYNAMIC" && ["ACTION", "PROGRESS", "COMPLETION"].includes(event.role)
-        && !stableId(event.changeTargetId))
-      || (event.referenceImage !== undefined && !safeProjectPngPath(event.referenceImage))
-      || (event.expectedOutput !== undefined && event.expectedOutput !== checkpointOutputMarker(event.id))
-      || (event.threshold !== undefined && (typeof event.threshold !== "number" || !Number.isFinite(event.threshold) || event.threshold < 0 || event.threshold > 1))) return false;
-    checkpointIds.add(event.id);
-    return true;
-  });
-}
-
-function isInteractionActionType(value) {
-  return ["key_tap", "key_hold", "click", "double_click", "drag", "scroll", "text_input", "gamepad_button_tap", "gamepad_button_hold", "gamepad_axis", "gamepad_trigger", "gamepad_release_all"].includes(value);
-}
-
-// Keep validation data behind hoisted function declarations. This executable
-// starts work through top-level await before the declarations below are
-// evaluated, so a later top-level `const` can still be uninitialized
-// zone when a fast or checkpoint-restored Agent reaches manifest validation.
-function requiredCoreStartAssertions() {
-  return [
-    { source: "STATE", key: "screen_mode", operator: "EQUALS", value: "MENU" },
-    { source: "STATE", key: "session_active", operator: "EQUALS", value: false },
-    { source: "STATE", key: "gameplay_input_enabled", operator: "EQUALS", value: false },
-    { source: "STATE", key: "blocking_layer_count", operator: "EQUALS", value: 0 },
-  ];
-}
-
-function requiredCoreReadyAssertions() {
-  return [
-    { source: "STATE", key: "screen_mode", operator: "EQUALS", value: "PLAYING" },
-    { source: "STATE", key: "session_active", operator: "EQUALS", value: true },
-    { source: "STATE", key: "gameplay_input_enabled", operator: "EQUALS", value: true },
-    { source: "STATE", key: "blocking_layer_count", operator: "EQUALS", value: 0 },
-  ];
-}
-
-function validCoreJourneyLifecycle(events) {
-  const meaningful = events.filter(event => event?.type !== "wait");
-  const indexes = role => meaningful.map((event, index) => event?.type === "checkpoint" && event.role === role ? index : -1).filter(index => index >= 0);
-  const starts = indexes("START"), ready = indexes("READY"), progress = indexes("PROGRESS"), completion = indexes("COMPLETION");
-  if (starts.length !== 1 || ready.length !== 1 || progress.length !== 1 || completion.length !== 1 || starts[0] !== 0) return false;
-  if (meaningful[starts[0]].visualMode !== "STABLE_REPLAY" || meaningful[ready[0]].visualMode !== "STABLE_REPLAY"
-    || !containsAssertions(meaningful[starts[0]].assertions, requiredCoreStartAssertions())
-    || !containsAssertions(meaningful[ready[0]].assertions, requiredCoreReadyAssertions())) return false;
-  const actions = meaningful.map((event, index) => isInteractionActionType(event?.type) ? { event, index } : null).filter(Boolean);
-  const startActions = actions.filter(entry => entry.event.intent === "START_SESSION");
-  const primaryActions = actions.filter(entry => entry.event.intent === "PRIMARY_ACTION");
-  const completeActions = actions.filter(entry => entry.event.intent === "COMPLETE_LOOP");
-  if (startActions.length !== 1 || primaryActions.length < 1 || completeActions.length < 1) return false;
-  const startAction = startActions[0], primary = primaryActions[0], complete = completeActions.at(-1);
-  if (!(starts[0] < startAction.index && startAction.index < ready[0]
-    && ready[0] < primary.index && primary.index < progress[0]
-    && progress[0] < complete.index && complete.index < completion[0])) return false;
-  if (actions.some(entry => entry.index < startAction.index && entry.event.intent !== "NAVIGATION")) return false;
-  if (actions.some(entry => entry.index > startAction.index && entry.index < ready[0])) return false;
-  return containsAssertions(startAction.event.postconditions, requiredCoreReadyAssertions());
-}
-
-function containsAssertions(actual, required) {
-  return Array.isArray(actual) && required.every(expected => actual.some(candidate => candidate?.source === expected.source
-    && candidate.key === expected.key && candidate.targetId === expected.targetId
-    && candidate.property === expected.property && candidate.operator === expected.operator
-    && candidate.value === expected.value));
-}
-
-function validProbeAssertion(value) {
-  if (!value || typeof value !== "object" || Array.isArray(value)
-    || !["STATE", "PROGRESS", "CONTROL", "SCENE"].includes(value.source)
-    || !["EQUALS", "NOT_EQUALS", "GREATER_THAN", "GREATER_THAN_OR_EQUALS", "LESS_THAN", "LESS_THAN_OR_EQUALS", "CONTAINS", "EXISTS", "CHANGED"].includes(value.operator)) return false;
-  if (["STATE", "PROGRESS"].includes(value.source)) {
-    if (typeof value.key !== "string" || !/^[A-Za-z0-9][A-Za-z0-9_.-]{0,199}$/.test(value.key)
-      || value.targetId !== undefined || value.property !== undefined) return false;
-  } else if (value.source === "CONTROL") {
-    if (!stableId(value.targetId) || !["visible", "enabled", "text", "value"].includes(value.property)
-      || value.key !== undefined) return false;
-  } else if (value.key !== undefined || value.targetId !== undefined || value.property !== undefined) return false;
-  const needsValue = !["EXISTS", "CHANGED"].includes(value.operator);
-  if (needsValue !== Object.hasOwn(value, "value")) return false;
-  return value.value === undefined || ["string", "number", "boolean"].includes(typeof value.value);
-}
-
-function probeAssertionValidationIssue(value) {
-  if (!value || typeof value !== "object" || Array.isArray(value)) return "must be an object";
-  if (!["STATE", "PROGRESS", "CONTROL", "SCENE"].includes(value.source)) return "has an invalid source";
-  if (!["EQUALS", "NOT_EQUALS", "GREATER_THAN", "GREATER_THAN_OR_EQUALS", "LESS_THAN", "LESS_THAN_OR_EQUALS", "CONTAINS", "EXISTS", "CHANGED"].includes(value.operator)) {
-    return "has an invalid operator";
-  }
-  if (["STATE", "PROGRESS"].includes(value.source)) {
-    if (typeof value.key !== "string" || !/^[A-Za-z0-9][A-Za-z0-9_.-]{0,199}$/.test(value.key)
-      || value.targetId !== undefined || value.property !== undefined) return "must use key and omit targetId/property";
-  } else if (value.source === "CONTROL") {
-    if (!stableId(value.targetId) || !["visible", "enabled", "text", "value"].includes(value.property)
-      || value.key !== undefined) return "must use targetId plus visible/enabled/text/value property and omit key";
-  } else if (value.key !== undefined || value.targetId !== undefined || value.property !== undefined) {
-    return "must omit key, targetId, and property";
-  }
-  const needsValue = !["EXISTS", "CHANGED"].includes(value.operator);
-  if (needsValue && !Object.hasOwn(value, "value")) return `${value.operator} requires value`;
-  if (!needsValue && Object.hasOwn(value, "value")) return `${value.operator} must not contain value`;
-  if (value.value !== undefined && !["string", "number", "boolean"].includes(typeof value.value)) return "value must be a string, number, or boolean";
-  return null;
-}
-
-function validLaunchProfile(value) {
-  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
-  if (value.type === "FRESH") return Object.keys(value).length === 1;
-  return value.type === "SCENARIO" && stableId(value.scenarioId);
-}
-
-function validKeyboardKey(value) {
-  return typeof value === "string" && /^(?:KEY_)?(?:[A-Z0-9]|SPACE|ENTER|TAB|ESCAPE|LEFT|RIGHT|UP|DOWN|MINUS|EQUAL)$/.test(value);
-}
-
-function validDuration(value) {
-  return Number.isInteger(value) && value >= 1 && value <= 300000;
-}
-
-function checkpointOutputMarker(checkpointId) {
-  return `DEVILUDO_E2E_CHECKPOINT:${checkpointId}`;
-}
-
-function validVisualSpec(value) {
-  return value && typeof value === "object" && !Array.isArray(value) && !Object.hasOwn(value, "version")
-    && safeProjectPngPath(value.referenceImage)
-    && (value.threshold === undefined || (typeof value.threshold === "number" && Number.isFinite(value.threshold) && value.threshold >= 0 && value.threshold <= 1))
-    && (value.captureDelay === undefined || (Number.isInteger(value.captureDelay) && value.captureDelay >= 0 && value.captureDelay <= 300000));
-}
-
-function stableId(value) {
-  return /^[a-z0-9][a-z0-9-]{0,119}$/.test(value);
-}
-
-function safeProjectPngPath(value) {
-  return typeof value === "string" && value.length >= 5 && value.length <= 240
-    && value.toLowerCase().endsWith(".png") && !value.startsWith("/") && !value.startsWith("res://")
-    && !/(^|\/)\.{1,2}(\/|$)|\/\//.test(value) && /^[A-Za-z0-9][A-Za-z0-9._/-]*\.png$/i.test(value);
 }
 
 async function extractE2eRepairEvidence(path) {
@@ -1276,21 +584,10 @@ async function runGenerationAgent(configuration, environment, prompt, onOutput, 
           "The project worktree was restored automatically to the exact snapshot taken before that model call. Do not guess at or manually revert earlier files.",
           "Resume the same session, inspect the restored files, implement only the current guidance, and run one bounded validation pass.",
         ].join("\n");
-      } else if (failure.code === "TEST_MANIFEST_INVALID") {
-        resumeInstruction = [
-          "Your previous run produced source code but agent.json does not satisfy the one current deviludo.test-manifest contract.",
-          "Rewrite only /workspace/project/agent.json and any directly required Probe/test wiring. Do not preserve old fields, old event names, old checkpoint roles, or old contract shapes. Do not weaken coverage.",
-          "Use the frozen requirement catalog from the original prompt. Every requirement needs source and verificationClass. PLAYER_INTERACTION requirements need real actions and postconditions; legitimate DATA/RUNTIME/NETWORK acceptance requirements may use SYSTEM with systemCategory and a concrete exemptionReason.",
-          "For Probe assertions: STATE and PROGRESS use key; CONTROL uses targetId plus property and no key; SCENE uses neither key nor targetId/property.",
-          "EXISTS and CHANGED assertions never contain value; every other Probe operator requires a scalar value.",
-          "For checkpoints, expectedOutput is optional; when present it must equal DEVILUDO_E2E_CHECKPOINT:<the same checkpoint id>. There are no marker aliases.",
-          `Current validator errors: ${failure.detail}`,
-          "Run one bounded JSON/static check and finish immediately.",
-        ].join("\n");
       } else if (failure.code === "INCOMPLETE_OUTPUT") {
         resumeInstruction = "Resume from the current session and files now. Your previous response stopped before changing any source files. Make the smallest concrete source change required by the latest player guidance or reported E2E failure. For normal development, update only the directly affected automated tests and manifest mapping; for an E2E repair, preserve valid tests and manifests unless the report proves they are wrong. Run one bounded validation pass, then finish. Do not repeat the project audit or merely describe the next step.";
       }
-      const delaySeconds = ["TEST_MANIFEST_INVALID", "GUIDANCE_PENDING"].includes(failure.code)
+      const delaySeconds = failure.code === "GUIDANCE_PENDING"
         ? 0
         : agentRetryDelaySeconds(failure, attempt);
       if (Date.now() + delaySeconds * 1_000 >= deadline) {
@@ -1299,8 +596,6 @@ async function runGenerationAgent(configuration, environment, prompt, onOutput, 
       const nextAttempt = attempt + 1;
       emitProgress("PHASE", failure.code === "GUIDANCE_PENDING"
         ? "执行期间收到新的实时指导；旧范围结果已拒绝，正在同一会话按最新范围继续"
-        : failure.code === "TEST_MANIFEST_INVALID"
-        ? `Agent 输出未通过完成门禁：${failure.detail}；正在同一会话定向修正（${nextAttempt}/${maxAttemptsForFailure}）`
         : `Agent CLI 暂时中断 [${failure.code}]：${failure.detail}；${delaySeconds} 秒后恢复同一会话（${nextAttempt}/${maxAttemptsForFailure}）`);
       if (delaySeconds > 0) await new Promise(resolve => setTimeout(resolve, delaySeconds * 1000));
     }
@@ -1329,7 +624,6 @@ function classifyAgentFailure(error) {
   const message = error instanceof Error ? error.message : String(error);
   const detail = sanitizeError(message.replace(/^claude exited [^:]+:\s*/i, "").replace(/^codex exited [^:]+:\s*/i, ""));
   if (error?.code === "GUIDANCE_PENDING") return { code: "GUIDANCE_PENDING", detail, recoverable: true };
-  if (error?.code === "TEST_MANIFEST_INVALID") return { code: "TEST_MANIFEST_INVALID", detail, recoverable: true };
   // Codex refreshes its account model catalogue independently from the
   // Responses request. A CDN/proxy can reject that refresh while the official
   // login and inference route remain valid; treating this diagnostic as a
@@ -1533,7 +827,6 @@ async function runGodotBuild(plan) {
   emitProgress("PHASE", "正在展开并校验 Agent 生成的 Godot 项目");
   await command("tar", ["-xzf", input, "-C", "/workspace/project"], safeEnvironment());
   await materializeBuildAssets(plan);
-  const packagedE2e = await preparePackagedE2eContract();
   const platforms = await prepareGodotProject("/workspace/project", plan.job.payload.targetPlatforms);
   await mkdir("/workspace/.local/share/godot", { recursive: true });
   await symlink("/home/task/.local/share/godot/export_templates", "/workspace/.local/share/godot/export_templates");
@@ -1547,7 +840,6 @@ async function runGodotBuild(plan) {
     await mkdir(exportDirectory, { recursive: true });
     emitProgress("PHASE", `正在导出 ${target.name} 制品`);
     await godotCommand(["--headless", "--path", "/workspace/project", "--export-release", target.name, `${exportDirectory}/${target.filename}`]);
-    await copyPackagedE2eContract(packagedE2e, exportDirectory);
     const archive = `godot-build-${platform}.tar.gz`;
     await command("tar", ["-czf", `/workspace/outputs/${archive}`, "-C", exportDirectory, "."], safeEnvironment());
     outputs.push({ file: archive, kind: "BUILD", targetPlatform: platform, contentType: "application/gzip" });
@@ -1561,56 +853,6 @@ async function godotCommand(arguments_) {
   const errors = godotErrorLines(result.stdout, result.stderr);
   if (errors.length > 0) throw new Error(`Godot reported script errors despite exit code 0: ${errors.join(" | ")}`);
   return result;
-}
-
-async function preparePackagedE2eContract() {
-  const { inspectScreenshot } = await import("/usr/local/lib/deviludo/e2e-evidence.mjs");
-  let agentManifest;
-  try { agentManifest = JSON.parse(await readFile("/workspace/project/agent.json", "utf8")); }
-  catch { throw new Error("Build source is missing a valid agent.json test contract"); }
-  if (!validTestManifest(agentManifest?.testManifest)) throw new Error("Build source has an invalid deviludo.test-manifest contract");
-  const root = "/workspace/project/.deviludo-e2e-package";
-  await rm(root, { recursive: true, force: true });
-  await mkdir(root, { recursive: true });
-  await writeFile(`${root}/manifest.json`, `${JSON.stringify(agentManifest.testManifest, null, 2)}\n`, "utf8");
-  const referenceImages = [];
-  for (const feature of agentManifest.testManifest.features) {
-    if (feature.verificationMethod === "visual") referenceImages.push(feature.expectedVisual.referenceImage);
-    if (feature.verificationMethod === "interactive") {
-      for (const event of feature.interactionScript.events) if (event.type === "checkpoint" && event.referenceImage) referenceImages.push(event.referenceImage);
-    }
-  }
-  for (const relativePath of new Set(referenceImages)) {
-    if (!safeProjectPngPath(relativePath)) throw new Error(`E2E visual baseline path is unsafe: ${relativePath}`);
-    const source = resolve("/workspace/project", relativePath);
-    if (!source.startsWith("/workspace/project/")) throw new Error("E2E visual baseline escaped the project root");
-    const info = await lstat(source).catch(() => null);
-    if (!info?.isFile() || info.isSymbolicLink() || info.size < 1 || info.size > 64 * 1024 * 1024) {
-      throw new Error(`E2E visual baseline is missing or invalid: ${relativePath}`);
-    }
-    await inspectScreenshot(source).catch(error => {
-      throw new Error(`E2E visual baseline is not a valid 1280x720 game frame (${relativePath}): ${error instanceof Error ? error.message : String(error)}`);
-    });
-    const target = resolve(root, relativePath);
-    if (!target.startsWith(`${root}/`)) throw new Error("E2E baseline package path escaped its root");
-    await mkdir(dirname(target), { recursive: true });
-    await copyFile(source, target);
-  }
-  return root;
-}
-
-async function copyPackagedE2eContract(source, exportDirectory) {
-  const target = `${exportDirectory}/.deviludo-e2e`;
-  await mkdir(target, { recursive: true });
-  for (const entry of await readdir(source, { recursive: true, withFileTypes: true })) {
-    const path = resolve(entry.parentPath, entry.name);
-    const relativePath = path.slice(source.length + 1);
-    const destination = resolve(target, relativePath);
-    if (!destination.startsWith(`${target}/`) && destination !== target) throw new Error("E2E package escaped its controlled directory");
-    if (entry.isDirectory()) await mkdir(destination, { recursive: true });
-    else if (entry.isFile()) { await mkdir(dirname(destination), { recursive: true }); await copyFile(path, destination); }
-    else throw new Error("E2E package contains an unsupported file type");
-  }
 }
 
 async function materializeBuildAssets(plan) {

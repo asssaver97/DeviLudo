@@ -21,6 +21,12 @@ const initial = await parentLines.next();
 const envelope = initial.done ? null : JSON.parse(initial.value);
 const request = envelope?.type === "execute" ? envelope.request : null;
 if (!/^[0-9a-f-]{36}$/i.test(request.jobId) || !Array.isArray(request.inputs)) throw new Error("E2E request is invalid");
+if (!request.testPlan || typeof request.testPlan !== "object" || Array.isArray(request.testPlan)
+  || !request.testPlan.testManifest || typeof request.testPlan.testManifest !== "object"
+  || !/^sha256:[0-9a-f]{64}$/.test(String(request.testPlan.testManifestDigest ?? ""))
+  || !/^sha256:[0-9a-f]{64}$/.test(String(request.testPlan.contractDigest ?? ""))) {
+  throw new Error("Cross-platform E2E test plan is invalid");
+}
 const workspace = await mkdtemp(join(process.env.DEVILUDO_E2E_JOB_ROOT ?? tmpdir(), `deviludo-${request.jobId}-`));
 let evidenceOutputReady = false;
 try {
@@ -31,6 +37,8 @@ try {
   const content = Buffer.from(await response.arrayBuffer());
   if (`sha256:${createHash("sha256").update(content).digest("hex")}` !== input.object.sha256) throw new Error("Downloaded artifact digest mismatch");
   await writeFile(artifact, content, { mode: 0o600 });
+  const testPlan = join(workspace, "test-plan.json");
+  await writeFile(testPlan, `${JSON.stringify(request.testPlan)}\n`, { mode: 0o600 });
   const regressionInput = selectInput(request.inputs, "E2E_REGRESSION", false);
   const regressionArtifact = regressionInput ? join(workspace, "current-e2e-regression.json") : "";
   if (regressionInput) await downloadInput(regressionInput, regressionArtifact);
@@ -39,13 +47,14 @@ try {
   const evidenceOutput = join(workspace, `e2e-evidence-${request.operatingSystem}-${request.jobId}.zip`);
   const regressionOutput = join(workspace, `e2e-regression-${request.operatingSystem}-${request.jobId}.json`);
   const receipt = await runFramed(guestRunner, [action, "--job-id", request.jobId, "--artifact", artifact,
+    "--test-plan", testPlan,
     ...(regressionArtifact ? ["--regression", regressionArtifact] : [])], parentLines, {
     DEVILUDO_E2E_HOST_OUTPUT: evidenceOutput,
     DEVILUDO_E2E_HOST_REGRESSION_OUTPUT: regressionOutput,
     DEVILUDO_E2E_STREAM_PROTOCOL: "1",
     DEVILUDO_E2E_PROJECT_ID: request.projectId,
     DEVILUDO_E2E_FROZEN_TIMEOUT_SECONDS: String(request.timeoutSeconds),
-    DEVILUDO_E2E_CONTRACT_DIGEST: String(request.payload?.e2eContractDigest ?? ""),
+    DEVILUDO_E2E_CONTRACT_DIGEST: String(request.testPlan.contractDigest),
   }, request.timeoutSeconds);
   const outcome = normalizeGuestOutcome(receipt);
   const evidence = await readFile(evidenceOutput);

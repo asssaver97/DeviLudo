@@ -14,7 +14,7 @@ import type { CodexPromptInput } from "@/services/core/src/codex-cli";
 
 test("E2E node preserves the complete player-policy provider budget", async () => {
   const source = await readFile(new URL("../services/e2e-node/src/core-client.ts", import.meta.url), "utf8");
-  assert.match(source, /path\.includes\("\/player-policy"\) \? 480_000 : 10_000/);
+  assert.match(source, /path\.includes\("\/player-policy"\) \|\| path\.includes\("\/test-plan"\) \? 480_000 : 10_000/);
 });
 
 test("Core reuses a successful visual capability check for the same settings revision", async () => {

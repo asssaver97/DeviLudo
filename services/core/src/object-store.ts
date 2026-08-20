@@ -13,7 +13,6 @@ import type { ArtifactRecord } from "@/lib/product/contracts";
 import { createHash } from "node:crypto";
 import { parseProjectDocumentContent, projectDocumentMarkdown } from "@/lib/product/project-document";
 import { parseResponseLanguage } from "@/lib/product/response-language";
-import { specificationRequirementCatalog, validateTestManifest } from "@/lib/product/test-manifest";
 
 export class CoreObjectStore {
   private readonly client: S3Client;
@@ -207,29 +206,12 @@ export class CoreObjectStore {
    */
   async readAgentCompletion(
     objects: readonly JobProtocolV4["inputObjects"][number][],
-    approvedInputs: readonly JobProtocolV4["inputObjects"][number][],
-  ): Promise<Readonly<{ assetManifest: unknown; testManifest: unknown }>> {
+  ): Promise<Readonly<{ assetManifest: unknown }>> {
     const parsed = await this.readJsonOutput(objects, "SPECIFICATION", 2 * 1024 * 1024, "Agent manifest");
-    if (!("assetManifest" in parsed) || !validateTestManifest(parsed.testManifest)) {
-      throw new Error("Agent output does not contain valid test and asset manifests");
+    if (!("assetManifest" in parsed) || Object.hasOwn(parsed, "testManifest")) {
+      throw new Error("Agent output must contain an asset manifest and leave test planning to E2E");
     }
-    await this.assertAgentTestManifest(parsed.testManifest, approvedInputs);
-    return Object.freeze({ assetManifest: parsed.assetManifest, testManifest: parsed.testManifest });
-  }
-
-  async assertAgentTestManifest(
-    testManifest: unknown,
-    approvedInputs: readonly JobProtocolV4["inputObjects"][number][],
-  ): Promise<void> {
-    if (!validateTestManifest(testManifest)) throw new Error("Agent test manifest is invalid");
-    const approved = approvedInputs.filter(object => object.kind === "SPECIFICATION" && object.key.endsWith("/specification.json"));
-    const specification = await this.readJsonOutput(approved, "SPECIFICATION", 2 * 1024 * 1024, "Approved specification");
-    const expectedRequirements = specificationRequirementCatalog(specification);
-    const actualRequirements = new Map(testManifest.requirements.map(requirement => [requirement.requirementId, requirement.description]));
-    if (expectedRequirements.length < 1 || actualRequirements.size !== expectedRequirements.length
-      || expectedRequirements.some(requirement => actualRequirements.get(requirement.requirementId) !== requirement.description)) {
-      throw new Error("Agent test manifest does not cover the frozen approved requirements");
-    }
+    return Object.freeze({ assetManifest: parsed.assetManifest });
   }
 
   private async readJsonOutput(

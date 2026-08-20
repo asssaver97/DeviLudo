@@ -544,6 +544,83 @@ export class CoreRepository {
     });
   }
 
+  async readE2ePlanningContext(input: Readonly<{
+    workspaceId: string;
+    workflowId: string;
+    projectId: string;
+    platform: ServerOperatingSystem;
+  }>): Promise<Readonly<Record<string, unknown>>> {
+    return this.database.withWorkspace(input.workspaceId, async client => {
+      const workflow = await client.query<{
+        name: string;
+        iteration_number: number;
+        state_data: Record<string, unknown>;
+        previous_state_data: Record<string, unknown> | null;
+      }>(
+        `SELECT project.name, workflow.iteration_number, workflow.state_data,
+                parent.state_data AS previous_state_data
+           FROM deviludo.workflow_instances workflow
+           JOIN deviludo.projects project
+             ON project.workspace_id = workflow.workspace_id AND project.id = workflow.project_id
+           LEFT JOIN deviludo.workflow_instances parent
+             ON parent.workspace_id = workflow.workspace_id AND parent.id = workflow.parent_workflow_id
+          WHERE workflow.workspace_id = $1::uuid AND workflow.id = $2::uuid
+            AND workflow.project_id = $3::uuid`,
+        [input.workspaceId, input.workflowId, input.projectId],
+      );
+      const row = workflow.rows[0];
+      if (!row) throw new Error("E2E planning workflow is unavailable");
+      const assets = await client.query<{
+        asset_key: string; asset_type: string; description: string; status: string;
+        source_path: string | null; object_key: string | null;
+      }>(
+        `SELECT item.asset_key, item.asset_type, item.description, item.status::text,
+                item.source_path, item.object_key
+           FROM deviludo.asset_manifests manifest
+           JOIN deviludo.asset_items item
+             ON item.workspace_id = manifest.workspace_id AND item.manifest_id = manifest.id
+          WHERE manifest.workspace_id = $1::uuid AND manifest.project_id = $2::uuid
+            AND manifest.workflow_id = $3::uuid
+          ORDER BY item.asset_key`,
+        [input.workspaceId, input.projectId, input.workflowId],
+      );
+      const regression = await client.query<{
+        input_profile: string; estimated_duration_ms: number; source_digest: string;
+      }>(
+        `SELECT input_profile, estimated_duration_ms, source_digest
+           FROM deviludo.e2e_regression_traces
+          WHERE workspace_id = $1::uuid AND project_id = $2::uuid
+            AND target_platform = $3::deviludo.server_os`,
+        [input.workspaceId, input.projectId, input.platform],
+      );
+      const state = row.state_data ?? {};
+      const previous = row.previous_state_data ?? {};
+      return Object.freeze({
+        projectName: row.name,
+        iterationNumber: row.iteration_number,
+        platform: input.platform,
+        concept: state.concept ?? "",
+        approvedSpecification: state.specification ?? {},
+        previousSpecification: previous.specification ?? null,
+        revisionNotes: (state.specification as Record<string, unknown> | undefined)?.revisionNotes ?? [],
+        regression: regression.rows[0] ? Object.freeze({
+          available: true,
+          inputProfile: regression.rows[0].input_profile,
+          estimatedDurationMs: regression.rows[0].estimated_duration_ms,
+          sourceDigest: regression.rows[0].source_digest,
+        }) : Object.freeze({ available: false }),
+        assets: Object.freeze(assets.rows.map(asset => Object.freeze({
+          assetKey: asset.asset_key,
+          assetType: asset.asset_type,
+          description: asset.description,
+          status: asset.status,
+          sourcePath: asset.source_path,
+          materialized: asset.object_key !== null || asset.source_path !== null,
+        }))),
+      });
+    });
+  }
+
   async readE2ePlayerDecision(input: Readonly<{
     workspaceId: string;
     jobId: string;
@@ -2725,6 +2802,25 @@ export class CoreRepository {
           $1::uuid, $2::text, $3::text, $4::jsonb
         ) AS accepted`,
         [workflowId, signal.kind, signal.idempotencyKey, JSON.stringify(signal.payload)],
+      );
+      return result.rows[0]?.accepted === true;
+    });
+  }
+
+  async rerunStage(
+    workspaceId: string,
+    workflowId: string,
+    signal: WorkflowSignalInput & Readonly<{ kind: "STAGE_RERUN_REQUESTED" }>,
+  ): Promise<boolean> {
+    return this.database.withWorkspace(workspaceId, async client => {
+      const workflow = await client.query<{ project_id: string }>(
+        "SELECT project_id::text FROM deviludo.workflow_instances WHERE id = $1::uuid",
+        [workflowId],
+      );
+      if (workflow.rows[0]) await touchProjectActivity(client, workspaceId, workflow.rows[0].project_id);
+      const result = await client.query<{ accepted: boolean }>(
+        `SELECT deviludo.request_stage_rerun($1::uuid, $2::text, $3::jsonb) AS accepted`,
+        [workflowId, signal.idempotencyKey, JSON.stringify(signal.payload)],
       );
       return result.rows[0]?.accepted === true;
     });

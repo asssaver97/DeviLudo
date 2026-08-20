@@ -77,7 +77,7 @@ CREATE TABLE deviludo.schema_metadata (
   applied_at timestamptz NOT NULL DEFAULT clock_timestamp()
 );
 INSERT INTO deviludo.schema_metadata(singleton, baseline, compatibility, current_version)
-VALUES (true, '001', 'deviludo-self-hosted-v1', '049_e2e_report_retention_before_insert');
+VALUES (true, '001', 'deviludo-self-hosted-v1', '051_e2e_node_test_planning');
 
 -- Every post-baseline change is immutable and checksummed. Fresh databases are
 -- created from this full snapshot and then stamp the migrations incorporated by
@@ -297,10 +297,6 @@ CREATE TABLE deviludo.project_source_revisions (
   content_digest text NOT NULL CHECK (content_digest ~ '^sha256:[0-9a-f]{64}$'),
   file_count integer NOT NULL CHECK (file_count BETWEEN 1 AND 20000),
   total_bytes bigint NOT NULL CHECK (total_bytes BETWEEN 1 AND 1073741824),
-  test_manifest_schema text CHECK (test_manifest_schema = 'deviludo.test-manifest'),
-  test_manifest_digest text CHECK (test_manifest_digest ~ '^sha256:[0-9a-f]{64}$'),
-  e2e_timeout_seconds integer CHECK (e2e_timeout_seconds BETWEEN 1800 AND 5400),
-  e2e_contract_digest text CHECK (e2e_contract_digest ~ '^sha256:[0-9a-f]{64}$'),
   workflow_id uuid,
   job_id uuid,
   actor_id uuid NOT NULL,
@@ -1167,9 +1163,7 @@ BEGIN
       || CASE WHEN v_source.revision IS NULL THEN '{}'::jsonb ELSE jsonb_build_object(
         'sourceRevision', v_source.revision,
         'sourceRelativePath', v_source.relative_path,
-        'sourceDigest', v_source.content_digest,
-        'testManifestDigest', v_source.test_manifest_digest,
-        'e2eContractDigest', v_source.e2e_contract_digest
+        'sourceDigest', v_source.content_digest
       ) END;
   END IF;
   INSERT INTO deviludo.jobs (
@@ -1181,7 +1175,7 @@ BEGIN
     CASE WHEN v_pool = 'CORE' THEN NULL ELSE p_operating_system END,
     deviludo.required_capabilities(p_kind), v_pool <> 'CORE', v_runtime_image,
     CASE WHEN p_kind = 'AGENT_GENERATION' THEN 5400
-         WHEN p_kind = 'E2E_TEST' THEN v_source.e2e_timeout_seconds
+         WHEN p_kind = 'E2E_TEST' THEN 5400
          ELSE 1800 END,
     3,
     jsonb_build_object(
@@ -1236,10 +1230,7 @@ BEGIN
          )) OR (artifact.kind = 'E2E_REGRESSION' AND artifact.target_platform = p_operating_system
            AND artifact.id = (SELECT trace.artifact_id FROM deviludo.e2e_regression_traces trace
              WHERE trace.workspace_id = p_workspace_id AND trace.project_id = p_project_id
-               AND trace.target_platform = p_operating_system
-               AND trace.source_digest = v_source.content_digest
-               AND trace.test_manifest_digest = v_source.test_manifest_digest
-               AND trace.contract_digest = v_source.e2e_contract_digest))
+               AND trace.target_platform = p_operating_system))
        WHEN 'ARTIFACT_SIGN' THEN artifact.kind = 'BUILD' AND artifact.target_platform = p_operating_system
          AND artifact.producing_job_id = (
            SELECT build_job.id FROM deviludo.jobs build_job
@@ -2201,7 +2192,7 @@ BEGIN
     -- A rerun is only meaningful from a terminal workflow. While work is still
     -- in flight, superseding jobs would race the executors currently holding
     -- their leases, so require an explicit cancel first.
-    IF workflow.state NOT IN ('FAILED', 'SUCCEEDED', 'CANCELLED') THEN
+    IF workflow.state NOT IN ('RELEASE_DECISION_PENDING', 'FAILED', 'SUCCEEDED', 'CANCELLED') THEN
       RAISE EXCEPTION 'Stage rerun requires a terminal workflow; cancel the running delivery first';
     END IF;
     BEGIN
@@ -2480,6 +2471,23 @@ AS $$
   )
 $$;
 
+-- Stage reruns use one explicit entry point so an idle release-decision state
+-- is treated like the other quiescent workflow states.
+CREATE OR REPLACE FUNCTION deviludo.request_stage_rerun(
+  p_workflow_id uuid,
+  p_idempotency_key text,
+  p_payload jsonb
+)
+RETURNS boolean
+LANGUAGE sql
+SECURITY INVOKER
+SET search_path = pg_catalog, deviludo
+AS $$
+  SELECT deviludo.accept_workflow_signal(
+    p_workflow_id, 'STAGE_RERUN_REQUESTED', p_idempotency_key, p_payload
+  )
+$$;
+
 CREATE OR REPLACE FUNCTION deviludo.complete_workflow_iteration(
   p_workflow_id uuid,
   p_idempotency_key text,
@@ -2605,25 +2613,15 @@ BEGIN
       OR coalesce(p_receipt #>> '{sourceRevision,digest}', '') !~ '^sha256:[0-9a-f]{64}$'
       OR (p_receipt #>> '{sourceRevision,fileCount}')::integer NOT BETWEEN 1 AND 20000
       OR (p_receipt #>> '{sourceRevision,totalBytes}')::bigint NOT BETWEEN 1 AND 1073741824
-      OR coalesce(p_receipt #>> '{testManifest,schema}', '') <> 'deviludo.test-manifest'
-      OR coalesce(p_receipt->>'testManifestDigest', '') !~ '^sha256:[0-9a-f]{64}$'
-      OR (p_receipt #>> '{e2eExecutionPlan,plannedTimeoutSeconds}')::integer NOT BETWEEN 1800 AND 5400
-      OR coalesce(p_receipt #>> '{e2eExecutionPlan,contractDigest}', '') !~ '^sha256:[0-9a-f]{64}$'
     THEN RAISE EXCEPTION 'validated persistent source revision is required'; END IF;
     INSERT INTO deviludo.project_source_revisions(
       workspace_id, project_id, revision, relative_path, content_digest,
-      file_count, total_bytes, test_manifest_schema, test_manifest_digest,
-      e2e_timeout_seconds, e2e_contract_digest,
-      workflow_id, job_id, actor_id, fencing_token
+      file_count, total_bytes, workflow_id, job_id, actor_id, fencing_token
     ) VALUES (
       job.workspace_id, job.project_id, (p_receipt #>> '{sourceRevision,revision}')::bigint,
       p_receipt #>> '{sourceRevision,relativePath}', p_receipt #>> '{sourceRevision,digest}',
       (p_receipt #>> '{sourceRevision,fileCount}')::integer,
       (p_receipt #>> '{sourceRevision,totalBytes}')::bigint,
-      p_receipt #>> '{testManifest,schema}',
-      p_receipt->>'testManifestDigest',
-      (p_receipt #>> '{e2eExecutionPlan,plannedTimeoutSeconds}')::integer,
-      p_receipt #>> '{e2eExecutionPlan,contractDigest}',
       job.workflow_id, job.id, workflow.development_actor_id, job.fencing_token
     ) ON CONFLICT (workspace_id, project_id, revision) DO NOTHING;
 
@@ -2785,12 +2783,12 @@ BEGIN
      FOR UPDATE;
     IF regression_artifact_id IS NULL
       OR coalesce(job.payload->>'sourceDigest', '') !~ '^sha256:[0-9a-f]{64}$'
-      OR coalesce(job.payload->>'testManifestDigest', '') !~ '^sha256:[0-9a-f]{64}$'
-      OR coalesce(job.payload->>'e2eContractDigest', '') !~ '^sha256:[0-9a-f]{64}$'
+      OR coalesce(p_receipt #>> '{execution,evidence,testManifestDigest}', '') !~ '^sha256:[0-9a-f]{64}$'
+      OR coalesce(p_receipt #>> '{execution,evidence,regressionContractDigest}', '') !~ '^sha256:[0-9a-f]{64}$'
       OR NOT EXISTS (
         SELECT 1 FROM deviludo.artifacts artifact
          WHERE artifact.workspace_id = job.workspace_id AND artifact.id = regression_artifact_id
-           AND artifact.metadata #>> '{e2eRegression,regressionContractDigest}' = job.payload->>'e2eContractDigest'
+           AND artifact.metadata #>> '{e2eRegression,regressionContractDigest}' = p_receipt #>> '{execution,evidence,regressionContractDigest}'
            AND artifact.metadata #>> '{e2eRegression,regressionInputProfile}' IN ('KEYBOARD_MOUSE', 'GAMEPAD')
            AND (artifact.metadata #>> '{e2eRegression,regressionEstimatedDurationMs}')::integer BETWEEN 1 AND 300000
       )
@@ -2800,7 +2798,9 @@ BEGIN
       test_manifest_digest, contract_digest, input_profile, estimated_duration_ms
     )
     SELECT job.workspace_id, job.project_id, job.target_operating_system, regression_artifact_id,
-           job.payload->>'sourceDigest', job.payload->>'testManifestDigest', job.payload->>'e2eContractDigest',
+           job.payload->>'sourceDigest',
+           p_receipt #>> '{execution,evidence,testManifestDigest}',
+           p_receipt #>> '{execution,evidence,regressionContractDigest}',
            artifact.metadata #>> '{e2eRegression,regressionInputProfile}',
            (artifact.metadata #>> '{e2eRegression,regressionEstimatedDurationMs}')::integer
       FROM deviludo.artifacts artifact
@@ -3336,7 +3336,8 @@ GRANT EXECUTE ON FUNCTION deviludo.accept_workflow_signal(uuid, text, text, json
   TO deviludo_claim_executor;
 GRANT EXECUTE ON FUNCTION deviludo.start_steam_release(uuid, uuid, text, jsonb),
   deviludo.complete_workflow_iteration(uuid, text, jsonb),
-  deviludo.retry_steam_release(uuid, text, jsonb)
+  deviludo.retry_steam_release(uuid, text, jsonb),
+  deviludo.request_stage_rerun(uuid, text, jsonb)
   TO deviludo_api;
 GRANT EXECUTE ON FUNCTION deviludo.complete_job(uuid, uuid, bigint, bigint, jsonb, jsonb, text, text, text)
   TO deviludo_api, deviludo_sandbox;

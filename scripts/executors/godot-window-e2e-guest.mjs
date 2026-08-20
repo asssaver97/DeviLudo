@@ -46,6 +46,8 @@ const jobArgument = process.argv.indexOf("--job-id");
 const jobId = jobArgument >= 0 ? process.argv[jobArgument + 1] : process.env.DEVILUDO_E2E_JOB_ID ?? randomUUID();
 const regressionArgument = process.argv.indexOf("--regression");
 const currentRegressionPath = regressionArgument >= 0 ? process.argv[regressionArgument + 1] : "";
+const testPlanArgument = process.argv.indexOf("--test-plan");
+const testPlanPath = testPlanArgument >= 0 ? process.argv[testPlanArgument + 1] : "";
 const platform = process.platform === "darwin" ? "macos" : process.platform === "win32" ? "windows" : "linux";
 const CHECKPOINT_OUTPUT_TIMEOUT_MS = 15_000;
 const CHECKPOINT_VISUAL_SETTLE_MS = 1_500;
@@ -64,7 +66,7 @@ streamHeartbeat?.unref?.();
 const frozenTimeoutSeconds = Number(process.env.DEVILUDO_E2E_FROZEN_TIMEOUT_SECONDS);
 const frozenContractDigest = process.env.DEVILUDO_E2E_CONTRACT_DIGEST ?? "";
 
-if (action !== "test" || !artifact || !isAbsolute(artifact)
+if (action !== "test" || !artifact || !isAbsolute(artifact) || !isAbsolute(testPlanPath)
   || !/^[0-9a-f-]{36}$/i.test(jobId)) throw new Error("Guest runner arguments are invalid");
 if (!Number.isSafeInteger(frozenTimeoutSeconds) || frozenTimeoutSeconds < 1800 || frozenTimeoutSeconds > 5400
   || !/^sha256:[0-9a-f]{64}$/.test(frozenContractDigest)) throw new Error("INFRASTRUCTURE: frozen E2E execution plan is invalid");
@@ -95,21 +97,24 @@ let gamepadInputCount = 0;
 let playerPolicy = null;
 let gameExitCode = 0;
 let activeManifest = null;
+let activePlanningCoverage = null;
 const startedAt = Date.now();
 let platformDeadline = startedAt + 90 * 60_000;
 
 try {
   await prepareInstalledArtifact();
   const gamePackage = await findGamePackage(workspace, platform);
-  const manifest = JSON.parse(await readFile(join(workspace, ".deviludo-e2e/manifest.json"), "utf8").catch(() => {
-    throw productFailure("E2E_MANIFEST_MISSING", "构建制品缺少 deviludo.test-manifest 测试清单");
+  const testPlan = JSON.parse(await readFile(testPlanPath, "utf8").catch(() => {
+    throw new Error("INFRASTRUCTURE: cross-platform E2E test plan is missing");
   }));
+  const manifest = testPlan?.testManifest;
   assertManifest(manifest);
   activeManifest = manifest;
+  activePlanningCoverage = testPlan.coverage ?? null;
   if (jsonDigest({ testManifest: manifest, runner: "adaptive-real-input" }) !== frozenContractDigest) {
     throw new Error("INFRASTRUCTURE: built test contract does not match the frozen source revision");
   }
-  const currentRegression = await readCurrentRegression(manifest);
+  const currentRegression = await readCurrentRegression();
   const executionPlan = planExecution(manifest, currentRegression?.estimatedDurationMs ?? 0);
   if (executionPlan.plannedTimeoutMs > frozenTimeoutSeconds * 1_000) {
     throw new Error("INFRASTRUCTURE: frozen E2E budget is smaller than the current execution plan");
@@ -233,22 +238,25 @@ async function runConsumerPackageSmoke(gamePackage) {
   }
 }
 
-async function readCurrentRegression(manifest) {
+async function readCurrentRegression() {
   if (!currentRegressionPath) return null;
   if (!isAbsolute(currentRegressionPath)) throw new Error("INFRASTRUCTURE: regression trace path must be absolute");
   let trace;
   try { trace = JSON.parse(await readFile(currentRegressionPath, "utf8")); }
   catch { throw new Error("INFRASTRUCTURE: current regression trace cannot be decoded"); }
-  const expectedContract = jsonDigest({ testManifest: manifest, runner: "adaptive-real-input" });
   if (!trace || typeof trace !== "object" || Array.isArray(trace)
-    || trace.schema !== "deviludo.e2e-regression" || trace.contractDigest !== expectedContract
+    || trace.schema !== "deviludo.e2e-regression"
     || !["KEYBOARD_MOUSE", "GAMEPAD"].includes(trace.inputProfile)
     || !Number.isInteger(trace.estimatedDurationMs) || trace.estimatedDurationMs < 1 || trace.estimatedDurationMs > 300_000
     || !Array.isArray(trace.actions) || trace.actions.length < 1 || trace.actions.length > 160
     || !Array.isArray(trace.successAssertions) || trace.successAssertions.length < 1) {
-    currentRegressionResult = { status: "STALE", reason: "contract digest or trace structure changed" };
+    currentRegressionResult = { status: "STALE", reason: "regression trace structure changed" };
     return null;
   }
+  // Semantic actions are intentionally replayed across source revisions and
+  // newly generated plans. A contract digest only identifies the plan that
+  // learned the trace; forcing equality here disabled real project regression
+  // exactly when a new iteration changed the game.
   return trace;
 }
 
@@ -1379,6 +1387,7 @@ async function finish(outcome, failureDomain, summary, manifest) {
   const report = {
     schema: E2E_EVIDENCE_SCHEMA, jobId, platform, action, outcome, failureDomain, summary,
     packageLaunches: launchRecords,
+    planningCoverage: activePlanningCoverage,
     coverage: {
       headlessCheckCount: headlessChecks.size,
       interactiveJourneyCount: interactiveJourneys.size,
@@ -1443,6 +1452,7 @@ async function finish(outcome, failureDomain, summary, manifest) {
       coveredPlayerRequirementCount: coveredPlayerRequirements.size,
       playerRequirementCount, screenshotCount: screenshots.length, visualBaselineCount: baselines.length,
       videoCount: videos.length, hasVisualDiff: diffs.length > 0,
+      testManifestDigest: jsonDigest(manifest),
       regressionTraceDigest: regressionBytes ? `sha256:${createHash("sha256").update(regressionBytes).digest("hex")}` : null,
       regressionContractDigest: regressionTrace?.contractDigest ?? null,
       regressionInputProfile: regressionTrace?.inputProfile ?? null,

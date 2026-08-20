@@ -422,6 +422,41 @@ async function runDatabaseSmoke(url) {
              state = 'RELEASE_DECISION_PENDING'
        WHERE workspace_id = $1::uuid AND id = $2::uuid
     `, [workspaceIds[0], workflowIds[0]]);
+    const releasePendingRerun = await withWorkspace(api, workspaceIds[0], client => client.query(`
+      SELECT deviludo.request_stage_rerun(
+        $1::uuid, $2,
+        jsonb_build_object('stage', 'ARTIFACT_BUILD', 'requestedByActorId', $3::text)
+      ) AS accepted
+    `, [workflowIds[0], `release-pending-build-rerun:${workflowIds[0]}`, actorId]));
+    if (releasePendingRerun.rows[0]?.accepted !== true) {
+      throw new Error("Build rerun was rejected while the workflow awaited a release decision");
+    }
+    const releasePendingRebuild = await owner.query(`
+      SELECT workflow.state::text,
+             count(job.id) FILTER (
+               WHERE job.kind = 'ARTIFACT_BUILD' AND job.state = 'QUEUED'
+             )::integer AS queued_builds
+        FROM deviludo.workflow_instances workflow
+        LEFT JOIN deviludo.jobs job
+          ON job.workspace_id = workflow.workspace_id AND job.workflow_id = workflow.id
+       WHERE workflow.workspace_id = $1::uuid AND workflow.id = $2::uuid
+       GROUP BY workflow.state
+    `, [workspaceIds[0], workflowIds[0]]);
+    if (releasePendingRebuild.rows[0]?.state !== "ARTIFACT_BUILDING"
+      || releasePendingRebuild.rows[0]?.queued_builds !== 1) {
+      throw new Error("Build rerun did not reopen the release-pending workflow");
+    }
+    await owner.query(`
+      UPDATE deviludo.jobs
+         SET state = 'SUCCEEDED', updated_at = clock_timestamp()
+       WHERE workspace_id = $1::uuid AND workflow_id = $2::uuid
+         AND kind = 'ARTIFACT_BUILD' AND state = 'QUEUED'
+    `, [workspaceIds[0], workflowIds[0]]);
+    await owner.query(`
+      UPDATE deviludo.workflow_instances
+         SET state = 'RELEASE_DECISION_PENDING'
+       WHERE workspace_id = $1::uuid AND id = $2::uuid
+    `, [workspaceIds[0], workflowIds[0]]);
     await owner.query(`
       INSERT INTO deviludo.artifacts(
         workspace_id, project_id, workflow_id, kind, target_platform,
@@ -493,6 +528,7 @@ async function runDatabaseSmoke(url) {
       expiredLeaseRecovered: true,
       assetReadinessGate: true,
       assetRerunContinuation: true,
+      releasePendingStageRerun: true,
       humanReleaseApproval: true,
       localGitCommitLease: true,
     }));

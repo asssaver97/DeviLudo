@@ -2,16 +2,18 @@ param(
   [Parameter(Position=0)][ValidateSet('test')][string]$Action,
   [Alias('job-id')][string]$JobId,
   [string]$Artifact,
+  [Alias('test-plan')][string]$TestPlan,
   [string]$Regression
 )
 $ErrorActionPreference='Stop'
-if($JobId -notmatch '^[0-9a-f-]{36}$' -or !(Test-Path -LiteralPath $Artifact)){throw 'Invalid guest execution request'}
+if($JobId -notmatch '^[0-9a-f-]{36}$' -or !(Test-Path -LiteralPath $Artifact) -or !(Test-Path -LiteralPath $TestPlan)){throw 'Invalid guest execution request'}
 if($Regression -and !(Test-Path -LiteralPath $Regression)){throw 'Current regression input does not exist'}
 $vm="deviludo-$JobId"
 $credentialFile=$(if($env:DEVILUDO_E2E_GUEST_CREDENTIAL_FILE){$env:DEVILUDO_E2E_GUEST_CREDENTIAL_FILE}else{'C:\ProgramData\Deviludo\guest-credential.xml'})
 if(!(Test-Path -LiteralPath $credentialFile -PathType Leaf)){throw 'PowerShell Direct guest credential is missing'}
 $credential=Import-Clixml $credentialFile
 $destination='C:\Deviludo\input\artifact'
+$testPlanDestination='C:\Deviludo\input\test-plan.json'
 $regressionDestination='C:\Deviludo\input\regression.json'
 $projectId=$(if($env:DEVILUDO_E2E_PROJECT_ID){$env:DEVILUDO_E2E_PROJECT_ID}else{$JobId})
 $frozenTimeout=$env:DEVILUDO_E2E_FROZEN_TIMEOUT_SECONDS
@@ -19,12 +21,13 @@ $contractDigest=$env:DEVILUDO_E2E_CONTRACT_DIGEST
 $session=New-PSSession -VMName $vm -Credential $credential
 try {
   Copy-Item -LiteralPath $Artifact -Destination $destination -ToSession $session -Force
+  Copy-Item -LiteralPath $TestPlan -Destination $testPlanDestination -ToSession $session -Force
   if($Regression){Copy-Item -LiteralPath $Regression -Destination $regressionDestination -ToSession $session -Force}
   Invoke-Command -Session $session -ScriptBlock {
-    param($a,$p,$j,$r,$projectId,$frozenTimeout,$contractDigest)
+    param($a,$p,$j,$testPlan,$r,$projectId,$frozenTimeout,$contractDigest)
     $psi=New-Object System.Diagnostics.ProcessStartInfo
     $psi.FileName='C:\Program Files\Deviludo\guest-runner.exe'
-    $psi.Arguments="$a $p --job-id $j --json" + $(if($r){" --regression $r"}else{''})
+    $psi.Arguments="$a $p --job-id $j --test-plan $testPlan --json" + $(if($r){" --regression $r"}else{''})
     $psi.UseShellExecute=$false
     $psi.RedirectStandardInput=$true
     $psi.RedirectStandardOutput=$true
@@ -41,7 +44,7 @@ try {
     $global:DeviludoE2EProcess=New-Object System.Diagnostics.Process
     $global:DeviludoE2EProcess.StartInfo=$psi
     if(!$global:DeviludoE2EProcess.Start()){throw 'Failed to start the guest runner'}
-  } -ArgumentList $Action,$destination,$JobId,$(if($Regression){$regressionDestination}else{''}),$projectId,$frozenTimeout,$contractDigest | Out-Null
+  } -ArgumentList $Action,$destination,$JobId,$testPlanDestination,$(if($Regression){$regressionDestination}else{''}),$projectId,$frozenTimeout,$contractDigest | Out-Null
   $receipt=$null
   while($true){
     $line=Invoke-Command -Session $session -ScriptBlock {

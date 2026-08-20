@@ -69,6 +69,19 @@ export class CoreE2eClient {
     await this.call(`/v1/e2e/jobs/${job.jobId}/player-policy/verify`, identity(job, this.config.nodeId));
   }
 
+  async generateTestPlan(job: JobProtocolV4) {
+    return this.call<Readonly<{
+      plan: Readonly<{
+        testManifest: Readonly<Record<string, unknown>>;
+        coverage: Readonly<Record<string, readonly string[]>>;
+        testManifestDigest: string;
+        contractDigest: string;
+        executionPlan: Readonly<{ plannedTimeoutMs: number }>;
+      }>;
+      policy: Readonly<{ configurationDigest: string; settingsRevision: number; model: string }>;
+    }>>(`/v1/e2e/jobs/${job.jobId}/test-plan`, identity(job, this.config.nodeId));
+  }
+
   async decidePlayerPolicy(job: JobProtocolV4, request: Readonly<Record<string, unknown>>) {
     return this.call<Readonly<{
       decision: Readonly<Record<string, unknown>>;
@@ -102,7 +115,7 @@ export class CoreE2eClient {
       // recovering transport, structured output, and lost image attachments.
       // Do not abandon the HTTP request while Core still owns its idempotency
       // lock, otherwise the guest retry queues behind work that is still alive.
-      timeout: path.includes("/player-policy") ? 480_000 : 10_000,
+      timeout: path.includes("/player-policy") || path.includes("/test-plan") ? 480_000 : 10_000,
     };
     return await new Promise<T>((resolve, reject) => {
       const requester = url.protocol === "https:" ? httpsRequest : httpRequest;

@@ -29,7 +29,7 @@ export type SourceImageFile = Readonly<{
 }>;
 
 const SOURCE_IMAGE_IGNORED_DIRECTORIES = new Set([
-  ".git", ".godot", ".deviludo-export", ".deviludo-e2e", ".deviludo-e2e-package",
+  ".git", ".godot", ".deviludo-export", ".deviludo-e2e",
   "node_modules", "build", "dist", "coverage",
 ]);
 

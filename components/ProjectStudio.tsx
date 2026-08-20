@@ -46,7 +46,8 @@ const PIPELINE = [
   ["E2E_TEST", "跨平台 E2E", "Cross-platform E2E"],
   ["STEAM_PUBLISH", "Steam 上传", "Steam Upload"],
 ] as const;
-const RERUNNABLE_WORKFLOW_STATES = new Set(["FAILED", "SUCCEEDED", "CANCELLED"]);
+const RERUNNABLE_WORKFLOW_STATES = new Set(["RELEASE_DECISION_PENDING", "FAILED", "SUCCEEDED", "CANCELLED"]);
+const ITERATION_TERMINAL_STATES = new Set(["FAILED", "SUCCEEDED", "CANCELLED"]);
 const ASSET_RERUN_WORKFLOW_STATES = new Set([
   "ASSET_GENERATING", "RELEASE_DECISION_PENDING", "FAILED", "SUCCEEDED", "CANCELLED",
 ]);
@@ -776,7 +777,7 @@ export function ProjectStudio({ projectId }: { projectId: string }) {
                 {text("取消本次交付", "CANCEL DELIVERY")}
               </button>
             ) : null}
-            {!viewingHistoricalIteration && RERUNNABLE_WORKFLOW_STATES.has(project.workflowState) ? (
+            {!viewingHistoricalIteration && ITERATION_TERMINAL_STATES.has(project.workflowState) ? (
               <button className="button button-primary" disabled={busy} onClick={() => void createNextIteration()} type="button">
                 {busy
                   ? text("正在创建新一轮…", "CREATING ITERATION…")
@@ -901,14 +902,14 @@ export function ProjectStudio({ projectId }: { projectId: string }) {
                       ))}
                     </div>
                   ) : null}
-                  {canRerunStages && inProfile && (kind !== "STEAM_PUBLISH" || project.workflowState === "FAILED") ? (
+                  {!viewingHistoricalIteration && inProfile ? (
                     <button
                       aria-label={text(
                         `从「${chineseLabel}」重新执行，之后的阶段都会重跑`,
                         `Re-run from ${englishLabel}; every later stage runs again`,
                       )}
                       className="product-delivery-stage-rerun-icon"
-                      disabled={busy}
+                      disabled={busy || !canRerunStages || (kind === "STEAM_PUBLISH" && project.workflowState !== "FAILED")}
                       onClick={() => void mutate("rerun-stage", { stage: kind })}
                       type="button"
                     >
@@ -1023,7 +1024,7 @@ export function ProjectStudio({ projectId }: { projectId: string }) {
           </section>
         ) : null}
         {assetPanelExpanded && !viewingHistoricalIteration ? (
-          <div className="product-delivery-inline-assets"><AssetManifestPanel onManifestChange={setAssetManifestView} onOpenSourceImage={openSourceImage} onRerunStarted={() => void loadProject(true)} projectId={projectId} refreshKey={assetManifestRefreshKey} /></div>
+          <div className="product-delivery-inline-assets"><AssetManifestPanel onManifestChange={setAssetManifestView} onOpenSourceImage={openSourceImage} projectId={projectId} refreshKey={assetManifestRefreshKey} /></div>
         ) : null}
       </section>
 

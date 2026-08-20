@@ -20,10 +20,11 @@ const action = process.argv[2];
 const argument = name => readCliArgument(process.argv, name);
 const jobId = argument("--job-id");
 const artifact = argument("--artifact");
+const testPlan = argument("--test-plan");
 const regression = argument("--regression");
 const hostOutput = process.env.DEVILUDO_E2E_HOST_OUTPUT ?? "";
 const hostRegressionOutput = process.env.DEVILUDO_E2E_HOST_REGRESSION_OUTPUT ?? "";
-if (!/^[0-9a-f-]{36}$/i.test(jobId) || !isAbsolute(artifact) || action !== "test") throw new Error("Local Tart guest request is invalid");
+if (!/^[0-9a-f-]{36}$/i.test(jobId) || !isAbsolute(artifact) || !isAbsolute(testPlan) || action !== "test") throw new Error("Local Tart guest request is invalid");
 const configuration = JSON.parse(await readFile(new URL("../../.deviludo/local/tart-e2e.json", import.meta.url), "utf8"));
 const vmName = `deviludo-${jobId}`;
 let ip = "";
@@ -36,6 +37,8 @@ if (!ip) throw new Error("Tart guest did not report an address");
 const ssh = ["-i", configuration.keyFile, "-o", "BatchMode=yes", "-o", "StrictHostKeyChecking=yes", "-o", "HostKeyAlias=deviludo-tart-guest", "-o", `UserKnownHostsFile=${configuration.knownHostsFile}`];
 const remoteArtifact = `/Users/Shared/deviludo-artifact-${jobId}`;
 await execute("scp", [...ssh, artifact, `${configuration.guestUser}@${ip}:${remoteArtifact}`], { timeout: 10 * 60_000, maxBuffer: 2 * 1024 * 1024 });
+const remoteTestPlan = `/Users/Shared/deviludo-test-plan-${jobId}.json`;
+await execute("scp", [...ssh, testPlan, `${configuration.guestUser}@${ip}:${remoteTestPlan}`], { timeout: 120_000, maxBuffer: 2 * 1024 * 1024 });
 const remoteRegression = regression ? `/Users/Shared/deviludo-regression-${jobId}.json` : "";
 if (regression) {
   if (!isAbsolute(regression)) throw new Error("Local regression path must be absolute");
@@ -52,7 +55,7 @@ const command = [
   `DEVILUDO_E2E_FROZEN_TIMEOUT_SECONDS=${process.env.DEVILUDO_E2E_FROZEN_TIMEOUT_SECONDS ?? ""}`,
   `DEVILUDO_E2E_CONTRACT_DIGEST=${process.env.DEVILUDO_E2E_CONTRACT_DIGEST ?? ""}`,
   "/usr/local/bin/node", "/usr/local/lib/deviludo/executors/godot-window-e2e-guest.mjs",
-  action, remoteArtifact, "--job-id", jobId, "--json",
+  action, remoteArtifact, "--job-id", jobId, "--test-plan", remoteTestPlan, "--json",
   ...(remoteRegression ? ["--regression", remoteRegression] : []),
 ];
 const killProcessGroup = process.platform !== "win32";

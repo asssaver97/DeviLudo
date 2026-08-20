@@ -8,8 +8,6 @@ import { useLanguage } from "./i18n/LanguageProvider";
 type AssetManifestPanelProps = {
   projectId: string;
   refreshKey?: number;
-  /** Lets the studio refresh the delivery view once a rerun has been accepted. */
-  onRerunStarted?: () => void;
   onManifestChange?: (payload: AssetManifestPayload) => void;
   onOpenSourceImage?: (sourcePath: string) => Promise<void>;
 };
@@ -37,7 +35,6 @@ const EMPTY_COMPLETION: AssetCompletion = Object.freeze({
 export function AssetManifestPanel({
   projectId,
   refreshKey = 0,
-  onRerunStarted,
   onManifestChange,
   onOpenSourceImage,
 }: AssetManifestPanelProps) {
@@ -47,8 +44,6 @@ export function AssetManifestPanel({
   const [autoGenerateEnabled, setAutoGenerateEnabled] = useState(false);
   const [uploading, setUploading] = useState(false);
   const [loading, setLoading] = useState(true);
-  const [rebuilding, setRebuilding] = useState(false);
-  const [rebuildError, setRebuildError] = useState<string | null>(null);
   const [uploadError, setUploadError] = useState<string | null>(null);
   const [sourceOpenError, setSourceOpenError] = useState<string | null>(null);
   const [openingSourcePath, setOpeningSourcePath] = useState<string | null>(null);
@@ -162,34 +157,6 @@ export function AssetManifestPanel({
     }
   };
 
-  // Uploaded assets only reach the game through a build, so "rebuild with
-  // assets" is an ARTIFACT_BUILD rerun: it keeps the Agent's generated source
-  // and re-runs packaging plus every stage after it.
-  const triggerRebuild = async () => {
-    setRebuildError(null);
-    setRebuilding(true);
-    try {
-      const response = await fetch(`/api/projects/${projectId}/rerun-stage`, {
-        method: "POST",
-        headers: {
-          "content-type": "application/json",
-          "idempotency-key": `stage-rerun:ARTIFACT_BUILD:${crypto.randomUUID()}`,
-        },
-        body: JSON.stringify({ stage: "ARTIFACT_BUILD" }),
-      });
-      const payload = await response.json().catch(() => null);
-      if (!response.ok) {
-        setRebuildError(errorText(payload?.message, "重新构建启动失败，请稍后再试", "Unable to start the rebuild. Try again shortly."));
-        return;
-      }
-      onRerunStarted?.();
-    } catch {
-      setRebuildError(text("重新构建启动失败，请稍后再试", "Unable to start the rebuild. Try again shortly."));
-    } finally {
-      setRebuilding(false);
-    }
-  };
-
   if (loading) {
     return <div className="asset-manifest-loading">{text("加载素材清单…", "Loading asset manifest…")}</div>;
   }
@@ -207,7 +174,8 @@ export function AssetManifestPanel({
   });
 
   // Generation policy lives with the rest of the project delivery settings.
-  // This panel is intentionally limited to status, uploads, and rebuilds.
+  // Applying supplied assets is intentionally owned by the Build node's rerun
+  // control, so the list has no second, state-divergent rebuild entry point.
   return (
     <div className="asset-manifest-panel">
       <div className="asset-manifest-header">
@@ -225,11 +193,6 @@ export function AssetManifestPanel({
           {text("生成中", "Generating")}: {generatingCount}
         </button>
         {completion.failed > 0 && <button aria-controls="asset-image-list" aria-pressed={assetFilter === "failed"} className={`asset-manifest-filter failed ${assetFilter === "failed" ? "is-active" : ""}`} onClick={() => setAssetFilter("failed")} type="button">{text("失败", "Failed")}: {completion.failed}</button>}
-        {completion.complete && (
-          <button className="rebuild-button" disabled={rebuilding} onClick={() => void triggerRebuild()} type="button">
-            {rebuilding ? text("正在启动重新构建…", "Starting rebuild…") : text("✓ 使用素材重新构建", "✓ Rebuild with assets")}
-          </button>
-        )}
       </div>
       {/* A failed asset is not a dead end: the Art branch can requeue only
           unresolved entries, while upload remains available here. */}
@@ -242,7 +205,6 @@ export function AssetManifestPanel({
         </p>
       )}
 
-      {rebuildError && <p className="asset-manifest-error" role="alert">{rebuildError}</p>}
       {uploadError && <p className="asset-manifest-error" role="alert">{uploadError}</p>}
       {sourceOpenError && <p className="asset-manifest-error" role="alert">{sourceOpenError}</p>}
 

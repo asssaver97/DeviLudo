@@ -41,12 +41,6 @@ try {
       const archive = `godot-build-${platform}.tar.gz`;
       await mkdir(directory, { recursive: true });
       await writeFile(`${directory}/deviludo-fixture-game.txt`, `platform=${platform}\njob=${plan.job.jobId}\n`);
-      const generatedManifest = JSON.parse(await readFile("/workspace/inputs/agent.json", "utf8"));
-      if (generatedManifest?.testManifest?.schema !== "deviludo.test-manifest") {
-        throw new Error("Fixture build requires the current test manifest");
-      }
-      await mkdir(`${directory}/.deviludo-e2e`, { recursive: true });
-      await writeFile(`${directory}/.deviludo-e2e/manifest.json`, JSON.stringify(generatedManifest.testManifest));
       const materialized = [];
       for (const asset of plan.job.inputObjects.filter(input => input.kind === "ASSET")) {
         const extension = asset.key.match(/\.(png|jpg|webp)$/)?.[1];
@@ -92,26 +86,8 @@ try {
     await progress("AGENT_OUTPUT", "正在生成 Godot 项目结构、主场景和自动化测试。");
     await observeGuidance();
     await cp("/opt/deviludo-fixture", "/workspace/project", { recursive: true, force: false });
-    const specification = JSON.parse(await readFile("/workspace/inputs/specification.json", "utf8"));
     const generatedManifest = JSON.parse(await readFile("/workspace/project/agent.json", "utf8"));
-    const requirements = specificationRequirementCatalog(specification);
-    if (requirements.length < 1) throw new Error("Fixture specification has no testable requirements");
-    generatedManifest.testManifest.requirements = requirements;
-    generatedManifest.testManifest.adaptivePlayer.requirementIds = requirements
-      .filter(requirement => requirement.source === "CORE_LOOP")
-      .map(requirement => requirement.requirementId);
-    generatedManifest.testManifest.features = generatedManifest.testManifest.features.map(feature => ({
-      ...feature,
-      requirementIds: requirements.map(requirement => requirement.requirementId),
-      ...(feature.verificationMethod === "interactive" ? {
-        interactionScript: {
-          ...feature.interactionScript,
-          events: feature.interactionScript.events.map(event => isRealInput(event)
-            ? { ...event, coversRequirementIds: requirements.map(requirement => requirement.requirementId) }
-            : event),
-        },
-      } : {}),
-    }));
+    delete generatedManifest.testManifest;
     await writeFile("/workspace/project/agent.json", `${JSON.stringify(generatedManifest, null, 2)}\n`);
     await progress("AGENT_OUTPUT", "项目结构生成完成，正在发布源码 revision。");
     // Match the real Agent runner: the output contract is the generated
@@ -137,33 +113,6 @@ function assetInputFilename(input) {
   return `asset-${createHash("sha256").update(input.key).digest("hex")}.${extension}`;
 }
 
-function specificationRequirementCatalog(specification) {
-  const catalog = [];
-  for (const [kind, value] of [["feature", specification.coreLoop], ["acceptance", specification.acceptanceCriteria]]) {
-    if (!Array.isArray(value)) continue;
-    value.forEach((item, index) => {
-      if (typeof item !== "string" || !item.trim()) return;
-      catalog.push({
-        requirementId: stableRequirementId(kind, index, item), description: item.trim(),
-        source: kind === "feature" ? "CORE_LOOP" : "ACCEPTANCE", verificationClass: "PLAYER_INTERACTION",
-      });
-    });
-  }
-  return catalog;
-}
-
-function isRealInput(event) {
-  return ["key_tap", "key_hold", "click", "double_click", "drag", "scroll", "text_input", "gamepad_button_tap", "gamepad_button_hold", "gamepad_axis", "gamepad_trigger", "gamepad_release_all"].includes(event?.type);
-}
-
-function stableRequirementId(kind, index, text) {
-  let hash = 0x811c9dc5;
-  for (const character of `${kind}\0${index}\0${text.normalize("NFKC").trim()}`) {
-    hash ^= character.codePointAt(0) ?? 0;
-    hash = Math.imul(hash, 0x01000193) >>> 0;
-  }
-  return `req-${kind}-${String(index + 1).padStart(3, "0")}-${hash.toString(16).padStart(8, "0")}`;
-}
 await writeFile("/run/deviludo/task-result.json", JSON.stringify({
   ok: taskError === null,
   error: taskError?.message.slice(0, 1_000) ?? null,

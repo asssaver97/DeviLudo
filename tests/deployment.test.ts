@@ -159,14 +159,10 @@ test("Agent generation preserves partial work and retries transient Provider fai
   assert.match(runner, /failure\.code === "INCOMPLETE_OUTPUT"[\s\S]*\? 4[\s\S]*failure\.code === "GUIDANCE_PENDING" \? 3[\s\S]*failure\.code === "PROVIDER_ERROR" \? maxProviderAttempts : 2/);
   assert.match(runner, /readAgentGuidanceSnapshot/);
   assert.match(runner, /agentGuidanceArrivedDuringRun/);
-  assert.match(runner, /TEST_MANIFEST_INVALID/);
-  assert.match(runner, /Current validator errors:/);
-  assert.match(runner, /testManifestValidationIssues/);
-  assert.match(runner, /expectedOutput must equal/);
-  assert.match(runner, /There are no marker aliases/);
-  assert.match(runner, /probeAssertionValidationIssue/);
-  assert.match(runner, /EXISTS and CHANGED assertions must not contain value/);
-  assert.match(runner, /await readGeneratedAgentManifest\(requirementCatalog\)/);
+  assert.doesNotMatch(runner, /TEST_MANIFEST_INVALID|testManifestValidationIssues|requirementCatalog/);
+  assert.match(runner, /cross-platform E2E node owns test-plan generation/);
+  assert.match(runner, /Object\.hasOwn\(value, "testManifest"\)/);
+  assert.match(runner, /await readGeneratedAgentManifest\(\)/);
   assert.doesNotMatch(runner, /E2E_REPAIR_INCOMPLETE|interactionRepairProgressIssue|repairLocator/);
   assert.match(runner, /isRepairPass \? 8 \* 60_000 : undefined/);
   assert.doesNotMatch(claudeImage, /e2e-repair-contract/);
@@ -188,22 +184,9 @@ test("Agent generation preserves partial work and retries transient Provider fai
   assert.match(runner, /model_providers\.deviludo_chatgpt\.supports_websockets=false/);
   assert.match(runner, /The task container is already the security boundary/);
   assert.match(runner, /environment\.CLAUDE_CODE_DISABLE_BACKGROUND_TASKS = "1"/);
-  assert.match(runner, /interactionScript contains only events and no version field/);
-  assert.match(runner, /fixed x\/y coordinates and unrelated key presses are forbidden/);
-  assert.match(runner, /Every interactive journey must represent one coherent, uninterrupted player objective/);
-  assert.match(runner, /never target controls from that previous context unless the journey contains a real visible action that returns there/);
-  assert.match(runner, /Put acceptance criteria for mutually exclusive modes, alternate entry paths, destructive\/settings flows, or long end states in separate journeys/);
-  assert.match(runner, /launchProfile shape \{type:\\"SCENARIO\\",scenarioId:\\"stable-kebab-case-id\\"\}/);
-  assert.match(runner, /A scenario must enter the truthful player-visible context declared by its first READY checkpoint/);
-  assert.match(runner, /no unrelated menu, modal, or overlay blocking the target/);
-  assert.match(runner, /every scenario journey needs at least one STABLE_REPLAY checkpoint/);
-  assert.match(runner, /unit timeoutMs budgets the complete Godot process for its gdsTestPath/);
-  assert.match(runner, /never shorten the hard timeout by dividing the suite budget across feature entries/);
-  assert.match(runner, /Generic example:.*activate-primary-control/);
-  assert.match(runner, /Replace every identifier with semantics discovered from the current project/);
-  assert.match(runner, /If the script targets a control from an exited or mutually exclusive context, split or reorder the journey/);
-  assert.match(runner, /never keep an unrelated old-context control globally visible merely to satisfy the script/);
-  assert.match(runner, /Every PLAYER_INTERACTION requirement must be covered/);
+  assert.doesNotMatch(runner, /interactionScript contains only events|launchProfile shape|PLAYER_INTERACTION requirement/);
+  assert.match(runner, /Implement the real game behavior, deterministic hooks, and read-only UI Probe/);
+  assert.match(runner, /E2E node will verify texture placement, visibility, aspect, and gameplay\/UI context/);
   assert.match(runner, /deviludo\.e2e-ui-probe/);
   assert.match(runner, /asynchronous UI lifecycle changes/);
   assert.match(runner, /Show and hide must both advance the sequence/);
@@ -381,12 +364,9 @@ test("Core keeps Docker authority in executord and isolates Agent and Steam egre
   assert.match(taskRunner, /for \(let attempt = 1; attempt <= maxProviderAttempts; attempt \+= 1\)/);
   assert.match(taskRunner, /All[\s\S]*calls still share the single 80-minute deadline/);
   assert.match(taskRunner, /previous response stopped before changing any source files/);
-  assert.match(taskRunner, /Core has already validated the existing agent\.json/);
-  assert.match(taskRunner, /const manifestInstructions = existingManifestValid \?/);
-  assert.match(taskRunner, /This repair does not need broad manifest work, but the failing journey and step must remain coherent/);
-  assert.match(taskRunner, /guest driver waits event\.delay_ms BEFORE it performs that event/);
-  assert.match(taskRunner, /Never model checkpoints as zero-time events/);
-  assert.match(taskRunner, /adding each event delay before recording the action/);
+  assert.doesNotMatch(taskRunner, /Core has already validated the existing agent\.json|existingManifestValid|testManifestValidationIssues/);
+  assert.match(taskRunner, /cross-platform E2E node owns test-plan generation/);
+  assert.match(taskRunner, /agent\.json must contain exactly the current assetManifest/);
   assert.match(taskRunner, /BLOCKING E2E REPAIR:[\s\S]*E2E failure summary:[\s\S]*e2eRepairPromptSummary\(e2eRepairContext\)/);
   assert.match(taskRunner, /plan\.job\.payload\.repairFailureKind === "ARTIFACT_BUILD"/);
   assert.match(taskRunner, /repairFailureSummary\.length <= 1_800/);
@@ -394,11 +374,9 @@ test("Core keeps Docker authority in executord and isolates Agent and Steam egre
   assert.match(taskRunner, /const isRepairPass = e2eRepairContext !== null \|\| upstreamFailureSummary !== null/);
   assert.doesNotMatch(taskRunner, /E2E failure report:[\s\S]*e2eRepairContext\.report/);
   assert.match(taskRunner, /failures\.filter\(value => typeof value === "string"\)\.slice\(0, 50\)/);
-  assert.match(taskRunner, /const specificationInstructions = existingManifestValid[\s\S]*Current revision notes:/);
-  assert.match(taskRunner, /: \[`Specification: \$\{JSON\.stringify\(specification\)\}`\]/);
-  assert.match(taskRunner, /function requiredCoreStartAssertions\(\)/);
-  assert.match(taskRunner, /function requiredCoreReadyAssertions\(\)/);
-  assert.doesNotMatch(taskRunner, /^const core(?:Start|Ready)Assertions\s*=/m);
+  assert.match(taskRunner, /`Specification: \$\{JSON\.stringify\(specification\)\}`/);
+  assert.match(taskRunner, /`Current revision notes: \$\{JSON\.stringify\(specification\.revisionNotes/);
+  assert.doesNotMatch(taskRunner, /requiredCoreStartAssertions|requiredCoreReadyAssertions/);
   assert.match(taskRunner, /make the first concrete source edit before inspecting broad regression coverage/);
   assert.match(taskRunner, /Open only the exact source\/test file named by the evidence first/);
   assert.match(taskRunner, /\n      5 \* 60_000,\n[\s\S]*isRepairPass \? 8 \* 60_000 : undefined/);
@@ -561,8 +539,8 @@ test("CI uses the fixed no-provider Agent while local macOS requires Tart E2E", 
   assert.match(fixtureMain, /get_tree\(\)\.quit\(\)/);
 });
 
-test("Godot E2E is a real-window manifest run with portable visual evidence", async () => {
-  const [guest, evidence, builder, macDriver, linuxDriver, windowsDriver, linuxIsolation] = await Promise.all([
+test("Godot E2E plans at the platform node and runs a real window with portable visual evidence", async () => {
+  const [guest, evidence, builder, macDriver, linuxDriver, windowsDriver, linuxIsolation, planner, nodeExecutor, hostExecutor] = await Promise.all([
     readFile(new URL("../scripts/executors/godot-window-e2e-guest.mjs", import.meta.url), "utf8"),
     readFile(new URL("../scripts/e2e-evidence.mjs", import.meta.url), "utf8"),
     readFile(new URL("../services/sandbox-executor/task-runner.mjs", import.meta.url), "utf8"),
@@ -570,7 +548,19 @@ test("Godot E2E is a real-window manifest run with portable visual evidence", as
     readFile(new URL("../scripts/executors/linux-x11-gui-driver.mjs", import.meta.url), "utf8"),
     readFile(new URL("../scripts/executors/windows-gui-driver.ps1", import.meta.url), "utf8"),
     readFile(new URL("../deploy/assets/e2e-linux-isolation.sh", import.meta.url), "utf8"),
+    readFile(new URL("../services/core/src/e2e-test-plan.ts", import.meta.url), "utf8"),
+    readFile(new URL("../services/e2e-node/src/executor.ts", import.meta.url), "utf8"),
+    readFile(new URL("../deploy/assets/e2e-job-executor.mjs", import.meta.url), "utf8"),
   ]);
+  assert.match(nodeExecutor, /verifyPlayerPolicy\(job\)[\s\S]*generateTestPlan\(job\)/);
+  assert.match(nodeExecutor, /testPlan: generatedPlan/);
+  assert.match(hostExecutor, /test-plan\.json/);
+  assert.match(hostExecutor, /"--test-plan"/);
+  assert.match(planner, /regressionOperations/);
+  assert.match(planner, /regressionUi/);
+  assert.match(planner, /changeImpact/);
+  assert.match(planner, /assetApplication/);
+  assert.match(planner, /loaded, visible in the correct game\/UI context, correctly cropped\/aspected/);
   assert.match(guest, /deviludo\.test-manifest/);
   assert.match(guest, /deviludo\.e2e-ui-probe|waitForProbeSnapshot/);
   assert.match(guest, /gameWindowArguments\(gameLogPath\)/);
@@ -622,7 +612,8 @@ test("Godot E2E is a real-window manifest run with portable visual evidence", as
   assert.match(guest, /inspectScreenshot/);
   assert.match(guest, /godotErrorLines/);
   assert.match(builder, /DEVILUDO_E2E_CHECKPOINT_FILE/);
-  assert.match(builder, /existingManifestValid \? \[[\s\S]*checkpointEmitterInstruction/);
+  assert.match(builder, /cross-platform E2E node owns test-plan generation/);
+  assert.doesNotMatch(builder, /existingManifestValid|testManifestValidationIssues/);
   assert.match(builder, /agentRetryDelaySeconds\(failure, attempt\)/);
   assert.match(builder, /memory overloaded[\s\S]*Math\.min\(120, 30 \* Math\.max\(1, attempt\)\)/);
   assert.match(evidence, /index\.html/);
@@ -632,7 +623,7 @@ test("Godot E2E is a real-window manifest run with portable visual evidence", as
   assert.match(evidence, /data:image\/png;base64/);
   assert.match(evidence, /玩家需求覆盖/);
   assert.match(evidence, /ZIP cannot contain symbolic links/);
-  assert.match(builder, /\.deviludo-e2e/);
+  assert.doesNotMatch(builder, /preparePackagedE2eContract|copyPackagedE2eContract|\.deviludo-e2e-package/);
   assert.match(builder, /Godot reported script errors despite exit code 0/);
   assert.match(macDriver, /CGEvent\(keyboardEventSource/);
   assert.match(macDriver, /"P": 35/);
@@ -893,11 +884,10 @@ test("image assets are a branched visual stage backed by asynchronous generation
   assert.match(studio, /text\("音乐", "MUSIC"\)/);
   assert.match(studio, /asset-manifest\/generate-missing/);
   assert.match(studio, /<AssetManifestPanel onManifestChange=\{setAssetManifestView\} onOpenSourceImage=\{openSourceImage\}/);
-  // Uploaded assets only reach the game through a build, so the panel's rebuild
-  // is an ARTIFACT_BUILD rerun rather than a bespoke endpoint.
-  assert.match(panel, /\/api\/projects\/\$\{projectId\}\/rerun-stage/);
-  assert.match(panel, /stage: "ARTIFACT_BUILD"/);
-  assert.doesNotMatch(panel, /rebuild-with-assets/);
+  // Applying assets has one entry point: the ordinary Build-node rerun icon.
+  assert.doesNotMatch(panel, /rerun-stage|Rebuild with assets|使用素材重新构建/);
+  assert.match(studio, /mutate\("rerun-stage", \{ stage: kind \}\)/);
+  assert.match(studio, /\["ARTIFACT_BUILD", "制品构建", "Artifact Build"\]/);
   // The panel goes through the authenticated Core proxy, never straight to S3 or
   // the database. Generation readiness belongs to the delivery setting, while
   // the expanded panel is only responsible for status, uploads, and rebuilds.
@@ -1088,9 +1078,11 @@ test("the trusted Agent manifest reaches automatic image generation", async () =
   // then includes the asset manifest in complete_job's receipt.
   assert.match(objectStore, /async readAgentCompletion\(/);
   assert.match(objectStore, /readJsonOutput\(objects, "SPECIFICATION"/);
-  assert.match(sandbox, /objectStore\.readAgentCompletion\(receipt\.outputObjects, job\.inputObjects\)/);
+  assert.match(sandbox, /objectStore\.readAgentCompletion\(receipt\.outputObjects\)/);
   assert.doesNotMatch(sandbox, /projectSources\.readRevisionFile\(relativePath, "agent\.json"/);
   assert.match(sandbox, /\.\.\.\(agentCompletion \?\? \{\}\)/);
+  assert.match(objectStore, /Object\.hasOwn\(parsed, "testManifest"\)/);
+  assert.match(fixture, /delete generatedManifest\.testManifest/);
   // Planning immediately enables the asynchronous scheduler branch.
   assert.match(sql, /auto_generate_enabled boolean NOT NULL DEFAULT true/);
   assert.match(sql, /auto_generate_enabled = true/);
@@ -1166,13 +1158,16 @@ test("one rerun endpoint covers every delivery node once the workflow is at rest
   assert.match(api, /Test Agent policy request failed[\s\S]*return reply\.code\(503\)\.send/);
   assert.match(studio, /mutate\("rerun-stage", \{ stage: kind \}\)/);
   assert.match(studio, /mutate\("rerun-stage", \{ stage: rerunnableFailedStage \}\)/);
-  // A rerun supersedes downstream jobs, so it stays closed while executors may
-  // still hold leases.
-  assert.match(studio, /RERUNNABLE_WORKFLOW_STATES = new Set\(\["FAILED", "SUCCEEDED", "CANCELLED"\]\)/);
+  // Release-decision pending is quiescent: no executor holds a lease, so a Build
+  // rerun can apply newly generated assets without forcing cancellation first.
+  assert.match(studio, /RERUNNABLE_WORKFLOW_STATES = new Set\(\["RELEASE_DECISION_PENDING", "FAILED", "SUCCEEDED", "CANCELLED"\]\)/);
   assert.match(studio, /RERUNNABLE_WORKFLOW_STATES\.has\(project\.workflowState\)\s*&&\s*project\.jobs\.length > 0/);
-  // VALIDATE has no signing or publication stages to offer, so their rerun is
-  // withheld — but the node itself still renders, see the visibility test below.
-  assert.match(studio, /canRerunStages && inProfile &&/);
+  // Every in-profile node renders the same icon. Invalid states disable it
+  // instead of replacing the node with a one-off asset rebuild control.
+  assert.match(studio, /!viewingHistoricalIteration && inProfile \?/);
+  assert.match(studio, /disabled=\{busy \|\| !canRerunStages/);
+  assert.match(api, /repository\.rerunStage/);
+  assert.match(api, /"RELEASE_DECISION_PENDING", "FAILED", "SUCCEEDED", "CANCELLED"/);
   assert.match(studio, /"idempotency-key": `stage-rerun:\$\{String\(body\?\.stage\)\}:\$\{crypto\.randomUUID\(\)\}`/);
   assert.match(studio, /"idempotency-key": `cancel:\$\{crypto\.randomUUID\(\)\}`/);
   assert.match(api, /requestIdempotencyKey\(request, `cancel:\$\{project\.workflowId\}`\)/);

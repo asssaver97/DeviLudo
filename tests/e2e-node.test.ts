@@ -47,6 +47,17 @@ const config: E2eNodeConfig = Object.freeze({
   pollMilliseconds: 250,
 });
 
+const generatedTestPlan = Object.freeze({
+  plan: Object.freeze({
+    testManifest: Object.freeze({}),
+    coverage: Object.freeze({}),
+    testManifestDigest: `sha256:${"d".repeat(64)}`,
+    contractDigest: `sha256:${"e".repeat(64)}`,
+    executionPlan: Object.freeze({ plannedTimeoutMs: 1_800_000 }),
+  }),
+  policy: Object.freeze({ configurationDigest: `sha256:${"f".repeat(64)}`, settingsRevision: 1, model: "test-model" }),
+});
+
 test("JavaScript E2E executors use the running Node binary instead of a PATH-dependent shebang", () => {
   assert.deepEqual(
     e2eExecutableInvocation("/opt/deviludo/e2e-job.mjs", ["test"], "/fixed/node"),
@@ -99,6 +110,7 @@ test("a trusted failed guest report is a product outcome instead of an E2E node 
       gamepadInputCount: 0, adaptiveRolloutCount: 0, adaptiveSuccessCount: 0, adaptiveDecisionCount: 0,
       coveredPlayerRequirementCount: 0, playerRequirementCount: 1, screenshotCount: 1,
       visualBaselineCount: 0, videoCount: 1, hasVisualDiff: false,
+      testManifestDigest: `sha256:${"d".repeat(64)}`,
       regressionTraceDigest: null, regressionInputProfile: null, regressionEstimatedDurationMs: null,
       packageLaunchMode: "MACOS_LAUNCH_SERVICES" }),
     outputPath: "/tmp/deviludo-e2e/evidence.zip",
@@ -119,6 +131,7 @@ test("a trusted failed guest report is a product outcome instead of an E2E node 
       gamepadInputCount: 0, adaptiveRolloutCount: 0, adaptiveSuccessCount: 0, adaptiveDecisionCount: 0,
       coveredPlayerRequirementCount: 0, playerRequirementCount: 1, screenshotCount: 1,
       visualBaselineCount: 0, videoCount: 1, hasVisualDiff: false,
+      testManifestDigest: `sha256:${"d".repeat(64)}`,
       regressionTraceDigest: null, regressionInputProfile: null, regressionEstimatedDurationMs: null,
       packageLaunchMode: "MACOS_LAUNCH_SERVICES" }),
     outputPath: "/tmp/deviludo-e2e/evidence.zip",
@@ -130,6 +143,7 @@ test("a trusted failed guest report is a product outcome instead of an E2E node 
 test("ordinary E2E tests never receive signing authority", async () => {
   const client = {
     async verifyPlayerPolicy() {},
+    async generateTestPlan() { return generatedTestPlan; },
     async authorizeObjects() { return []; },
   } as unknown as CoreE2eClient;
   const calls: string[] = [];
@@ -178,6 +192,7 @@ test("logical operating-system overrides are restricted to test mode and still p
 test("execution failures still attempt cleanup and the final trusted reimage", async () => {
   const client = {
     async verifyPlayerPolicy() {},
+    async generateTestPlan() { return generatedTestPlan; },
     async authorizeObjects() { throw new Error("artifact authorization unavailable"); },
   } as unknown as CoreE2eClient;
   const calls: string[] = [];
@@ -207,7 +222,11 @@ test("cleanup failures fail the job even when execution itself succeeds", async 
   await assert.rejects(() => executeE2eJob(
     baseJob,
     config,
-    { verifyPlayerPolicy: async () => {}, authorizeObjects: async () => [] } as unknown as CoreE2eClient,
+    {
+      verifyPlayerPolicy: async () => {},
+      generateTestPlan: async () => generatedTestPlan,
+      authorizeObjects: async () => [],
+    } as unknown as CoreE2eClient,
     isolation,
     new AbortController().signal,
   ), AggregateError);

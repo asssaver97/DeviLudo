@@ -1,5 +1,4 @@
 import { spawn } from "node:child_process";
-import { createHash } from "node:crypto";
 import { isAbsolute } from "node:path";
 import { StringDecoder } from "node:string_decoder";
 import {
@@ -13,7 +12,6 @@ import type { JobProtocolV4, ObjectReference } from "./contracts";
 import type { CoreRepository } from "./repository";
 import { CoreObjectStore } from "./object-store";
 import { ProjectSourceStore } from "./project-sources";
-import { planE2eExecution, validateTestManifest } from "@/lib/product/test-manifest";
 
 export type SandboxMode = "MICROVM" | "RESTRICTED_CONTAINER";
 export type SandboxPlan = Readonly<{
@@ -284,45 +282,10 @@ async function discardOrphanedAgentSource(
 
 async function readAgentCompletion(
   objectStore: CoreObjectStore,
-  job: JobProtocolV4,
+  _job: JobProtocolV4,
   receipt: SandboxReceipt,
-): Promise<Readonly<{
-  assetManifest: unknown;
-  testManifest: unknown;
-  testManifestDigest: string;
-  e2eExecutionPlan: Readonly<{ plannedTimeoutSeconds: number; contractDigest: string }>;
-}>> {
-  const completion = await objectStore.readAgentCompletion(receipt.outputObjects, job.inputObjects);
-  return agentCompletionContract(completion.assetManifest, completion.testManifest);
-}
-
-function agentCompletionContract(assetManifest: unknown, testManifest: unknown) {
-  if (!validateTestManifest(testManifest)) throw new Error("Generated test manifest is invalid");
-  // Reserve the full allowed current-regression duration. The pointer can be
-  // replaced after this source revision is published, but a frozen job budget
-  // must never become too small because the current trace changed meanwhile.
-  const plan = planE2eExecution(testManifest, 300_000);
-  return Object.freeze({
-    assetManifest,
-    testManifest,
-    testManifestDigest: jsonDigest(testManifest),
-    e2eExecutionPlan: Object.freeze({
-      plannedTimeoutSeconds: Math.ceil(plan.plannedTimeoutMs / 1_000),
-      contractDigest: jsonDigest({ testManifest, runner: "adaptive-real-input" }),
-    }),
-  });
-}
-
-function jsonDigest(value: unknown): string {
-  return `sha256:${createHash("sha256").update(stableJson(value)).digest("hex")}`;
-}
-
-function stableJson(value: unknown): string {
-  if (Array.isArray(value)) return `[${value.map(stableJson).join(",")}]`;
-  if (value && typeof value === "object") {
-    return `{${Object.keys(value).sort().map(key => `${JSON.stringify(key)}:${stableJson((value as Record<string, unknown>)[key])}`).join(",")}}`;
-  }
-  return JSON.stringify(value) ?? "null";
+): Promise<Readonly<{ assetManifest: unknown }>> {
+  return objectStore.readAgentCompletion(receipt.outputObjects);
 }
 
 export function sandboxPlan(job: JobProtocolV4, operationId: string | null = null): SandboxPlan {

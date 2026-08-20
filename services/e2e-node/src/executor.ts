@@ -43,6 +43,13 @@ export async function executeE2eJob(
   // cloning or booting an expensive platform VM. A text-only Provider is an
   // infrastructure capability failure and must never reach product repair.
   await client.verifyPlayerPolicy(job);
+  const generatedPlan = await client.generateTestPlan(job);
+  const plannedTimeoutSeconds = Math.ceil(Number(generatedPlan.plan.executionPlan.plannedTimeoutMs) / 1_000);
+  if (!Number.isSafeInteger(plannedTimeoutSeconds) || plannedTimeoutSeconds < 1_800 || plannedTimeoutSeconds > 5_400
+    || !/^sha256:[0-9a-f]{64}$/.test(generatedPlan.plan.testManifestDigest)
+    || !/^sha256:[0-9a-f]{64}$/.test(generatedPlan.plan.contractDigest)) {
+    throw new Error("Cross-platform E2E node received an invalid generated test plan");
+  }
   await isolation.assertAgentAbsent();
   const beforeReimageProof = await isolation.reimage(job, "before");
   let executionReceipt: Readonly<Record<string, unknown>> | null = null;
@@ -52,7 +59,10 @@ export async function executeE2eJob(
   let executionFailure: unknown;
   try {
     const inputs = await client.authorizeObjects(job);
-    executionReceipt = await runUnprivileged(job, "test", inputs, process.env.DEVILUDO_E2E_TEST_EXECUTOR ?? "", client, signal);
+    executionReceipt = await runUnprivileged(
+      job, "test", inputs, process.env.DEVILUDO_E2E_TEST_EXECUTOR ?? "", client, signal,
+      Object.freeze({ ...generatedPlan.plan, plannedTimeoutSeconds }),
+    );
     validateExecutionReceipt(job, executionReceipt);
     const prepared = await readExecutorArtifact(executionReceipt);
     preparedOutputContent = prepared.content;
@@ -208,6 +218,7 @@ export function validateExecutionReceipt(job: JobProtocolV4, receipt: Readonly<R
       || (receipt.outcome === "PASSED" && Number(evidence.screenshotCount) < 3)
       || !Number.isSafeInteger(evidence.visualBaselineCount) || Number(evidence.visualBaselineCount) < 0
       || !Number.isSafeInteger(evidence.videoCount) || Number(evidence.videoCount) < 0
+      || typeof evidence.testManifestDigest !== "string" || !/^sha256:[0-9a-f]{64}$/.test(evidence.testManifestDigest)
       || (evidence.regressionTraceDigest !== null && !/^sha256:[0-9a-f]{64}$/.test(String(evidence.regressionTraceDigest)))
       || ![null, "KEYBOARD_MOUSE", "GAMEPAD"].includes(evidence.regressionInputProfile as never)
       || (evidence.regressionEstimatedDurationMs !== null
@@ -254,6 +265,7 @@ async function runUnprivileged(
   executable: string,
   client: CoreE2eClient,
   signal: AbortSignal,
+  generatedPlan: Readonly<Record<string, unknown>>,
 ): Promise<Readonly<Record<string, unknown>>> {
   return runExternal(executable, {
     schema: "deviludo.e2e-execution",
@@ -261,8 +273,13 @@ async function runUnprivileged(
     jobId: job.jobId,
     workspaceId: job.workspaceId,
     projectId: job.projectId,
-    payload: job.payload,
-    timeoutSeconds: job.timeoutSeconds,
+    payload: Object.freeze({
+      ...job.payload,
+      testManifestDigest: generatedPlan.testManifestDigest,
+      e2eContractDigest: generatedPlan.contractDigest,
+    }),
+    testPlan: generatedPlan,
+    timeoutSeconds: generatedPlan.plannedTimeoutSeconds,
     inputs,
   }, job, client, signal, action);
 }

@@ -38,7 +38,7 @@ await writeFile(trajectoryPath, `${JSON.stringify({ schema: "deviludo.e2e-trajec
 const regressionPath = join(directory, "current.json");
 const regression = {
   schema: "deviludo.e2e-regression",
-  contractDigest: request.payload?.e2eContractDigest ?? `sha256:${"1".repeat(64)}`,
+  contractDigest: request.testPlan?.contractDigest ?? `sha256:${"1".repeat(64)}`,
   inputProfile: "KEYBOARD_MOUSE", estimatedDurationMs: 5_000,
   goal: "Complete the fixture core loop", actions: [{ type: "key_tap", key: "SPACE" }],
   successAssertions: [{ source: "PROGRESS", key: "turn", operator: "CHANGED" }],
@@ -71,6 +71,7 @@ const receipt = {
     adaptiveSuccessCount: 2, adaptiveDecisionCount: 6, coveredPlayerRequirementCount: 1,
     playerRequirementCount: 1, screenshotCount: 3, visualBaselineCount: 1, videoCount: 1,
     hasVisualDiff: false, regressionTraceDigest: `sha256:${createHash("sha256").update(regressionBytes).digest("hex")}`,
+    testManifestDigest: request.testPlan?.testManifestDigest ?? `sha256:${"2".repeat(64)}`,
     regressionContractDigest: regression.contractDigest, regressionInputProfile: regression.inputProfile,
     regressionEstimatedDurationMs: regression.estimatedDurationMs,
     packageLaunchMode: platform === "macos" ? "MACOS_LAUNCH_SERVICES" : platform === "windows" ? "WINDOWS_FINAL_EXE" : "LINUX_RELEASE_EXECUTABLE" },

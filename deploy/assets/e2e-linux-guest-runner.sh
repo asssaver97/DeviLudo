@@ -1,14 +1,15 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 action=${1:?}; shift
-job_id='' artifact='' regression=''
+job_id='' artifact='' regression='' test_plan=''
 while (($#)); do case "$1" in
   --job-id) job_id=$2; shift 2;;
   --artifact) artifact=$2; shift 2;;
+  --test-plan) test_plan=$2; shift 2;;
   --regression) regression=$2; shift 2;;
   *) exit 64;;
 esac; done
-[[ $action == test && $job_id =~ ^[0-9a-f-]{36}$ && -r $artifact ]]
+[[ $action == test && $job_id =~ ^[0-9a-f-]{36}$ && -r $artifact && -r $test_plan ]]
 [[ -z $regression || -r $regression ]]
 vm="deviludo-$job_id"
 for _ in {1..120}; do
@@ -19,8 +20,10 @@ done
 [[ -n ${ip:-} ]] || { echo 'guest agent did not report an address' >&2; exit 1; }
 ssh_options=(-i /etc/deviludo/e2e/guest_ed25519 -o BatchMode=yes -o StrictHostKeyChecking=yes -o UserKnownHostsFile=/etc/deviludo/e2e/guest_known_hosts)
 remote_artifact="/var/lib/deviludo/input/artifact-$job_id"
+remote_test_plan="/var/lib/deviludo/input/test-plan-$job_id.json"
 remote_regression="/var/lib/deviludo/input/regression-$job_id.json"
 scp "${ssh_options[@]}" "$artifact" "deviludo-guest@$ip:$remote_artifact"
+scp "${ssh_options[@]}" "$test_plan" "deviludo-guest@$ip:$remote_test_plan"
 regression_arguments=()
 if [[ -n $regression ]]; then
   scp "${ssh_options[@]}" "$regression" "deviludo-guest@$ip:$remote_regression"
@@ -36,7 +39,7 @@ ssh "${ssh_options[@]}" "deviludo-guest@$ip" env \
     DEVILUDO_E2E_STREAM_PROTOCOL=1 "DEVILUDO_E2E_PROJECT_ID=${DEVILUDO_E2E_PROJECT_ID:-$job_id}" \
     "DEVILUDO_E2E_FROZEN_TIMEOUT_SECONDS=${DEVILUDO_E2E_FROZEN_TIMEOUT_SECONDS:-}" \
     "DEVILUDO_E2E_CONTRACT_DIGEST=${DEVILUDO_E2E_CONTRACT_DIGEST:-}" \
-    /usr/local/bin/deviludo-guest-runner test "$remote_artifact" --job-id "$job_id" --json "${regression_arguments[@]}" \
+    /usr/local/bin/deviludo-guest-runner test "$remote_artifact" --job-id "$job_id" --test-plan "$remote_test_plan" --json "${regression_arguments[@]}" \
     <"$relay_root/to-guest" >"$relay_root/from-guest" &
 guest_pid=$!
 exec 3>"$relay_root/to-guest"
