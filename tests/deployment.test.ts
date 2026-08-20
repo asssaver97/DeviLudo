@@ -818,6 +818,8 @@ test("product pages share local instance data and never poll an idle project", a
   const telemetry = await readFile(new URL("../components/TelemetrySettings.tsx", import.meta.url), "utf8");
   assert.match(shell, /fetch\("\/api\/instance"/);
   for (const source of [dashboard,studio,telemetry]) assert.doesNotMatch(source,/fetch\("\/api\/instance"/);
+  assert.doesNotMatch(telemetry, /type="checkbox"|method: "PUT"|setEnabled|OPT IN/);
+  assert.match(telemetry, /AUTOMATIC REPORTING CONFIGURED/);
   assert.doesNotMatch(studio,/setInterval|1500/);
   assert.match(studio,/workflowNeedsPolling\(workflowState\)/);
   assert.doesNotMatch(studio,/repositoryNeedsPolling|platformManaged|github\/repositories/);

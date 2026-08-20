@@ -118,10 +118,14 @@ npm run local:up -- --refresh-e2e-vm
 
 Agent 默认只并发执行一个任务。内存和 Provider 容量充足时，可设置 `DEVILUDO_SANDBOX_CONCURRENCY=2` 允许两个并发任务。
 
+## 匿名使用统计
+
+配置 `DEVILUDO_TELEMETRY_ENDPOINT` 后，Core 会自动上报随机安装标识、UTC 活跃日期、发布版本、操作系统和 CPU 架构；每次成功上报后至少间隔 20 小时。上报内容不包含项目、源码、路径、提示词、模型设置、制品或凭证。接收端为空时不会发送请求。
+
 ## 多节点部署
 
 生产部署将 Web、Core 与 Linux、Windows、macOS E2E 节点分开运行。请填写对应的 [Web](deploy/web/deploy.env.example)、[Core](deploy/core/deploy.env.example)、[Linux E2E](deploy/e2e-linux/deploy.env.example)、[Windows E2E](deploy/e2e-windows/deploy.json.example) 和 [macOS E2E](deploy/e2e-macos/deploy.env.example) 配置。推送 `v*` tag 后会生成发布镜像和部署 bundle。
 
 ## 许可
 
-DeviLudo 采用 [Elastic License 2.0](LICENSE)，属于源码可用软件。你的游戏和项目文件继续使用其原有许可。
+DeviLudo 采用 [Elastic License 2.0](LICENSE)，属于源码可用软件。不得将 DeviLudo 作为托管或管理服务提供给第三方，使其能够访问本软件的实质性功能。你的游戏和项目文件继续使用其原有许可。完整条款以 [LICENSE](LICENSE) 为准。

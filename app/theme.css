@@ -325,7 +325,7 @@ html[data-theme="light"] :is(
   .project-tools-menu > div,
   .workspace-dropdown,
   .workspace-dialog,
-  .telemetry-toggle,
+  .telemetry-status,
   .agent-connection-status,
   .agent-runtime-choice,
   .settings-json-editor textarea,

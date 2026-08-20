@@ -23,7 +23,6 @@ export type CoreConfig = Readonly<{
   localDirectoryBindings: boolean;
   localProjectBridgeUrl: string | null;
   localProjectBridgeToken: string | null;
-  telemetryEnabled: boolean;
   telemetryEndpoint: string | null;
   releaseVersion: string;
 }>;
@@ -102,7 +101,6 @@ export function loadCoreConfig(env: NodeJS.ProcessEnv = process.env): CoreConfig
   if (localDirectoryBindings && !/^[A-Za-z0-9_-]{40,200}$/.test(localProjectBridgeToken ?? "")) {
     throw new Error("DEVILUDO_LOCAL_PROJECT_BRIDGE_TOKEN is invalid");
   }
-  const telemetryEnabled = parseBoolean(env.DEVILUDO_TELEMETRY_ENABLED ?? "1", "DEVILUDO_TELEMETRY_ENABLED");
   const telemetryEndpoint = normalizeTelemetryEndpoint(env.DEVILUDO_TELEMETRY_ENDPOINT ?? "", env.NODE_ENV);
   const releaseVersion = (env.DEVILUDO_RELEASE_VERSION ?? "development").trim();
   if (!/^(development|v?[0-9]+\.[0-9]+\.[0-9]+(?:-[0-9A-Za-z.-]+)?)$/.test(releaseVersion)) {
@@ -128,7 +126,6 @@ export function loadCoreConfig(env: NodeJS.ProcessEnv = process.env): CoreConfig
     localDirectoryBindings,
     localProjectBridgeUrl,
     localProjectBridgeToken,
-    telemetryEnabled,
     telemetryEndpoint,
     releaseVersion,
   });
@@ -155,12 +152,6 @@ function normalizeTelemetryEndpoint(value: string, environment: string | undefin
     throw new Error("DEVILUDO_TELEMETRY_ENDPOINT is invalid");
   }
   return url.href;
-}
-
-function parseBoolean(value: string, name: string): boolean {
-  if (value === "1") return true;
-  if (value === "0") return false;
-  throw new Error(`${name} must be 0 or 1`);
 }
 
 function secretValue(env: NodeJS.ProcessEnv, key: string): string {

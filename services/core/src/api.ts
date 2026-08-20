@@ -174,14 +174,7 @@ export async function runApi(
 
   app.get("/v1/settings/telemetry", async (request, reply) => {
     productAccess(request, config);
-    return reply.header("cache-control", "no-store").send({ settings: await telemetry.settings() });
-  });
-
-  app.put("/v1/settings/telemetry", async (request, reply) => {
-    productAccess(request, config);
-    const body = objectBody(request.body);
-    if (typeof body.enabled !== "boolean") throw httpError(400, "INVALID_TELEMETRY_SETTINGS", "遥测开关无效");
-    return reply.header("cache-control", "no-store").send({ settings: await telemetry.setEnabled(body.enabled) });
+    return reply.header("cache-control", "no-store").send({ status: await telemetry.status() });
   });
 
   app.get("/v1/settings/agent", async (request, reply) => {

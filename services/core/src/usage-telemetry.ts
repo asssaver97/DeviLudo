@@ -2,7 +2,7 @@ import { randomUUID } from "node:crypto";
 import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
 import { arch, platform } from "node:os";
 import { join } from "node:path";
-import type { TelemetrySettings } from "@/lib/product/contracts";
+import type { TelemetryStatus } from "@/lib/product/contracts";
 import type { CoreConfig } from "./config";
 
 const REPORT_INTERVAL_MS = 20 * 60 * 60 * 1_000;
@@ -17,7 +17,6 @@ const COLLECTED_FIELDS = Object.freeze([
 
 type TelemetryState = Readonly<{
   installationId: string;
-  enabled: boolean;
   lastReportedAt: string | null;
 }>;
 
@@ -37,24 +36,14 @@ export class UsageTelemetry {
     this.stateFile = join(config.projectsRoot, ".deviludo-telemetry.json");
   }
 
-  async settings(): Promise<TelemetrySettings> {
+  async status(): Promise<TelemetryStatus> {
     const state = await this.readState();
     return Object.freeze({
-      enabled: state.enabled,
       endpointConfigured: this.config.telemetryEndpoint !== null,
       installationIdMask: `${state.installationId.slice(0, 8)}…`,
       lastReportedAt: state.lastReportedAt,
       collectedFields: COLLECTED_FIELDS,
     });
-  }
-
-  async setEnabled(enabled: boolean): Promise<TelemetrySettings> {
-    // Do not let a heartbeat that started just before an opt-out restore the
-    // previous enabled state when it records its completion timestamp.
-    if (this.inFlight) await this.inFlight;
-    const current = await this.readState();
-    await this.saveState(Object.freeze({ ...current, enabled }));
-    return this.settings();
   }
 
   recordActivity(): void {
@@ -66,7 +55,7 @@ export class UsageTelemetry {
     const endpoint = this.config.telemetryEndpoint;
     if (!endpoint) return;
     const state = await this.readState();
-    if (!state.enabled || !reportDue(state.lastReportedAt)) return;
+    if (!reportDue(state.lastReportedAt)) return;
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
     try {
@@ -100,20 +89,17 @@ export class UsageTelemetry {
     try {
       const parsed = JSON.parse(await readFile(this.stateFile, "utf8")) as Record<string, unknown>;
       if (typeof parsed.installationId !== "string" || !UUID.test(parsed.installationId)
-        || typeof parsed.enabled !== "boolean"
         || (parsed.lastReportedAt !== null && typeof parsed.lastReportedAt !== "string")) {
         throw new Error("invalid telemetry state");
       }
       this.state = Object.freeze({
         installationId: parsed.installationId,
-        enabled: parsed.enabled,
         lastReportedAt: parsed.lastReportedAt as string | null,
       });
       return this.state;
     } catch {
       const created = Object.freeze({
         installationId: randomUUID(),
-        enabled: this.config.telemetryEnabled,
         lastReportedAt: null,
       });
       await this.saveState(created);

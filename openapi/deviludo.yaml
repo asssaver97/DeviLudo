@@ -31,13 +31,9 @@ paths:
         "200": { description: Self-hosted instance and its internal local workspace }
   /v1/settings/telemetry:
     get:
-      operationId: readTelemetrySettings
+      operationId: readTelemetryStatus
       responses:
-        "200": { description: Privacy-minimal active-installation telemetry settings }
-    put:
-      operationId: saveTelemetrySettings
-      responses:
-        "200": { description: Anonymous telemetry enabled state persisted locally }
+        "200": { description: Automatic active-installation reporting status }
   /v1/settings/agent:
     get:
       operationId: readGlobalAgentSettings

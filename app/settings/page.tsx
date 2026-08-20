@@ -1,6 +1,6 @@
 import type { Metadata } from "next";
 import { AgentSettings } from "@/components/AgentSettings";
-import { TelemetrySettingsPanel } from "@/components/TelemetrySettings";
+import { TelemetryStatusPanel } from "@/components/TelemetrySettings";
 import { SteamSettings } from "@/components/SteamSettings";
 import { localizedMetadata } from "@/lib/web/localized-metadata";
 
@@ -19,7 +19,7 @@ export default function SettingsPage() {
       <AgentSettings />
       <div className="settings-secondary-grid">
         <SteamSettings />
-        <TelemetrySettingsPanel />
+        <TelemetryStatusPanel />
       </div>
     </>
   );

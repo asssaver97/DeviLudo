@@ -266,11 +266,10 @@ textarea {
   .auth-card::after { left: 0; }
 }
 .telemetry-settings { padding: 20px; }
-.telemetry-toggle { align-items: center; background: #0a121e; border: 1px solid #34445a; cursor: pointer; display: grid; gap: 12px; grid-template-columns: auto minmax(0, 1fr); padding: 16px; }
-.telemetry-toggle input { accent-color: var(--blue); height: 18px; margin: 0; width: 18px; }
-.telemetry-toggle b, .telemetry-toggle small { display: block; }
-.telemetry-toggle b { color: var(--ink); font: 800 10px var(--font-geist-mono), monospace; }
-.telemetry-toggle small { color: var(--muted); font: 8px/1.5 var(--font-geist-mono), monospace; margin-top: 5px; }
+.telemetry-status { background: #0a121e; border: 1px solid #34445a; padding: 16px; }
+.telemetry-status b, .telemetry-status small { display: block; }
+.telemetry-status b { color: var(--ink); font: 800 10px var(--font-geist-mono), monospace; }
+.telemetry-status small { color: var(--muted); font: 8px/1.5 var(--font-geist-mono), monospace; margin-top: 5px; }
 .telemetry-last-report { color: var(--muted); font: 8px/1.5 var(--font-geist-mono), monospace; margin: 12px 0 0; }
 
 .project-catalog-card.is-disabled {

@@ -9,8 +9,7 @@ export type LocalInstance = Readonly<{
   workspace: WorkspaceSummary;
 }>;
 
-export type TelemetrySettings = Readonly<{
-  enabled: boolean;
+export type TelemetryStatus = Readonly<{
   endpointConfigured: boolean;
   installationIdMask: string;
   lastReportedAt: string | null;
