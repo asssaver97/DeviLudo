@@ -36,6 +36,8 @@ jobs:
         run: npm run local:executor:test
         env:
           DEVILUDO_SKIP_NATIVE_E2E: "1"
+      - name: Quiesce background workers for deterministic database checks
+        run: docker compose -f infra/docker-compose.yml stop core-sandbox core-scheduler
       - name: Exercise PostgreSQL RLS, claiming, fencing, recovery, and cancellation
         run: npm run local:database:test
       - name: Capture diagnostics
