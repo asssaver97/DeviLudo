@@ -301,8 +301,21 @@ async function runDatabaseSmoke(url) {
       INSERT INTO deviludo.asset_items(workspace_id, manifest_id, asset_key, asset_type, description)
       SELECT $1::uuid, id, 'ui/smoke', 'icon', 'database smoke asset' FROM manifest
     `, [workspaceIds[0], projectIds[0], workflowIds[0]]);
-    const held = await scheduler.query("SELECT deviludo.advance_asset_workflows()::integer AS count");
-    if (Number(held.rows[0]?.count) !== 0) throw new Error("A planned image did not hold the artifact build gate");
+    await scheduler.query("SELECT deviludo.advance_asset_workflows()::integer AS count");
+    const held = await owner.query(`
+      SELECT workflow.state::text,
+             count(job.id) FILTER (
+               WHERE job.kind = 'ARTIFACT_BUILD' AND job.state = 'QUEUED'
+             )::integer AS queued_builds
+        FROM deviludo.workflow_instances workflow
+        LEFT JOIN deviludo.jobs job
+          ON job.workspace_id = workflow.workspace_id AND job.workflow_id = workflow.id
+       WHERE workflow.workspace_id = $1::uuid AND workflow.id = $2::uuid
+       GROUP BY workflow.state
+    `, [workspaceIds[0], workflowIds[0]]);
+    if (held.rows[0]?.state !== "ASSET_GENERATING" || held.rows[0]?.queued_builds !== 0) {
+      throw new Error("A planned image did not hold the artifact build gate");
+    }
     await owner.query(`
       UPDATE deviludo.asset_items
          SET status = 'uploaded', bucket = 'deviludo-artifacts',
