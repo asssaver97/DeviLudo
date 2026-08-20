@@ -62,6 +62,12 @@ EOF
 }
 role_restart() { launchctl bootout system/com.deviludo.e2e 2>/dev/null || true; launchctl bootout system/com.deviludo.e2e-renew 2>/dev/null || true; launchctl bootstrap system /Library/LaunchDaemons/com.deviludo.e2e.plist; launchctl bootstrap system /Library/LaunchDaemons/com.deviludo.e2e-renew.plist; }
 role_healthcheck() { /opt/deviludo/current/deviludo-e2e-host preflight --pool E2E_MACOS --isolation tart; }
-role_stop() { launchctl bootout system/com.deviludo.e2e 2>/dev/null || true; launchctl bootout system/com.deviludo.e2e-renew 2>/dev/null || true; }
+role_stop() {
+  local base="/Library/Application Support/DeviludoE2E"
+  launchctl bootout system/com.deviludo.e2e 2>/dev/null || true
+  launchctl bootout system/com.deviludo.e2e-renew 2>/dev/null || true
+  sudo -u deviludo-e2e -H env HOME="$base" DEVILUDO_E2E_JOB_ROOT="$base/jobs" PATH=/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin \
+    /opt/deviludo/current/e2e-macos-isolation.sh reap || true
+}
 role_status() { launchctl print system/com.deviludo.e2e; }
 dispatch "$@"

@@ -4,7 +4,12 @@ import { access, chmod, mkdir, readFile, writeFile } from "node:fs/promises";
 import { arch, platform } from "node:os";
 import { resolve } from "node:path";
 import { promisify } from "node:util";
-const execute = promisify(execFile);
+const executeFile = promisify(execFile);
+let preparationSignal = null;
+const execute = (executable, arguments_, options = {}) => executeFile(executable, arguments_, {
+  ...options,
+  ...(options.signal || !preparationSignal ? {} : { signal: preparationSignal }),
+});
 const root = resolve(new URL("..", import.meta.url).pathname);
 const localRoot = resolve(root, ".deviludo/local");
 const stateFile = resolve(localRoot, "tart-e2e.json");
@@ -19,28 +24,31 @@ const baseCacheName = "deviludo-e2e-tahoe-base-cache";
 const baseImage = "ghcr.io/cirruslabs/macos-tahoe-base:latest";
 
 export async function preflightLocalTartE2e() {
-  if (platform() !== "darwin" || arch() !== "arm64") throw new Error("本地真实窗口 E2E 仅支持 Apple Silicon macOS，且不会降级到宿主机执行");
+  if (platform() !== "darwin" || arch() !== "arm64") throw new Error("Local real-window E2E requires Apple Silicon macOS and does not fall back to host execution");
   await mkdir(localRoot, { recursive: true, mode: 0o700 });
   await requireVirtualization();
   await ensureHomebrewTools();
   await ensureSshKey();
 }
 
-export async function prepareLocalTartE2e({ refresh = false, preflight = true, onProgress = null } = {}) {
-  await reportPreparation(onProgress, "PREPARING", "CHECKING_HOST", 2, "检查 macOS 虚拟化与 E2E 工具");
+export async function prepareLocalTartE2e({ refresh = false, preflight = true, onProgress = null, signal = null } = {}) {
+  preparationSignal = signal;
+  try {
+    signal?.throwIfAborted();
+  await reportPreparation(onProgress, "PREPARING", "CHECKING_HOST", 2, "Checking macOS virtualization and E2E tools");
   if (preflight) await preflightLocalTartE2e();
   else await mkdir(localRoot, { recursive: true, mode: 0o700 });
-  await reportPreparation(onProgress, "PREPARING", "DOWNLOADING_BASE", 5, "检查 macOS E2E 基础镜像");
+  await reportPreparation(onProgress, "PREPARING", "DOWNLOADING_BASE", 5, "Checking the macOS E2E base image");
   const baseImageDigest = await ensureCachedBaseImage(refresh, percentage => {
     void reportPreparation(
       onProgress,
       "PREPARING",
       "DOWNLOADING_BASE",
       5 + Math.round(percentage * 0.35),
-      `下载 macOS E2E 基础镜像 ${Math.round(percentage)}%`,
+      `Downloading the macOS E2E base image: ${Math.round(percentage)}%`,
     );
   });
-  await reportPreparation(onProgress, "PREPARING", "DOWNLOADING_BASE", 40, "macOS E2E 基础镜像已准备");
+  await reportPreparation(onProgress, "PREPARING", "DOWNLOADING_BASE", 40, "The macOS E2E base image is ready");
   const fingerprint = await configurationFingerprint(baseImageDigest);
   const previous = await readFile(stateFile, "utf8").then(JSON.parse).catch(() => null);
   if (!refresh && previous?.baseImage === baseImage && previous?.goldenName === goldenName
@@ -49,10 +57,10 @@ export async function prepareLocalTartE2e({ refresh = false, preflight = true, o
     await ensureAliasedKnownHosts();
     const migrated = { ...previous, baseImageDigest, fingerprint, verifiedAt: new Date().toISOString() };
     await writeState(migrated);
-    await reportPreparation(onProgress, "READY", "READY", 100, "macOS E2E 环境已复用并就绪");
+    await reportPreparation(onProgress, "READY", "READY", 100, "The existing macOS E2E environment is ready");
     return Object.freeze({ ...migrated, reused: true });
   }
-  await reportPreparation(onProgress, "PREPARING", "COMPILING_DRIVERS", 45, "编译 macOS 系统输入驱动");
+  await reportPreparation(onProgress, "PREPARING", "COMPILING_DRIVERS", 45, "Compiling macOS system input drivers");
   await compileHostDrivers();
   const updateFromGolden = !refresh
     && previous?.schema === "deviludo.local-tart-e2e"
@@ -66,20 +74,23 @@ export async function prepareLocalTartE2e({ refresh = false, preflight = true, o
     "PREPARING",
     "CLONING_VM",
     55,
-    updateFromGolden ? "增量更新真实窗口 E2E 虚拟机" : "创建真实窗口 E2E 虚拟机",
+    updateFromGolden ? "Updating the real-window E2E virtual machine" : "Creating the real-window E2E virtual machine",
   );
-  if (await tartVmExists(stagingName)) await run("tart", ["delete", stagingName], 120_000);
+  if (await tartVmExists(stagingName)) {
+    await run("tart", ["stop", stagingName], 120_000).catch(() => undefined);
+    await run("tart", ["delete", stagingName], 120_000);
+  }
   await visible("tart", ["clone", updateSource, stagingName], percentage => {
     void reportPreparation(
       onProgress,
       "PREPARING",
       "CLONING_VM",
       55 + Math.round(percentage * 0.1),
-      `创建 E2E 虚拟机 ${Math.round(percentage)}%`,
+      `Creating the E2E virtual machine: ${Math.round(percentage)}%`,
     );
   });
   await run("tart", ["set", stagingName, "--memory", "6144", "--display", "1440x900"], 30_000);
-  await reportPreparation(onProgress, "PREPARING", "BOOTING_VM", 67, "启动 E2E 虚拟机");
+  await reportPreparation(onProgress, "PREPARING", "BOOTING_VM", 67, "Booting the E2E virtual machine");
   const logFile = resolve(localRoot, "tart-provision.log");
   const descriptor = await import("node:fs").then(fs => fs.openSync(logFile, "a", 0o600));
   const vm = spawn("tart", ["run", stagingName, "--no-graphics", "--serial"], { detached: true, stdio: ["ignore", descriptor, descriptor], shell: false });
@@ -91,7 +102,7 @@ export async function prepareLocalTartE2e({ refresh = false, preflight = true, o
     if (ip) break;
     await delay(1000);
   }
-  if (!ip) throw new Error(`Tart 金镜像未能启动；请查看 ${logFile}`);
+  if (!ip) throw new Error(`The Tart golden VM did not start; inspect ${logFile}`);
   try {
     if (updateFromGolden) {
       await ensureAliasedKnownHosts();
@@ -99,17 +110,17 @@ export async function prepareLocalTartE2e({ refresh = false, preflight = true, o
     } else {
       await authorizeSshKey(ip);
     }
-    await reportPreparation(onProgress, "PREPARING", "PROVISIONING_VM", 74, "安装 E2E 测试运行环境");
+    await reportPreparation(onProgress, "PREPARING", "PROVISIONING_VM", 74, "Installing the E2E test runtime");
     await installGuestRuntime(ip, { rotateCredentials: !updateFromGolden });
   } catch (error) {
-    throw new Error(`Tart 真实窗口环境初始化失败，未启用宿主机降级：${error instanceof Error ? error.message : String(error)}`);
+    throw new Error(`Tart real-window environment initialization failed; host fallback is disabled: ${error instanceof Error ? error.message : String(error)}`);
   } finally {
     await run("tart", ["stop", stagingName], 120_000).catch(() => undefined);
   }
   // Validate the persisted image after a real reboot. The provisioning session
   // itself inherits the base image's already logged-in desktop and therefore
   // cannot prove that the replacement password still permits automatic login.
-  await reportPreparation(onProgress, "PREPARING", "REBOOTING_VM", 86, "重启虚拟机并验证自动登录");
+  await reportPreparation(onProgress, "PREPARING", "REBOOTING_VM", 86, "Rebooting the VM and verifying automatic login");
   const rebootLogDescriptor = await import("node:fs").then(fs => fs.openSync(logFile, "a", 0o600));
   const rebootedVm = spawn("tart", ["run", stagingName, "--no-graphics", "--serial"], {
     detached: true,
@@ -124,15 +135,15 @@ export async function prepareLocalTartE2e({ refresh = false, preflight = true, o
     if (rebootedIp) break;
     await delay(1000);
   }
-  if (!rebootedIp) throw new Error(`Tart 金镜像重启后未能启动；请查看 ${logFile}`);
+  if (!rebootedIp) throw new Error(`The Tart golden VM did not start after reboot; inspect ${logFile}`);
   let gamepadAvailable = false;
   try {
     await waitForGuestSsh(rebootedIp);
     await waitForGuestDesktop(rebootedIp);
-    await reportPreparation(onProgress, "PREPARING", "VERIFYING_VM", 94, "执行真实窗口与输入冒烟测试");
+    await reportPreparation(onProgress, "PREPARING", "VERIFYING_VM", 94, "Running real-window and input smoke tests");
     gamepadAvailable = await smokeGuestRuntime(rebootedIp);
   } catch (error) {
-    throw new Error(`Tart 金镜像重启后真实窗口 smoke 失败，未启用宿主机降级：${error instanceof Error ? error.message : String(error)}`);
+    throw new Error(`Tart real-window smoke testing failed after reboot; host fallback is disabled: ${error instanceof Error ? error.message : String(error)}`);
   } finally {
     await run("tart", ["stop", stagingName], 120_000).catch(() => undefined);
   }
@@ -140,12 +151,16 @@ export async function prepareLocalTartE2e({ refresh = false, preflight = true, o
   await run("tart", ["rename", stagingName, goldenName], 120_000);
   const state = { schema: "deviludo.local-tart-e2e", goldenName, baseImage, baseCacheName, baseImageDigest, fingerprint, gamepadAvailable, guestUser: "admin", keyFile, knownHostsFile, createdAt: new Date().toISOString(), verifiedAt: new Date().toISOString() };
   await writeState(state);
-  await reportPreparation(onProgress, "READY", "READY", 100, "macOS E2E 环境已就绪");
+  await reportPreparation(onProgress, "READY", "READY", 100, "The macOS E2E environment is ready");
   return Object.freeze({ ...state, reused: false });
+  } finally {
+    preparationSignal = null;
+    await executeFile("tart", ["stop", stagingName], { timeout: 120_000, maxBuffer: 1024 * 1024 }).catch(() => undefined);
+  }
 }
 
 async function ensureHomebrewTools() {
-  await access("/opt/homebrew/bin/brew").catch(() => { throw new Error("缺少 Homebrew，无法自动安装 Tart 和 SSH 辅助工具"); });
+  await access("/opt/homebrew/bin/brew").catch(() => { throw new Error("Homebrew is required to install Tart and SSH helper tools automatically"); });
   const tools = [["tart", "tart"], ["sshpass", "sshpass"]];
   const missing = [];
   for (const [command, formula] of tools) if (!await commandExists(command)) missing.push([command, formula]);
@@ -171,12 +186,12 @@ async function assertHomebrewCommandLineTools() {
   }
   if (!/Command Line Tools are too outdated/i.test(diagnosis)) return;
   const installed = await execute("pkgutil", ["--pkg-info=com.apple.pkg.CLTools_Executables"], { timeout: 10_000 })
-    .then(result => result.stdout.match(/^version:\s*(.+)$/m)?.[1]?.trim() ?? "未知版本")
-    .catch(() => "未知版本");
+    .then(result => result.stdout.match(/^version:\s*(.+)$/m)?.[1]?.trim() ?? "unknown version")
+    .catch(() => "unknown version");
   const required = diagnosis.match(/Command Line Tools for Xcode\s+([0-9.]+)/i)?.[1];
   throw new Error(
-    `当前 Command Line Tools ${installed} 与系统不兼容。请先在“系统设置 → 通用 → 软件更新”安装${required ? ` Command Line Tools for Xcode ${required}` : "最新版 Command Line Tools"}，`
-      + "或从 https://developer.apple.com/download/all/ 手动下载安装；完成后重新运行 npm run local:up。",
+    `Command Line Tools ${installed} are incompatible with this system. Install ${required ? `Command Line Tools for Xcode ${required}` : "the latest Command Line Tools"} from System Settings > General > Software Update, `
+      + "or download them from https://developer.apple.com/download/all/. Then run npm run local:up again.",
   );
 }
 
@@ -191,7 +206,7 @@ async function ensureCachedBaseImage(refresh, onCloneProgress) {
   if (refresh || !cacheExists) await requireDiskSpace();
   if (refresh && await tartVmExists(baseCacheName)) await run("tart", ["delete", baseCacheName], 120_000);
   if (!await tartVmExists(baseCacheName)) {
-    console.log("[DeviLudo:E2E] 首次下载 macOS E2E 基础镜像（约 25 GB）");
+    console.log("[DeviLudo:E2E] Downloading the macOS E2E base image for the first time (about 25 GB)");
     await visible("tart", ["clone", baseImage, baseCacheName], onCloneProgress);
   }
   let identity = "";
@@ -214,7 +229,7 @@ async function ensureCachedBaseImage(refresh, onCloneProgress) {
     const configuration = (await execute("tart", ["get", baseCacheName], { timeout: 30_000, maxBuffer: 4 * 1024 * 1024 })).stdout;
     identity = configuration.replace(/\b(?:running|stopped)\s*$/gim, "").trim();
   }
-  if (!identity) throw new Error("无法读取缓存的 Tart 基础镜像标识");
+  if (!identity) throw new Error("The cached Tart base image identity could not be read");
   const digest = createHash("sha256").update(baseImage).update("\0").update(identity).digest("hex");
   return `sha256:${digest}`;
 }
@@ -244,7 +259,7 @@ async function authorizeSshKey(ip) {
       await delay(2000);
     }
   }
-  if (!authorized) throw authorizationError ?? new Error("无法授权 Tart guest SSH key");
+  if (!authorized) throw authorizationError ?? new Error("The Tart guest SSH key could not be authorized");
   let knownHosts = "";
   for (let attempt = 0; attempt < 20 && !knownHosts; attempt += 1) {
     const scan = await execute("ssh-keyscan", ["-T", "5", "-H", ip], { timeout: 10_000, maxBuffer: 1024 * 1024 })
@@ -256,7 +271,7 @@ async function authorizeSshKey(ip) {
       .join("\n");
     if (!knownHosts) await delay(1000);
   }
-  if (!knownHosts) throw new Error("无法固定 Tart guest SSH host key");
+  if (!knownHosts) throw new Error("The Tart guest SSH host key could not be pinned");
   await writeFile(knownHostsFile, `${knownHosts}\n`, { mode: 0o600 });
   await ensureAliasedKnownHosts();
 }
@@ -269,7 +284,7 @@ async function ensureAliasedKnownHosts() {
     .map(line => line.split(/\s+/))
     .filter(parts => parts.length >= 3)
     .map(parts => `${guestHostKeyAlias} ${parts.slice(1).join(" ")}`))];
-  if (!aliased.length) throw new Error("缓存的 Tart guest SSH host key 无效");
+  if (!aliased.length) throw new Error("The cached Tart guest SSH host key is invalid");
   await writeFile(knownHostsFile, `${aliased.join("\n")}\n`, { mode: 0o600 });
 }
 
@@ -334,13 +349,13 @@ async function smokeGuestRuntime(ip) {
         throw new Error(`Tart guest smoke receipt is incomplete: ${stdout.trim().slice(0, 1_000)}`);
       }
       const available = stdout.includes("gamepad-smoke-ok");
-      if (!available) console.warn("Tart guest 未获得 Apple Core HID 虚拟设备 entitlement；键鼠 E2E 可用，声明 GAMEPAD 的项目将明确报基础设施不可用");
+      if (!available) console.warn("The Tart guest lacks the Apple Core HID virtual-device entitlement. Keyboard and pointer E2E remain available; projects requiring GAMEPAD will report an infrastructure error.");
       return available;
     } catch (error) {
       const stderr = String(error?.stderr ?? "").trim();
       const stdout = String(error?.stdout ?? "").trim();
       lastError = new Error(
-        `Tart guest 截图/键鼠 smoke 第 ${attempt + 1} 次失败：${(stderr || stdout || error?.message || String(error)).slice(0, 2_000)}`,
+        `Tart guest screenshot/input smoke attempt ${attempt + 1} failed: ${(stderr || stdout || error?.message || String(error)).slice(0, 2_000)}`,
         { cause: error },
       );
       // loginwindow can report the desktop session before ScreenCaptureKit has
@@ -349,7 +364,7 @@ async function smokeGuestRuntime(ip) {
       if (attempt < 2) await delay(5_000 * (attempt + 1));
     }
   }
-  throw lastError ?? new Error("Tart guest 截图/键鼠 smoke 未通过");
+  throw lastError ?? new Error("Tart guest screenshot/input smoke testing failed");
 }
 
 async function waitForGuestSsh(ip) {
@@ -408,10 +423,25 @@ async function tartVmExists(name) {
   }
 }
 async function commandExists(name) { return execute("/usr/bin/which", [name], { timeout: 10_000 }).then(() => true).catch(() => false); }
-async function requireDiskSpace() { const { stdout } = await execute("df", ["-Pk", localRoot]); const available = Number(stdout.trim().split(/\s+/).at(-3)); if (!Number.isFinite(available) || available < 35 * 1024 * 1024) throw new Error("Tart E2E 初始化至少需要 35 GiB 可用磁盘空间"); }
-async function requireVirtualization() { const { stdout } = await execute("sysctl", ["-n", "kern.hv_support"]); if (stdout.trim() !== "1") throw new Error("当前 Mac 未启用 Apple 虚拟化能力"); }
+async function requireDiskSpace() { const { stdout } = await execute("df", ["-Pk", localRoot]); const available = Number(stdout.trim().split(/\s+/).at(-3)); if (!Number.isFinite(available) || available < 35 * 1024 * 1024) throw new Error("Tart E2E initialization requires at least 35 GiB of free disk space"); }
+async function requireVirtualization() { const { stdout } = await execute("sysctl", ["-n", "kern.hv_support"]); if (stdout.trim() !== "1") throw new Error("Apple virtualization is not available on this Mac"); }
 async function writeState(value) { await writeFile(stateFile, `${JSON.stringify(value, null, 2)}\n`, { mode: 0o600 }); }
-function delay(ms) { return new Promise(resolvePromise => setTimeout(resolvePromise, ms)); }
+function delay(ms) {
+  return new Promise((resolvePromise, rejectPromise) => {
+    preparationSignal?.throwIfAborted();
+    const signal = preparationSignal;
+    const timer = setTimeout(() => {
+      signal?.removeEventListener("abort", abort);
+      resolvePromise();
+    }, ms);
+    const abort = () => {
+      clearTimeout(timer);
+      signal?.removeEventListener("abort", abort);
+      rejectPromise(signal?.reason ?? new Error("macOS E2E preparation was cancelled"));
+    };
+    signal?.addEventListener("abort", abort, { once: true });
+  });
+}
 function run(executable, arguments_, timeout) { return execute(executable, arguments_, { timeout, maxBuffer: 4 * 1024 * 1024 }); }
 let lastPreparationLogStage = "";
 async function reportPreparation(onProgress, state, stage, progress, message) {
@@ -429,7 +459,9 @@ function visible(executable, arguments_, onPercent) {
     const child = spawn(executable, arguments_, {
       stdio: tracksProgress ? ["inherit", "pipe", "pipe"] : "inherit",
       shell: false,
+      detached: Boolean(preparationSignal) && process.platform !== "win32",
     });
+    const detachAbort = attachPreparationAbort(child);
     let lastPercentage = -1;
     const forward = (stream, output) => stream?.on("data", chunk => {
       output.write(chunk);
@@ -449,6 +481,7 @@ function visible(executable, arguments_, onPercent) {
     }
     child.once("error", rejectPromise);
     child.once("close", code => {
+      detachAbort();
       if (code === 0) resolvePromise();
       else rejectPromise(new Error(`${executable} exited ${code}`));
     });
@@ -456,16 +489,47 @@ function visible(executable, arguments_, onPercent) {
 }
 function spawnWithInput(executable, arguments_, input, timeout) {
   return new Promise((resolvePromise, rejectPromise) => {
-    const child = spawn(executable, arguments_, { stdio: ["pipe", "pipe", "pipe"], shell: false });
+    const child = spawn(executable, arguments_, {
+      stdio: ["pipe", "pipe", "pipe"],
+      shell: false,
+      detached: Boolean(preparationSignal) && process.platform !== "win32",
+    });
+    const detachAbort = attachPreparationAbort(child);
     const stderr = [];
-    const timer = setTimeout(() => child.kill("SIGKILL"), timeout);
+    const timer = setTimeout(() => terminatePreparationChild(child, "SIGKILL"), timeout);
     child.stderr.on("data", chunk => stderr.push(Buffer.from(chunk)));
     child.stdin.end(input);
     child.once("error", rejectPromise);
     child.once("close", code => {
       clearTimeout(timer);
+      detachAbort();
       if (code === 0) resolvePromise();
       else rejectPromise(new Error(`${executable} failed: ${Buffer.concat(stderr).toString("utf8").slice(0, 2000)}`));
     });
   });
+}
+
+function attachPreparationAbort(child) {
+  const signal = preparationSignal;
+  if (!signal) return () => {};
+  let forceTimer = null;
+  const abort = () => {
+    terminatePreparationChild(child, "SIGTERM");
+    forceTimer = setTimeout(() => terminatePreparationChild(child, "SIGKILL"), 2_000);
+    forceTimer.unref?.();
+  };
+  signal.addEventListener("abort", abort, { once: true });
+  if (signal.aborted) abort();
+  return () => {
+    signal.removeEventListener("abort", abort);
+    if (forceTimer) clearTimeout(forceTimer);
+  };
+}
+
+function terminatePreparationChild(child, signal) {
+  if (child.exitCode !== null || child.signalCode !== null) return;
+  try {
+    if (process.platform !== "win32" && child.pid) process.kill(-child.pid, signal);
+    else child.kill(signal);
+  } catch { /* The child has already exited. */ }
 }

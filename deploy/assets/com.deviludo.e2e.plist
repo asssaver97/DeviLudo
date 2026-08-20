@@ -4,6 +4,7 @@
   <key>Label</key><string>com.deviludo.e2e</string>
   <key>ProgramArguments</key><array><string>/opt/deviludo/current/deviludo-e2e-host</string></array>
   <key>RunAtLoad</key><true/><key>KeepAlive</key><true/>
+  <key>ExitTimeOut</key><integer>900</integer>
   <key>UserName</key><string>deviludo-e2e</string>
   <key>EnvironmentVariables</key><dict><key>NODE_ENV</key><string>production</string><key>DEVILUDO_NODE_BIN</key><string>/opt/homebrew/bin/node</string></dict>
   <key>StandardOutPath</key><string>/Library/Application Support/DeviludoE2E/logs/e2e.log</string>

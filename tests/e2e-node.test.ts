@@ -210,6 +210,7 @@ test("cleanup failures fail the job even when execution itself succeeds", async 
   const calls: string[] = [];
   const isolation: IsolationController = {
     async assertAgentAbsent() { calls.push("agent-absent"); },
+    async reap() {},
     async reimage(_job, stage) {
       calls.push(`reimage-${stage}`);
       return `trusted-reimage-${stage}-proof`;
@@ -253,6 +254,7 @@ function fakeIsolation(calls: string[]): IsolationController {
     async assertAgentAbsent() {
       calls.push("agent-absent");
     },
+    async reap() {},
     async reimage(_job, stage) {
       calls.push(`reimage-${stage}`);
       return `trusted-reimage-${stage}-proof`;

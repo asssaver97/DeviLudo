@@ -4,6 +4,7 @@ import { resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 import { spawn } from "node:child_process";
+import { cleanupLocalTartOrphans } from "./local-tart-orphans.mjs";
 
 const execute = promisify(execFile);
 const root = fileURLToPath(new URL("..", import.meta.url));
@@ -16,6 +17,8 @@ const guestRunnerPath = resolve(root, "scripts/executors/local-tart-guest-runner
 export async function startLocalE2e({ refresh = false } = {}) {
   const current = await runningPid();
   if (current) return current;
+  await stopManagedGuestRunners();
+  await cleanupLocalTartOrphans();
   mkdirSync(runtimeDirectory, { recursive: true, mode: 0o700 });
   const output = openSync(logFile, "a", 0o600);
   const arguments_ = ["--import", "tsx", entrypoint];
@@ -40,22 +43,34 @@ export async function stopLocalE2e() {
   const pid = await runningPid();
   if (!pid) {
     removePidFile();
-    return await stopManagedGuestRunners() > 0;
+    const guestRunners = await stopManagedGuestRunners();
+    const virtualMachines = await cleanupLocalTartOrphans();
+    return guestRunners > 0 || virtualMachines.length > 0;
   }
   const identity = await processIdentity(pid);
   if (identity !== "match") {
     throw new Error(`Refusing to stop PID ${pid}: local E2E process identity could not be verified`);
   }
   process.kill(pid, "SIGTERM");
-  for (let attempt = 0; attempt < 30; attempt += 1) {
-    await new Promise(resolveDelay => setTimeout(resolveDelay, 100));
-    if (await processIdentity(pid) === "missing") {
-      removePidFile();
-      await stopManagedGuestRunners();
-      return true;
-    }
+  let stopped = await waitForProcessExit(pid, 120_000);
+  if (!stopped) {
+    signalProcessGroup(pid, "SIGKILL");
+    stopped = await waitForProcessExit(pid, 5_000);
   }
-  throw new Error(`macOS E2E node ${pid} did not stop after SIGTERM`);
+  if (stopped) removePidFile();
+  await stopManagedGuestRunners();
+  await cleanupLocalTartOrphans();
+  if (!stopped) throw new Error(`macOS E2E node ${pid} did not stop after SIGKILL`);
+  return true;
+}
+
+async function waitForProcessExit(pid, timeoutMs) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    if (await processIdentity(pid) === "missing") return true;
+    await new Promise(resolveDelay => setTimeout(resolveDelay, 100));
+  }
+  return await processIdentity(pid) === "missing";
 }
 
 async function stopManagedGuestRunners() {
@@ -96,6 +111,13 @@ function signalProcess(pid, signal) {
   try { process.kill(pid, signal); }
   catch (error) {
     if (!error || typeof error !== "object" || !("code" in error) || error.code !== "ESRCH") throw error;
+  }
+}
+
+function signalProcessGroup(pid, signal) {
+  try { process.kill(-pid, signal); }
+  catch (error) {
+    if (!error || typeof error !== "object" || !("code" in error) || error.code !== "ESRCH") signalProcess(pid, signal);
   }
 }
 

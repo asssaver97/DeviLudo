@@ -48,14 +48,35 @@ export async function stopLocalGitImport() {
   const identity = await processIdentity(pid);
   if (identity !== "match") throw new Error(`Refusing to stop PID ${pid}: local Git import process identity could not be verified`);
   process.kill(pid, "SIGTERM");
-  for (let attempt = 0; attempt < 30; attempt += 1) {
-    await new Promise(resolveDelay => setTimeout(resolveDelay, 100));
-    if (await processIdentity(pid) === "missing") {
-      removePidFile();
-      return true;
+  if (!await waitForProcessExit(pid, 10_000)) {
+    signalProcessGroup(pid, "SIGKILL");
+    if (!await waitForProcessExit(pid, 5_000)) {
+      throw new Error(`Local Git import bridge ${pid} did not stop after SIGKILL`);
     }
   }
-  throw new Error(`Local Git import bridge ${pid} did not stop after SIGTERM`);
+  removePidFile();
+  return true;
+}
+
+async function waitForProcessExit(pid, timeoutMs) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    if (await processIdentity(pid) === "missing") return true;
+    await new Promise(resolveDelay => setTimeout(resolveDelay, 100));
+  }
+  return await processIdentity(pid) === "missing";
+}
+
+function signalProcessGroup(pid, signal) {
+  try { process.kill(-pid, signal); }
+  catch (error) {
+    if (!error || typeof error !== "object" || !("code" in error) || error.code !== "ESRCH") {
+      try { process.kill(pid, signal); }
+      catch (fallbackError) {
+        if (!fallbackError || typeof fallbackError !== "object" || !("code" in fallbackError) || fallbackError.code !== "ESRCH") throw fallbackError;
+      }
+    }
+  }
 }
 
 export async function runningGitImportPid() {

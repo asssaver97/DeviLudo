@@ -36,7 +36,7 @@ test("local deployment keeps Core private by default and exposes it only for exp
   const localE2eDaemon = await readFile(new URL("../scripts/local-e2e-daemon.mjs", import.meta.url), "utf8");
   assert.match(localE2eDaemon, /await stopManagedGuestRunners\(\)/);
   assert.match(localE2eDaemon, /guestRunnerPath[\s\S]*local-tart-guest-runner\.mjs/);
-  assert.match(localE2eDaemon, /signalProcess\(pid, "SIGTERM"\)[\s\S]*signalProcess\(pid, "SIGKILL"\)/);
+  assert.match(localE2eDaemon, /process\.kill\(pid, "SIGTERM"\)[\s\S]*signalProcessGroup\(pid, "SIGKILL"\)/);
   const tartGuest = await readFile(new URL("../scripts/executors/local-tart-guest-runner.mjs", import.meta.url), "utf8");
   assert.match(tartGuest, /tart-e2e\.json/);
   assert.match(tartGuest, /DEVILUDO_E2E_HOST_OUTPUT/);
@@ -54,7 +54,7 @@ test("local deployment keeps Core private by default and exposes it only for exp
   assert.match(localUp, /DEVILUDO_DOCKER_GID/);
   assert.match(localUp, /BEGIN DEVILUDO LOCAL RUNTIME/);
   assert.match(localUp, /detectLocalProviderUpstreamProxy\(\)/);
-  assert.match(localUp, /198\.18\.0\.0\/15 Fake-IP/);
+  assert.match(localUp, /198\.18\.0\.0\/15 fake IP/);
   assert.match(localUp, /supportsHttpConnectProxy/);
   assert.match(localUp, /optionValue\("--remote-e2e"\)/);
   assert.match(localUp, /isPrivateNetworkIpv4/);
@@ -78,6 +78,56 @@ test("local deployment keeps Core private by default and exposes it only for exp
   assert.match(localUp, /"down", "--volumes", "--remove-orphans"/);
   assert.match(localUp, /npm run local:reset:self-hosted/);
   assert.doesNotMatch(compose, /deviludo-local-client(?:-secret)?/);
+});
+
+test("local shutdown and E2E recovery reap resources after interrupted work", async () => {
+  const [down, e2eDaemon, tartPreparation, tartRecovery, runner, executor, compose, systemdExecutor] = await Promise.all([
+    readFile(new URL("../scripts/local-down.mjs", import.meta.url), "utf8"),
+    readFile(new URL("../scripts/local-e2e-daemon.mjs", import.meta.url), "utf8"),
+    readFile(new URL("../scripts/local-tart-prepare.mjs", import.meta.url), "utf8"),
+    readFile(new URL("../scripts/local-tart-orphans.mjs", import.meta.url), "utf8"),
+    readFile(new URL("../services/e2e-node/src/runner.ts", import.meta.url), "utf8"),
+    readFile(new URL("../services/sandbox-executor/src/daemon.ts", import.meta.url), "utf8"),
+    readFile(new URL("../infra/docker-compose.yml", import.meta.url), "utf8"),
+    readFile(new URL("../deploy/assets/deviludo-executord.service", import.meta.url), "utf8"),
+  ]);
+  assert.match(down, /Promise\.allSettled\(\[/);
+  assert.match(down, /"down", "--remove-orphans"/);
+  assert.match(down, /label=deviludo\.managed=true/);
+  assert.match(down, /cleanupLocalTartOrphans/);
+  assert.match(e2eDaemon, /waitForProcessExit\(pid, 120_000\)/);
+  assert.match(e2eDaemon, /signalProcessGroup\(pid, "SIGKILL"\)/);
+  assert.match(tartPreparation, /signal = null[\s\S]*signal\?\.throwIfAborted/);
+  assert.match(tartPreparation, /finally \{[\s\S]*\["stop", stagingName\]/);
+  assert.match(tartRecovery, /jobVmName[\s\S]*stagingName[\s\S]*\["stop", name\][\s\S]*\["delete", name\]/);
+  assert.match(runner, /await isolation\.reap\(\);[\s\S]*finally \{[\s\S]*await isolation\.reap\(\)/);
+  assert.ok(executor.indexOf("for (const execution of liveExecutions) execution.abort()") < executor.indexOf("await serverClosed"));
+  assert.match(compose, /sandbox-executord:[\s\S]*stop_grace_period: 90s/);
+  assert.match(systemdExecutor, /docker stop --time 90/);
+});
+
+test("production E2E service managers allow recovery to finish before force termination", async () => {
+  const [linuxService, macosPlist, linuxDeploy, macosDeploy, windowsDeploy] = await Promise.all([
+    readFile(new URL("../deploy/assets/deviludo-e2e.service", import.meta.url), "utf8"),
+    readFile(new URL("../deploy/assets/com.deviludo.e2e.plist", import.meta.url), "utf8"),
+    readFile(new URL("../deploy/e2e-linux/deploy.sh", import.meta.url), "utf8"),
+    readFile(new URL("../deploy/e2e-macos/deploy.sh", import.meta.url), "utf8"),
+    readFile(new URL("../deploy/e2e-windows/deploy.ps1", import.meta.url), "utf8"),
+  ]);
+  assert.match(linuxService, /TimeoutStopSec=15min/);
+  assert.match(macosPlist, /<key>ExitTimeOut<\/key><integer>900<\/integer>/);
+  assert.match(linuxDeploy, /role_stop\(\)[\s\S]*e2e-linux-isolation\.sh reap/);
+  assert.match(macosDeploy, /role_stop\(\)[\s\S]*e2e-macos-isolation\.sh reap/);
+  assert.match(windowsDeploy, /AppStopMethodConsole 900000[\s\S]*AppKillProcessTree 1/);
+});
+
+test("local deployment terminal output is English", async () => {
+  const sources = await Promise.all([
+    "local-up.mjs", "local-down.mjs", "local-bootstrap.mjs", "local-prepare.mjs",
+    "local-e2e-daemon.mjs", "local-git-import-daemon.mjs", "local-macos-e2e.mjs",
+    "local-tart-prepare.mjs", "local-status.mjs", "local-logs.mjs",
+  ].map(file => readFile(new URL(`../scripts/${file}`, import.meta.url), "utf8")));
+  for (const source of sources) assert.doesNotMatch(source, /[\u3400-\u9fff]/);
 });
 
 test("production Core derives one anonymous installation ID from the host machine", async () => {
@@ -542,7 +592,7 @@ test("CI uses the fixed no-provider Agent while local macOS requires Tart E2E", 
   assert.match(tartPrepare, /for \(let attempt = 0; attempt < 3; attempt \+= 1\)/);
   assert.match(tartPrepare, /loginwindow can report the desktop session before ScreenCaptureKit/);
   assert.match(tartPrepare, /String\(error\?\.stderr \?\? ""\)\.trim\(\)/);
-  assert.match(tartPrepare, /金镜像重启后真实窗口 smoke 失败/);
+  assert.match(tartPrepare, /Tart real-window smoke testing failed after reboot/);
   assert.match(tartProvision, /\/usr\/sbin\/sysadminctl[\s\\]*-resetPasswordFor admin/);
   assert.match(tartProvision, /dscl \. -authonly admin/);
   assert.match(tartProvision, /writeFileSync\("\/Users\/Shared\/deviludo-kcpassword"/);
@@ -736,13 +786,20 @@ test("state backup and restore cover all durable stores with integrity and empty
 });
 
 test("E2E failures and isolation cleanup remove transient workspaces", async () => {
-  const executor = await readFile(new URL("../deploy/assets/e2e-job-executor.mjs", import.meta.url), "utf8");
-  const windows = await readFile(new URL("../deploy/assets/e2e-windows-isolation.ps1", import.meta.url), "utf8");
+  const [executor, linux, macos, windows] = await Promise.all([
+    readFile(new URL("../deploy/assets/e2e-job-executor.mjs", import.meta.url), "utf8"),
+    readFile(new URL("../deploy/assets/e2e-linux-isolation.sh", import.meta.url), "utf8"),
+    readFile(new URL("../deploy/assets/e2e-macos-isolation.sh", import.meta.url), "utf8"),
+    readFile(new URL("../deploy/assets/e2e-windows-isolation.ps1", import.meta.url), "utf8"),
+  ]);
   assert.match(executor, /if \(!evidenceOutputReady\) await rm\(workspace/);
   assert.doesNotMatch(executor, /signedOutputReady|ARTIFACT_SIGN|STEAM_CLEAN_INSTALL/);
   assert.match(executor, /executable\.endsWith\("\.mjs"\)[\s\S]*process\.execPath[\s\S]*\[executable, \.\.\.arguments_\]/);
   assert.doesNotMatch(executor, /spawn\(guestRunner,/);
   assert.match(executor, /Guest runner outcome contract is invalid: \$\{JSON\.stringify\(diagnostic\)\}/);
+  assert.match(linux, /action == reap[\s\S]*virsh destroy[\s\S]*virsh undefine/);
+  assert.match(macos, /action == reap[\s\S]*tart stop[\s\S]*tart delete/);
+  assert.match(windows, /Action -eq 'reap'[\s\S]*Stop-VM[\s\S]*Remove-VM/);
   assert.match(windows, /Filter "deviludo-\$JobId-\*"[\s\S]*Remove-Item -Recurse -Force/);
 });
 

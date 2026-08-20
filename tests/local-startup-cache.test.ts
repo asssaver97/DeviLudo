@@ -31,10 +31,10 @@ test("an unchanged checkout reuses verified images and never runs two local star
   assert.match(startup, /startupCache\.imageInputFingerprint !== inputFingerprint/);
   assert.doesNotMatch(startup, /imageCacheMaxAgeMs|age >= imageCacheMaxAgeMs/);
   assert.match(startup, /current\[image\] === startupCache\.imageIds\[image\]/);
-  assert.match(startup, /if \(resolvedImageIds\) \{[\s\S]*跳过 10 个镜像的重复构建/);
+  assert.match(startup, /if \(resolvedImageIds\) \{[\s\S]*skipping 10 redundant image builds/);
   assert.match(startup, /await buildLocalImages\(baseEnvironment\)/);
   assert.match(startup, /async function buildLocalImages\(environment\)/);
-  assert.match(startup, /并行 BuildKit 会话中断；正在复用已完成的层缓存逐个重试/);
+  assert.match(startup, /parallel BuildKit session was interrupted; retrying images individually/);
   assert.match(startup, /for \(const \[index, entry\] of localImageBuilds\.entries\(\)\)/);
   // Healthy services are retained. A stop is reserved for rotated credentials,
   // whose in-memory consumers must reload their token files.
@@ -173,7 +173,7 @@ test("local startup returns with E2E preparation in the background and exposes c
     readFile(new URL("../components/ServerPoolDashboard.tsx", import.meta.url), "utf8"),
     readFile(new URL("../scripts/local-bootstrap.mjs", import.meta.url), "utf8"),
   ]);
-  assert.match(startup, /启动 Web、Core 与本地依赖服务[\s\S]*启动 macOS E2E 后台准备/);
+  assert.match(startup, /Start Web, Core, and local dependencies[\s\S]*Start macOS E2E preparation in the background/);
   assert.match(startup, /startLocalE2e\(\{ refresh: refreshE2eVm \}\)/);
   assert.doesNotMatch(startup, /preflightLocalTartE2e/);
   assert.doesNotMatch(startup, /prepareLocalTartE2e\(\{ refresh: refreshE2eVm \}\)/);
@@ -185,7 +185,7 @@ test("local startup returns with E2E preparation in the background and exposes c
   assert.match(dashboard, /role="progressbar"/);
   assert.doesNotMatch(bootstrap, /"cosign"/);
   assert.match(bootstrap, /function executeVisible/);
-  assert.match(startup, /仍在进行：[\s\S]*formatDuration/);
+  assert.match(startup, /Still working:[\s\S]*formatDuration/);
   assert.match(startup, /"--wait",\s*"--no-deps",\s*\.\.\.localRuntimeServices/);
   assert.match(startup, /"run", "--rm", "--no-deps", "minio-init"/);
   assert.match(startup, /matchesCachedFingerprint\("projectSources", projectFingerprint\)/);

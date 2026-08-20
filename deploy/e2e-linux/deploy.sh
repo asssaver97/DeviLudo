@@ -48,6 +48,10 @@ EOF
 }
 role_restart() { systemctl enable --now deviludo-e2e deviludo-e2e-renew.timer; }
 role_healthcheck() { /opt/deviludo/current/deviludo-e2e-host preflight --pool E2E_LINUX; }
-role_stop() { systemctl stop deviludo-e2e deviludo-e2e-renew.timer || true; }
+role_stop() {
+  systemctl stop deviludo-e2e deviludo-e2e-renew.timer || true
+  runuser -u deviludo-e2e -- env DEVILUDO_E2E_JOB_ROOT=/var/lib/deviludo-e2e/jobs PATH=/usr/local/bin:/usr/bin:/bin \
+    /opt/deviludo/current/e2e-linux-isolation.sh reap || true
+}
 role_status() { systemctl --no-pager status deviludo-e2e; }
 dispatch "$@"

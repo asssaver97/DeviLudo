@@ -64,7 +64,7 @@ if (remoteE2eHost && !isLocalInterfaceIpv4(remoteE2eHost)) {
   throw new Error(`--remote-e2e address ${remoteE2eHost} is not assigned to a local network interface`);
 }
 const releaseStartupLock = acquireStartupLock();
-console.log("\nDeviLudo 本地环境启动\n");
+console.log("\nStarting the DeviLudo local environment\n");
 const webPort = process.env.DEVILUDO_WEB_HOST_PORT?.trim() || "3100";
 const corePort = process.env.DEVILUDO_CORE_HOST_PORT?.trim() || "8080";
 const gitImportPort = process.env.DEVILUDO_LOCAL_GIT_IMPORT_PORT?.trim() || "3199";
@@ -122,7 +122,7 @@ const {
   dockerIdentity,
   providerUpstreamProxy,
   installationId,
-} = await runStartupStage("检查 Docker、Git 和 Agent 运行环境", async () => {
+} = await runStartupStage("Check Docker, Git, and Agent runtimes", async () => {
   const [[detectedClaudeVersion, detectedCodexVersion, detectedCodexLoginMethod], resolvedDockerIdentity, resolvedInstallationId] = await Promise.all([
     Promise.all([
       detectLocalRuntime("claude"),
@@ -175,22 +175,22 @@ const baseEnvironment = {
   DEVILUDO_PROVIDER_UPSTREAM_PROXY: providerUpstreamProxy,
   DEVILUDO_CODEX_ACCOUNT_DEFAULT_MODEL: codexAccountDefaultModel ?? "",
 };
-await runStartupStage("启动 PostgreSQL、Vault 与对象存储", () => executeVisible("docker", [
+await runStartupStage("Start PostgreSQL, Vault, and object storage", () => executeVisible("docker", [
   "compose", "-f", "infra/docker-compose.yml", "up", "-d", "--wait", "postgres", "vault", "minio",
 ], { cwd: root, env: baseEnvironment }));
 // Vault stores its data on a file volume, so a restarted Vault comes back sealed
 // and its service tokens have to be reissued. Both facts follow from the container
 // start time, which is why the fingerprint is built from it.
 let credentialConsumersStopped = false;
-const vaultFingerprint = await runStartupStage("检查本地凭证与运行身份", async () => {
+const vaultFingerprint = await runStartupStage("Check local credentials and runtime identities", async () => {
   const fingerprint = await fingerprintVaultInit();
   if (!matchesStartupCache("vaultInit", fingerprint)) {
-    startupProgress("Vault 状态已变化，正在刷新服务凭证");
+    startupProgress("Vault state changed; refreshing service credentials");
     await stopCredentialConsumers(baseEnvironment);
     credentialConsumersStopped = true;
     await refreshLocalVaultTokens(baseEnvironment);
   } else {
-    startupProgress("Vault 凭证未变化，跳过刷新");
+    startupProgress("Vault credentials are unchanged; skipping refresh");
   }
   await import("./local-identity.mjs");
   return fingerprint;
@@ -206,11 +206,11 @@ const {
   imageIds,
   imagesBuilt,
   imageBuiltAt,
-} = await runStartupStage("准备本地运行镜像", async () => {
+} = await runStartupStage("Prepare local runtime images", async () => {
   const inputFingerprint = await fingerprintLocalImageInputs();
   let resolvedImageIds = await reusableLocalImageIds(inputFingerprint);
   if (resolvedImageIds) {
-    startupProgress("源码与镜像未变化，跳过 10 个镜像的重复构建");
+    startupProgress("Sources and images are unchanged; skipping 10 redundant image builds");
     return {
       imageInputFingerprint: inputFingerprint,
       imageIds: resolvedImageIds,
@@ -218,7 +218,7 @@ const {
       imageBuiltAt: startupCache.imageBuiltAt,
     };
   }
-  startupProgress("首次启动或镜像输入已变化，BuildKit 输出如下");
+  startupProgress("First start or changed image inputs; streaming BuildKit output below");
   await buildLocalImages(baseEnvironment);
   resolvedImageIds = await inspectLocalImageIds();
   return {
@@ -240,10 +240,10 @@ const runtimeImages = JSON.stringify({
 // Reading the socket group means starting a container purely to stat one file,
 // which is the most expensive probe here. The group belongs to the daemon, so the
 // answer only changes when the daemon does.
-const dockerSocketGid = await runStartupStage("准备沙箱执行器", async () => {
+const dockerSocketGid = await runStartupStage("Prepare the sandbox executor", async () => {
   const cached = cachedStartupValue("dockerSocketGid", dockerIdentity, /^\d+$/);
   if (cached) {
-    startupProgress("Docker socket 权限未变化，跳过容器探测");
+    startupProgress("Docker socket permissions are unchanged; skipping the container probe");
     return cached;
   }
   return await resolveDockerSocketGid();
@@ -265,7 +265,7 @@ await persistLocalComposeEnvironment(environment);
 // The init container installs the executor's secrets into a volume from files on
 // the host, so it has to re-run when either side changes: the volume identity, or
 // the bytes it copies in.
-const executorSecretsFingerprint = await runStartupStage("同步执行器凭证", async () => {
+const executorSecretsFingerprint = await runStartupStage("Synchronize executor credentials", async () => {
   const fingerprint = await fingerprintExecutorSecrets();
   if (!matchesStartupCache("executorSecrets", fingerprint)) {
     if (!credentialConsumersStopped) {
@@ -274,11 +274,11 @@ const executorSecretsFingerprint = await runStartupStage("同步执行器凭证"
     }
     await refreshLocalExecutorSecrets(environment);
   } else {
-    startupProgress("执行器凭证未变化，跳过同步");
+    startupProgress("Executor credentials are unchanged; skipping synchronization");
   }
   return fingerprint;
 });
-const storageFingerprints = await runStartupStage("准备本地持久存储", async () => {
+const storageFingerprints = await runStartupStage("Prepare local persistent storage", async () => {
   let projectFingerprint = await fingerprintProjectSources();
   let objectStoreFingerprint = await fingerprintObjectStore();
   const operations = [];
@@ -287,38 +287,38 @@ const storageFingerprints = await runStartupStage("准备本地持久存储", as
       "compose", "-f", "infra/docker-compose.yml", "run", "--rm", "--no-deps", "minio-init",
     ], { cwd: root, env: environment }));
   } else {
-    startupProgress("对象存储卷未变化，跳过存储桶初始化容器");
+    startupProgress("Object storage is unchanged; skipping bucket initialization");
   }
   if (!matchesCachedFingerprint("projectSources", projectFingerprint)) {
     operations.push(executeVisible("docker", [
       "compose", "-f", "infra/docker-compose.yml", "run", "--rm", "--no-deps", "project-sources-init",
     ], { cwd: root, env: environment }));
   } else {
-    startupProgress("项目存储卷权限未变化，跳过初始化容器");
+    startupProgress("Project storage permissions are unchanged; skipping initialization");
   }
   await Promise.all(operations);
   [projectFingerprint, objectStoreFingerprint] = await Promise.all([
     fingerprintProjectSources(),
     fingerprintObjectStore(),
   ]);
-  if (!projectFingerprint || !objectStoreFingerprint) throw new Error("无法验证本地持久存储卷");
+  if (!projectFingerprint || !objectStoreFingerprint) throw new Error("Local persistent storage could not be verified");
   return { projectFingerprint, objectStoreFingerprint };
 });
 // Migration and instance bootstrap are reachable only through the init profile.
 // Their skips are justified by committed database state rather than a recorded
 // fingerprint, so one query replaces two container starts without trusting cache.
-const { migrationRan, initialized } = await runStartupStage("校验数据库并注册本地运行时", async () => {
+const { migrationRan, initialized } = await runStartupStage("Verify the database and register local runtimes", async () => {
   const [instanceState, expectedMigrationLedger] = await Promise.all([
     readLocalInstanceState(environment),
     readExpectedMigrationLedger(),
   ]);
   const applied = await migrateWithOptionalBaselineReset(environment, instanceState, expectedMigrationLedger);
   const bootstrap = await bootstrapInstance(environment, runtimeImages, instanceState, applied);
-  startupProgress(applied ? "数据库迁移已应用" : "迁移账本未变化，跳过迁移容器");
-  startupProgress(bootstrap.reused ? "本地节点注册未变化，跳过初始化容器" : "本地节点与运行时已注册");
+  startupProgress(applied ? "Database migrations applied" : "Migration ledger is unchanged; skipping the migration container");
+  startupProgress(bootstrap.reused ? "Local node registration is unchanged; skipping bootstrap" : "Local nodes and runtimes registered");
   return { migrationRan: applied, initialized: bootstrap };
 });
-await runStartupStage("启动 Web、Core 与本地依赖服务", () => executeVisible("docker", [
+await runStartupStage("Start Web, Core, and local dependencies", () => executeVisible("docker", [
   "compose",
   "-f", "infra/docker-compose.yml",
   "up",
@@ -330,7 +330,7 @@ await runStartupStage("启动 Web、Core 与本地依赖服务", () => executeVi
 const gitImportConfigurationFingerprint = digest([
   "git-import", imageInputFingerprint, JSON.stringify(gitImportConfiguration),
 ]);
-const gitImportPid = await runStartupStage("启动本地项目桥接服务", async () => {
+const gitImportPid = await runStartupStage("Start the local project bridge", async () => {
   const { runningGitImportPid, startLocalGitImport, stopLocalGitImport } = await import("./local-git-import-daemon.mjs");
   const previousGitImportPid = await runningGitImportPid();
   if (previousGitImportPid && !matchesCachedFingerprint("gitImportConfiguration", gitImportConfigurationFingerprint)) {
@@ -341,7 +341,7 @@ const gitImportPid = await runStartupStage("启动本地项目桥接服务", asy
 let e2ePid = null;
 let e2eConfigurationFingerprint = null;
 if (!ciMode) {
-  const prepared = await runStartupStage("启动 macOS E2E 后台准备", async () => {
+  const prepared = await runStartupStage("Start macOS E2E preparation in the background", async () => {
     if (!initialized.macNodeId) throw new Error("Local macOS E2E node initialization failed");
     const e2eConfiguration = {
       nodeId: initialized.macNodeId,
@@ -363,7 +363,7 @@ if (!ciMode) {
       await stopLocalE2e();
     }
     const pid = await startLocalE2e({ refresh: refreshE2eVm });
-    startupProgress("Web/Core 已可使用；E2E 镜像在后台准备，进度可在“运行状态”页面查看");
+    startupProgress("Web and Core are ready; the E2E image is being prepared in the background. Track it on Runtime Status");
     return { fingerprint, pid };
   });
   e2eConfigurationFingerprint = prepared.fingerprint;
@@ -388,11 +388,11 @@ if (!baselineReset) {
   });
 }
 const startupMs = Date.now() - startupStartedAt;
-console.log(`\n✓ DeviLudo 已可使用（${formatDuration(startupMs)}）`);
+console.log(`\n✓ DeviLudo is ready (${formatDuration(startupMs)})`);
 console.log(`  Web: http://127.0.0.1:${webPort}`);
 if (e2ePid) {
-  console.log("  macOS E2E: 后台准备中或已就绪；打开“运行状态”查看实时进度");
-  console.log("  详细日志: .deviludo/local/e2e-macos.log");
+  console.log("  macOS E2E: preparing in the background or ready; open Runtime Status for live progress");
+  console.log("  Detailed log: .deviludo/local/e2e-macos.log");
 }
 console.log("");
 console.log(JSON.stringify({
@@ -423,15 +423,15 @@ async function runStartupStage(label, operation) {
   const startedAt = Date.now();
   console.log(`[${stage}] ${label}…`);
   const heartbeat = setInterval(() => {
-    console.log(`    仍在进行：${label}（${formatDuration(Date.now() - startedAt)}）`);
+    console.log(`    Still working: ${label} (${formatDuration(Date.now() - startedAt)})`);
   }, 10_000);
   heartbeat.unref();
   try {
     const result = await operation();
-    console.log(`    ✓ 完成（${formatDuration(Date.now() - startedAt)}）\n`);
+    console.log(`    ✓ Done (${formatDuration(Date.now() - startedAt)})\n`);
     return result;
   } catch (error) {
-    console.error(`    ✗ 失败（${formatDuration(Date.now() - startedAt)}）`);
+    console.error(`    ✗ Failed (${formatDuration(Date.now() - startedAt)})`);
     throw error;
   } finally {
     clearInterval(heartbeat);
@@ -451,9 +451,9 @@ async function buildLocalImages(environment) {
   try {
     await executeVisible("docker", [...compose, ...localImageBuilds.map(entry => entry.service)], options);
   } catch {
-    startupProgress("并行 BuildKit 会话中断；正在复用已完成的层缓存逐个重试");
+    startupProgress("The parallel BuildKit session was interrupted; retrying images individually with completed layer caches");
     for (const [index, entry] of localImageBuilds.entries()) {
-      startupProgress(`镜像 ${index + 1}/${localImageBuilds.length}：${entry.image}`);
+      startupProgress(`Image ${index + 1}/${localImageBuilds.length}: ${entry.image}`);
       await executeVisible("docker", [...compose, entry.service], options);
     }
   }
@@ -461,9 +461,9 @@ async function buildLocalImages(environment) {
 
 function formatDuration(milliseconds) {
   const seconds = Math.max(0, Math.round(milliseconds / 1_000));
-  if (seconds < 60) return `${seconds} 秒`;
+  if (seconds < 60) return `${seconds}s`;
   const minutes = Math.floor(seconds / 60);
-  return `${minutes} 分 ${seconds % 60} 秒`;
+  return `${minutes}m ${seconds % 60}s`;
 }
 
 /** Stream long-running BuildKit output so local startup never looks frozen. */
@@ -516,14 +516,14 @@ function acquireStartupLock() {
         }
       }
       if (running && Number.isFinite(age) && age >= 0 && age < 12 * 60 * 60 * 1000) {
-        throw Object.assign(new Error(`LOCAL_UP_ALREADY_RUNNING: PID ${owner.pid} 正在启动本地服务`), {
+        throw Object.assign(new Error(`LOCAL_UP_ALREADY_RUNNING: PID ${owner.pid} is already starting local services`), {
           code: "LOCAL_UP_ALREADY_RUNNING",
         });
       }
       try { unlinkSync(startupLockFile); } catch { /* another starter won the race */ }
     }
   }
-  throw new Error("LOCAL_UP_LOCK_UNAVAILABLE: 无法获取本地启动锁");
+  throw new Error("LOCAL_UP_LOCK_UNAVAILABLE: could not acquire the local startup lock");
 }
 
 /**
@@ -893,7 +893,7 @@ async function requireCommand(command, arguments_) {
   try {
     await execute(command, arguments_, { timeout: 10_000, maxBuffer: 64 * 1024 });
   } catch {
-    throw new Error(`${command} 未就绪；请先显式运行 npm run local:bootstrap`);
+    throw new Error(`${command} is unavailable; run npm run local:bootstrap first`);
   }
 }
 
@@ -1030,8 +1030,8 @@ async function detectLocalProviderUpstreamProxy() {
     if (await supportsHttpConnectProxy(port, target)) return `http://host.docker.internal:${port}`;
   }
   throw new Error([
-    "检测到 Provider DNS 返回 198.18.0.0/15 Fake-IP，但 Docker 无法使用宿主机透明代理。",
-    "请开启本机 HTTP 代理端口，并设置 DEVILUDO_PROVIDER_UPSTREAM_PROXY=http://host.docker.internal:<port> 后重试。",
+    "Provider DNS returned a 198.18.0.0/15 fake IP, but Docker cannot use the host's transparent proxy.",
+    "Enable a local HTTP proxy port, set DEVILUDO_PROVIDER_UPSTREAM_PROXY=http://host.docker.internal:<port>, and retry.",
   ].join("\n"));
 }
 
@@ -1118,7 +1118,7 @@ async function retainActiveJobRuntimeImages(environment) {
         await execute("docker", ["image", "tag", reference, `deviludo-retained-job-runtime:${digest.slice(0, 16)}`], { maxBuffer: 64 * 1024 });
         retained.push(reference);
       } catch {
-        console.warn(`活动作业引用的镜像已不存在，将在页面提供安全重试：${reference}`);
+        console.warn(`An image referenced by an active job no longer exists; the UI will offer a safe retry: ${reference}`);
       }
     }
     return retained;
@@ -1146,15 +1146,15 @@ async function migrateWithOptionalBaselineReset(environment, state, expectedLedg
     if (!isIncompatibleBaselineError(error)) throw error;
     if (!resetIncompatibleBaseline) {
       throw Object.assign(new Error([
-        "检测到包含旧托管平台或账号模型的不兼容 DeviLudo 数据基线。自建版不支持原地迁移。",
-        "如确认删除本地 PostgreSQL、MinIO 制品、项目源码目录和 Vault 数据，请运行：",
+        "Detected an incompatible DeviLudo data baseline containing the retired hosted-platform or account model. In-place migration is not supported.",
+        "To delete local PostgreSQL, MinIO artifacts, project source storage, and Vault data, run:",
         "  npm run local:reset:self-hosted",
-        "已绑定的外部本地项目目录不会被此操作删除。",
-        "任何远端服务的数据都不会被删除。",
+        "Bound external project directories will not be deleted.",
+        "No remote service data will be deleted.",
       ].join("\n")), { code: "INCOMPATIBLE_BASELINE_RESET_REQUIRED" });
     }
 
-    console.warn("正在重置不兼容的本地 PostgreSQL、MinIO、项目源码和 Vault 数据；不会删除任何远端数据。");
+    console.warn("Resetting incompatible local PostgreSQL, MinIO, project source, and Vault data. No remote data will be deleted.");
     await execute("docker", [
       "compose", "-f", "infra/docker-compose.yml", "down", "--volumes", "--remove-orphans",
     ], { cwd: root, env: environment, maxBuffer: 10 * 1024 * 1024 });
@@ -1165,7 +1165,7 @@ async function migrateWithOptionalBaselineReset(environment, state, expectedLedg
     // Every volume the fingerprints describe has just been destroyed, so nothing
     // recorded from this start may be reused by the next one.
     baselineReset = true;
-    console.warn("自建版本地数据基线已重建，继续启动服务。");
+    console.warn("The self-hosted local data baseline was rebuilt; continuing startup.");
     return true;
   }
 }

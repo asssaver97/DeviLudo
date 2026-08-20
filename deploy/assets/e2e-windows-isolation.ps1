@@ -1,8 +1,22 @@
 param([string]$Action,[string]$Stage,[string]$JobId,[string]$WorkspaceId,[long]$Generation,[string]$RuntimeImage)
 $ErrorActionPreference='Stop'
+$jobRoot=$(if($env:DEVILUDO_E2E_JOB_ROOT){$env:DEVILUDO_E2E_JOB_ROOT}else{'C:\ProgramData\Deviludo\jobs'})
+if($Action -eq 'reap'){
+  $removed=0
+  Get-ChildItem $jobRoot -Directory -ErrorAction SilentlyContinue | Where-Object {$_.Name -match '^[0-9a-f-]{36}$'} | ForEach-Object {
+    $vm="deviludo-$($_.Name)"
+    Stop-VM $vm -TurnOff -Force -ErrorAction SilentlyContinue
+    Remove-VM $vm -Force -ErrorAction SilentlyContinue
+    if(Get-VM $vm -ErrorAction SilentlyContinue){throw "Failed to reap Hyper-V VM $vm"}
+    Remove-Item $_.FullName -Recurse -Force -ErrorAction SilentlyContinue
+    Get-ChildItem $jobRoot -Directory -Filter "deviludo-$($_.Name)-*" -ErrorAction SilentlyContinue | Remove-Item -Recurse -Force
+    $removed++
+  }
+  "reap:$removed"
+  exit 0
+}
 if($JobId -notmatch '^[0-9a-f-]{36}$' -or $WorkspaceId -notmatch '^[0-9a-f-]{36}$' -or $Generation -lt 1 -or $RuntimeImage -notmatch '^sha256:[0-9a-f]{64}$'){throw 'Invalid isolation request'}
 $vm="deviludo-$JobId"
-$jobRoot=$(if($env:DEVILUDO_E2E_JOB_ROOT){$env:DEVILUDO_E2E_JOB_ROOT}else{'C:\ProgramData\Deviludo\jobs'})
 $jobDirectory=Join-Path $jobRoot $JobId
 if($Action -eq 'reimage' -and $Stage -eq 'before'){
   if(!(Test-Path -LiteralPath $env:DEVILUDO_GOLDEN_VM_ARCHIVE -PathType Leaf) -or !(Test-Path -LiteralPath $env:DEVILUDO_GOLDEN_VM_FILE -PathType Leaf)){throw 'Golden VM archive or configuration is missing'}
@@ -16,8 +30,11 @@ if($Action -eq 'reimage' -and $Stage -eq 'before'){
   Import-VM -Path $env:DEVILUDO_GOLDEN_VM_FILE -Copy -GenerateNewId -VirtualMachinePath $jobDirectory -VhdDestinationPath (Join-Path $jobDirectory 'Virtual Hard Disks') -SnapshotFilePath (Join-Path $jobDirectory 'Snapshots') | Rename-VM -NewName $vm
   Start-VM $vm
 } elseif(($Action -eq 'cleanup' -or $Action -eq 'reimage') -and $Stage -eq 'after'){
-  Stop-VM $vm -TurnOff -Force -ErrorAction SilentlyContinue
-  Remove-VM $vm -Force -ErrorAction SilentlyContinue
+  if(Get-VM $vm -ErrorAction SilentlyContinue){
+    Stop-VM $vm -TurnOff -Force -ErrorAction SilentlyContinue
+    Remove-VM $vm -Force -ErrorAction SilentlyContinue
+    if(Get-VM $vm -ErrorAction SilentlyContinue){throw "Failed to remove Hyper-V VM $vm"}
+  }
   Remove-Item $jobDirectory -Recurse -Force -ErrorAction SilentlyContinue
   Get-ChildItem $jobRoot -Directory -Filter "deviludo-$JobId-*" -ErrorAction SilentlyContinue | Remove-Item -Recurse -Force
 } else { throw 'Invalid isolation transition' }

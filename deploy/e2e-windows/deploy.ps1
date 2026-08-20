@@ -133,6 +133,10 @@ function Set-ServiceConfiguration {
   & $nssm set $Service AppDirectory (Join-Path $Root 'current') | Out-Null
   & $nssm set $Service AppEnvironmentExtra (Get-ServiceEnvironment -Config $Config -NodeId $NodeId -GoldenVmArchive $GoldenVmArchive -GoldenVmConfiguration $GoldenVmConfiguration) | Out-Null
   & $nssm set $Service AppExit Default Restart | Out-Null
+  & $nssm set $Service AppStopMethodConsole 900000 | Out-Null
+  & $nssm set $Service AppStopMethodWindow 900000 | Out-Null
+  & $nssm set $Service AppStopMethodThreads 900000 | Out-Null
+  & $nssm set $Service AppKillProcessTree 1 | Out-Null
   & $nssm set $Service Start SERVICE_AUTO_START | Out-Null
   @{coreUrl=$Config.coreUrl;credentialDirectory=(Join-Path $State 'credentials')} | ConvertTo-Json | Set-Content -Encoding UTF8 (Join-Path $State 'node.json')
   $renewAction=New-ScheduledTaskAction -Execute 'powershell.exe' -Argument '-NoProfile -NonInteractive -ExecutionPolicy Bypass -File "C:\Program Files\Deviludo\current\e2e-windows-renew.ps1"'

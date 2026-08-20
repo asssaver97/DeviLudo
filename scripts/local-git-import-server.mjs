@@ -23,7 +23,12 @@ import { extractAndValidateEvidenceBundle } from "./e2e-evidence.mjs";
 
 const { normalizeGitBranchName, normalizeGitHubRepositoryUrl } = projectImport;
 const { normalizeProjectPath, shouldIncludeProjectPath } = sourceArchive;
-const execute = promisify(execFile);
+const executeFile = promisify(execFile);
+const shutdownController = new AbortController();
+const execute = (executable, arguments_, options = {}) => executeFile(executable, arguments_, {
+  ...options,
+  signal: options.signal ?? shutdownController.signal,
+});
 const MAX_REQUEST_BYTES = 16 * 1024;
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const ARTIFACT_KINDS = new Set([
@@ -132,7 +137,17 @@ server.listen(config.port, "127.0.0.1", () => {
 });
 
 for (const signal of ["SIGINT", "SIGTERM"]) {
-  process.once(signal, () => server.close(() => process.exit(0)));
+  process.once(signal, () => void shutdown(signal));
+}
+
+let shutdownStarted = false;
+async function shutdown(signal) {
+  if (shutdownStarted) return;
+  shutdownStarted = true;
+  shutdownController.abort(new Error(`Local project bridge received ${signal}`));
+  server.closeIdleConnections?.();
+  await new Promise(resolveClosed => server.close(resolveClosed));
+  process.exitCode = 0;
 }
 
 function browserCors(request) {
@@ -312,7 +327,10 @@ async function openLocalArtifact(body) {
   await mkdir(staging, { mode: 0o700 });
   try {
     const artifactFile = join(staging, filename);
-    const download = await fetch(sourceUrl, { redirect: "error", signal: AbortSignal.timeout(30 * 60 * 1_000) });
+    const download = await fetch(sourceUrl, {
+      redirect: "error",
+      signal: AbortSignal.any([shutdownController.signal, AbortSignal.timeout(30 * 60 * 1_000)]),
+    });
     if (!download.ok || !download.body) throw failure("ARTIFACT_DOWNLOAD_FAILED", `制品读取失败 (${download.status})`);
     const handle = await openFile(artifactFile, "wx", 0o600);
     const hash = createHash("sha256");

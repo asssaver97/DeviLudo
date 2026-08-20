@@ -151,11 +151,14 @@ async function shutdown(signalName: string) {
   if (shuttingDown) return;
   shuttingDown = true;
   // Stop accepting work first so nothing new starts while we unwind.
-  await new Promise<void>(resolve => server.close(() => resolve()));
+  const serverClosed = new Promise<void>(resolve => server.close(() => resolve()));
+  server.closeIdleConnections?.();
   // Aborting each execution removes its task container through the same finally
   // block a cancelled request uses, so no orphan survives the restart.
   for (const execution of liveExecutions) execution.abort();
   await Promise.allSettled([...liveExecutions].map(execution => execution.settled));
+  server.closeAllConnections?.();
+  await serverClosed;
   await rm(socketPath, { force: true }).catch(() => undefined);
   console.log(JSON.stringify({
     level: "info",
@@ -317,7 +320,8 @@ async function execute(
       `--tmpfs=/workspace:rw,nosuid,nodev,size=2147483648,mode=0700,uid=10001,gid=10001`,
       "--user=10001:10001",
       `--network=${network}`,
-      "--label=deviludo.managed=true", `--label=deviludo.job=${plan.job.jobId}`,
+      "--label=deviludo.managed=true", `--label=deviludo.executor=${executorId}`,
+      `--label=deviludo.job=${plan.job.jobId}`,
     ];
     if (plan.mode === "MICROVM") createArguments.push(`--runtime=${microvmRuntime}`);
     createArguments.push(plan.job.runtimeImage);

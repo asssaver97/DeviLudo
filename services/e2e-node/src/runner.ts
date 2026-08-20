@@ -16,44 +16,49 @@ export async function runE2eNode(
   const client = dependencies.client ?? await CoreE2eClient.create(config);
   const isolation = dependencies.isolation ?? new TrustedIsolationController();
   await isolation.assertAgentAbsent();
+  await isolation.reap();
 
-  while (!signal.aborted) {
-    let job: JobProtocolV4 | null = null;
-    try {
-      job = await client.claim();
-      if (!job) {
-        await delay(config.pollMilliseconds, signal);
-        continue;
-      }
-      const jobController = new AbortController();
-      const abortJob = () => jobController.abort();
-      signal.addEventListener("abort", abortJob, { once: true });
-      const heartbeat = setInterval(() => void client.heartbeat(job as JobProtocolV4)
-        .then(accepted => { if (!accepted) jobController.abort(); })
-        .catch(() => jobController.abort()), 20_000);
+  try {
+    while (!signal.aborted) {
+      let job: JobProtocolV4 | null = null;
       try {
-        const completion = await executeE2eJob(job, config, client, isolation, jobController.signal);
-        if (!await client.complete(job, completion)) throw new Error("E2E completion was rejected by fencing");
-      } finally {
-        clearInterval(heartbeat);
-        signal.removeEventListener("abort", abortJob);
-        jobController.abort();
+        job = await client.claim();
+        if (!job) {
+          await delay(config.pollMilliseconds, signal);
+          continue;
+        }
+        const jobController = new AbortController();
+        const abortJob = () => jobController.abort();
+        signal.addEventListener("abort", abortJob, { once: true });
+        const heartbeat = setInterval(() => void client.heartbeat(job as JobProtocolV4)
+          .then(accepted => { if (!accepted) jobController.abort(); })
+          .catch(() => jobController.abort()), 20_000);
+        try {
+          const completion = await executeE2eJob(job, config, client, isolation, jobController.signal);
+          if (!await client.complete(job, completion)) throw new Error("E2E completion was rejected by fencing");
+        } finally {
+          clearInterval(heartbeat);
+          signal.removeEventListener("abort", abortJob);
+          jobController.abort();
+        }
+      } catch (error) {
+        const failure = classifyE2eInfrastructureFailure(error);
+        console.error(JSON.stringify({
+          level: "error",
+          event: "e2e_job_failed",
+          jobId: job?.jobId,
+          workspaceId: job?.workspaceId,
+          poolKind: config.poolKind,
+          classification: failure.classification,
+          domain: failure.domain,
+          message: failure.reason,
+        }));
+        if (job) await client.fail(job, failure).catch(() => undefined);
+        await delay(config.pollMilliseconds, signal);
       }
-    } catch (error) {
-      const failure = classifyE2eInfrastructureFailure(error);
-      console.error(JSON.stringify({
-        level: "error",
-        event: "e2e_job_failed",
-        jobId: job?.jobId,
-        workspaceId: job?.workspaceId,
-        poolKind: config.poolKind,
-        classification: failure.classification,
-        domain: failure.domain,
-        message: failure.reason,
-      }));
-      if (job) await client.fail(job, failure).catch(() => undefined);
-      await delay(config.pollMilliseconds, signal);
     }
+  } finally {
+    await isolation.reap();
   }
 }
 

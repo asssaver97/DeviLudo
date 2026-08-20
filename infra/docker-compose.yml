@@ -236,6 +236,7 @@ services:
   sandbox-executord:
     image: deviludo-sandbox-executor:local
     restart: unless-stopped
+    stop_grace_period: 90s
     user: "10001:10001"
     read_only: true
     cap_drop: ["ALL"]
