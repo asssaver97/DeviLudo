@@ -557,8 +557,42 @@ export async function runApi(
       const workspace = await requireSelectedWorkspace(request, repository, principal);
       const project = await repository.readProject(workspace.id, request.params.projectId);
       if (!project) return reply.code(404).send({ code: "PROJECT_NOT_FOUND" });
-      const result = await repository.assets.retryMissing(workspace.id, project.id);
-      if (!result) return reply.code(404).send({ code: "ASSET_MANIFEST_NOT_FOUND" });
+      if (!["ASSET_GENERATING", "RELEASE_DECISION_PENDING", "SUCCEEDED", "FAILED", "CANCELLED"].includes(project.workflowState)) {
+        return reply.code(409).send({
+          code: "ASSET_RERUN_UNAVAILABLE",
+          message: "当前交付仍在运行；请等待该阶段完成或先取消交付，再重新生成素材",
+        });
+      }
+      const manifest = await repository.assets.read(workspace.id, project.id);
+      if (!manifest) return reply.code(404).send({ code: "ASSET_MANIFEST_NOT_FOUND" });
+      const unresolved = manifest.items.filter(item => ["planned", "generating", "failed"].includes(item.status));
+      if (unresolved.length === 0) {
+        return reply.code(409).send({
+          code: "ASSET_RERUN_NOT_NEEDED",
+          message: "所有图片素材均已完成；如需应用新上传的素材，请直接重新构建",
+        });
+      }
+      if (unresolved.some(item => !item.generationPrompt)) {
+        return reply.code(409).send({
+          code: "ASSET_GENERATION_PROMPT_MISSING",
+          message: "未完成素材缺少生成提示词，请上传对应图片或重新运行 Agent",
+        });
+      }
+      const settings = await repository.readAgentSettings();
+      if (!settings || (settings.agentRuntime === "CLAUDE_CODE" && !settings.imageModel)) {
+        return reply.code(424).send({
+          code: "IMAGE_GENERATION_CONFIG_REQUIRED",
+          message: "请先在 Agent 设置中配置当前运行时的图片生成能力",
+        });
+      }
+      const result = await repository.assets.retryMissing({
+        workspaceId: workspace.id,
+        projectId: project.id,
+        workflowId: project.workflowId,
+        idempotencyKey: requestIdempotencyKey(request, "asset-rerun"),
+        requestedBy: principal.actorLabel,
+        requestedByActorId: principal.actorId,
+      });
       return reply.code(202).send(result);
     },
   );

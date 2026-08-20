@@ -32,6 +32,7 @@ export type WorkflowSnapshot = Readonly<{
 export type WorkflowEvent =
   | Readonly<{ kind: "SPEC_APPROVED" }>
   | Readonly<{ kind: "ASSETS_READY"; predecessorJobId: string }>
+  | Readonly<{ kind: "ASSET_RERUN_REQUESTED" }>
   | Readonly<{ kind: "RELEASE_APPROVED"; approvalId: string }>
   | Readonly<{ kind: "RELEASE_SKIPPED" }>
   | Readonly<{ kind: "CANCEL_REQUESTED" }>
@@ -115,9 +116,11 @@ export function initialWorkflowSnapshot(
 }
 
 export function transitionWorkflow(snapshot: WorkflowSnapshot, event: WorkflowEvent): WorkflowTransition {
-  // A rerun is the one event that legitimately reopens a terminal workflow, so
-  // it has to be handled before the terminal-state guard below.
+  // Reruns legitimately reopen a terminal workflow, so they have to be handled
+  // before the terminal-state guard below. Asset work has no job of its own: it
+  // re-enters the asynchronous gate and ASSETS_READY resumes at Builder.
   if (event.kind === "STAGE_RERUN_REQUESTED") return rerunStage(snapshot, event.stage, event.signalId);
+  if (event.kind === "ASSET_RERUN_REQUESTED") return rerunAssets(snapshot);
   if (["SUCCEEDED", "FAILED", "CANCELLED"].includes(snapshot.state)) {
     return Object.freeze({ snapshot, enqueue: Object.freeze([]) });
   }
@@ -167,6 +170,13 @@ export function transitionWorkflow(snapshot: WorkflowSnapshot, event: WorkflowEv
     return result({ ...snapshot, state: "SUCCEEDED" }, []);
   }
   throw new Error(`Job ${event.jobKind} is invalid for ${snapshot.state}`);
+}
+
+function rerunAssets(snapshot: WorkflowSnapshot): WorkflowTransition {
+  if (!["ASSET_GENERATING", "RELEASE_DECISION_PENDING", "SUCCEEDED", "FAILED", "CANCELLED"].includes(snapshot.state)) {
+    throw new Error("Asset rerun requires an idle delivery or the active asset gate");
+  }
+  return result({ ...snapshot, state: "ASSET_GENERATING", completedE2e: Object.freeze([]) }, []);
 }
 
 /**

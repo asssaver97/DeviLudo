@@ -77,7 +77,7 @@ CREATE TABLE deviludo.schema_metadata (
   applied_at timestamptz NOT NULL DEFAULT clock_timestamp()
 );
 INSERT INTO deviludo.schema_metadata(singleton, baseline, compatibility, current_version)
-VALUES (true, '001', 'deviludo-self-hosted-v1', '045_existing_source_assets');
+VALUES (true, '001', 'deviludo-self-hosted-v1', '049_e2e_report_retention_before_insert');
 
 -- Every post-baseline change is immutable and checksummed. Fresh databases are
 -- created from this full snapshot and then stamp the migrations incorporated by
@@ -685,6 +685,56 @@ CREATE TABLE deviludo.artifact_inputs (
   FOREIGN KEY (workspace_id, job_id) REFERENCES deviludo.jobs(workspace_id, id) ON DELETE CASCADE,
   FOREIGN KEY (workspace_id, artifact_id) REFERENCES deviludo.artifacts(workspace_id, id)
 );
+
+-- Evidence screenshots, videos, logs, and traces live together in the
+-- E2E_REPORT ZIP. A rerun replaces that ZIP for the same iteration/platform;
+-- retaining older copies only consumes object storage and the product never
+-- presents them. Queue the superseded object before removing its database row
+-- so object deletion remains durable across scheduler restarts.
+CREATE OR REPLACE FUNCTION deviludo.retain_latest_e2e_report()
+RETURNS trigger
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = pg_catalog, deviludo
+SET row_security = off
+AS $$
+BEGIN
+  INSERT INTO deviludo.object_cleanup_queue(workspace_id, bucket, object_key, reason)
+  SELECT artifact.workspace_id, artifact.bucket, artifact.object_key,
+         'superseded E2E report'
+    FROM deviludo.artifacts artifact
+   WHERE artifact.workspace_id = NEW.workspace_id
+     AND artifact.workflow_id = NEW.workflow_id
+     AND artifact.kind = 'E2E_REPORT'
+     AND artifact.target_platform IS NOT DISTINCT FROM NEW.target_platform
+     AND artifact.id <> NEW.id
+     -- Output keys normally contain the producing job id. If imported data ever
+     -- reused a key, that key now names the current object and must not be deleted.
+     AND (artifact.bucket, artifact.object_key) IS DISTINCT FROM (NEW.bucket, NEW.object_key)
+  ON CONFLICT (workspace_id, bucket, object_key) DO NOTHING;
+
+  DELETE FROM deviludo.artifact_inputs input
+   USING deviludo.artifacts artifact
+   WHERE artifact.workspace_id = NEW.workspace_id
+     AND artifact.workflow_id = NEW.workflow_id
+     AND artifact.kind = 'E2E_REPORT'
+     AND artifact.target_platform IS NOT DISTINCT FROM NEW.target_platform
+     AND artifact.id <> NEW.id
+     AND input.workspace_id = artifact.workspace_id
+     AND input.artifact_id = artifact.id;
+  DELETE FROM deviludo.artifacts artifact
+   WHERE artifact.workspace_id = NEW.workspace_id
+     AND artifact.workflow_id = NEW.workflow_id
+     AND artifact.kind = 'E2E_REPORT'
+     AND artifact.target_platform IS NOT DISTINCT FROM NEW.target_platform
+     AND artifact.id <> NEW.id;
+  RETURN NEW;
+END
+$$;
+CREATE TRIGGER artifacts_retain_latest_e2e_report
+BEFORE INSERT ON deviludo.artifacts
+FOR EACH ROW WHEN (NEW.kind = 'E2E_REPORT')
+EXECUTE FUNCTION deviludo.retain_latest_e2e_report();
 
 CREATE TABLE deviludo.e2e_policy_locks (
   workspace_id uuid NOT NULL,
@@ -1807,6 +1857,131 @@ $$;
 ALTER FUNCTION deviludo.fail_asset_generation(uuid, uuid, text)
   OWNER TO deviludo_claim_executor;
 
+-- Re-open the delivery gate when the user retries unresolved art after a build,
+-- E2E run, or completed delivery. The mutation is deliberately atomic: the old
+-- downstream jobs are superseded in the same transaction that requeues failed
+-- images, so no executor can start from a mixture of old and new assets.
+CREATE OR REPLACE FUNCTION deviludo.request_asset_rerun(
+  p_workflow_id uuid,
+  p_project_id uuid,
+  p_idempotency_key text,
+  p_payload jsonb
+)
+RETURNS TABLE (accepted boolean, queued integer, remaining integer)
+LANGUAGE plpgsql
+SECURITY INVOKER
+SET search_path = pg_catalog, deviludo
+AS $$
+DECLARE
+  workflow deviludo.workflow_instances%ROWTYPE;
+  asset_manifest_id uuid;
+  existing_kind text;
+  inserted_id uuid;
+  queued_count integer := 0;
+  remaining_count integer := 0;
+BEGIN
+  SELECT * INTO workflow
+    FROM deviludo.workflow_instances
+   WHERE id = p_workflow_id AND project_id = p_project_id
+   FOR UPDATE;
+  IF workflow.id IS NULL THEN RAISE EXCEPTION 'workflow not found'; END IF;
+
+  SELECT manifest.id INTO asset_manifest_id
+    FROM deviludo.asset_manifests manifest
+   WHERE manifest.workspace_id = workflow.workspace_id
+     AND manifest.project_id = workflow.project_id
+     AND manifest.workflow_id = workflow.id
+   FOR UPDATE;
+  IF asset_manifest_id IS NULL THEN RAISE EXCEPTION 'asset manifest not found'; END IF;
+
+  SELECT signal.signal_kind INTO existing_kind
+    FROM deviludo.external_signals signal
+   WHERE signal.workspace_id = workflow.workspace_id
+     AND signal.workflow_id = workflow.id
+     AND signal.idempotency_key = p_idempotency_key;
+  IF existing_kind IS NOT NULL THEN
+    IF existing_kind <> 'ASSET_RERUN_REQUESTED' THEN
+      RAISE EXCEPTION 'asset rerun idempotency key conflicts with another signal';
+    END IF;
+    SELECT count(*)::integer INTO remaining_count
+      FROM deviludo.asset_items item
+     WHERE item.workspace_id = workflow.workspace_id
+       AND item.manifest_id = asset_manifest_id
+       AND item.status IN ('planned', 'generating', 'failed');
+    RETURN QUERY SELECT false, 0, remaining_count;
+    RETURN;
+  END IF;
+
+  IF workflow.state NOT IN (
+    'ASSET_GENERATING', 'RELEASE_DECISION_PENDING', 'SUCCEEDED', 'FAILED', 'CANCELLED'
+  ) THEN
+    RAISE EXCEPTION 'Asset rerun requires an idle delivery or the active asset gate';
+  END IF;
+  IF NOT EXISTS (
+    SELECT 1 FROM deviludo.instance_agent_settings
+     WHERE singleton = true
+       AND (
+         agent_runtime = 'CODEX_CLI'
+         OR (agent_runtime = 'CLAUDE_CODE' AND image_model IS NOT NULL)
+       )
+  ) THEN
+    RAISE EXCEPTION 'Image generation configuration is required before rerunning assets';
+  END IF;
+
+  SELECT count(*)::integer INTO remaining_count
+    FROM deviludo.asset_items item
+   WHERE item.workspace_id = workflow.workspace_id
+     AND item.manifest_id = asset_manifest_id
+     AND item.status IN ('planned', 'generating', 'failed');
+  IF remaining_count = 0 THEN RAISE EXCEPTION 'No unresolved assets remain'; END IF;
+
+  INSERT INTO deviludo.external_signals(
+    workspace_id, workflow_id, signal_kind, payload, idempotency_key
+  ) VALUES (
+    workflow.workspace_id, workflow.id, 'ASSET_RERUN_REQUESTED', p_payload, p_idempotency_key
+  ) RETURNING id INTO inserted_id;
+
+  UPDATE deviludo.asset_manifests
+     SET auto_generate_enabled = true, updated_at = clock_timestamp()
+   WHERE workspace_id = workflow.workspace_id AND id = asset_manifest_id;
+  UPDATE deviludo.asset_items
+     SET status = 'planned', generation_attempt = 0,
+         generation_lease_expires_at = NULL, error_message = NULL,
+         updated_at = clock_timestamp()
+   WHERE workspace_id = workflow.workspace_id
+     AND manifest_id = asset_manifest_id
+     AND status = 'failed';
+  GET DIAGNOSTICS queued_count = ROW_COUNT;
+
+  UPDATE deviludo.jobs
+     SET state = 'CANCELLED',
+         lease_owner = NULL, lease_token = NULL, lease_expires_at = NULL,
+         heartbeat_at = NULL, fencing_token = fencing_token + 1,
+         last_error = 'superseded by asset rerun', updated_at = clock_timestamp()
+   WHERE workspace_id = workflow.workspace_id AND workflow_id = workflow.id
+     AND kind IN ('ARTIFACT_BUILD', 'E2E_TEST', 'STEAM_PUBLISH')
+     AND state <> 'CANCELLED';
+  UPDATE deviludo.workflow_instances
+     SET state = 'ASSET_GENERATING', version = version + 1,
+         updated_at = clock_timestamp()
+   WHERE workspace_id = workflow.workspace_id AND id = workflow.id;
+  INSERT INTO deviludo.workflow_events(
+    workspace_id, workflow_id, event_kind, event_data, idempotency_key
+  ) VALUES (
+    workflow.workspace_id, workflow.id, 'ASSET_RERUN_REQUESTED',
+    p_payload || jsonb_build_object('signalId', inserted_id, 'queued', queued_count),
+    'signal:' || p_idempotency_key
+  );
+
+  SELECT count(*)::integer INTO remaining_count
+    FROM deviludo.asset_items item
+   WHERE item.workspace_id = workflow.workspace_id
+     AND item.manifest_id = asset_manifest_id
+     AND item.status IN ('planned', 'generating', 'failed');
+  RETURN QUERY SELECT true, queued_count, remaining_count;
+END
+$$;
+
 -- Advance deliveries whose generated/uploaded art is now complete. This is a
 -- cross-workspace scheduler primitive, so it owns the same narrow BYPASSRLS role
 -- as job claiming. Turning auto-generation off is an explicit request to use
@@ -1827,7 +2002,8 @@ BEGIN
   END IF;
   FOR candidate IN
     SELECT workflow.workspace_id, workflow.id AS workflow_id, workflow.project_id,
-           workflow.target_platforms, agent.id AS agent_job_id
+           workflow.target_platforms, agent.id AS agent_job_id,
+           asset_rerun.id AS asset_rerun_signal_id
       FROM deviludo.workflow_instances workflow
       JOIN deviludo.asset_manifests manifest
         ON manifest.workspace_id = workflow.workspace_id
@@ -1843,6 +2019,15 @@ BEGIN
          ORDER BY source.updated_at DESC, source.created_at DESC
          LIMIT 1
       ) agent ON true
+      LEFT JOIN LATERAL (
+        SELECT signal.id
+          FROM deviludo.external_signals signal
+         WHERE signal.workspace_id = workflow.workspace_id
+           AND signal.workflow_id = workflow.id
+           AND signal.signal_kind = 'ASSET_RERUN_REQUESTED'
+         ORDER BY signal.created_at DESC, signal.id DESC
+         LIMIT 1
+      ) asset_rerun ON true
      WHERE workflow.state = 'ASSET_GENERATING'
        AND (
          manifest.auto_generate_enabled = false
@@ -1866,15 +2051,21 @@ BEGIN
       PERFORM deviludo.enqueue_job(
         candidate.workspace_id, candidate.workflow_id, candidate.project_id,
         'ARTIFACT_BUILD', NULL,
-        candidate.workflow_id::text || ':artifact:after:' || candidate.agent_job_id::text,
+        candidate.workflow_id::text || ':artifact:assets:'
+          || coalesce(candidate.asset_rerun_signal_id::text, 'initial')
+          || ':after:' || candidate.agent_job_id::text,
         jsonb_build_object('targetPlatforms', candidate.target_platforms)
       );
       INSERT INTO deviludo.workflow_events(
         workspace_id, workflow_id, event_kind, event_data, idempotency_key
       ) VALUES (
         candidate.workspace_id, candidate.workflow_id, 'ASSETS_READY',
-        jsonb_build_object('agentJobId', candidate.agent_job_id),
-        'assets-ready:' || candidate.agent_job_id::text
+        jsonb_build_object(
+          'agentJobId', candidate.agent_job_id,
+          'assetRerunSignalId', candidate.asset_rerun_signal_id
+        ),
+        'assets-ready:' || coalesce(candidate.asset_rerun_signal_id::text, 'initial')
+          || ':' || candidate.agent_job_id::text
       ) ON CONFLICT (workspace_id, workflow_id, idempotency_key) DO NOTHING;
       advanced := advanced + 1;
     END IF;
@@ -3160,6 +3351,7 @@ GRANT EXECUTE ON FUNCTION deviludo.complete_asset_generation(uuid, uuid, text, t
   TO deviludo_scheduler;
 GRANT EXECUTE ON FUNCTION deviludo.fail_asset_generation(uuid, uuid, text) TO deviludo_scheduler;
 GRANT EXECUTE ON FUNCTION deviludo.advance_asset_workflows(integer) TO deviludo_scheduler;
+GRANT EXECUTE ON FUNCTION deviludo.request_asset_rerun(uuid, uuid, text, jsonb) TO deviludo_api;
 GRANT EXECUTE ON FUNCTION deviludo.schedule_idle_project_document_maintenance(integer, integer)
   TO deviludo_scheduler;
 GRANT EXECUTE ON FUNCTION deviludo.claim_project_import_analysis(integer) TO deviludo_api;

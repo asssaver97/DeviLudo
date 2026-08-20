@@ -47,6 +47,9 @@ const PIPELINE = [
   ["STEAM_PUBLISH", "Steam 上传", "Steam Upload"],
 ] as const;
 const RERUNNABLE_WORKFLOW_STATES = new Set(["FAILED", "SUCCEEDED", "CANCELLED"]);
+const ASSET_RERUN_WORKFLOW_STATES = new Set([
+  "ASSET_GENERATING", "RELEASE_DECISION_PENDING", "FAILED", "SUCCEEDED", "CANCELLED",
+]);
 
 type LocalGitState = Readonly<{
   repository: boolean;
@@ -212,6 +215,7 @@ export function ProjectStudio({ projectId }: { projectId: string }) {
     try {
       const response = await fetch(`/api/projects/${encodeURIComponent(projectId)}/asset-manifest/generate-missing`, {
         method: "POST",
+        headers: { "idempotency-key": `asset-rerun:${crypto.randomUUID()}` },
       });
       const payload = await response.json().catch(() => ({})) as { message?: string };
       if (!response.ok) {
@@ -219,7 +223,10 @@ export function ProjectStudio({ projectId }: { projectId: string }) {
       }
       setAssetPanelExpanded(true);
       setAssetManifestRefreshKey(value => value + 1);
-      await loadAssetManifest();
+      // The request atomically reopens a completed delivery at ASSET_GENERATING.
+      // Refresh the workflow as well as the manifest so the active-state polling
+      // effect starts immediately and follows Builder and E2E to completion.
+      await Promise.all([loadProject(true), loadArtifacts(true), loadIterations(), loadAssetManifest()]);
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : text("图片素材重跑失败", "Unable to rerun image assets"));
     } finally {
@@ -698,6 +705,8 @@ export function ProjectStudio({ projectId }: { projectId: string }) {
   const assetItems = assetManifestView?.items ?? Object.freeze([]);
   const assetCompletion = assetManifestView?.completion;
   const assetOutstanding = assetItems.filter(item => ["planned", "generating", "failed"].includes(item.status)).length;
+  const assetRerunAvailable = !viewingHistoricalIteration
+    && ASSET_RERUN_WORKFLOW_STATES.has(project.workflowState);
   const assetNodeStatus = !assetManifestView?.manifest
     ? "pending"
     : assetCompletion?.complete
@@ -932,7 +941,7 @@ export function ProjectStudio({ projectId }: { projectId: string }) {
                     <button
                       aria-label={text("重新运行美术素材节点，只补齐未生成图片", "Rerun the Art stage and generate only missing images")}
                       className="product-delivery-stage-rerun-icon"
-                      disabled={retryingAssets}
+                      disabled={retryingAssets || !assetRerunAvailable}
                       onClick={() => void retryMissingAssets()}
                       title={text(`补齐 ${assetOutstanding} 个未完成素材`, `Generate ${assetOutstanding} missing assets`)}
                       type="button"

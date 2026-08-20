@@ -102,6 +102,29 @@ test("rerunning a stage reopens a terminal workflow and enqueues only that stage
   assert.match(advanced.enqueue[0].idempotencyKey, /:e2e:macos:after:rerun-build-job$/);
 });
 
+test("rerunning unresolved assets reopens the gate and resumes through build and E2E", () => {
+  const succeeded: WorkflowSnapshot = Object.freeze({
+    ...initialWorkflowSnapshot(workflowId, workspaceId, projectId, "VALIDATE", ["macos"]),
+    state: "SUCCEEDED",
+    completedE2e: Object.freeze(["macos"] as const),
+  });
+  const assets = transitionWorkflow(succeeded, { kind: "ASSET_RERUN_REQUESTED" });
+  assert.equal(assets.snapshot.state, "ASSET_GENERATING");
+  assert.deepEqual(assets.snapshot.completedE2e, []);
+  assert.deepEqual(assets.enqueue, []);
+
+  const build = transitionWorkflow(assets.snapshot, {
+    kind: "ASSETS_READY", predecessorJobId: "asset-rerun-signal-1",
+  });
+  assert.equal(build.snapshot.state, "ARTIFACT_BUILDING");
+  assert.deepEqual(build.enqueue.map(command => command.jobKind), ["ARTIFACT_BUILD"]);
+  const e2e = transitionWorkflow(build.snapshot, {
+    kind: "JOB_SUCCEEDED", jobId: "rebuilt-with-assets", jobKind: "ARTIFACT_BUILD", targetOperatingSystem: null,
+  });
+  assert.equal(e2e.snapshot.state, "E2E_TESTING");
+  assert.deepEqual(e2e.enqueue.map(command => command.jobKind), ["E2E_TEST"]);
+});
+
 test("rerunning a per-platform stage fans out across every target platform", () => {
   let snapshot = initialWorkflowSnapshot(workflowId, workspaceId, projectId, "RELEASE", ["linux", "windows", "macos"]);
   snapshot = transitionWorkflow(snapshot, { kind: "SPEC_APPROVED" }).snapshot;

@@ -73,6 +73,12 @@ export type AssetGenerationLease = Readonly<{
   attempt: number;
 }>;
 
+export type AssetRerunResult = Readonly<{
+  accepted: boolean;
+  queued: number;
+  remaining: number;
+}>;
+
 type AssetGenerationLeaseRow = Readonly<{
   workspaceId: string;
   projectId: string;
@@ -181,38 +187,33 @@ export class AssetManifestStore {
   }
 
   /**
-   * Requeue only unresolved image work. Existing source images and already
-   * generated/uploaded objects are deliberately untouched.
+   * Requeue unresolved image work and atomically reopen the delivery at its
+   * asset gate. Existing source images and supplied objects remain untouched;
+   * the database supersedes Builder/E2E jobs derived from the older set.
    */
-  async retryMissing(workspaceId: string, projectId: string): Promise<Readonly<{ queued: number; remaining: number }> | null> {
-    return this.database.withWorkspace(workspaceId, async client => {
-      const manifest = await client.query<{ id: string }>(
-        `UPDATE deviludo.asset_manifests
-            SET auto_generate_enabled = true, updated_at = clock_timestamp()
-          WHERE project_id = $1::uuid
-        RETURNING id::text`,
-        [projectId],
+  async retryMissing(input: Readonly<{
+    workspaceId: string;
+    projectId: string;
+    workflowId: string;
+    idempotencyKey: string;
+    requestedBy: string;
+    requestedByActorId: string;
+  }>): Promise<AssetRerunResult> {
+    return this.database.withWorkspace(input.workspaceId, async client => {
+      const result = await client.query<{ accepted: boolean; queued: number; remaining: number }>(
+        `SELECT accepted, queued, remaining
+           FROM deviludo.request_asset_rerun(
+             $1::uuid, $2::uuid, $3::text,
+             jsonb_build_object('requestedBy', $4::text, 'requestedByActorId', $5::text)
+           )`,
+        [input.workflowId, input.projectId, input.idempotencyKey, input.requestedBy, input.requestedByActorId],
       );
-      const manifestId = manifest.rows[0]?.id;
-      if (!manifestId) return null;
-      const retried = await client.query(
-        `UPDATE deviludo.asset_items
-            SET status = 'planned', generation_attempt = 0,
-                generation_lease_expires_at = NULL, error_message = NULL,
-                updated_at = clock_timestamp()
-          WHERE manifest_id = $1::uuid AND status = 'failed'`,
-        [manifestId],
-      );
-      const remaining = await client.query<{ count: string }>(
-        `SELECT count(*)::text AS count
-           FROM deviludo.asset_items
-          WHERE manifest_id = $1::uuid
-            AND status IN ('planned', 'generating', 'failed')`,
-        [manifestId],
-      );
+      const row = result.rows[0];
+      if (!row) throw new Error("Asset rerun did not return a result");
       return Object.freeze({
-        queued: retried.rowCount ?? 0,
-        remaining: Number(remaining.rows[0]?.count ?? 0),
+        accepted: row.accepted,
+        queued: Number(row.queued),
+        remaining: Number(row.remaining),
       });
     });
   }

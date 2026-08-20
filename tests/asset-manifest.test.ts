@@ -313,21 +313,31 @@ describe("Asset manifest store", () => {
     assert.equal(await new AssetManifestStore(missing.database).setAutoGenerate(workspaceId, projectId, true), false);
   });
 
-  it("requeues only failed image work and preserves supplied images", async () => {
-    let call = 0;
-    const { database, calls } = fakeDatabase(() => {
-      call += 1;
-      if (call === 1) return { rows: [{ id: manifestId }], rowCount: 1 };
-      if (call === 2) return { rows: [], rowCount: 2 };
-      return { rows: [{ count: "3" }] };
-    });
-    assert.deepEqual(await new AssetManifestStore(database).retryMissing(workspaceId, projectId), {
+  it("atomically reopens the asset gate and preserves supplied images", async () => {
+    const { database, calls } = fakeDatabase(() => ({
+      rows: [{ accepted: true, queued: 2, remaining: 3 }],
+    }));
+    assert.deepEqual(await new AssetManifestStore(database).retryMissing({
+      workspaceId,
+      projectId,
+      workflowId: "20000000-0000-4000-8000-000000000004",
+      idempotencyKey: "asset-rerun:test-request",
+      requestedBy: "Local operator",
+      requestedByActorId: "20000000-0000-4000-8000-000000000005",
+    }), {
+      accepted: true,
       queued: 2,
       remaining: 3,
     });
-    assert.match(calls[0].text, /auto_generate_enabled = true/);
-    assert.match(calls[1].text, /status = 'planned'[\s\S]*status = 'failed'/);
-    assert.doesNotMatch(calls[1].text, /existing|generated|uploaded/);
+    assert.equal(calls.length, 1);
+    assert.match(calls[0].text, /deviludo\.request_asset_rerun/);
+    assert.deepEqual(calls[0].values, [
+      "20000000-0000-4000-8000-000000000004",
+      projectId,
+      "asset-rerun:test-request",
+      "Local operator",
+      "20000000-0000-4000-8000-000000000005",
+    ]);
   });
 
   it("attaches an upload with the object metadata the schema requires together", async () => {

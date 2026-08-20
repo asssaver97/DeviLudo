@@ -122,6 +122,9 @@ test("every workspace-owned table fails closed with forced row isolation", async
   assert.match(sql, /current E2E output set is invalid/);
   assert.match(sql, /claim_object_cleanup\(p_lease_seconds integer\)[\s\S]*FOR UPDATE SKIP LOCKED/);
   assert.match(sql, /replaced E2E regression trace/);
+  assert.match(sql, /CREATE TRIGGER artifacts_retain_latest_e2e_report[\s\S]*BEFORE INSERT ON deviludo\.artifacts[\s\S]*WHEN \(NEW\.kind = 'E2E_REPORT'\)/);
+  assert.match(sql, /retain_latest_e2e_report\(\)[\s\S]*'superseded E2E report'/);
+  assert.match(sql, /artifact\.workflow_id = NEW\.workflow_id[\s\S]*artifact\.target_platform IS NOT DISTINCT FROM NEW\.target_platform/);
   assert.match(sql, /source IN \('PROJECT_CREATED', 'PROJECT_IMPORTED', 'USER_EDIT', 'AGENT_CONVERSATION', 'AGENT_IDLE_MAINTENANCE'\)/);
   assert.doesNotMatch(sql, /api_key\s+text/i);
 });
@@ -194,6 +197,34 @@ test("the adaptive E2E migration retires old evidence and reruns only each lates
   assert.match(migration, /'STAGE_RERUN_REQUESTED', 'adaptive-e2e-current'/);
   assert.match(migration, /'stage', 'AGENT_GENERATION'/);
   assert.doesNotMatch(migration, /allowLegacy/);
+});
+
+test("E2E report retention deletes superseded evidence on upgrade and after every rerun", async () => {
+  const migration = await readFile(
+    new URL("../infra/postgres/migrations/047_latest_e2e_report_retention.sql", import.meta.url),
+    "utf8",
+  );
+  assert.match(migration, /CREATE TRIGGER artifacts_retain_latest_e2e_report/);
+  assert.match(migration, /PARTITION BY workspace_id, workflow_id, target_platform/);
+  assert.match(migration, /ORDER BY created_at DESC, id DESC/);
+  assert.match(migration, /INSERT INTO deviludo\.object_cleanup_queue[\s\S]*'superseded E2E report'/);
+  assert.match(migration, /DELETE FROM deviludo\.artifact_inputs/);
+  assert.match(migration, /DELETE FROM deviludo\.artifacts/);
+  assert.match(migration, /OWNER TO deviludo_claim_executor/);
+  assert.match(migration, /SET row_security = off/);
+  const privilegeMigration = await readFile(
+    new URL("../infra/postgres/migrations/048_e2e_report_retention_privilege.sql", import.meta.url),
+    "utf8",
+  );
+  assert.match(privilegeMigration, /ALTER FUNCTION deviludo\.retain_latest_e2e_report\(\) OWNER TO CURRENT_USER/);
+  assert.match(privilegeMigration, /REVOKE ALL ON FUNCTION deviludo\.retain_latest_e2e_report\(\) FROM PUBLIC/);
+  assert.doesNotMatch(privilegeMigration, /GRANT DELETE ON deviludo\.artifacts/);
+  const orderingMigration = await readFile(
+    new URL("../infra/postgres/migrations/049_e2e_report_retention_before_insert.sql", import.meta.url),
+    "utf8",
+  );
+  assert.match(orderingMigration, /DROP TRIGGER IF EXISTS artifacts_retain_latest_e2e_report/);
+  assert.match(orderingMigration, /BEFORE INSERT ON deviludo\.artifacts/);
 });
 
 test("upgraded schedulers can inspect idempotent workflow signals", async () => {
@@ -460,6 +491,28 @@ test("asset generation is leased, attempt-bounded, and never overwrites a user u
   const completeJob = sql.match(/CREATE OR REPLACE FUNCTION deviludo\.complete_job\([\s\S]*?(?=CREATE OR REPLACE FUNCTION deviludo\.fail_job\()/)?.[0] ?? "";
   assert.match(completeJob, /generation_attempt = CASE\s*\n\s*WHEN deviludo\.asset_items\.status IN \('generated', 'uploaded'\) THEN deviludo\.asset_items\.generation_attempt\s*\n\s*ELSE 0 END/);
   assert.match(completeJob, /status = CASE\s*\n\s*WHEN deviludo\.asset_items\.status IN \('generated', 'uploaded'\) THEN deviludo\.asset_items\.status\s*\n\s*ELSE 'planned' END/);
+});
+
+test("asset reruns atomically invalidate downstream work and resume the delivery chain", async () => {
+  const sql = await readFile(sqlUrl, "utf8");
+  const rerun = sql.match(/CREATE OR REPLACE FUNCTION deviludo\.request_asset_rerun\([\s\S]*?\n\$\$;/)?.[0] ?? "";
+  const advance = sql.match(/CREATE OR REPLACE FUNCTION deviludo\.advance_asset_workflows\([\s\S]*?\n\$\$;/)?.[0] ?? "";
+  assert.ok(rerun && advance, "asset rerun and readiness functions must exist");
+  assert.match(rerun, /FOR UPDATE/);
+  assert.match(rerun, /'ASSET_GENERATING', 'RELEASE_DECISION_PENDING', 'SUCCEEDED', 'FAILED', 'CANCELLED'/);
+  assert.match(rerun, /signal_kind[\s\S]*'ASSET_RERUN_REQUESTED'/);
+  assert.match(rerun, /SET status = 'planned', generation_attempt = 0/);
+  assert.match(rerun, /kind IN \('ARTIFACT_BUILD', 'E2E_TEST', 'STEAM_PUBLISH'\)[\s\S]*state <> 'CANCELLED'/);
+  assert.match(rerun, /SET state = 'ASSET_GENERATING'/);
+  assert.match(advance, /signal\.signal_kind = 'ASSET_RERUN_REQUESTED'/);
+  assert.match(advance, /':artifact:assets:'[\s\S]*asset_rerun_signal_id/);
+  assert.match(advance, /'assets-ready:' \|\| coalesce\(candidate\.asset_rerun_signal_id::text, 'initial'\)/);
+  assert.match(sql, /GRANT EXECUTE ON FUNCTION deviludo\.request_asset_rerun\(uuid, uuid, text, jsonb\) TO deviludo_api/);
+
+  const migration = await readFile(new URL("../infra/postgres/migrations/046_asset_rerun_continuation.sql", import.meta.url), "utf8");
+  assert.match(migration, /CREATE OR REPLACE FUNCTION deviludo\.request_asset_rerun/);
+  assert.match(migration, /CREATE OR REPLACE FUNCTION deviludo\.advance_asset_workflows/);
+  assert.match(migration, /REVOKE ALL ON FUNCTION deviludo\.request_asset_rerun\(uuid, uuid, text, jsonb\) FROM PUBLIC/);
 });
 
 test("image generation requires one explicit model through the selected Agent connection", async () => {

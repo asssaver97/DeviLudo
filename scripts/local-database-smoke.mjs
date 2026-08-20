@@ -82,22 +82,35 @@ async function runDatabaseSmoke(url) {
        WHERE namespace.nspname = 'deviludo' AND function.prosecdef
        ORDER BY function.proname
     `);
+    const artifactOwnerResult = await owner.query(`
+      SELECT owner.rolname AS owner
+        FROM pg_class relation
+        JOIN pg_namespace namespace ON namespace.oid = relation.relnamespace
+        JOIN pg_roles owner ON owner.oid = relation.relowner
+       WHERE namespace.nspname = 'deviludo' AND relation.relname = 'artifacts'
+    `);
+    const artifactOwner = artifactOwnerResult.rows[0]?.owner;
     const expectedDefiners = [
       "advance_asset_workflows", "claim_asset_generation", "claim_job",
       "claim_local_git_commit", "claim_object_cleanup", "claim_project_import_analysis", "cleanup_expired_executor_state",
       "complete_asset_generation", "complete_local_git_commit", "complete_object_cleanup",
       "fail_asset_generation", "fail_local_git_commit", "fail_object_cleanup",
       "recover_expired_jobs",
+      "retain_latest_e2e_report",
       "schedule_idle_project_document_maintenance",
     ];
     if (JSON.stringify(definers.rows.map(row => row.proname)) !== JSON.stringify(expectedDefiners)
-      || definers.rows.some(row => row.owner !== "deviludo_claim_executor")) {
+      || !artifactOwner
+      || definers.rows.some(row => row.owner !== (row.proname === "retain_latest_e2e_report"
+        ? artifactOwner : "deviludo_claim_executor"))) {
       throw new Error("A SECURITY DEFINER function has an unexpected owner or scope");
     }
     await assertFunctionPrivilege(owner, "deviludo_scheduler", "deviludo.cleanup_expired_executor_state()", true);
     await assertFunctionPrivilege(owner, "deviludo_api", "deviludo.cleanup_expired_executor_state()", false);
     await assertFunctionPrivilege(owner, "deviludo_scheduler", "deviludo.advance_asset_workflows(integer)", true);
     await assertFunctionPrivilege(owner, "deviludo_api", "deviludo.advance_asset_workflows(integer)", false);
+    await assertFunctionPrivilege(owner, "deviludo_api", "deviludo.request_asset_rerun(uuid,uuid,text,jsonb)", true);
+    await assertFunctionPrivilege(owner, "deviludo_scheduler", "deviludo.request_asset_rerun(uuid,uuid,text,jsonb)", false);
     const sandboxAgentSettings = await sandbox.query(
       "SELECT count(*)::integer AS count FROM deviludo.instance_agent_settings",
     );
@@ -144,6 +157,47 @@ async function runDatabaseSmoke(url) {
         [workspaceIds[index], workflowIds[index], projectIds[index], actorId],
       );
     }
+
+    // Each immutable iteration/platform exposes one current evidence ZIP. A new
+    // report retires the old database row immediately and durably queues its
+    // object for deletion, while another platform remains independent.
+    const firstReportId = randomUUID();
+    const secondReportId = randomUUID();
+    const linuxReportId = randomUUID();
+    const firstReportKey = `workspaces/${workspaceIds[0]}/projects/${projectIds[0]}/jobs/e2e-old/report.zip`;
+    const secondReportKey = `workspaces/${workspaceIds[0]}/projects/${projectIds[0]}/jobs/e2e-new/report.zip`;
+    await withWorkspace(sandbox, workspaceIds[0], client => client.query(`
+      INSERT INTO deviludo.artifacts(
+        workspace_id, id, project_id, workflow_id, kind, target_platform,
+        bucket, object_key, sha256, size_bytes
+      ) VALUES
+        ($1::uuid, $4::uuid, $2::uuid, $3::uuid, 'E2E_REPORT', 'macos',
+         'deviludo-artifacts', $7, 'sha256:${"d".repeat(64)}', 100),
+        ($1::uuid, $5::uuid, $2::uuid, $3::uuid, 'E2E_REPORT', 'macos',
+         'deviludo-artifacts', $8, 'sha256:${"e".repeat(64)}', 200),
+        ($1::uuid, $6::uuid, $2::uuid, $3::uuid, 'E2E_REPORT', 'linux',
+         'deviludo-artifacts',
+         'workspaces/' || $1::text || '/projects/' || $2::text || '/jobs/e2e-linux/report.zip',
+         'sha256:${"f".repeat(64)}', 300)
+    `, [workspaceIds[0], projectIds[0], workflowIds[0], firstReportId,
+      secondReportId, linuxReportId, firstReportKey, secondReportKey]));
+    const retainedReports = await owner.query(`
+      SELECT id::text, target_platform::text
+        FROM deviludo.artifacts
+       WHERE workspace_id = $1::uuid AND workflow_id = $2::uuid AND kind = 'E2E_REPORT'
+       ORDER BY target_platform
+    `, [workspaceIds[0], workflowIds[0]]);
+    if (retainedReports.rows.length !== 2
+      || retainedReports.rows.some(row => row.id === firstReportId)
+      || !retainedReports.rows.some(row => row.id === secondReportId)
+      || !retainedReports.rows.some(row => row.id === linuxReportId)) {
+      throw new Error(`E2E report retention did not keep one report per platform: ${JSON.stringify(retainedReports.rows)}`);
+    }
+    const queuedReportCleanup = await owner.query(`
+      SELECT 1 FROM deviludo.object_cleanup_queue
+       WHERE workspace_id = $1::uuid AND bucket = 'deviludo-artifacts' AND object_key = $2
+    `, [workspaceIds[0], firstReportKey]);
+    if (queuedReportCleanup.rowCount !== 1) throw new Error("Superseded E2E evidence was not queued for object deletion");
 
     const digest = `sha256:${"a".repeat(64)}`;
     const relativePath = `workspaces/${workspaceIds[0]}/projects/${projectIds[0]}/revisions/r000000000001-${digest.slice(7, 23)}`;
@@ -281,6 +335,79 @@ async function runDatabaseSmoke(url) {
       || frozenAsset?.sha256 !== `sha256:${"b".repeat(64)}`) {
       throw new Error("Artifact build did not freeze the supplied image object");
     }
+
+    // A later art retry reopens the same workflow, supersedes the build made
+    // from the older image, and gives the readiness sweep a fresh idempotency
+    // scope. This is the user-visible continuation from Art to Build and E2E.
+    await owner.query(`
+      UPDATE deviludo.asset_items
+         SET status = 'failed', bucket = NULL, object_key = NULL, sha256 = NULL,
+             size_bytes = NULL, generation_attempt = 3,
+             error_message = 'database smoke retry'
+       WHERE workspace_id = $1::uuid AND asset_key = 'ui/smoke'
+    `, [workspaceIds[0]]);
+    await owner.query(`UPDATE deviludo.workflow_instances SET state = 'SUCCEEDED'
+      WHERE workspace_id = $1::uuid AND id = $2::uuid`, [workspaceIds[0], workflowIds[0]]);
+    const assetRerunKey = `asset-rerun-smoke:${workflowIds[0]}`;
+    const rerun = await withWorkspace(api, workspaceIds[0], client => client.query(`
+      SELECT accepted, queued, remaining
+        FROM deviludo.request_asset_rerun(
+          $1::uuid, $2::uuid, $3,
+          jsonb_build_object('requestedBy', 'database smoke', 'requestedByActorId', $4::text)
+        )
+    `, [workflowIds[0], projectIds[0], assetRerunKey, actorId]));
+    if (rerun.rows[0]?.accepted !== true || rerun.rows[0]?.queued !== 1 || rerun.rows[0]?.remaining !== 1) {
+      throw new Error(`Asset rerun was not accepted atomically: ${JSON.stringify(rerun.rows[0])}`);
+    }
+    const duplicateRerun = await withWorkspace(api, workspaceIds[0], client => client.query(`
+      SELECT accepted, queued, remaining
+        FROM deviludo.request_asset_rerun($1::uuid, $2::uuid, $3, '{}'::jsonb)
+    `, [workflowIds[0], projectIds[0], assetRerunKey]));
+    if (duplicateRerun.rows[0]?.accepted !== false || duplicateRerun.rows[0]?.queued !== 0) {
+      throw new Error("Duplicate asset rerun was not idempotent");
+    }
+    const reopened = await owner.query(`
+      SELECT workflow.state::text,
+             count(job.id) FILTER (WHERE job.kind = 'ARTIFACT_BUILD' AND job.state = 'CANCELLED')::integer AS cancelled_builds,
+             max(item.generation_attempt)::integer AS generation_attempt
+        FROM deviludo.workflow_instances workflow
+        JOIN deviludo.asset_manifests manifest
+          ON manifest.workspace_id = workflow.workspace_id AND manifest.workflow_id = workflow.id
+        JOIN deviludo.asset_items item
+          ON item.workspace_id = manifest.workspace_id AND item.manifest_id = manifest.id
+        LEFT JOIN deviludo.jobs job
+          ON job.workspace_id = workflow.workspace_id AND job.workflow_id = workflow.id
+       WHERE workflow.workspace_id = $1::uuid AND workflow.id = $2::uuid
+       GROUP BY workflow.state
+    `, [workspaceIds[0], workflowIds[0]]);
+    if (reopened.rows[0]?.state !== "ASSET_GENERATING"
+      || reopened.rows[0]?.cancelled_builds !== 1
+      || reopened.rows[0]?.generation_attempt !== 0) {
+      throw new Error("Asset rerun did not reopen the gate and supersede the old build");
+    }
+    await owner.query(`
+      UPDATE deviludo.asset_items
+         SET status = 'uploaded', bucket = 'deviludo-artifacts',
+             object_key = 'workspaces/' || workspace_id::text || '/projects/${projectIds[0]}/assets/ui-smoke-rerun.png',
+             sha256 = 'sha256:${"a".repeat(64)}', size_bytes = 96,
+             error_message = NULL
+       WHERE workspace_id = $1::uuid AND asset_key = 'ui/smoke'
+    `, [workspaceIds[0]]);
+    const readvanced = await scheduler.query("SELECT deviludo.advance_asset_workflows()::integer AS count");
+    // This smoke runs against the persistent local database, which may contain
+    // other ready workflows from an interrupted earlier run. The scoped query
+    // below proves that this workflow advanced exactly once; the global sweep
+    // only needs to have made progress.
+    if (Number(readvanced.rows[0]?.count) < 1) throw new Error("Regenerated art did not resume the build chain");
+    const rebuilt = await owner.query(`
+      SELECT count(*) FILTER (WHERE state = 'QUEUED')::integer AS queued,
+             bool_or(idempotency_key LIKE '%:artifact:assets:%') AS scoped_to_assets
+        FROM deviludo.jobs
+       WHERE workspace_id = $1::uuid AND workflow_id = $2::uuid AND kind = 'ARTIFACT_BUILD'
+    `, [workspaceIds[0], workflowIds[0]]);
+    if (rebuilt.rows[0]?.queued !== 1 || rebuilt.rows[0]?.scoped_to_assets !== true) {
+      throw new Error("Asset rerun did not enqueue one fresh asset-scoped build");
+    }
     const steamReleaseId = randomUUID();
     const steamCredentialVersion = randomUUID();
     await owner.query(`
@@ -365,6 +492,7 @@ async function runDatabaseSmoke(url) {
       repeatedClaimRejected: true,
       expiredLeaseRecovered: true,
       assetReadinessGate: true,
+      assetRerunContinuation: true,
       humanReleaseApproval: true,
       localGitCommitLease: true,
     }));
