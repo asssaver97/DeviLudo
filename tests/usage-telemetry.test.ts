@@ -3,7 +3,7 @@ import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
-import type { CoreConfig } from "../services/core/src/config";
+import { DEFAULT_TELEMETRY_ENDPOINT, type CoreConfig } from "../services/core/src/config";
 import { UsageTelemetry } from "../services/core/src/usage-telemetry";
 
 function config(root: string, endpoint: string | null): CoreConfig {
@@ -17,19 +17,22 @@ function config(root: string, endpoint: string | null): CoreConfig {
 test("telemetry stores an opaque installation ID and sends only the disclosed active-installation fields", async () => {
   const root = await mkdtemp(join(tmpdir(), "deviludo-telemetry-"));
   const originalFetch = globalThis.fetch;
+  let target = "";
   let payload: Record<string, unknown> | null = null;
-  globalThis.fetch = (async (_input, init) => {
+  globalThis.fetch = (async (input, init) => {
+    target = String(input);
     payload = JSON.parse(String(init?.body)) as Record<string, unknown>;
     return new Response(null, { status: 204 });
   }) as typeof fetch;
   try {
-    const telemetry = new UsageTelemetry(config(root, "https://telemetry.example/active"));
+    const telemetry = new UsageTelemetry(config(root, DEFAULT_TELEMETRY_ENDPOINT));
     const before = await telemetry.status();
     assert.equal(before.endpointConfigured, true);
     assert.deepEqual(before.collectedFields, ["installationId", "activeDay", "releaseVersion", "operatingSystem", "architecture"]);
     telemetry.recordActivity();
     await waitFor(async () => (await telemetry.status()).lastReportedAt !== null);
     assert.ok(payload);
+    assert.equal(target, DEFAULT_TELEMETRY_ENDPOINT);
     const reported = payload as unknown as Record<string, unknown>;
     assert.deepEqual(Object.keys(reported).sort(), [
       "activeDay", "architecture", "event", "installationId", "operatingSystem", "releaseVersion",

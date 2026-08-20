@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { loadCoreConfig } from "@/services/core/src/config";
+import { DEFAULT_TELEMETRY_ENDPOINT, loadCoreConfig } from "@/services/core/src/config";
 
 const base = Object.freeze({
   NODE_ENV: "development",
@@ -18,9 +18,10 @@ test("sandbox concurrency rejects unsafe worker counts", () => {
   assert.throws(() => loadCoreConfig({ ...base, DEVILUDO_SANDBOX_CONCURRENCY: "3" }), /DEVILUDO_SANDBOX_CONCURRENCY/);
 });
 
-test("telemetry is automatic when configured and validates its transport", () => {
+test("telemetry defaults to the official collector and validates developer overrides", () => {
   const defaults = loadCoreConfig(base);
-  assert.equal(defaults.telemetryEndpoint, null);
+  assert.equal(defaults.telemetryEndpoint, DEFAULT_TELEMETRY_ENDPOINT);
+  assert.equal(loadCoreConfig({ ...base, DEVILUDO_TELEMETRY_ENDPOINT: "" }).telemetryEndpoint, DEFAULT_TELEMETRY_ENDPOINT);
   assert.equal(defaults.releaseVersion, "development");
   const configured = loadCoreConfig({
     ...base,

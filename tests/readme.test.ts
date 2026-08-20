@@ -15,8 +15,8 @@ test("the English and Chinese READMEs switch directly between root files", async
   assert.match(chinese, /### E2E 结果/);
   assert.match(english, /### Requirements[\s\S]*Node\.js `>=22\.13`[\s\S]*140 GiB[\s\S]*roughly 25 GB/);
   assert.match(chinese, /### 环境要求[\s\S]*Node\.js `>=22\.13`[\s\S]*140 GiB[\s\S]*约 25 GB/);
-  assert.match(english, /## Anonymous usage reporting[\s\S]*DEVILUDO_TELEMETRY_ENDPOINT[\s\S]*automatically reports/);
-  assert.match(chinese, /## 匿名使用统计[\s\S]*DEVILUDO_TELEMETRY_ENDPOINT[\s\S]*自动上报/);
+  assert.match(english, /## Anonymous usage reporting[\s\S]*automatically reports[\s\S]*https:\/\/telemetry\.deviludo\.com\/v1\/active-installations[\s\S]*No setup is required/);
+  assert.match(chinese, /## 匿名使用统计[\s\S]*自动向 `https:\/\/telemetry\.deviludo\.com\/v1\/active-installations` 上报[\s\S]*无需用户配置/);
   assert.match(english, /## License[\s\S]*may not provide DeviLudo to third parties as a hosted or managed service/);
   assert.match(chinese, /## 许可[\s\S]*不得将 DeviLudo 作为托管或管理服务提供给第三方/);
 });

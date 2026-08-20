@@ -120,7 +120,7 @@ Agent 默认只并发执行一个任务。内存和 Provider 容量充足时，�
 
 ## 匿名使用统计
 
-配置 `DEVILUDO_TELEMETRY_ENDPOINT` 后，Core 会自动上报随机安装标识、UTC 活跃日期、发布版本、操作系统和 CPU 架构；每次成功上报后至少间隔 20 小时。上报内容不包含项目、源码、路径、提示词、模型设置、制品或凭证。接收端为空时不会发送请求。
+安装实例产生实际使用后，Core 会自动向 `https://telemetry.deviludo.com/v1/active-installations` 上报随机安装标识、UTC 活跃日期、发布版本、操作系统和 CPU 架构；每次成功上报后至少间隔 20 小时，无需用户配置。上报内容不包含项目、源码、路径、提示词、模型设置、制品或凭证。开发者测试时可用 `DEVILUDO_TELEMETRY_ENDPOINT` 覆盖接收端。
 
 ## 多节点部署
 

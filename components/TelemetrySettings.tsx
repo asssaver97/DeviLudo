@@ -25,11 +25,11 @@ export function TelemetryStatusPanel() {
     <section className="settings-card settings-section telemetry-settings">
       <div className="settings-card-title"><div><h2>{text("匿名使用统计", "ANONYMOUS USAGE STATISTICS")}</h2></div><span>AUTOMATIC</span></div>
       <p className="settings-description">{text(
-        "接收端配置后自动上报随机安装标识、活跃日期、版本、系统和架构；不发送项目、源码、提示词、模型或凭证。",
-        "Automatically reports a random installation ID, active day, version, OS, and architecture when a collector is configured—never projects, source, prompts, models, or credentials.",
+        "自动向官方接收端上报随机安装标识、活跃日期、版本、系统和架构；不发送项目、源码、提示词、模型或凭证。",
+        "Automatically reports a random installation ID, active day, version, OS, and architecture to the official collector—never projects, source, prompts, models, or credentials.",
       )}</p>
       <div className="telemetry-status">
-        <b>{status?.endpointConfigured ? text("自动上报已配置", "AUTOMATIC REPORTING CONFIGURED") : text("等待接收端配置", "COLLECTOR NOT CONFIGURED")}</b>
+        <b>{status?.endpointConfigured ? text("自动上报运行中", "AUTOMATIC REPORTING ACTIVE") : text("上报接收端不可用", "REPORTING ENDPOINT UNAVAILABLE")}</b>
         <small>{status?.endpointConfigured
           ? text(`安装标识 · ${status.installationIdMask}`, `Installation ID · ${status.installationIdMask}`)
           : text("当前不会发送请求", "No request is currently sent")}</small>

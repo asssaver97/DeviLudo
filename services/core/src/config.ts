@@ -3,6 +3,8 @@ import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { isServerPoolKind, SERVER_POOL_KINDS, type ServerPoolKind } from "@/lib/runtime/server-pools";
 
+export const DEFAULT_TELEMETRY_ENDPOINT = "https://telemetry.deviludo.com/v1/active-installations";
+
 export type CoreConfig = Readonly<{
   role: CoreRole;
   port: number;
@@ -101,7 +103,10 @@ export function loadCoreConfig(env: NodeJS.ProcessEnv = process.env): CoreConfig
   if (localDirectoryBindings && !/^[A-Za-z0-9_-]{40,200}$/.test(localProjectBridgeToken ?? "")) {
     throw new Error("DEVILUDO_LOCAL_PROJECT_BRIDGE_TOKEN is invalid");
   }
-  const telemetryEndpoint = normalizeTelemetryEndpoint(env.DEVILUDO_TELEMETRY_ENDPOINT ?? "", env.NODE_ENV);
+  const telemetryEndpoint = normalizeTelemetryEndpoint(
+    env.DEVILUDO_TELEMETRY_ENDPOINT?.trim() || DEFAULT_TELEMETRY_ENDPOINT,
+    env.NODE_ENV,
+  );
   const releaseVersion = (env.DEVILUDO_RELEASE_VERSION ?? "development").trim();
   if (!/^(development|v?[0-9]+\.[0-9]+\.[0-9]+(?:-[0-9A-Za-z.-]+)?)$/.test(releaseVersion)) {
     throw new Error("DEVILUDO_RELEASE_VERSION is invalid");

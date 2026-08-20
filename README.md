@@ -120,7 +120,7 @@ Agent execution defaults to one concurrent job. On a machine with enough memory 
 
 ## Anonymous usage reporting
 
-When `DEVILUDO_TELEMETRY_ENDPOINT` is configured, Core automatically reports a random installation ID, active UTC day, release version, operating system, and CPU architecture at most once every 20 hours after a successful report. It does not include projects, source, paths, prompts, model settings, artifacts, or credentials. No request is sent when the endpoint is empty.
+When an installation is used, Core automatically reports a random installation ID, active UTC day, release version, operating system, and CPU architecture to `https://telemetry.deviludo.com/v1/active-installations`, at most once every 20 hours after a successful report. No setup is required. Reports never include projects, source, paths, prompts, model settings, artifacts, or credentials. Developers may override the collector with `DEVILUDO_TELEMETRY_ENDPOINT` for testing.
 
 ## Multi-node deployment
 
