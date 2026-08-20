@@ -3092,10 +3092,41 @@ textarea {
 
 .nodeList li {
   border-top: 1px solid var(--line);
+  padding-top: 8px;
+}
+
+.node-row {
   display: flex;
   gap: 16px;
   justify-content: space-between;
-  padding-top: 8px;
+}
+
+.node-preparation {
+  display: grid;
+  gap: 6px;
+  margin-top: 9px;
+}
+
+.node-preparation-track {
+  background: #111a26;
+  border: 1px solid var(--line-strong);
+  height: 7px;
+  overflow: hidden;
+}
+
+.node-preparation-track i {
+  background: var(--blue);
+  display: block;
+  height: 100%;
+  transition: width .25s ease;
+}
+
+.node-preparation.is-ready .node-preparation-track i { background: var(--green); }
+.node-preparation.is-failed .node-preparation-track i { background: #ff6d7a; }
+
+.node-preparation small {
+  color: var(--muted);
+  font: 8px/1.5 var(--font-geist-mono), monospace;
 }
 
 @media (max-width: 1100px) {

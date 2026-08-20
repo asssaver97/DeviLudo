@@ -10,6 +10,15 @@ export type ServerPoolKind = typeof SERVER_POOL_KINDS[number];
 export type ServerOperatingSystem = "linux" | "windows" | "macos";
 export type PoolReadiness = "READY" | "DEGRADED" | "NOT_READY" | "ON_DEMAND_READY";
 export type ServerNodeState = "PROVISIONING" | "ACTIVE" | "DRAINING" | "DISABLED" | "REIMAGING";
+export type NodePreparationState = "PREPARING" | "READY" | "FAILED";
+
+export type NodePreparation = Readonly<{
+  state: NodePreparationState;
+  stage: string;
+  progress: number;
+  message: string;
+  updatedAt: string;
+}>;
 
 export type ServerPoolDefinition = Readonly<{
   kind: ServerPoolKind;
@@ -91,6 +100,7 @@ export type ServerNodeRecord = Readonly<{
   currentWorkspaceId: string | null;
   lastHeartbeatAt: string | null;
   lastReimageProofAt: string | null;
+  preparation: NodePreparation | null;
 }>;
 
 export function isServerPoolKind(value: unknown): value is ServerPoolKind {
@@ -124,7 +134,8 @@ export function poolReadiness(
 export function fixedPoolRecords(nodes: readonly ServerNodeRecord[]): readonly ServerPoolRecord[] {
   return Object.freeze(SERVER_POOL_KINDS.map(kind => {
     const matching = nodes.filter(node => node.poolKind === kind);
-    const activeNodes = matching.filter(node => node.state === "ACTIVE").length;
+    const activeNodes = matching.filter(node => node.state === "ACTIVE"
+      && (!node.preparation || node.preparation.state === "READY")).length;
     const drainingNodes = matching.filter(node => node.state === "DRAINING").length;
     return Object.freeze({
       ...SERVER_POOL_DEFINITIONS[kind],

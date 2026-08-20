@@ -18,6 +18,7 @@ export function ServerPoolDashboard() {
 
   useEffect(() => {
     let active = true;
+    let timer: number | null = null;
     const load = async (maximumAge: number) => loadCached<PoolResponse>(clientCacheKeys.serverPools, maximumAge, async () => {
         const response = await fetch("/api/runtime/server-pools", { cache: "no-store" });
         if (!response.ok) throw new Error(text(`服务器池接口返回 ${response.status}`, `Server pool API returned ${response.status}`));
@@ -25,16 +26,22 @@ export function ServerPoolDashboard() {
       });
     const refresh = (maximumAge: number) => {
       void load(maximumAge)
-      .then(value => { if (active) setState(value); })
+      .then(value => {
+        if (!active) return;
+        setState(value);
+        const preparing = value.nodes.some(node => node.preparation?.state === "PREPARING");
+        timer = window.setTimeout(() => refresh(0), preparing ? 2_000 : 15_000);
+      })
       .catch(reason => {
-        if (active) setError(reason instanceof Error ? reason.message : text("加载失败", "Unable to load"));
+        if (!active) return;
+        setError(reason instanceof Error ? reason.message : text("加载失败", "Unable to load"));
+        timer = window.setTimeout(() => refresh(0), 15_000);
       });
     };
     refresh(15_000);
-    const timer = window.setInterval(() => refresh(0), 15_000);
     return () => {
       active = false;
-      window.clearInterval(timer);
+      if (timer !== null) window.clearTimeout(timer);
     };
   }, [text]);
 
@@ -87,10 +94,26 @@ export function ServerPoolDashboard() {
               </button>
             ) : null}
             <ul className="nodeList">
-              {nodes.length === 0 ? <li><span>{text("无常驻节点", "No resident nodes")}</span><span>{text("按需", "ON DEMAND")}</span></li> : nodes.map(node => (
-                <li key={node.id}>
-                  <span>{node.id}</span>
-                  <span>{node.state === "ACTIVE" && isRecentlyConnected(node.lastHeartbeatAt) ? text("已连接", "CONNECTED") : node.state === "ACTIVE" ? text("等待心跳", "WAITING") : node.state}</span>
+              {nodes.length === 0 ? <li><div className="node-row"><span>{text("无常驻节点", "No resident nodes")}</span><span>{text("按需", "ON DEMAND")}</span></div></li> : nodes.map(node => (
+                <li className={node.preparation ? "has-preparation" : undefined} key={node.id}>
+                  <div className="node-row">
+                    <span>{node.id}</span>
+                    <span>{node.preparation?.state === "PREPARING"
+                      ? text(`准备中 ${node.preparation.progress}%`, `PREPARING ${node.preparation.progress}%`)
+                      : node.preparation?.state === "FAILED"
+                        ? text("准备失败", "PREPARATION FAILED")
+                        : node.state === "ACTIVE" && isRecentlyConnected(node.lastHeartbeatAt)
+                          ? text("已连接", "CONNECTED")
+                          : node.state === "ACTIVE" ? text("等待心跳", "WAITING") : node.state}</span>
+                  </div>
+                  {node.preparation ? (
+                    <div className={`node-preparation is-${node.preparation.state.toLowerCase()}`} role="status">
+                      <div aria-label={text("E2E 准备进度", "E2E preparation progress")} aria-valuemax={100} aria-valuemin={0} aria-valuenow={node.preparation.progress} className="node-preparation-track" role="progressbar">
+                        <i style={{ width: `${node.preparation.progress}%` }} />
+                      </div>
+                      <small>{preparationMessage(node.preparation.stage, node.preparation.message, text)}</small>
+                    </div>
+                  ) : null}
                 </li>
               ))}
             </ul>
@@ -111,4 +134,25 @@ export function ServerPoolDashboard() {
 
 function isRecentlyConnected(value: string | null): boolean {
   return Boolean(value && Date.now() - Date.parse(value) < 90_000);
+}
+
+function preparationMessage(
+  stage: string,
+  fallback: string,
+  text: (chinese: string, english: string) => string,
+): string {
+  const messages: Readonly<Record<string, readonly [string, string]>> = Object.freeze({
+    CHECKING_HOST: ["检查 macOS 虚拟化与工具", "Checking macOS virtualization and tools"],
+    DOWNLOADING_BASE: ["下载 macOS E2E 基础镜像", "Downloading the macOS E2E base image"],
+    COMPILING_DRIVERS: ["编译系统输入驱动", "Compiling system input drivers"],
+    CLONING_VM: ["创建 E2E 虚拟机", "Creating the E2E virtual machine"],
+    BOOTING_VM: ["启动 E2E 虚拟机", "Booting the E2E virtual machine"],
+    PROVISIONING_VM: ["安装测试运行环境", "Installing the test runtime"],
+    REBOOTING_VM: ["重启并验证自动登录", "Rebooting and verifying automatic login"],
+    VERIFYING_VM: ["执行真实窗口冒烟测试", "Running the real-window smoke test"],
+    READY: ["macOS E2E 已就绪", "macOS E2E is ready"],
+    FAILED: ["macOS E2E 准备失败", "macOS E2E preparation failed"],
+  });
+  const localized = messages[stage];
+  return localized ? text(localized[0], localized[1]) : fallback;
 }

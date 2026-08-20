@@ -1174,6 +1174,35 @@ export async function runApi(
     return reply.send(certificate);
   });
 
+  app.post<{ Params: { nodeId: string } }>("/v1/e2e/nodes/:nodeId/preparation", async (request, reply) => {
+    const authenticatedNodeId = await authorizeE2e(request, config, repository);
+    if (!UUID.test(request.params.nodeId)
+      || (authenticatedNodeId && authenticatedNodeId !== request.params.nodeId)) {
+      throw unauthorized("E2E node identity mismatch");
+    }
+    const body = objectBody(request.body);
+    const state = body.state;
+    const stage = body.stage;
+    const progress = body.progress;
+    const message = body.message;
+    if (!(typeof state === "string" && ["PREPARING", "READY", "FAILED"].includes(state))
+      || typeof stage !== "string" || !/^[A-Z][A-Z0-9_]{1,39}$/.test(stage)
+      || typeof progress !== "number" || !Number.isSafeInteger(progress) || progress < 0 || progress > 100
+      || typeof message !== "string" || message.length < 1 || message.length > 240
+      || (state === "READY" && progress !== 100)
+      || (state === "PREPARING" && progress === 100)) {
+      return reply.code(400).send({ code: "INVALID_E2E_PREPARATION_PROGRESS" });
+    }
+    const accepted = await repository.updateE2eNodePreparation({
+      nodeId: request.params.nodeId,
+      state: state as "PREPARING" | "READY" | "FAILED",
+      stage,
+      progress,
+      message,
+    });
+    return accepted ? reply.send({ accepted: true }) : reply.code(404).send({ code: "SERVER_NODE_NOT_FOUND" });
+  });
+
   app.post<{ Params: { nodeId: string; action: string } }>(
     "/v1/runtime/server-nodes/:nodeId/:action",
     async (request, reply) => {

@@ -1,4 +1,3 @@
-import { randomUUID } from "node:crypto";
 import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
 import { arch, platform } from "node:os";
 import { join } from "node:path";
@@ -22,10 +21,10 @@ type TelemetryState = Readonly<{
 
 /**
  * Privacy-minimal active-installation telemetry for self-hosted deployments.
- * A random installation identifier is created locally; no project, source,
- * prompt, path, credential, artifact, username, or hardware identifier enters
- * the payload. One successful heartbeat per active day is sufficient to derive
- * distinct daily/monthly active installation counts at the configured endpoint.
+ * The deployment launcher derives one app-scoped anonymous identifier per host;
+ * no project, source, prompt, path, credential, artifact, username, or raw
+ * hardware identifier enters the payload. One successful heartbeat per active
+ * day is sufficient to derive distinct daily/monthly active installation counts.
  */
 export class UsageTelemetry {
   private state: TelemetryState | null = null;
@@ -92,14 +91,22 @@ export class UsageTelemetry {
         || (parsed.lastReportedAt !== null && typeof parsed.lastReportedAt !== "string")) {
         throw new Error("invalid telemetry state");
       }
+      if (parsed.installationId !== this.config.installationId) {
+        const migrated = Object.freeze({
+          installationId: this.config.installationId,
+          lastReportedAt: null,
+        });
+        await this.saveState(migrated);
+        return migrated;
+      }
       this.state = Object.freeze({
-        installationId: parsed.installationId,
+        installationId: this.config.installationId,
         lastReportedAt: parsed.lastReportedAt as string | null,
       });
       return this.state;
     } catch {
       const created = Object.freeze({
-        installationId: randomUUID(),
+        installationId: this.config.installationId,
         lastReportedAt: null,
       });
       await this.saveState(created);

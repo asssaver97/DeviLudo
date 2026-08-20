@@ -67,7 +67,7 @@ npm run local:bootstrap
 npm run local:up
 ```
 
-首次启动会下载约 25 GB 数据，并准备容器服务和 macOS E2E 虚拟机。请为虚拟机、镜像、构建缓存、源码与测试证据预留约 140 GiB 空间。
+首次启动会构建容器服务；Web 和 Core 可用后，约 25 GB 的 macOS E2E 环境会继续在后台准备，其实时阶段与百分比显示在“运行状态”页面。请为虚拟机、镜像、构建缓存、源码与测试证据预留约 140 GiB 空间。
 
 打开 [http://127.0.0.1:3100](http://127.0.0.1:3100)，进入“**设置 → Agent 设置**”，选择以下任一运行时：
 
@@ -120,7 +120,7 @@ Agent 默认只并发执行一个任务。内存和 Provider 容量充足时，�
 
 ## 匿名使用统计
 
-安装实例产生实际使用后，Core 会自动向 `https://telemetry.deviludo.com/v1/active-installations` 上报随机安装标识、UTC 活跃日期、发布版本、操作系统和 CPU 架构；每次成功上报后至少间隔 20 小时，无需用户配置。上报内容不包含项目、源码、路径、提示词、模型设置、制品或凭证。开发者测试时可用 `DEVILUDO_TELEMETRY_ENDPOINT` 覆盖接收端。
+安装实例产生实际使用后，Core 会自动向 `https://telemetry.deviludo.com/v1/active-installations` 上报宿主机稳定匿名 ID、UTC 活跃日期、发布版本、操作系统和 CPU 架构；每次成功上报后至少间隔 20 小时，无需用户配置。启动器会在本机通过 DeviLudo 专用的单向哈希生成该 ID，因此同一台机器重复部署仍使用同一 ID，原始机器标识不会被上传。上报内容不包含项目、源码、路径、提示词、模型设置、制品或凭证。开发者测试时可用 `DEVILUDO_TELEMETRY_ENDPOINT` 覆盖接收端。
 
 ## 多节点部署
 

@@ -102,7 +102,8 @@ export class CoreRepository {
     const result = await this.database.pool.query<ServerNodeRow>(
       `SELECT id::text, pool_kind::text, operating_system::text, state::text, capabilities,
               isolation_generation::text, current_workspace_id::text, last_heartbeat_at::text,
-              last_reimage_proof_at::text
+              last_reimage_proof_at::text, preparation_state, preparation_stage,
+              preparation_progress::text, preparation_message, preparation_updated_at::text
          FROM deviludo.server_nodes
         ORDER BY pool_kind, id`,
     );
@@ -2325,7 +2326,8 @@ export class CoreRepository {
        VALUES ($1::deviludo.server_pool_kind, $2::deviludo.server_os, $3::text[])
        RETURNING id::text, pool_kind::text, operating_system::text, state::text, capabilities,
                  isolation_generation::text, current_workspace_id::text, last_heartbeat_at::text,
-                 last_reimage_proof_at::text`,
+                 last_reimage_proof_at::text, preparation_state, preparation_stage,
+                 preparation_progress::text, preparation_message, preparation_updated_at::text`,
       [input.poolKind, input.operatingSystem, input.capabilities],
     );
     return serverNodeFromRow(result.rows[0]);
@@ -2339,7 +2341,8 @@ export class CoreRepository {
         WHERE id = $1::uuid
         RETURNING id::text, pool_kind::text, operating_system::text, state::text, capabilities,
                   isolation_generation::text, current_workspace_id::text, last_heartbeat_at::text,
-                  last_reimage_proof_at::text`,
+                  last_reimage_proof_at::text, preparation_state, preparation_stage,
+                  preparation_progress::text, preparation_message, preparation_updated_at::text`,
       [id, state],
     );
     return result.rows[0] ? serverNodeFromRow(result.rows[0]) : null;
@@ -2515,6 +2518,27 @@ export class CoreRepository {
           SET last_heartbeat_at = clock_timestamp(), updated_at = clock_timestamp()
         WHERE id = $1::uuid AND pool_kind = $2::deviludo.server_pool_kind AND state = 'ACTIVE'`,
       [nodeId, poolKind],
+    );
+    return result.rowCount === 1;
+  }
+
+  async updateE2eNodePreparation(input: Readonly<{
+    nodeId: string;
+    state: "PREPARING" | "READY" | "FAILED";
+    stage: string;
+    progress: number;
+    message: string;
+  }>): Promise<boolean> {
+    const result = await this.database.pool.query(
+      `UPDATE deviludo.server_nodes
+          SET preparation_state = $2,
+              preparation_stage = $3,
+              preparation_progress = $4,
+              preparation_message = $5,
+              preparation_updated_at = clock_timestamp(),
+              updated_at = clock_timestamp()
+        WHERE id = $1::uuid AND pool_kind::text LIKE 'E2E_%'`,
+      [input.nodeId, input.state, input.stage, input.progress, input.message],
     );
     return result.rowCount === 1;
   }
@@ -3053,14 +3077,29 @@ type ServerNodeRow = {
   current_workspace_id: string | null;
   last_heartbeat_at: string | null;
   last_reimage_proof_at: string | null;
+  preparation_state: string | null;
+  preparation_stage: string | null;
+  preparation_progress: string | null;
+  preparation_message: string | null;
+  preparation_updated_at: string | null;
 };
 
 function serverNodeFromRow(row: ServerNodeRow): ServerNodeRecord {
-  if (!row || !isServerPoolKind(row.pool_kind)
+  if (!row) throw new Error("Stored server node is invalid");
+  const preparationProgress = row.preparation_progress === null ? null : Number(row.preparation_progress);
+  if (!isServerPoolKind(row.pool_kind)
     || !["linux", "windows", "macos"].includes(row.operating_system)
     || !["PROVISIONING", "ACTIVE", "DRAINING", "DISABLED", "REIMAGING"].includes(row.state)
     || !Number.isSafeInteger(Number(row.isolation_generation))
-    || Number(row.isolation_generation) < 1) {
+    || Number(row.isolation_generation) < 1
+    || (row.preparation_state !== null
+      && (!(["PREPARING", "READY", "FAILED"] as readonly string[]).includes(row.preparation_state)
+        || typeof row.preparation_stage !== "string"
+        || !/^[A-Z][A-Z0-9_]{1,39}$/.test(row.preparation_stage)
+        || preparationProgress === null || !Number.isSafeInteger(preparationProgress)
+        || preparationProgress < 0 || preparationProgress > 100
+        || typeof row.preparation_message !== "string" || row.preparation_message.length < 1
+        || row.preparation_message.length > 240 || typeof row.preparation_updated_at !== "string"))) {
     throw new Error("Stored server node is invalid");
   }
   return Object.freeze({
@@ -3073,6 +3112,13 @@ function serverNodeFromRow(row: ServerNodeRow): ServerNodeRecord {
     currentWorkspaceId: row.current_workspace_id,
     lastHeartbeatAt: row.last_heartbeat_at,
     lastReimageProofAt: row.last_reimage_proof_at,
+    preparation: row.preparation_state === null ? null : Object.freeze({
+      state: row.preparation_state as "PREPARING" | "READY" | "FAILED",
+      stage: row.preparation_stage as string,
+      progress: preparationProgress as number,
+      message: row.preparation_message as string,
+      updatedAt: row.preparation_updated_at as string,
+    }),
   });
 }
 

@@ -77,7 +77,7 @@ CREATE TABLE deviludo.schema_metadata (
   applied_at timestamptz NOT NULL DEFAULT clock_timestamp()
 );
 INSERT INTO deviludo.schema_metadata(singleton, baseline, compatibility, current_version)
-VALUES (true, '001', 'deviludo-self-hosted-v1', '051_e2e_node_test_planning');
+VALUES (true, '001', 'deviludo-self-hosted-v1', '052_e2e_node_preparation_progress');
 
 -- Every post-baseline change is immutable and checksummed. Fresh databases are
 -- created from this full snapshot and then stamp the migrations incorporated by
@@ -132,6 +132,11 @@ CREATE TABLE deviludo.server_nodes (
   ),
   last_heartbeat_at timestamptz,
   last_reimage_proof_at timestamptz,
+  preparation_state text CHECK (preparation_state IS NULL OR preparation_state IN ('PREPARING', 'READY', 'FAILED')),
+  preparation_stage text CHECK (preparation_stage IS NULL OR preparation_stage ~ '^[A-Z][A-Z0-9_]{1,39}$'),
+  preparation_progress smallint CHECK (preparation_progress IS NULL OR preparation_progress BETWEEN 0 AND 100),
+  preparation_message text CHECK (preparation_message IS NULL OR char_length(preparation_message) BETWEEN 1 AND 240),
+  preparation_updated_at timestamptz,
   created_at timestamptz NOT NULL DEFAULT clock_timestamp(),
   updated_at timestamptz NOT NULL DEFAULT clock_timestamp(),
   CHECK (

@@ -557,3 +557,18 @@ test("the explicit-image migration separates image generation from inheriting te
   assert.match(migration, /model_overrides - ARRAY\['design', 'development', 'test'\]::text\[\] = '\{\}'::jsonb/);
   assert.doesNotMatch(migration, /model_overrides->'image'/);
 });
+
+test("E2E node preparation progress is durable and bounded", async () => {
+  const [baseline, migration] = await Promise.all([
+    readFile(sqlUrl, "utf8"),
+    readFile(new URL("../infra/postgres/migrations/052_e2e_node_preparation_progress.sql", import.meta.url), "utf8"),
+  ]);
+  for (const column of [
+    "preparation_state", "preparation_stage", "preparation_progress", "preparation_message", "preparation_updated_at",
+  ]) {
+    assert.match(baseline, new RegExp(`${column} `));
+    assert.match(migration, new RegExp(`ADD COLUMN IF NOT EXISTS ${column}`));
+  }
+  assert.match(baseline, /preparation_progress BETWEEN 0 AND 100/);
+  assert.match(baseline, /preparation_state IN \('PREPARING', 'READY', 'FAILED'\)/);
+});

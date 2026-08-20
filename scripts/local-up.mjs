@@ -10,6 +10,7 @@ import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 import { selectCodexAccountDefaultModel } from "./local-codex-model.mjs";
+import { resolveMachineInstallationId } from "./machine-installation-id.mjs";
 
 const execute = promisify(execFile);
 const root = new URL("..", import.meta.url);
@@ -18,6 +19,7 @@ const composeProject = process.env.COMPOSE_PROJECT_NAME?.trim() || "deviludo-loc
 const startupCacheFile = new URL("../.deviludo/local/startup-cache.json", import.meta.url);
 const startupLockFile = fileURLToPath(new URL("../.deviludo/local/local-up.lock", import.meta.url));
 const startupStartedAt = Date.now();
+let startupStageNumber = 0;
 /**
  * Vault issues the service tokens with a 720h period and the services renew them
  * while they run, so a cache older than a fraction of that window is discarded: a
@@ -25,7 +27,6 @@ const startupStartedAt = Date.now();
  * a fingerprint that says nothing about the token's remaining life.
  */
 const startupCacheMaxAgeMs = 7 * 24 * 60 * 60 * 1000;
-const imageCacheMaxAgeMs = 24 * 60 * 60 * 1000;
 const localImageBuilds = Object.freeze([
   { service: "agent-claude-image", image: "deviludo-agent-claude:local" },
   { service: "agent-codex-image", image: "deviludo-agent-codex:local" },
@@ -38,6 +39,20 @@ const localImageBuilds = Object.freeze([
   { service: "core-api", image: "deviludo-core:local" },
   { service: "web", image: "deviludo-web:local" },
 ]);
+const localRuntimeServices = Object.freeze([
+  "postgres",
+  "vault",
+  "minio",
+  "otel-collector",
+  "provider-proxy",
+  "steam-proxy",
+  "local-project-bridge-proxy",
+  "sandbox-executord",
+  "core-api",
+  "core-scheduler",
+  "core-sandbox",
+  "web",
+]);
 const ciMode = process.env.DEVILUDO_LOCAL_CI === "1";
 const resetIncompatibleBaseline = process.argv.includes("--reset-incompatible-baseline");
 const refreshE2eVm = process.argv.includes("--refresh-e2e-vm");
@@ -49,6 +64,7 @@ if (remoteE2eHost && !isLocalInterfaceIpv4(remoteE2eHost)) {
   throw new Error(`--remote-e2e address ${remoteE2eHost} is not assigned to a local network interface`);
 }
 const releaseStartupLock = acquireStartupLock();
+console.log("\nDeviLudo 本地环境启动\n");
 const webPort = process.env.DEVILUDO_WEB_HOST_PORT?.trim() || "3100";
 const corePort = process.env.DEVILUDO_CORE_HOST_PORT?.trim() || "8080";
 const gitImportPort = process.env.DEVILUDO_LOCAL_GIT_IMPORT_PORT?.trim() || "3199";
@@ -98,30 +114,49 @@ await writeFile(
   `${JSON.stringify(gitImportConfiguration, null, 2)}\n`,
   { mode: 0o600 },
 );
-const [claudeVersion, codexVersion, codexLoginMethod] = await Promise.all([
-  detectLocalRuntime("claude"),
-  detectLocalRuntime("codex"),
-  detectLocalCodexAuthentication(),
-]);
-await prepareLocalCodexOfficialLogin(codexLoginMethod);
-const codexAccountDefaultModel = await resolveLocalCodexAccountDefaultModel(codexLoginMethod, codexVersion);
-await requireCommand("docker", ["version", "--format", "{{.Server.Version}}"]);
-await requireCommand("docker", ["compose", "version"]);
-await requireCommand("git", ["--version"]);
-const tartE2e = ciMode ? null : await import("./local-tart-prepare.mjs")
-  .then(module => module.prepareLocalTartE2e({ refresh: refreshE2eVm }));
+const {
+  claudeVersion,
+  codexVersion,
+  codexLoginMethod,
+  codexAccountDefaultModel,
+  dockerIdentity,
+  providerUpstreamProxy,
+  installationId,
+} = await runStartupStage("检查 Docker、Git 和 Agent 运行环境", async () => {
+  const [[detectedClaudeVersion, detectedCodexVersion, detectedCodexLoginMethod], resolvedDockerIdentity, resolvedInstallationId] = await Promise.all([
+    Promise.all([
+      detectLocalRuntime("claude"),
+      detectLocalRuntime("codex"),
+      detectLocalCodexAuthentication(),
+    ]),
+    Promise.all([
+      requireCommand("docker", ["version", "--format", "{{.Server.Version}}"]),
+      requireCommand("docker", ["compose", "version"]),
+      requireCommand("git", ["--version"]),
+    ]).then(() => resolveDockerIdentity()),
+    resolveMachineInstallationId(),
+  ]);
+  await prepareLocalCodexOfficialLogin(detectedCodexLoginMethod);
+  return {
+    claudeVersion: detectedClaudeVersion,
+    codexVersion: detectedCodexVersion,
+    codexLoginMethod: detectedCodexLoginMethod,
+    codexAccountDefaultModel: await resolveLocalCodexAccountDefaultModel(detectedCodexLoginMethod, detectedCodexVersion),
+    dockerIdentity: resolvedDockerIdentity,
+    providerUpstreamProxy: await detectLocalProviderUpstreamProxy(),
+    installationId: resolvedInstallationId,
+  };
+});
 // Each one-shot initialisation step below is guarded by a fingerprint of the
 // inputs that could change its answer, because a repeat start otherwise pays a
 // full container creation per step to redo work that is already done. A guard
 // that cannot prove the inputs are unchanged re-runs its step, so the cache only
 // ever costs time, never correctness.
-const dockerIdentity = await resolveDockerIdentity();
 const startupCache = await readStartupCache(dockerIdentity);
 // A baseline reset destroys every volume, including the ones the fingerprints
 // below describe, so it suppresses the cache write and the next start redoes the
 // initialisation from scratch.
 let baselineReset = false;
-const providerUpstreamProxy = await detectLocalProviderUpstreamProxy();
 const baseEnvironment = {
   ...process.env,
   DEVILUDO_WEB_HOST_PORT: webPort,
@@ -130,6 +165,7 @@ const baseEnvironment = {
   DEVILUDO_ARTIFACT_BIND_ADDRESS: remoteE2eHost ? "0.0.0.0" : "127.0.0.1",
   DEVILUDO_S3_PUBLIC_ENDPOINT: remoteE2eConfiguration.artifactUrl,
   DEVILUDO_E2E_NODE_TOKEN: e2eNodeToken,
+  DEVILUDO_INSTALLATION_ID: installationId,
   DEVILUDO_LOCAL_GIT_IMPORT_PORT: gitImportPort,
   DEVILUDO_LOCAL_GIT_IMPORT_PUBLIC_URL: `http://127.0.0.1:${gitImportPort}`,
   DEVILUDO_LOCAL_PROJECT_BRIDGE_INTERNAL_URL: `http://local-project-bridge-proxy:${gitImportPort}`,
@@ -139,45 +175,59 @@ const baseEnvironment = {
   DEVILUDO_PROVIDER_UPSTREAM_PROXY: providerUpstreamProxy,
   DEVILUDO_CODEX_ACCOUNT_DEFAULT_MODEL: codexAccountDefaultModel ?? "",
 };
-await execute("docker", [
-  "compose", "-f", "infra/docker-compose.yml", "up", "-d", "--wait", "postgres", "vault",
-], { cwd: root, env: baseEnvironment, maxBuffer: 10 * 1024 * 1024 });
+await runStartupStage("启动 PostgreSQL、Vault 与对象存储", () => executeVisible("docker", [
+  "compose", "-f", "infra/docker-compose.yml", "up", "-d", "--wait", "postgres", "vault", "minio",
+], { cwd: root, env: baseEnvironment }));
 // Vault stores its data on a file volume, so a restarted Vault comes back sealed
 // and its service tokens have to be reissued. Both facts follow from the container
 // start time, which is why the fingerprint is built from it.
-const vaultFingerprint = await fingerprintVaultInit();
 let credentialConsumersStopped = false;
-if (!matchesStartupCache("vaultInit", vaultFingerprint)) {
-  await stopCredentialConsumers(baseEnvironment);
-  credentialConsumersStopped = true;
-  await refreshLocalVaultTokens(baseEnvironment);
-}
+const vaultFingerprint = await runStartupStage("检查本地凭证与运行身份", async () => {
+  const fingerprint = await fingerprintVaultInit();
+  if (!matchesStartupCache("vaultInit", fingerprint)) {
+    startupProgress("Vault 状态已变化，正在刷新服务凭证");
+    await stopCredentialConsumers(baseEnvironment);
+    credentialConsumersStopped = true;
+    await refreshLocalVaultTokens(baseEnvironment);
+  } else {
+    startupProgress("Vault 凭证未变化，跳过刷新");
+  }
+  await import("./local-identity.mjs");
+  return fingerprint;
+});
 const retainedJobRuntimeImages = await retainActiveJobRuntimeImages(baseEnvironment);
-await import("./local-identity.mjs");
 // Buildx stamps a fresh provenance attestation into the image config on every
 // build, so an entirely cached rebuild still mints a new image id. Nothing here
 // consumes that provenance, and the churn would re-register every runtime digest
 // and rewrite the executor's allowlist on each start, so it is turned off to keep
 // an unchanged source tree producing an unchanged image.
-const imageInputFingerprint = await fingerprintLocalImageInputs();
-let imageIds = await reusableLocalImageIds(imageInputFingerprint);
-let imagesBuilt = false;
-let imageBuiltAt = startupCache.imageBuiltAt;
-if (!imageIds) {
-  const imageBuildStartedAt = Date.now();
-  console.log(JSON.stringify({ event: "local_up_stage", stage: "building_images", message: "源码或镜像基线已变化，正在构建本地运行镜像" }));
-  await executeVisible("docker", ["compose", "-f", "infra/docker-compose.yml", "--profile", "images", "build",
-    ...localImageBuilds.map(entry => entry.service)], {
-    cwd: root,
-    env: { ...process.env, BUILDX_NO_DEFAULT_ATTESTATIONS: "1" },
-  });
-  imageIds = await inspectLocalImageIds();
-  imagesBuilt = true;
-  imageBuiltAt = new Date().toISOString();
-  console.log(JSON.stringify({ event: "local_up_stage", stage: "images_ready", durationMs: Date.now() - imageBuildStartedAt }));
-} else {
-  console.log(JSON.stringify({ event: "local_up_stage", stage: "images_reused", message: "源码未变化，复用已验证镜像" }));
-}
+const {
+  imageInputFingerprint,
+  imageIds,
+  imagesBuilt,
+  imageBuiltAt,
+} = await runStartupStage("准备本地运行镜像", async () => {
+  const inputFingerprint = await fingerprintLocalImageInputs();
+  let resolvedImageIds = await reusableLocalImageIds(inputFingerprint);
+  if (resolvedImageIds) {
+    startupProgress("源码与镜像未变化，跳过 10 个镜像的重复构建");
+    return {
+      imageInputFingerprint: inputFingerprint,
+      imageIds: resolvedImageIds,
+      imagesBuilt: false,
+      imageBuiltAt: startupCache.imageBuiltAt,
+    };
+  }
+  startupProgress("首次启动或镜像输入已变化，BuildKit 输出如下");
+  await buildLocalImages(baseEnvironment);
+  resolvedImageIds = await inspectLocalImageIds();
+  return {
+    imageInputFingerprint: inputFingerprint,
+    imageIds: resolvedImageIds,
+    imagesBuilt: true,
+    imageBuiltAt: new Date().toISOString(),
+  };
+});
 const runtimeImages = JSON.stringify({
   AGENT_CLAUDE: imageIds["deviludo-agent-claude:local"],
   AGENT_CODEX: imageIds["deviludo-agent-codex:local"],
@@ -190,8 +240,14 @@ const runtimeImages = JSON.stringify({
 // Reading the socket group means starting a container purely to stat one file,
 // which is the most expensive probe here. The group belongs to the daemon, so the
 // answer only changes when the daemon does.
-const dockerSocketGid = cachedStartupValue("dockerSocketGid", dockerIdentity, /^\d+$/)
-  ?? await resolveDockerSocketGid();
+const dockerSocketGid = await runStartupStage("准备沙箱执行器", async () => {
+  const cached = cachedStartupValue("dockerSocketGid", dockerIdentity, /^\d+$/);
+  if (cached) {
+    startupProgress("Docker socket 权限未变化，跳过容器探测");
+    return cached;
+  }
+  return await resolveDockerSocketGid();
+});
 const environment = {
   ...baseEnvironment,
   DEVILUDO_AGENT_RUNTIME_DETECTION_SCOPE: "LOCAL_HOST",
@@ -209,66 +265,112 @@ await persistLocalComposeEnvironment(environment);
 // The init container installs the executor's secrets into a volume from files on
 // the host, so it has to re-run when either side changes: the volume identity, or
 // the bytes it copies in.
-const executorSecretsFingerprint = await fingerprintExecutorSecrets();
-if (!matchesStartupCache("executorSecrets", executorSecretsFingerprint)) {
-  if (!credentialConsumersStopped) {
-    await stopCredentialConsumers(environment);
-    credentialConsumersStopped = true;
+const executorSecretsFingerprint = await runStartupStage("同步执行器凭证", async () => {
+  const fingerprint = await fingerprintExecutorSecrets();
+  if (!matchesStartupCache("executorSecrets", fingerprint)) {
+    if (!credentialConsumersStopped) {
+      await stopCredentialConsumers(environment);
+      credentialConsumersStopped = true;
+    }
+    await refreshLocalExecutorSecrets(environment);
+  } else {
+    startupProgress("执行器凭证未变化，跳过同步");
   }
-  await refreshLocalExecutorSecrets(environment);
-}
-// Both remaining init containers are reachable only through the init profile, so
-// nothing else runs them and a skip has to be justified by the committed database
-// state rather than a recorded fingerprint. One query reads everything the two
-// containers would write, for a fraction of the cost of starting either.
-const instanceState = await readLocalInstanceState(environment);
-const expectedMigrationLedger = await readExpectedMigrationLedger();
-const migrationRan = await migrateWithOptionalBaselineReset(environment, instanceState, expectedMigrationLedger);
-const initialized = await bootstrapInstance(environment, runtimeImages, instanceState, migrationRan);
-await execute("docker", [
+  return fingerprint;
+});
+const storageFingerprints = await runStartupStage("准备本地持久存储", async () => {
+  let projectFingerprint = await fingerprintProjectSources();
+  let objectStoreFingerprint = await fingerprintObjectStore();
+  const operations = [];
+  if (!matchesCachedFingerprint("objectStore", objectStoreFingerprint)) {
+    operations.push(executeVisible("docker", [
+      "compose", "-f", "infra/docker-compose.yml", "run", "--rm", "--no-deps", "minio-init",
+    ], { cwd: root, env: environment }));
+  } else {
+    startupProgress("对象存储卷未变化，跳过存储桶初始化容器");
+  }
+  if (!matchesCachedFingerprint("projectSources", projectFingerprint)) {
+    operations.push(executeVisible("docker", [
+      "compose", "-f", "infra/docker-compose.yml", "run", "--rm", "--no-deps", "project-sources-init",
+    ], { cwd: root, env: environment }));
+  } else {
+    startupProgress("项目存储卷权限未变化，跳过初始化容器");
+  }
+  await Promise.all(operations);
+  [projectFingerprint, objectStoreFingerprint] = await Promise.all([
+    fingerprintProjectSources(),
+    fingerprintObjectStore(),
+  ]);
+  if (!projectFingerprint || !objectStoreFingerprint) throw new Error("无法验证本地持久存储卷");
+  return { projectFingerprint, objectStoreFingerprint };
+});
+// Migration and instance bootstrap are reachable only through the init profile.
+// Their skips are justified by committed database state rather than a recorded
+// fingerprint, so one query replaces two container starts without trusting cache.
+const { migrationRan, initialized } = await runStartupStage("校验数据库并注册本地运行时", async () => {
+  const [instanceState, expectedMigrationLedger] = await Promise.all([
+    readLocalInstanceState(environment),
+    readExpectedMigrationLedger(),
+  ]);
+  const applied = await migrateWithOptionalBaselineReset(environment, instanceState, expectedMigrationLedger);
+  const bootstrap = await bootstrapInstance(environment, runtimeImages, instanceState, applied);
+  startupProgress(applied ? "数据库迁移已应用" : "迁移账本未变化，跳过迁移容器");
+  startupProgress(bootstrap.reused ? "本地节点注册未变化，跳过初始化容器" : "本地节点与运行时已注册");
+  return { migrationRan: applied, initialized: bootstrap };
+});
+await runStartupStage("启动 Web、Core 与本地依赖服务", () => executeVisible("docker", [
   "compose",
   "-f", "infra/docker-compose.yml",
   "up",
   "-d",
   "--wait",
-], { cwd: root, env: environment, maxBuffer: 10 * 1024 * 1024 });
+  "--no-deps",
+  ...localRuntimeServices,
+], { cwd: root, env: environment }));
 const gitImportConfigurationFingerprint = digest([
   "git-import", imageInputFingerprint, JSON.stringify(gitImportConfiguration),
 ]);
-const { runningGitImportPid, startLocalGitImport, stopLocalGitImport } = await import("./local-git-import-daemon.mjs");
-const previousGitImportPid = await runningGitImportPid();
-if (previousGitImportPid && !matchesStartupCache("gitImportConfiguration", gitImportConfigurationFingerprint)) {
-  await stopLocalGitImport();
-}
-const gitImportPid = await startLocalGitImport();
+const gitImportPid = await runStartupStage("启动本地项目桥接服务", async () => {
+  const { runningGitImportPid, startLocalGitImport, stopLocalGitImport } = await import("./local-git-import-daemon.mjs");
+  const previousGitImportPid = await runningGitImportPid();
+  if (previousGitImportPid && !matchesCachedFingerprint("gitImportConfiguration", gitImportConfigurationFingerprint)) {
+    await stopLocalGitImport();
+  }
+  return await startLocalGitImport();
+});
 let e2ePid = null;
 let e2eConfigurationFingerprint = null;
 if (!ciMode) {
-  if (!initialized.macNodeId) throw new Error("Local macOS E2E node initialization failed");
-  const e2eConfiguration = {
-    nodeId: initialized.macNodeId,
-    poolKind: "E2E_MACOS",
-    coreUrl: process.env.DEVILUDO_CORE_API_URL?.trim() || remoteE2eConfiguration.coreUrl,
-    token: e2eNodeToken,
-    identityKeyFile: new URL("../.deviludo/local/e2e-macos-ed25519.pem", import.meta.url).pathname,
-    jobRoot: new URL("../.deviludo/local/tart-host-jobs", import.meta.url).pathname,
-    tartFingerprint: tartE2e?.fingerprint,
-  };
-  mkdirSync(e2eConfiguration.jobRoot, { recursive: true, mode: 0o700 });
-  await writeFile(new URL("../.deviludo/local/e2e-macos.json", import.meta.url), JSON.stringify(e2eConfiguration, null, 2), { mode: 0o600 });
-  e2eConfigurationFingerprint = digest([
-    "e2e-macos", imageInputFingerprint, JSON.stringify(e2eConfiguration),
-    await readOptionalFile(new URL("../.deviludo/local/e2e-macos-ed25519.pem", import.meta.url)),
-  ]);
-  const { runningPid, startLocalE2e, stopLocalE2e } = await import("./local-e2e-daemon.mjs");
-  const previousE2ePid = await runningPid();
-  if (previousE2ePid && !matchesStartupCache("e2eConfiguration", e2eConfigurationFingerprint)) {
-    await stopLocalE2e();
-  }
-  e2ePid = await startLocalE2e();
+  const prepared = await runStartupStage("启动 macOS E2E 后台准备", async () => {
+    if (!initialized.macNodeId) throw new Error("Local macOS E2E node initialization failed");
+    const e2eConfiguration = {
+      nodeId: initialized.macNodeId,
+      poolKind: "E2E_MACOS",
+      coreUrl: process.env.DEVILUDO_CORE_API_URL?.trim() || remoteE2eConfiguration.coreUrl,
+      token: e2eNodeToken,
+      identityKeyFile: new URL("../.deviludo/local/e2e-macos-ed25519.pem", import.meta.url).pathname,
+      jobRoot: new URL("../.deviludo/local/tart-host-jobs", import.meta.url).pathname,
+    };
+    mkdirSync(e2eConfiguration.jobRoot, { recursive: true, mode: 0o700 });
+    await writeFile(new URL("../.deviludo/local/e2e-macos.json", import.meta.url), JSON.stringify(e2eConfiguration, null, 2), { mode: 0o600 });
+    const fingerprint = digest([
+      "e2e-macos", imageInputFingerprint, JSON.stringify(e2eConfiguration),
+      await readOptionalFile(new URL("../.deviludo/local/e2e-macos-ed25519.pem", import.meta.url)),
+    ]);
+    const { runningPid, startLocalE2e, stopLocalE2e } = await import("./local-e2e-daemon.mjs");
+    const previousE2ePid = await runningPid();
+    if (previousE2ePid && (refreshE2eVm || !matchesCachedFingerprint("e2eConfiguration", fingerprint))) {
+      await stopLocalE2e();
+    }
+    const pid = await startLocalE2e({ refresh: refreshE2eVm });
+    startupProgress("Web/Core 已可使用；E2E 镜像在后台准备，进度可在“运行状态”页面查看");
+    return { fingerprint, pid };
+  });
+  e2eConfigurationFingerprint = prepared.fingerprint;
+  e2ePid = prepared.pid;
 }
-// Recorded only once the complete stack is up, so a start that fails midway
-// leaves the previous fingerprints in place and the next attempt redoes work.
+// Recorded only once the interactive stack and background E2E worker are up, so
+// a start that fails midway leaves the previous fingerprints in place.
 if (!baselineReset) {
   await writeStartupCache({
     dockerIdentity,
@@ -276,6 +378,8 @@ if (!baselineReset) {
     dockerSocketGid,
     vaultInit: vaultFingerprint,
     executorSecrets: executorSecretsFingerprint,
+    projectSources: storageFingerprints.projectFingerprint,
+    objectStore: storageFingerprints.objectStoreFingerprint,
     imageInputFingerprint,
     imageIds,
     imageBuiltAt,
@@ -283,6 +387,14 @@ if (!baselineReset) {
     e2eConfiguration: e2eConfigurationFingerprint,
   });
 }
+const startupMs = Date.now() - startupStartedAt;
+console.log(`\n✓ DeviLudo 已可使用（${formatDuration(startupMs)}）`);
+console.log(`  Web: http://127.0.0.1:${webPort}`);
+if (e2ePid) {
+  console.log("  macOS E2E: 后台准备中或已就绪；打开“运行状态”查看实时进度");
+  console.log("  详细日志: .deviludo/local/e2e-macos.log");
+}
+console.log("");
 console.log(JSON.stringify({
   ready: true,
   ciMode,
@@ -294,17 +406,65 @@ console.log(JSON.stringify({
     artifactUrl: remoteE2eConfiguration.artifactUrl,
     enrollment: "Open Runtime and create a one-time E2E enrollment token",
   } : null,
-  startupMs: Date.now() - startupStartedAt,
+  startupMs,
   images: imagesBuilt ? "built" : "reused",
   migrations: migrationRan ? "applied" : "verified",
   bootstrap: initialized.reused ? "reused" : "refreshed",
   runtimes: {
     claudeCode: claudeVersion,
     codexCli: codexVersion,
-    e2eVm: tartE2e ? (tartE2e.reused ? "reused" : "initialized") : "ci-skipped",
+    e2eVm: e2ePid ? "background" : "ci-skipped",
   },
 }));
 releaseStartupLock();
+
+async function runStartupStage(label, operation) {
+  const stage = ++startupStageNumber;
+  const startedAt = Date.now();
+  console.log(`[${stage}] ${label}…`);
+  const heartbeat = setInterval(() => {
+    console.log(`    仍在进行：${label}（${formatDuration(Date.now() - startedAt)}）`);
+  }, 10_000);
+  heartbeat.unref();
+  try {
+    const result = await operation();
+    console.log(`    ✓ 完成（${formatDuration(Date.now() - startedAt)}）\n`);
+    return result;
+  } catch (error) {
+    console.error(`    ✗ 失败（${formatDuration(Date.now() - startedAt)}）`);
+    throw error;
+  } finally {
+    clearInterval(heartbeat);
+  }
+}
+
+function startupProgress(message) {
+  console.log(`    ${message}`);
+}
+
+async function buildLocalImages(environment) {
+  const options = {
+    cwd: root,
+    env: { ...environment, BUILDX_NO_DEFAULT_ATTESTATIONS: "1" },
+  };
+  const compose = ["compose", "-f", "infra/docker-compose.yml", "--profile", "images", "build"];
+  try {
+    await executeVisible("docker", [...compose, ...localImageBuilds.map(entry => entry.service)], options);
+  } catch {
+    startupProgress("并行 BuildKit 会话中断；正在复用已完成的层缓存逐个重试");
+    for (const [index, entry] of localImageBuilds.entries()) {
+      startupProgress(`镜像 ${index + 1}/${localImageBuilds.length}：${entry.image}`);
+      await executeVisible("docker", [...compose, entry.service], options);
+    }
+  }
+}
+
+function formatDuration(milliseconds) {
+  const seconds = Math.max(0, Math.round(milliseconds / 1_000));
+  if (seconds < 60) return `${seconds} 秒`;
+  const minutes = Math.floor(seconds / 60);
+  return `${minutes} 分 ${seconds % 60} 秒`;
+}
 
 /** Stream long-running BuildKit output so local startup never looks frozen. */
 function executeVisible(command, arguments_, options) {
@@ -455,9 +615,6 @@ function globExpression(pattern) {
 
 async function reusableLocalImageIds(inputFingerprint) {
   if (typeof inputFingerprint !== "string" || startupCache.imageInputFingerprint !== inputFingerprint) return null;
-  const builtAt = Date.parse(startupCache.imageBuiltAt ?? "");
-  const age = Date.now() - builtAt;
-  if (!Number.isFinite(builtAt) || age < 0 || age >= imageCacheMaxAgeMs) return null;
   if (!startupCache.imageIds || typeof startupCache.imageIds !== "object" || Array.isArray(startupCache.imageIds)) return null;
   try {
     const current = await inspectLocalImageIds();
@@ -482,8 +639,9 @@ async function inspectLocalImageIds() {
 
 /**
  * Reads the recorded fingerprints of the previous successful start. Anything
- * unreadable, malformed, or belonging to a different Docker daemon is discarded,
- * so a stale or foreign cache degrades into re-running every step.
+ * unreadable, malformed, or belonging to a different Docker daemon is discarded.
+ * Image fingerprints remain reusable indefinitely; credential gates apply their
+ * own freshness window instead of forcing unrelated image rebuilds.
  */
 async function readStartupCache(identity) {
   if (!identity) return {};
@@ -493,8 +651,7 @@ async function readStartupCache(identity) {
     if (parsed.dockerIdentity !== identity) return {};
     const recordedAt = Date.parse(parsed.recordedAt ?? "");
     if (!Number.isFinite(recordedAt)) return {};
-    const age = Date.now() - recordedAt;
-    return age >= 0 && age < startupCacheMaxAgeMs ? parsed : {};
+    return Number.isFinite(recordedAt) ? parsed : {};
   } catch {
     return {};
   }
@@ -506,6 +663,13 @@ async function readStartupCache(identity) {
  * instead of silently skipping it.
  */
 function matchesStartupCache(key, fingerprint) {
+  const recordedAt = Date.parse(startupCache.recordedAt ?? "");
+  const age = Date.now() - recordedAt;
+  return Number.isFinite(recordedAt) && age >= 0 && age < startupCacheMaxAgeMs
+    && matchesCachedFingerprint(key, fingerprint);
+}
+
+function matchesCachedFingerprint(key, fingerprint) {
   return typeof fingerprint === "string" && startupCache[key] === fingerprint;
 }
 
@@ -581,6 +745,22 @@ async function fingerprintExecutorSecrets() {
   // fingerprint has to invalidate this one too — including when it is unknown,
   // which digest() propagates as an unusable fingerprint.
   return digest(["executor-secrets", volumes, vaultFingerprint, ...sources]);
+}
+
+async function fingerprintProjectSources() {
+  const volume = await inspectFormat([
+    "volume",
+    `${composeProject}_projects-data`,
+  ], "{{.CreatedAt}}");
+  return volume ? digest(["project-sources", volume, "uid=1001", "gid=1001", "mode=2770"]) : null;
+}
+
+async function fingerprintObjectStore() {
+  const volume = await inspectFormat([
+    "volume",
+    `${composeProject}_minio-data`,
+  ], "{{.CreatedAt}}");
+  return volume ? digest(["object-store", volume, "bucket=deviludo-artifacts"]) : null;
 }
 
 async function readLocalPolicySources() {
@@ -741,6 +921,7 @@ async function persistLocalComposeEnvironment(environment) {
     "DEVILUDO_ARTIFACT_BIND_ADDRESS",
     "DEVILUDO_S3_PUBLIC_ENDPOINT",
     "DEVILUDO_E2E_NODE_TOKEN",
+    "DEVILUDO_INSTALLATION_ID",
     "DEVILUDO_AGENT_RUNTIME_DETECTION_SCOPE",
     "DEVILUDO_CLAUDE_CODE_VERSION",
     "DEVILUDO_CODEX_CLI_VERSION",

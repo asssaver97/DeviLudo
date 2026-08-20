@@ -24,6 +24,10 @@ x-core: &core
     DEVILUDO_CODEX_PROXY_URL: http://provider-proxy:3128
     DEVILUDO_SANDBOX_CONCURRENCY: ${DEVILUDO_SANDBOX_CONCURRENCY:-1}
     DEVILUDO_TELEMETRY_ENDPOINT: ${DEVILUDO_TELEMETRY_ENDPOINT:-}
+    # local-up always injects the machine ID. The empty fallback keeps read-only
+    # status/log/down commands usable before the first start; Core itself rejects
+    # an empty ID if someone tries to bypass the launcher and start the service.
+    DEVILUDO_INSTALLATION_ID: ${DEVILUDO_INSTALLATION_ID:-}
     DEVILUDO_RELEASE_VERSION: ${DEVILUDO_RELEASE_VERSION:-development}
     DEVILUDO_PROJECTS_ROOT: /var/lib/deviludo-projects
     DEVILUDO_LOCAL_DIRECTORY_BINDINGS: ${DEVILUDO_LOCAL_DIRECTORY_BINDINGS:-0}

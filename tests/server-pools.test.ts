@@ -6,6 +6,7 @@ import {
   assertPoolOperatingSystem,
   fixedPoolRecords,
   poolReadiness,
+  type ServerNodeRecord,
 } from "@/lib/runtime/server-pools";
 import { assertJobPlacement, routeJob } from "@/lib/runtime/job-routing";
 
@@ -50,4 +51,33 @@ test("macOS reports on-demand readiness with zero resident nodes", () => {
   const pools = fixedPoolRecords([]);
   assert.equal(pools.length, 5);
   assert.equal(pools.find(pool => pool.kind === "E2E_MACOS")?.readiness, "ON_DEMAND_READY");
+});
+
+test("a macOS node becomes ready only after its asynchronous preparation completes", () => {
+  const preparing = Object.freeze({
+    id: "00000000-0000-4000-8000-000000000005",
+    poolKind: "E2E_MACOS",
+    operatingSystem: "macos",
+    state: "ACTIVE",
+    capabilities: Object.freeze(["E2E_TEST"]),
+    isolationGeneration: 1,
+    currentWorkspaceId: null,
+    lastHeartbeatAt: null,
+    lastReimageProofAt: null,
+    preparation: Object.freeze({
+      state: "PREPARING",
+      stage: "DOWNLOADING_BASE",
+      progress: 37,
+      message: "Downloading",
+      updatedAt: new Date().toISOString(),
+    }),
+  }) satisfies ServerNodeRecord;
+  assert.equal(fixedPoolRecords([preparing]).find(pool => pool.kind === "E2E_MACOS")?.activeNodes, 0);
+  const ready = Object.freeze({ ...preparing, preparation: Object.freeze({
+    ...preparing.preparation,
+    state: "READY" as const,
+    stage: "READY",
+    progress: 100,
+  }) });
+  assert.equal(fixedPoolRecords([ready]).find(pool => pool.kind === "E2E_MACOS")?.activeNodes, 1);
 });

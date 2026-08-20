@@ -67,7 +67,7 @@ npm run local:bootstrap
 npm run local:up
 ```
 
-The first startup downloads roughly 25 GB and prepares the container stack and a macOS E2E virtual machine. Keep about 140 GiB free for the VM, images, build caches, source, and test evidence.
+The first startup builds the container stack, then makes Web and Core available while the roughly 25 GB macOS E2E environment finishes in the background. Its live stage and percentage appear on the Runtime page. Keep about 140 GiB free for the VM, images, build caches, source, and test evidence.
 
 Open [http://127.0.0.1:3100](http://127.0.0.1:3100), then go to **Settings → Agent Settings** and select either:
 
@@ -120,7 +120,7 @@ Agent execution defaults to one concurrent job. On a machine with enough memory 
 
 ## Anonymous usage reporting
 
-When an installation is used, Core automatically reports a random installation ID, active UTC day, release version, operating system, and CPU architecture to `https://telemetry.deviludo.com/v1/active-installations`, at most once every 20 hours after a successful report. No setup is required. Reports never include projects, source, paths, prompts, model settings, artifacts, or credentials. Developers may override the collector with `DEVILUDO_TELEMETRY_ENDPOINT` for testing.
+When an installation is used, Core automatically reports a stable anonymous ID for the host machine, active UTC day, release version, operating system, and CPU architecture to `https://telemetry.deviludo.com/v1/active-installations`, at most once every 20 hours after a successful report. No setup is required. The launcher derives the ID locally with a DeviLudo-scoped one-way hash, so redeployments on the same machine keep one ID and the original machine identifier is never sent. Reports never include projects, source, paths, prompts, model settings, artifacts, or credentials. Developers may override the collector with `DEVILUDO_TELEMETRY_ENDPOINT` for testing.
 
 ## Multi-node deployment
 

@@ -18,13 +18,29 @@ const stagingName = `${goldenName}-building`;
 const baseCacheName = "deviludo-e2e-tahoe-base-cache";
 const baseImage = "ghcr.io/cirruslabs/macos-tahoe-base:latest";
 
-export async function prepareLocalTartE2e({ refresh = false } = {}) {
+export async function preflightLocalTartE2e() {
   if (platform() !== "darwin" || arch() !== "arm64") throw new Error("本地真实窗口 E2E 仅支持 Apple Silicon macOS，且不会降级到宿主机执行");
   await mkdir(localRoot, { recursive: true, mode: 0o700 });
   await requireVirtualization();
   await ensureHomebrewTools();
   await ensureSshKey();
-  const baseImageDigest = await ensureCachedBaseImage(refresh);
+}
+
+export async function prepareLocalTartE2e({ refresh = false, preflight = true, onProgress = null } = {}) {
+  await reportPreparation(onProgress, "PREPARING", "CHECKING_HOST", 2, "检查 macOS 虚拟化与 E2E 工具");
+  if (preflight) await preflightLocalTartE2e();
+  else await mkdir(localRoot, { recursive: true, mode: 0o700 });
+  await reportPreparation(onProgress, "PREPARING", "DOWNLOADING_BASE", 5, "检查 macOS E2E 基础镜像");
+  const baseImageDigest = await ensureCachedBaseImage(refresh, percentage => {
+    void reportPreparation(
+      onProgress,
+      "PREPARING",
+      "DOWNLOADING_BASE",
+      5 + Math.round(percentage * 0.35),
+      `下载 macOS E2E 基础镜像 ${Math.round(percentage)}%`,
+    );
+  });
+  await reportPreparation(onProgress, "PREPARING", "DOWNLOADING_BASE", 40, "macOS E2E 基础镜像已准备");
   const fingerprint = await configurationFingerprint(baseImageDigest);
   const previous = await readFile(stateFile, "utf8").then(JSON.parse).catch(() => null);
   if (!refresh && previous?.baseImage === baseImage && previous?.goldenName === goldenName
@@ -33,8 +49,10 @@ export async function prepareLocalTartE2e({ refresh = false } = {}) {
     await ensureAliasedKnownHosts();
     const migrated = { ...previous, baseImageDigest, fingerprint, verifiedAt: new Date().toISOString() };
     await writeState(migrated);
+    await reportPreparation(onProgress, "READY", "READY", 100, "macOS E2E 环境已复用并就绪");
     return Object.freeze({ ...migrated, reused: true });
   }
+  await reportPreparation(onProgress, "PREPARING", "COMPILING_DRIVERS", 45, "编译 macOS 系统输入驱动");
   await compileHostDrivers();
   const updateFromGolden = !refresh
     && previous?.schema === "deviludo.local-tart-e2e"
@@ -43,16 +61,25 @@ export async function prepareLocalTartE2e({ refresh = false } = {}) {
     && previous?.goldenName === goldenName
     && await tartVmExists(goldenName);
   const updateSource = updateFromGolden ? goldenName : baseCacheName;
-  console.log(JSON.stringify({
-    event: "local_up_stage",
-    stage: "e2e_vm_initializing",
-    message: updateFromGolden
-      ? "正在增量更新真实窗口 E2E 金镜像"
-      : "正在从固定的本地基础镜像构建真实窗口 E2E 金镜像",
-  }));
+  await reportPreparation(
+    onProgress,
+    "PREPARING",
+    "CLONING_VM",
+    55,
+    updateFromGolden ? "增量更新真实窗口 E2E 虚拟机" : "创建真实窗口 E2E 虚拟机",
+  );
   if (await tartVmExists(stagingName)) await run("tart", ["delete", stagingName], 120_000);
-  await visible("tart", ["clone", updateSource, stagingName]);
+  await visible("tart", ["clone", updateSource, stagingName], percentage => {
+    void reportPreparation(
+      onProgress,
+      "PREPARING",
+      "CLONING_VM",
+      55 + Math.round(percentage * 0.1),
+      `创建 E2E 虚拟机 ${Math.round(percentage)}%`,
+    );
+  });
   await run("tart", ["set", stagingName, "--memory", "6144", "--display", "1440x900"], 30_000);
+  await reportPreparation(onProgress, "PREPARING", "BOOTING_VM", 67, "启动 E2E 虚拟机");
   const logFile = resolve(localRoot, "tart-provision.log");
   const descriptor = await import("node:fs").then(fs => fs.openSync(logFile, "a", 0o600));
   const vm = spawn("tart", ["run", stagingName, "--no-graphics", "--serial"], { detached: true, stdio: ["ignore", descriptor, descriptor], shell: false });
@@ -72,6 +99,7 @@ export async function prepareLocalTartE2e({ refresh = false } = {}) {
     } else {
       await authorizeSshKey(ip);
     }
+    await reportPreparation(onProgress, "PREPARING", "PROVISIONING_VM", 74, "安装 E2E 测试运行环境");
     await installGuestRuntime(ip, { rotateCredentials: !updateFromGolden });
   } catch (error) {
     throw new Error(`Tart 真实窗口环境初始化失败，未启用宿主机降级：${error instanceof Error ? error.message : String(error)}`);
@@ -81,6 +109,7 @@ export async function prepareLocalTartE2e({ refresh = false } = {}) {
   // Validate the persisted image after a real reboot. The provisioning session
   // itself inherits the base image's already logged-in desktop and therefore
   // cannot prove that the replacement password still permits automatic login.
+  await reportPreparation(onProgress, "PREPARING", "REBOOTING_VM", 86, "重启虚拟机并验证自动登录");
   const rebootLogDescriptor = await import("node:fs").then(fs => fs.openSync(logFile, "a", 0o600));
   const rebootedVm = spawn("tart", ["run", stagingName, "--no-graphics", "--serial"], {
     detached: true,
@@ -100,6 +129,7 @@ export async function prepareLocalTartE2e({ refresh = false } = {}) {
   try {
     await waitForGuestSsh(rebootedIp);
     await waitForGuestDesktop(rebootedIp);
+    await reportPreparation(onProgress, "PREPARING", "VERIFYING_VM", 94, "执行真实窗口与输入冒烟测试");
     gamepadAvailable = await smokeGuestRuntime(rebootedIp);
   } catch (error) {
     throw new Error(`Tart 金镜像重启后真实窗口 smoke 失败，未启用宿主机降级：${error instanceof Error ? error.message : String(error)}`);
@@ -110,6 +140,7 @@ export async function prepareLocalTartE2e({ refresh = false } = {}) {
   await run("tart", ["rename", stagingName, goldenName], 120_000);
   const state = { schema: "deviludo.local-tart-e2e", goldenName, baseImage, baseCacheName, baseImageDigest, fingerprint, gamepadAvailable, guestUser: "admin", keyFile, knownHostsFile, createdAt: new Date().toISOString(), verifiedAt: new Date().toISOString() };
   await writeState(state);
+  await reportPreparation(onProgress, "READY", "READY", 100, "macOS E2E 环境已就绪");
   return Object.freeze({ ...state, reused: false });
 }
 
@@ -155,13 +186,13 @@ async function ensureSshKey() {
   await chmod(keyFile, 0o600); await chmod(`${keyFile}.pub`, 0o644);
 }
 
-async function ensureCachedBaseImage(refresh) {
+async function ensureCachedBaseImage(refresh, onCloneProgress) {
   const cacheExists = await tartVmExists(baseCacheName);
   if (refresh || !cacheExists) await requireDiskSpace();
   if (refresh && await tartVmExists(baseCacheName)) await run("tart", ["delete", baseCacheName], 120_000);
   if (!await tartVmExists(baseCacheName)) {
-    console.log(JSON.stringify({ event: "local_up_stage", stage: "e2e_vm_base_downloading", message: "首次下载 macOS E2E 基础镜像（约 25 GB）" }));
-    await visible("tart", ["clone", baseImage, baseCacheName]);
+    console.log("[DeviLudo:E2E] 首次下载 macOS E2E 基础镜像（约 25 GB）");
+    await visible("tart", ["clone", baseImage, baseCacheName], onCloneProgress);
   }
   let identity = "";
   try {
@@ -382,9 +413,40 @@ async function requireVirtualization() { const { stdout } = await execute("sysct
 async function writeState(value) { await writeFile(stateFile, `${JSON.stringify(value, null, 2)}\n`, { mode: 0o600 }); }
 function delay(ms) { return new Promise(resolvePromise => setTimeout(resolvePromise, ms)); }
 function run(executable, arguments_, timeout) { return execute(executable, arguments_, { timeout, maxBuffer: 4 * 1024 * 1024 }); }
-function visible(executable, arguments_) {
+let lastPreparationLogStage = "";
+async function reportPreparation(onProgress, state, stage, progress, message) {
+  const payload = Object.freeze({ state, stage, progress: Math.max(0, Math.min(100, progress)), message });
+  if (stage !== lastPreparationLogStage || state !== "PREPARING") {
+    console.log(`[DeviLudo:E2E] ${message} (${payload.progress}%)`);
+    lastPreparationLogStage = stage;
+  }
+  if (typeof onProgress === "function") await onProgress(payload);
+}
+
+function visible(executable, arguments_, onPercent) {
   return new Promise((resolvePromise, rejectPromise) => {
-    const child = spawn(executable, arguments_, { stdio: "inherit", shell: false });
+    const tracksProgress = typeof onPercent === "function";
+    const child = spawn(executable, arguments_, {
+      stdio: tracksProgress ? ["inherit", "pipe", "pipe"] : "inherit",
+      shell: false,
+    });
+    let lastPercentage = -1;
+    const forward = (stream, output) => stream?.on("data", chunk => {
+      output.write(chunk);
+      const text = String(chunk);
+      for (const match of text.matchAll(/(?:^|\s)(\d{1,3}(?:\.\d+)?)\s*%/g)) {
+        const percentage = Math.max(0, Math.min(100, Number(match[1])));
+        const rounded = Math.floor(percentage);
+        if (Number.isFinite(percentage) && rounded >= lastPercentage + 2) {
+          lastPercentage = rounded;
+          onPercent(percentage);
+        }
+      }
+    });
+    if (tracksProgress) {
+      forward(child.stdout, process.stdout);
+      forward(child.stderr, process.stderr);
+    }
     child.once("error", rejectPromise);
     child.once("close", code => {
       if (code === 0) resolvePromise();

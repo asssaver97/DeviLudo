@@ -1,15 +1,18 @@
 import assert from "node:assert/strict";
-import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import { DEFAULT_TELEMETRY_ENDPOINT, type CoreConfig } from "../services/core/src/config";
 import { UsageTelemetry } from "../services/core/src/usage-telemetry";
 
+const MACHINE_INSTALLATION_ID = "01234567-89ab-5def-8abc-0123456789ab";
+
 function config(root: string, endpoint: string | null): CoreConfig {
   return {
     projectsRoot: root,
     telemetryEndpoint: endpoint,
+    installationId: MACHINE_INSTALLATION_ID,
     releaseVersion: "v1.2.3",
   } as CoreConfig;
 }
@@ -39,11 +42,31 @@ test("telemetry stores an opaque installation ID and sends only the disclosed ac
     ]);
     assert.equal(reported.event, "ACTIVE_INSTALLATION");
     assert.equal(reported.releaseVersion, "v1.2.3");
+    assert.equal(reported.installationId, MACHINE_INSTALLATION_ID);
     const persisted = JSON.parse(await readFile(join(root, ".deviludo-telemetry.json"), "utf8")) as Record<string, unknown>;
     assert.match(String(persisted.installationId), /^[0-9a-f-]{36}$/i);
     assert.deepEqual(Object.keys(persisted).sort(), ["installationId", "lastReportedAt"]);
   } finally {
     globalThis.fetch = originalFetch;
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("telemetry replaces a deployment-scoped legacy ID with the machine ID", async () => {
+  const root = await mkdtemp(join(tmpdir(), "deviludo-telemetry-migrate-"));
+  const legacyId = "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee";
+  try {
+    await writeFile(join(root, ".deviludo-telemetry.json"), `${JSON.stringify({
+      installationId: legacyId,
+      lastReportedAt: new Date().toISOString(),
+    })}\n`);
+    const status = await new UsageTelemetry(config(root, DEFAULT_TELEMETRY_ENDPOINT)).status();
+    assert.equal(status.installationIdMask, `${MACHINE_INSTALLATION_ID.slice(0, 8)}…`);
+    assert.equal(status.lastReportedAt, null);
+    const migrated = JSON.parse(await readFile(join(root, ".deviludo-telemetry.json"), "utf8")) as Record<string, unknown>;
+    assert.equal(migrated.installationId, MACHINE_INSTALLATION_ID);
+    assert.equal(migrated.lastReportedAt, null);
+  } finally {
     await rm(root, { recursive: true, force: true });
   }
 });

@@ -18,6 +18,13 @@ role_validate_config() { role_preflight; [[ ${DEVILUDO_PROJECTS_ROOT:-} == /var/
 role_verify_images() { local image; while IFS= read -r image; do verify_and_pull_image "$image"; done < <(jq -r '.images[] | select(contains("-web@") | not)' "$1"); }
 role_install() {
   local stage=$1 secrets=/etc/deviludo/core/secrets manifest="$1/release-manifest.json"
+  local machine_source machine_digest installation_id
+  machine_source=$(tr -d '[:space:]' < /etc/machine-id | tr '[:upper:]' '[:lower:]')
+  [[ $machine_source =~ ^[0-9a-f-]{16,128}$ ]] || { log "host machine-id is invalid"; return 1; }
+  machine_digest=$(printf 'deviludo.machine-installation.v1\0linux\0%s' "$machine_source" | openssl dgst -sha256 -r)
+  machine_digest=${machine_digest%% *}
+  [[ $machine_digest =~ ^[0-9a-f]{64}$ ]] || { log "could not derive the machine installation ID"; return 1; }
+  installation_id="${machine_digest:0:8}-${machine_digest:8:4}-5${machine_digest:13:3}-8${machine_digest:17:3}-${machine_digest:20:12}"
   install -d -m 0711 -o root -g root "$secrets"
   install -m 0400 -o 1001 -g 1001 "$DEVILUDO_DATABASE_OWNER_URL_FILE" "$secrets/database-owner.url"
   install -m 0400 -o 1001 -g 1001 "$DEVILUDO_DATABASE_API_URL_FILE" "$secrets/database-api.url"
@@ -51,7 +58,7 @@ role_install() {
   [[ $agent_smoke_image == *@sha256:* ]] || { log "Agent microVM smoke image is missing"; return 1; }
   install_kata_runtime "$manifest" "$stage"
   printf 'DEVILUDO_CORE_IMAGE=%s\nDEVILUDO_PROVIDER_PROXY_IMAGE=%s\nDEVILUDO_CORE_BIND_ADDRESS=%s\nDEVILUDO_PROVIDER_ALLOWLIST=%s\nDEVILUDO_STEAM_ALLOWLIST=%s\nDEVILUDO_S3_ENDPOINT=%s\nDEVILUDO_S3_PUBLIC_ENDPOINT=%s\nDEVILUDO_S3_REGION=%s\nDEVILUDO_S3_PATH_STYLE=%s\nDEVILUDO_S3_CREATE_BUCKET=%s\nDEVILUDO_ARTIFACT_BUCKET=%s\nDEVILUDO_VAULT_ADDR=%s\nDEVILUDO_OTEL_ENDPOINT=%s\n' "$core_image" "$proxy_image" "$DEVILUDO_CORE_BIND_ADDRESS" "$DEVILUDO_PROVIDER_ALLOWLIST" "$DEVILUDO_STEAM_ALLOWLIST" "$DEVILUDO_S3_ENDPOINT" "$DEVILUDO_S3_PUBLIC_ENDPOINT" "${DEVILUDO_S3_REGION:-us-east-1}" "${DEVILUDO_S3_PATH_STYLE:-0}" "${DEVILUDO_S3_CREATE_BUCKET:-0}" "$DEVILUDO_ARTIFACT_BUCKET" "$DEVILUDO_VAULT_ADDR" "$DEVILUDO_OTEL_ENDPOINT" > "$stage/runtime.env"
-  printf 'DEVILUDO_PROJECTS_ROOT=%s\nDEVILUDO_RELEASE_VERSION=%s\nDEVILUDO_TELEMETRY_ENDPOINT=%s\n' "$DEVILUDO_PROJECTS_ROOT" "$DEVILUDO_RELEASE_VERSION" "${DEVILUDO_TELEMETRY_ENDPOINT:-}" >> "$stage/runtime.env"
+  printf 'DEVILUDO_PROJECTS_ROOT=%s\nDEVILUDO_RELEASE_VERSION=%s\nDEVILUDO_TELEMETRY_ENDPOINT=%s\nDEVILUDO_INSTALLATION_ID=%s\n' "$DEVILUDO_PROJECTS_ROOT" "$DEVILUDO_RELEASE_VERSION" "${DEVILUDO_TELEMETRY_ENDPOINT:-}" "$installation_id" >> "$stage/runtime.env"
   printf 'NODE_ENV=production\nDEVILUDO_EXECUTOR_ID=core-executor\nDEVILUDO_EXECUTOR_IMAGE=%s\nDEVILUDO_EXECUTOR_ALLOWED_IMAGES=%s\nDEVILUDO_EXECUTOR_MICROVM_RUNTIME=io.containerd.kata.v2\nDEVILUDO_EXECUTOR_MICROVM_SMOKE_IMAGE=%s\nDEVILUDO_DOCKER_GID=%s\nDEVILUDO_EXECUTOR_SOCKET=/run/deviludo-executor/executor.sock\nDEVILUDO_EXECUTOR_SOCKET_GID=1001\nDEVILUDO_EXECUTOR_IDENTITY_KEY_FILE=/run/service-secrets/identity.pem\nDEVILUDO_VAULT_TOKEN_FILE=/run/service-secrets/vault.token\nAWS_SHARED_CREDENTIALS_FILE=/run/service-secrets/s3.credentials\nDEVILUDO_EXECUTOR_WORK_ROOT=/var/lib/deviludo-executor\nDEVILUDO_PROJECTS_ROOT=/var/lib/deviludo-projects\nDEVILUDO_EXECUTOR_SECRET_ROOT=/run/deviludo-secrets\nDEVILUDO_EXECUTOR_AGENT_NETWORK=deviludo-executor-agent\nDEVILUDO_EXECUTOR_STEAM_NETWORK=deviludo-executor-steam\nDEVILUDO_EXECUTOR_EGRESS_PROXY=http://provider-proxy:3128\nDEVILUDO_EXECUTOR_STEAM_PROXY=http://steam-proxy:3128\nDEVILUDO_PROVIDER_ALLOWLIST=%s\nDEVILUDO_VAULT_ADDR=%s\nDEVILUDO_S3_ENDPOINT=%s\nDEVILUDO_S3_REGION=%s\nDEVILUDO_S3_PATH_STYLE=%s\nDEVILUDO_ARTIFACT_BUCKET=%s\n' "$executor_image" "$allowed" "$agent_smoke_image" "$(stat -c %g /var/run/docker.sock)" "$DEVILUDO_PROVIDER_ALLOWLIST" "$DEVILUDO_VAULT_ADDR" "$DEVILUDO_S3_ENDPOINT" "${DEVILUDO_S3_REGION:-us-east-1}" "${DEVILUDO_S3_PATH_STYLE:-0}" "$DEVILUDO_ARTIFACT_BUCKET" > "$stage/executor.env"
   chmod 0600 "$stage/runtime.env" "$stage/executor.env"
   systemctl daemon-reload

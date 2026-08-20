@@ -20,6 +20,7 @@ test("local deployment keeps Core private by default and exposes it only for exp
   assert.match(compose, /DEVILUDO_CODEX_CLI_VERSION/);
   assert.match(compose, /DEVILUDO_CODEX_ACCOUNT_DEFAULT_MODEL/);
   assert.match(compose, /DEVILUDO_SANDBOX_CONCURRENCY: \$\{DEVILUDO_SANDBOX_CONCURRENCY:-1\}/);
+  assert.match(compose, /DEVILUDO_INSTALLATION_ID: \$\{DEVILUDO_INSTALLATION_ID:-\}/);
   assert.match(compose, /project-sources-init:[\s\S]*cap_add: \["CHOWN", "FOWNER", "FSETID"\][\s\S]*chmod 2770 \/var\/lib\/deviludo-projects/);
   const webSection = compose.match(/\n  web:([\s\S]*?)\nnetworks:/)?.[1] ?? "";
   assert.doesNotMatch(webSection, /DATABASE_URL|VAULT|OBJECT_STORE|S3_/);
@@ -48,7 +49,8 @@ test("local deployment keeps Core private by default and exposes it only for exp
   assert.match(localUp, /deviludo-retained-job-runtime/);
   assert.match(localUp, /DEVILUDO_EXECUTOR_ALLOWED_IMAGES: \[\.\.\.new Set\(\[\s*\.\.\.Object\.values\(JSON\.parse\(runtimeImages\)\), imageIds\["deviludo-agent-fixture:local"\], \.\.\.retainedJobRuntimeImages/);
   assert.match(localUp, /persistLocalComposeEnvironment\(environment\)/);
-  assert.match(localUp, /resolveLocalCodexAccountDefaultModel\(codexLoginMethod, codexVersion\)/);
+  assert.match(localUp, /resolveMachineInstallationId\(\)/);
+  assert.match(localUp, /resolveLocalCodexAccountDefaultModel\(detectedCodexLoginMethod, detectedCodexVersion\)/);
   assert.match(localUp, /DEVILUDO_DOCKER_GID/);
   assert.match(localUp, /BEGIN DEVILUDO LOCAL RUNTIME/);
   assert.match(localUp, /detectLocalProviderUpstreamProxy\(\)/);
@@ -76,6 +78,17 @@ test("local deployment keeps Core private by default and exposes it only for exp
   assert.match(localUp, /"down", "--volumes", "--remove-orphans"/);
   assert.match(localUp, /npm run local:reset:self-hosted/);
   assert.doesNotMatch(compose, /deviludo-local-client(?:-secret)?/);
+});
+
+test("production Core derives one anonymous installation ID from the host machine", async () => {
+  const [compose, deploy] = await Promise.all([
+    readFile(new URL("../deploy/assets/core.compose.yaml", import.meta.url), "utf8"),
+    readFile(new URL("../deploy/core/deploy.sh", import.meta.url), "utf8"),
+  ]);
+  assert.match(compose, /DEVILUDO_INSTALLATION_ID: \$\{DEVILUDO_INSTALLATION_ID:\?machine installation ID is required\}/);
+  assert.match(deploy, /< \/etc\/machine-id/);
+  assert.match(deploy, /deviludo\.machine-installation\.v1\\0linux\\0/);
+  assert.match(deploy, /DEVILUDO_INSTALLATION_ID=%s/);
 });
 
 test("Core sandbox concurrency is bounded and assigns independent worker ids", async () => {
@@ -314,6 +327,9 @@ test("remote E2E enrollment is node-bound and public networks keep production mT
   assert.match(api, /nodeAuthTokenHash/);
   assert.match(api, /authenticateDevelopmentE2eNode/);
   assert.match(api, /heartbeatServerNode/);
+  assert.match(api, /\/v1\/e2e\/nodes\/:nodeId\/preparation/);
+  assert.match(api, /INVALID_E2E_PREPARATION_PROGRESS/);
+  assert.match(repository, /updateE2eNodePreparation/);
   assert.match(repository, /node\.development_auth_token_hash = \$2/);
   assert.doesNotMatch(repository, /authenticateDevelopmentE2eNode[\s\S]{0,500}e2e_enrollment_tokens/);
   assert.match(enroll, /Plain HTTP enrollment is restricted to a private LAN\/VPN IPv4 address/);
@@ -444,20 +460,25 @@ test("production Agent execution requires a pinned Kata microVM runtime", async 
 
 test("CI uses the fixed no-provider Agent while local macOS requires Tart E2E", async () => {
   const workflow = await readFile(new URL("../.github/workflows/ci.yml", import.meta.url), "utf8");
-  const localUp = await readFile(new URL("../scripts/local-up.mjs", import.meta.url), "utf8");
+  const [localUp, localMac] = await Promise.all([
+    readFile(new URL("../scripts/local-up.mjs", import.meta.url), "utf8"),
+    readFile(new URL("../scripts/local-macos-e2e.mjs", import.meta.url), "utf8"),
+  ]);
   const smoke = await readFile(new URL("../scripts/local-executor-smoke.mjs", import.meta.url), "utf8");
   const tartProvision = await readFile(new URL("../scripts/local-tart-provision.sh", import.meta.url), "utf8");
   assert.match(workflow, /DEVILUDO_LOCAL_CI: "1"/);
   assert.match(workflow, /DEVILUDO_SKIP_NATIVE_E2E: "1"/);
   assert.match(workflow, /stop core-sandbox core-scheduler/);
   assert.match(workflow, /npm run local:logs -- --no-follow/);
-  assert.match(localUp, /prepareLocalTartE2e\(\{ refresh: refreshE2eVm \}\)/);
+  assert.doesNotMatch(localUp, /preflightLocalTartE2e|prepareLocalTartE2e/);
+  assert.match(localMac, /prepareLocalTartE2e\(\{/);
   assert.match(localUp, /error\?\.code !== "ENOENT"/);
   assert.match(localUp, /hash\.update\("missing", "utf8"\)/);
   assert.doesNotMatch(localUp, /requireGodot|local-macos-job/);
   assert.match(smoke, /const specificationKey = `\$\{objectPrefix\(agentJobId\)\}\/specification\.json`/);
   assert.match(smoke, /inputObjects: \[specificationObject\]/);
   const tartPrepare = await readFile(new URL("../scripts/local-tart-prepare.mjs", import.meta.url), "utf8");
+  assert.match(tartPrepare, /if \(preflight\) await preflightLocalTartE2e\(\)/);
   assert.match(tartPrepare, /assertHomebrewCommandLineTools\(\)/);
   assert.match(tartPrepare, /Command Line Tools are too outdated/);
   assert.match(tartPrepare, /developer\.apple\.com\/download\/all/);
@@ -805,8 +826,10 @@ test("English mode is the first-run default and localizes settings, assets, meta
 
 test("remote E2E node connectivity refreshes from server heartbeats", async () => {
   const dashboard = await readFile(new URL("../components/ServerPoolDashboard.tsx", import.meta.url), "utf8");
-  assert.match(dashboard, /window\.setInterval\(\(\) => refresh\(0\), 15_000\)/);
+  assert.match(dashboard, /window\.setTimeout\(\(\) => refresh\(0\), preparing \? 2_000 : 15_000\)/);
   assert.match(dashboard, /isRecentlyConnected\(node\.lastHeartbeatAt\)/);
+  assert.match(dashboard, /node\.preparation\.progress/);
+  assert.match(dashboard, /role="progressbar"/);
   assert.match(dashboard, /Date\.now\(\) - Date\.parse\(value\) < 90_000/);
   assert.match(dashboard, /pool\.readiness === "READY" \? "is-ready" : "is-not-ready"/);
 });

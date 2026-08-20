@@ -8,16 +8,16 @@ test("cacheable local initialisation is gated while the migration ledger is alwa
   const startup = await readStartup();
   // Each of these steps costs a container creation, so a repeat start must be able
   // to skip the ones whose inputs are unchanged.
-  assert.match(startup, /if \(!matchesStartupCache\("vaultInit", vaultFingerprint\)\) \{[\s\S]*?await refreshLocalVaultTokens/);
-  assert.match(startup, /if \(!matchesStartupCache\("executorSecrets", executorSecretsFingerprint\)\) \{[\s\S]*?await refreshLocalExecutorSecrets/);
-  assert.match(startup, /cachedStartupValue\("dockerSocketGid", dockerIdentity, \/\^\\d\+\$\/\)\s*\?\? await resolveDockerSocketGid\(\)/);
+  assert.match(startup, /if \(!matchesStartupCache\("vaultInit", fingerprint\)\) \{[\s\S]*?await refreshLocalVaultTokens/);
+  assert.match(startup, /if \(!matchesStartupCache\("executorSecrets", fingerprint\)\) \{[\s\S]*?await refreshLocalExecutorSecrets/);
+  assert.match(startup, /cachedStartupValue\("dockerSocketGid", dockerIdentity, \/\^\\d\+\$\/\)[\s\S]*return await resolveDockerSocketGid\(\)/);
   // Baseline compatibility cannot prove that later versioned migrations are
   // present, so every start compares the complete immutable ledger before it
   // decides whether creating a migration container is necessary.
   assert.match(startup, /readExpectedMigrationLedger\(\)/);
   assert.match(startup, /migrateWithOptionalBaselineReset\(environment, instanceState, expectedMigrationLedger\)/);
   assert.match(startup, /state\?\.baseline === "001 deviludo-self-hosted-v1" && state\.migrations === expectedLedger/);
-  assert.match(startup, /bootstrapInstance\(environment, runtimeImages, instanceState, migrationRan\)/);
+  assert.match(startup, /bootstrapInstance\(environment, runtimeImages, instanceState, applied\)/);
   assert.match(startup, /await runMigration\(environment\)/);
   assert.match(startup, /if \(!migrationRan && !baselineReset\)/);
 });
@@ -29,13 +29,16 @@ test("an unchanged checkout reuses verified images and never runs two local star
   assert.match(startup, /"ls-files", "--cached", "--others", "--exclude-standard", "-z"/);
   assert.match(startup, /path === "\.dockerignore" \|\| !isDockerIgnored\(path, ignoreRules\)/);
   assert.match(startup, /startupCache\.imageInputFingerprint !== inputFingerprint/);
-  assert.match(startup, /age >= imageCacheMaxAgeMs/);
+  assert.doesNotMatch(startup, /imageCacheMaxAgeMs|age >= imageCacheMaxAgeMs/);
   assert.match(startup, /current\[image\] === startupCache\.imageIds\[image\]/);
-  assert.match(startup, /if \(!imageIds\) \{[\s\S]*executeVisible\("docker"/);
-  assert.match(startup, /stage: "images_reused"/);
+  assert.match(startup, /if \(resolvedImageIds\) \{[\s\S]*跳过 10 个镜像的重复构建/);
+  assert.match(startup, /await buildLocalImages\(baseEnvironment\)/);
+  assert.match(startup, /async function buildLocalImages\(environment\)/);
+  assert.match(startup, /并行 BuildKit 会话中断；正在复用已完成的层缓存逐个重试/);
+  assert.match(startup, /for \(const \[index, entry\] of localImageBuilds\.entries\(\)\)/);
   // Healthy services are retained. A stop is reserved for rotated credentials,
   // whose in-memory consumers must reload their token files.
-  assert.match(startup, /if \(!matchesStartupCache\("vaultInit", vaultFingerprint\)\) \{\s*await stopCredentialConsumers/);
+  assert.match(startup, /if \(!matchesStartupCache\("vaultInit", fingerprint\)\) \{[\s\S]*await stopCredentialConsumers/);
   assert.doesNotMatch(startup, /const startupCache = await readStartupCache\(dockerIdentity\);[\s\S]{0,500}await stopLocalE2e\(\)/);
 });
 
@@ -95,9 +98,13 @@ test("Docker dependency downloads are cached and health checks probe quickly onl
   assert.match(web, /COPY app \.\/app/);
   assert.match(web, /COPY next\.config\.ts next-env\.d\.ts tsconfig\.json tsconfig\.web\.json/);
   assert.match(webTsconfig, /"app\/\*\*\/\*\.tsx"/);
-    for (const ignored of ["test-results", "playwright-report", "*.tsbuildinfo"]) {
+  for (const ignored of ["test-results", "playwright-report", "*.tsbuildinfo", "README.md", "deploy", ".github"]) {
     assert.match(dockerignore, new RegExp(`^${ignored.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}$`, "m"));
   }
+  assert.match(dockerignore, /^scripts\/\*\*$/m);
+  assert.match(dockerignore, /^!scripts\/migrate-postgres\.mjs$/m);
+  assert.match(dockerignore, /^!scripts\/local-project-bridge-proxy\.mjs$/m);
+  assert.doesNotMatch(dockerignore, /^!scripts\/local-up\.mjs$/m);
   assert.equal((compose.match(/start_interval: 500ms/g) ?? []).length, 5);
   assert.equal((compose.match(/start_period: 30s/g) ?? []).length, 5);
   assert.equal((compose.match(/interval: 10s/g) ?? []).length, 5);
@@ -107,7 +114,7 @@ test("a fingerprint that cannot be computed never satisfies a gate", async () =>
   const startup = await readStartup();
   // The failure mode that matters is a skip that should not have happened, so an
   // unknown input has to be unusable rather than merely falsy-equal.
-  assert.match(startup, /function matchesStartupCache\(key, fingerprint\) \{\s*return typeof fingerprint === "string" && startupCache\[key\] === fingerprint;/);
+  assert.match(startup, /function matchesCachedFingerprint\(key, fingerprint\) \{\s*return typeof fingerprint === "string" && startupCache\[key\] === fingerprint;/);
   assert.match(startup, /function digest\(parts\) \{\s*if \(parts\.some\(part => part === null \|\| part === undefined\)\) return null;/);
   // Length-prefixing keeps two different part lists from hashing the same way.
   assert.match(startup, /hash\.update\(`\$\{value\.length\}:`, "utf8"\)/);
@@ -122,7 +129,8 @@ test("the startup cache is scoped to one daemon, time-bounded, and dropped after
   // A stack left down long enough for token renewal to lapse must reissue rather
   // than trust a fingerprint that says nothing about the token's remaining life.
   assert.match(startup, /const startupCacheMaxAgeMs = 7 \* 24 \* 60 \* 60 \* 1000;/);
-  assert.match(startup, /age >= 0 && age < startupCacheMaxAgeMs \? parsed : \{\}/);
+  assert.match(startup, /return Number\.isFinite\(recordedAt\) \? parsed : \{\}/);
+  assert.match(startup, /age >= 0 && age < startupCacheMaxAgeMs[\s\S]*matchesCachedFingerprint\(key, fingerprint\)/);
   // Recorded only after the stack is up, so a start that fails midway redoes the work.
   assert.match(startup, /if \(!baselineReset\) \{\s*await writeStartupCache\(\{/);
   assert.match(startup, /baselineReset = true;/);
@@ -154,4 +162,33 @@ test("local image builds stay reproducible so runtime digests are not re-registe
   for (const source of [startup, e2e]) {
     assert.match(source, /BUILDX_NO_DEFAULT_ATTESTATIONS: "1"/);
   }
+});
+
+test("local startup returns with E2E preparation in the background and exposes continuous progress", async () => {
+  const [startup, daemon, macNode, tart, dashboard, bootstrap] = await Promise.all([
+    readStartup(),
+    readFile(new URL("../scripts/local-e2e-daemon.mjs", import.meta.url), "utf8"),
+    readFile(new URL("../scripts/local-macos-e2e.mjs", import.meta.url), "utf8"),
+    readFile(new URL("../scripts/local-tart-prepare.mjs", import.meta.url), "utf8"),
+    readFile(new URL("../components/ServerPoolDashboard.tsx", import.meta.url), "utf8"),
+    readFile(new URL("../scripts/local-bootstrap.mjs", import.meta.url), "utf8"),
+  ]);
+  assert.match(startup, /启动 Web、Core 与本地依赖服务[\s\S]*启动 macOS E2E 后台准备/);
+  assert.match(startup, /startLocalE2e\(\{ refresh: refreshE2eVm \}\)/);
+  assert.doesNotMatch(startup, /preflightLocalTartE2e/);
+  assert.doesNotMatch(startup, /prepareLocalTartE2e\(\{ refresh: refreshE2eVm \}\)/);
+  assert.match(daemon, /arguments_\.push\("--refresh-e2e-vm"\)/);
+  assert.match(macNode, /\/v1\/e2e\/nodes\/\$\{configuration\.nodeId\}\/preparation/);
+  assert.match(macNode, /state: "FAILED"/);
+  assert.match(tart, /onProgress[\s\S]*DOWNLOADING_BASE[\s\S]*percentage/);
+  assert.match(dashboard, /preparing \? 2_000 : 15_000/);
+  assert.match(dashboard, /role="progressbar"/);
+  assert.doesNotMatch(bootstrap, /"cosign"/);
+  assert.match(bootstrap, /function executeVisible/);
+  assert.match(startup, /仍在进行：[\s\S]*formatDuration/);
+  assert.match(startup, /"--wait",\s*"--no-deps",\s*\.\.\.localRuntimeServices/);
+  assert.match(startup, /"run", "--rm", "--no-deps", "minio-init"/);
+  assert.match(startup, /matchesCachedFingerprint\("projectSources", projectFingerprint\)/);
+  assert.match(startup, /matchesCachedFingerprint\("objectStore", objectStoreFingerprint\)/);
+  assert.match(startup, /executeVisible\("docker", \[\s*"compose"/);
 });

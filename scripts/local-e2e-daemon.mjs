@@ -13,12 +13,14 @@ const logFile = resolve(runtimeDirectory, "e2e-macos.log");
 const entrypoint = "scripts/local-macos-e2e.mjs";
 const guestRunnerPath = resolve(root, "scripts/executors/local-tart-guest-runner.mjs");
 
-export async function startLocalE2e() {
+export async function startLocalE2e({ refresh = false } = {}) {
   const current = await runningPid();
   if (current) return current;
   mkdirSync(runtimeDirectory, { recursive: true, mode: 0o700 });
   const output = openSync(logFile, "a", 0o600);
-  const child = spawn(process.execPath, ["--import", "tsx", entrypoint], {
+  const arguments_ = ["--import", "tsx", entrypoint];
+  if (refresh) arguments_.push("--refresh-e2e-vm");
+  const child = spawn(process.execPath, arguments_, {
     cwd: root,
     detached: true,
     stdio: ["ignore", output, output],
