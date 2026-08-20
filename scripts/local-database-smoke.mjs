@@ -301,6 +301,14 @@ async function runDatabaseSmoke(url) {
       INSERT INTO deviludo.asset_items(workspace_id, manifest_id, asset_key, asset_type, description)
       SELECT $1::uuid, id, 'ui/smoke', 'icon', 'database smoke asset' FROM manifest
     `, [workspaceIds[0], projectIds[0], workflowIds[0]]);
+    // The insertion trigger derives the initial value from the instance model.
+    // Exercise the project-level user switch explicitly so this gate contract
+    // does not depend on whether CI configured an image-capable Agent runtime.
+    await owner.query(`
+      UPDATE deviludo.asset_manifests
+         SET auto_generate_enabled = true
+       WHERE workspace_id = $1::uuid AND workflow_id = $2::uuid
+    `, [workspaceIds[0], workflowIds[0]]);
     await scheduler.query("SELECT deviludo.advance_asset_workflows()::integer AS count");
     const held = await owner.query(`
       SELECT workflow.state::text,
