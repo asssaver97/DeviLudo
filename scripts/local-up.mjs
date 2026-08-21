@@ -4,7 +4,7 @@ import { lookup } from "node:dns/promises";
 import { isIP } from "node:net";
 import { homedir, networkInterfaces } from "node:os";
 import { closeSync, mkdirSync, openSync, readFileSync, unlinkSync, writeFileSync } from "node:fs";
-import { chmod, lstat, mkdir, readFile, readlink, readdir, writeFile } from "node:fs/promises";
+import { access, chmod, lstat, mkdir, readFile, readlink, readdir, writeFile } from "node:fs/promises";
 import { request } from "node:http";
 import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -115,6 +115,7 @@ await writeFile(
   `${JSON.stringify(gitImportConfiguration, null, 2)}\n`,
   { mode: 0o600 },
 );
+await prepareLocalHost();
 const {
   claudeVersion,
   codexVersion,
@@ -891,11 +892,102 @@ async function resolveLocalCodexAccountDefaultModel(loginMethod, cliVersion) {
   }
 }
 
+async function prepareLocalHost() {
+  if (!await commandSucceeds("git", ["--version"])) {
+    throw new Error("Git is unavailable; install the current Xcode Command Line Tools, then run npm run local:up again");
+  }
+
+  let dockerCliReady = await commandSucceeds("docker", ["--version"]);
+  let composeReady = dockerCliReady && await commandSucceeds("docker", ["compose", "version"]);
+  if (!dockerCliReady || !composeReady) {
+    if (process.platform !== "darwin") {
+      throw new Error("Docker CLI with Compose v2 is required before running npm run local:up");
+    }
+    await runLocalDependencyBootstrap("Docker CLI or Compose is missing; installing local dependencies...");
+    dockerCliReady = await commandSucceeds("docker", ["--version"]);
+    composeReady = dockerCliReady && await commandSucceeds("docker", ["compose", "version"]);
+  }
+  if (!dockerCliReady || !composeReady) {
+    throw new Error("Docker CLI with Compose v2 could not be prepared automatically; run npm run local:bootstrap for diagnostics");
+  }
+  if (await commandSucceeds("docker", ["info"], 10_000)) return;
+
+  const context = await commandOutput("docker", ["context", "show"]);
+  const unforcedDefault = context === "default" && !process.env.DOCKER_HOST && !process.env.DOCKER_CONTEXT;
+  let colimaReady = process.platform === "darwin" && await commandSucceeds("colima", ["version"]);
+  let desktopReady = process.platform === "darwin" && await dockerDesktopAvailable();
+  if (process.platform === "darwin" && ((context === "colima" && !colimaReady)
+    || (unforcedDefault && !colimaReady && !desktopReady))) {
+    await runLocalDependencyBootstrap("No usable local container runtime was found; installing Colima...");
+    if (await commandSucceeds("docker", ["info"], 10_000)) return;
+    colimaReady = await commandSucceeds("colima", ["version"]);
+    desktopReady = await dockerDesktopAvailable();
+  }
+  if (colimaReady && (context === "colima" || (unforcedDefault && !desktopReady))) {
+    console.log("[dependency] Docker is stopped; starting Colima...\n");
+    await executeVisible("colima", ["start", "--cpu", "4", "--memory", "8", "--disk", "60"]);
+  } else if (desktopReady && (/^desktop(?:-linux)?$/.test(context ?? "") || unforcedDefault)) {
+    console.log("[dependency] Docker Desktop is stopped; starting it...\n");
+    await execute("open", ["-gja", "Docker"], { timeout: 10_000, maxBuffer: 64 * 1024 });
+    await waitForCommand("docker", ["info"], 120_000);
+  } else {
+    const label = context ? `the '${context}' Docker context` : "the configured Docker runtime";
+    throw new Error(`Docker is installed, but ${label} is unavailable; start it and run npm run local:up again`);
+  }
+
+  if (!await commandSucceeds("docker", ["info"], 10_000)) {
+    throw new Error("The local container runtime started without making the Docker daemon available");
+  }
+}
+
+async function runLocalDependencyBootstrap(message) {
+  console.log(`[dependency] ${message}\n`);
+  await executeVisible(process.execPath, [fileURLToPath(new URL("./local-bootstrap.mjs", import.meta.url))], {
+    cwd: rootPath,
+  });
+}
+
+async function commandSucceeds(command, arguments_, timeout = 10_000) {
+  try {
+    await execute(command, arguments_, { timeout, maxBuffer: 64 * 1024 });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+async function commandOutput(command, arguments_) {
+  try {
+    const { stdout } = await execute(command, arguments_, { timeout: 10_000, maxBuffer: 64 * 1024 });
+    return stdout.trim() || null;
+  } catch {
+    return null;
+  }
+}
+
+async function dockerDesktopAvailable() {
+  for (const candidate of ["/Applications/Docker.app", join(homedir(), "Applications", "Docker.app")]) {
+    try {
+      await access(candidate);
+      return true;
+    } catch { /* try the next standard application directory */ }
+  }
+  return false;
+}
+
+async function waitForCommand(command, arguments_, timeout) {
+  const deadline = Date.now() + timeout;
+  while (Date.now() < deadline) {
+    if (await commandSucceeds(command, arguments_, 5_000)) return;
+    await new Promise(resolvePromise => setTimeout(resolvePromise, 2_000));
+  }
+}
+
 async function requireCommand(command, arguments_) {
   try {
     await execute(command, arguments_, { timeout: 10_000, maxBuffer: 64 * 1024 });
   } catch {
-    throw new Error(`${command} is unavailable; run npm run local:bootstrap first`);
+    throw new Error(`${command} became unavailable during local startup`);
   }
 }
 

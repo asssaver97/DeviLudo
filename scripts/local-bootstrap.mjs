@@ -33,7 +33,7 @@ try {
   });
   await access(brew);
 }
-const formulae = ["node@22", "docker", "docker-compose", "colima"];
+const formulae = ["docker", "docker-compose", "colima"];
 const missing = [];
 for (const formula of formulae) {
   try {
@@ -55,7 +55,7 @@ try {
   await bootstrapForegroundStage("Start the Colima container runtime", "colima", ["start", "--cpu", "4", "--memory", "8", "--disk", "60"]);
 }
 console.log("\n✓ Local dependencies are ready\n");
-console.log(JSON.stringify({ bootstrapped: true, node: 22, containerRuntime: "colima" }));
+console.log(JSON.stringify({ bootstrapped: true, node: process.versions.node, containerRuntime: "colima" }));
 
 function bootstrapForegroundStage(label, command, arguments_, options = {}) {
   return bootstrapStage(label, () => executeVisible(command, arguments_, options), { showHeartbeat: false });

@@ -185,8 +185,13 @@ test("local startup returns with E2E preparation in the background and exposes c
   assert.match(dashboard, /preparing \? 2_000 : 15_000/);
   assert.match(dashboard, /role="progressbar"/);
   assert.doesNotMatch(bootstrap, /"cosign"/);
+  assert.doesNotMatch(bootstrap, /"node@22"/);
   assert.match(bootstrap, /function executeVisible/);
   assert.match(bootstrap, /function bootstrapForegroundStage[\s\S]*showHeartbeat: false/);
+  assert.match(startup, /await prepareLocalHost\(\);[\s\S]*Check Docker, Git, and Agent runtimes/);
+  assert.match(startup, /Docker is stopped; starting Colima[\s\S]*"colima", \["start"/);
+  assert.match(startup, /Docker Desktop is stopped; starting it[\s\S]*waitForCommand\("docker", \["info"\], 120_000\)/);
+  assert.doesNotMatch(startup, /docker is unavailable; run npm run local:bootstrap first/);
   assert.match(startup, /Still working:[\s\S]*formatDuration/);
   assert.match(startup, /"--wait",\s*"--no-deps",\s*\.\.\.localRuntimeServices/);
   assert.match(startup, /"run", "--rm", "--no-deps", "minio-init"/);

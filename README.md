@@ -50,8 +50,8 @@ flowchart LR
 | Item | Requirement |
 | --- | --- |
 | Host | Apple Silicon Mac (M1 or newer) with macOS 15 or newer |
-| Toolchain | Current Xcode Command Line Tools, Homebrew, Git, Node.js `>=22.13`, and npm |
-| Containers | Docker Desktop, or Colima with Docker Compose v2 |
+| Toolchain | Current Xcode Command Line Tools, Git, Node.js `>=22.13`, and npm |
+| Containers | `local:up` automatically prepares and starts Colima, or starts an existing Docker Desktop installation |
 | Virtualization | Apple Virtualization Framework enabled; `sysctl -n kern.hv_support` must return `1` |
 | Resources | 16 GiB RAM minimum, 24 GiB recommended, and about 140 GiB free disk space before first setup |
 | Network | HTTPS access to GitHub/GHCR, Homebrew, npm, container registries, and the selected AI provider |
@@ -63,11 +63,10 @@ flowchart LR
 git clone https://github.com/asssaver97/DeviLudo.git
 cd DeviLudo
 npm ci
-npm run local:bootstrap
 npm run local:up
 ```
 
-The first startup builds the container stack, then makes Web and Core available while the roughly 25 GB macOS E2E environment finishes in the background. Its live stage and percentage appear on the Runtime page. Keep about 140 GiB free for the VM, images, build caches, source, and test evidence.
+`local:up` installs missing Homebrew container dependencies and starts the configured Colima or Docker Desktop runtime automatically. The first startup then builds the container stack and makes Web and Core available while the roughly 25 GB macOS E2E environment finishes in the background. Its live stage and percentage appear on the Runtime page. Keep about 140 GiB free for the VM, images, build caches, source, and test evidence.
 
 Open [http://127.0.0.1:3100](http://127.0.0.1:3100), then go to **Settings → Agent Settings** and select either:
 

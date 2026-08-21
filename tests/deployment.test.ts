@@ -138,6 +138,18 @@ test("local deployment terminal output is English", async () => {
   for (const source of sources) assert.doesNotMatch(source, /[\u3400-\u9fff]/);
 });
 
+test("local quick start prepares the container runtime without a separate bootstrap command", async () => {
+  const [english, chinese] = await Promise.all([
+    readFile(new URL("../README.md", import.meta.url), "utf8"),
+    readFile(new URL("../README.zh-CN.md", import.meta.url), "utf8"),
+  ]);
+  for (const readme of [english, chinese]) {
+    const quickStart = readme.slice(readme.indexOf("git clone"), readme.indexOf("```", readme.indexOf("git clone")));
+    assert.match(quickStart, /npm ci[\s\S]*npm run local:up/);
+    assert.doesNotMatch(quickStart, /local:bootstrap/);
+  }
+});
+
 test("production Core derives one anonymous installation ID from the host machine", async () => {
   const [compose, deploy, e2e] = await Promise.all([
     readFile(new URL("../deploy/assets/core.compose.yaml", import.meta.url), "utf8"),

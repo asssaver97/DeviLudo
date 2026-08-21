@@ -50,8 +50,8 @@ flowchart LR
 | 项目 | 要求 |
 | --- | --- |
 | 主机 | Apple Silicon Mac（M1 或更新）和 macOS 15 或更新版本 |
-| 工具链 | 最新 Xcode Command Line Tools、Homebrew、Git、Node.js `>=22.13` 和 npm |
-| 容器 | Docker Desktop，或 Colima + Docker Compose v2 |
+| 工具链 | 最新 Xcode Command Line Tools、Git、Node.js `>=22.13` 和 npm |
+| 容器 | `local:up` 会自动准备并启动 Colima，也可启动已有的 Docker Desktop |
 | 虚拟化 | 启用 Apple Virtualization Framework；`sysctl -n kern.hv_support` 必须返回 `1` |
 | 资源 | 至少 16 GiB 内存，建议 24 GiB；首次安装前建议预留约 140 GiB 磁盘空间 |
 | 网络 | 可通过 HTTPS 访问 GitHub/GHCR、Homebrew、npm、容器镜像仓库和所选 AI Provider |
@@ -63,11 +63,10 @@ flowchart LR
 git clone https://github.com/asssaver97/DeviLudo.git
 cd DeviLudo
 npm ci
-npm run local:bootstrap
 npm run local:up
 ```
 
-首次启动会构建容器服务；Web 和 Core 可用后，约 25 GB 的 macOS E2E 环境会继续在后台准备，其实时阶段与百分比显示在“运行状态”页面。请为虚拟机、镜像、构建缓存、源码与测试证据预留约 140 GiB 空间。
+`local:up` 会自动安装缺失的 Homebrew 容器依赖，并启动已配置的 Colima 或 Docker Desktop。首次启动随后会构建容器服务；Web 和 Core 可用后，约 25 GB 的 macOS E2E 环境会继续在后台准备，其实时阶段与百分比显示在“运行状态”页面。请为虚拟机、镜像、构建缓存、源码与测试证据预留约 140 GiB 空间。
 
 打开 [http://127.0.0.1:3100](http://127.0.0.1:3100)，进入“**设置 → Agent 设置**”，选择以下任一运行时：
 
