@@ -73,7 +73,10 @@ export function ProjectSteamPanel(props: Readonly<{
     try {
       const response = await fetch(path, {
         method: "POST",
-        headers: { "content-type": "application/json", "idempotency-key": crypto.randomUUID() },
+        headers: {
+          "idempotency-key": crypto.randomUUID(),
+          ...(body === undefined ? {} : { "content-type": "application/json" }),
+        },
         body: body === undefined ? undefined : JSON.stringify(body),
       });
       const payload = await response.json().catch(() => ({})) as { message?: string };

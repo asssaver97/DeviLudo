@@ -6,8 +6,13 @@ import { createInterface } from "node:readline";
 import { createEvidenceBundle, encodeRgbaPng } from "../e2e-evidence.mjs";
 
 if (process.argv[2] !== "test") throw new Error("Unsupported fixture E2E action");
-const lines = createInterface({ input: process.stdin, crlfDelay: Infinity })[Symbol.asyncIterator]();
+const protocolInput = createInterface({ input: process.stdin, crlfDelay: Infinity });
+const lines = protocolInput[Symbol.asyncIterator]();
 const initial = await lines.next();
+// This deterministic fixture never asks Core for an adaptive policy response.
+// Release stdin after its single execute frame so the process can exit while
+// the parent keeps the bidirectional protocol pipe open for real executors.
+protocolInput.close();
 const envelope = initial.done ? null : JSON.parse(initial.value);
 const request = envelope?.type === "execute" ? envelope.request : null;
 if (!/^[0-9a-f-]{36}$/i.test(request?.jobId ?? "") || !Array.isArray(request.inputs) || request.inputs.length < 1) {
@@ -54,6 +59,12 @@ const report = {
     realInputCount: 8, keyboardMouseInputCount: 8, gamepadInputCount: 0,
     adaptiveRolloutCount: 3, adaptiveSuccessCount: 2, adaptiveDecisionCount: 6,
     coveredPlayerRequirementCount: 1, playerRequirementCount: 1, visualBaselineCount: 1 },
+  performance: { schema: "deviludo.e2e-performance.v1", passed: true, thresholds: {},
+    environment: { softwareRenderer: true, softwareRendererRunCount: 1, frameRateEnforced: false,
+      inputResponseThresholds: { maximumP95Ms: 4_000, maximumMs: 6_000 } },
+    frameRate: { sampleCount: 6, minimumFps: 60, p10Fps: 60, medianFps: 60,
+      slowSampleCount: 0, slowSampleRatio: 0, runs: [] },
+    inputResponse: { sampleCount: 2, p95Ms: 100, maximumMs: 100, samples: [] }, failures: [] },
   checkpoints: screenshots.map(item => ({ journeyId: "fixture-core-loop", checkpointId: item.id, status: "PASSED", screenshot: `screenshots/${item.id}.png` })),
 };
 const bundle = await createEvidenceBundle({
@@ -71,6 +82,9 @@ const receipt = {
     adaptiveSuccessCount: 2, adaptiveDecisionCount: 6, coveredPlayerRequirementCount: 1,
     playerRequirementCount: 1, screenshotCount: 3, visualBaselineCount: 1, videoCount: 1,
     hasVisualDiff: false, regressionTraceDigest: `sha256:${createHash("sha256").update(regressionBytes).digest("hex")}`,
+    frameRateSampleCount: 6, minimumFps: 60, p10Fps: 60, medianFps: 60,
+    inputResponseSampleCount: 2, p95InputResponseMs: 100, maxInputResponseMs: 100,
+    softwareRenderer: true, frameRateEnforced: false, performancePassed: true,
     testManifestDigest: request.testPlan?.testManifestDigest ?? `sha256:${"2".repeat(64)}`,
     regressionContractDigest: regression.contractDigest, regressionInputProfile: regression.inputProfile,
     regressionEstimatedDurationMs: regression.estimatedDurationMs,

@@ -21,7 +21,7 @@ test("instance Agent settings persist safely and freeze into workspace jobs", as
   });
   expect(initialBody.runtimes).toEqual([
     { kind: "CLAUDE_CODE", installed: false, version: null, scope: "CORE_RUNTIME", authentication: null },
-    { kind: "CODEX_CLI", installed: false, version: null, scope: "CORE_RUNTIME", authentication: null },
+    { kind: "CODEX_CLI", installed: true, version: "0.149.0", scope: "CORE_RUNTIME", authentication: "SIGNED_OUT" },
   ]);
 
   for (const invalid of [

@@ -32,6 +32,7 @@ const environment = {
   DEVILUDO_E2E_WEB_URL: `http://127.0.0.1:${webPort}`,
   DEVILUDO_E2E_CORE_URL: `http://127.0.0.1:${corePort}`,
   DEVILUDO_PUBLIC_BASE_URL: `http://127.0.0.1:${webPort}`,
+  DEVILUDO_S3_PUBLIC_ENDPOINT: `http://127.0.0.1:${minioPort}`,
   DEVILUDO_WEB_CORE_TOKEN: "local-web-to-core-token-0000000000000001",
   DEVILUDO_E2E_NODE_TOKEN: "local-e2e-node-token",
   // Browser fixtures must satisfy Core's launcher-owned machine identity

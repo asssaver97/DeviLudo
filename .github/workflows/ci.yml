@@ -47,6 +47,32 @@ jobs:
         if: always()
         run: npm run local:reset
 
+  code-e2e:
+    name: Code E2E (API and browsers)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 22.22.0
+          cache: npm
+      - run: npm ci
+      - name: Install Playwright browsers
+        run: npx --no-install playwright install --with-deps chromium firefox webkit
+      - name: Exercise the complete application through APIs and browsers
+        run: npm run test:e2e:code
+      - name: Upload E2E failure evidence
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: code-e2e-failure-evidence
+          path: |
+            playwright-report/
+            test-results/
+          if-no-files-found: warn
+          retention-days: 7
+
   windows-deploy-scripts:
     runs-on: windows-2025
     timeout-minutes: 15

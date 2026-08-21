@@ -545,6 +545,29 @@ test("production Agent execution requires a pinned Kata microVM runtime", async 
   assert.match(manifest, /macosGoldenImage: "TAHOE_26"/);
 });
 
+test("CI gates code changes on the isolated API and cross-browser E2E suite", async () => {
+  const [workflow, packageSource, launcher, e2eCompose, coreApi, e2eFixture] = await Promise.all([
+    readFile(new URL("../.github/workflows/ci.yml", import.meta.url), "utf8"),
+    readFile(new URL("../package.json", import.meta.url), "utf8"),
+    readFile(new URL("../scripts/run-e2e.mjs", import.meta.url), "utf8"),
+    readFile(new URL("../infra/docker-compose.e2e.yml", import.meta.url), "utf8"),
+    readFile(new URL("../services/core/src/api.ts", import.meta.url), "utf8"),
+    readFile(new URL("../scripts/executors/e2e-fixture-job.mjs", import.meta.url), "utf8"),
+  ]);
+  const packageJson = JSON.parse(packageSource) as { scripts?: Record<string, string> };
+  assert.equal(packageJson.scripts?.["test:e2e:code"], "node scripts/run-e2e.mjs");
+  assert.match(workflow, /code-e2e:[\s\S]*name: Code E2E \(API and browsers\)/);
+  assert.match(workflow, /playwright install --with-deps chromium firefox webkit/);
+  assert.match(workflow, /npm run test:e2e:code/);
+  assert.match(workflow, /if: failure\(\)[\s\S]*playwright-report\/[\s\S]*test-results\//);
+  assert.match(launcher, /DEVILUDO_MINIO_HOST_PORT: String\(minioPort\)/);
+  assert.match(launcher, /DEVILUDO_S3_PUBLIC_ENDPOINT: `http:\/\/127\.0\.0\.1:\$\{minioPort\}`/);
+  assert.match(e2eCompose, /DEVILUDO_E2E_PLAYER_POLICY_FIXTURE: "1"/);
+  assert.match(coreApi, /process\.env\.NODE_ENV === "test"[\s\S]*DEVILUDO_E2E_PLAYER_POLICY_FIXTURE === "1"/);
+  assert.match(coreApi, /if \(e2ePlayerPolicyFixture\)[\s\S]*markTestPolicyReady/);
+  assert.match(e2eFixture, /const protocolInput = createInterface[\s\S]*await lines\.next\(\);[\s\S]*protocolInput\.close\(\);/);
+});
+
 test("CI uses the fixed no-provider Agent while local macOS requires Tart E2E", async () => {
   const workflow = await readFile(new URL("../.github/workflows/ci.yml", import.meta.url), "utf8");
   const [localUp, localMac] = await Promise.all([
@@ -1097,6 +1120,7 @@ test("image assets gate the first build and Steam upload remains an explicit loc
   assert.match(studio, /<ProjectSteamPanel/);
   assert.match(steamPanel, /APPROVE & UPLOAD TO STEAM/);
   assert.match(steamPanel, /FINISH WITHOUT PUBLISHING/);
+  assert.match(steamPanel, /body === undefined \? \{\} : \{ "content-type": "application\/json" \}/);
   assert.match(steamSettings, /STEAM BUILD CREDENTIAL/);
   assert.match(runner, /file\.startsWith\(`build-\$\{platform\}-`\)/);
   assert.match(runner, /steam\.channel === "TEST" \? `  "SetLive"/);

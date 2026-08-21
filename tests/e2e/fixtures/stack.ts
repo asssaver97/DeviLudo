@@ -311,7 +311,12 @@ export const test = base.extend<{ stack: StackHarness }>({
     const harness = new StackHarness(request);
     await harness.reset();
     const storageState = await request.storageState();
-    await context.addCookies(storageState.cookies);
+    await context.addCookies([
+      ...storageState.cookies.filter(cookie => cookie.name !== "deviludo_locale"),
+      // Browser journeys intentionally start in Chinese and verify the explicit
+      // switch to English separately; never depend on a developer's locale.
+      { name: "deviludo_locale", value: "zh", domain: harness.webUrl.hostname, path: "/", sameSite: "Lax" },
+    ]);
     try {
       await provide(harness);
     } finally {

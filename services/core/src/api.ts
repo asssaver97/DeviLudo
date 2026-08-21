@@ -85,6 +85,8 @@ export async function runApi(
   const projectSources = new ProjectSourceStore(config.projectsRoot);
   const pki = new E2ePkiIssuer();
   const telemetry = new UsageTelemetry(config);
+  const e2ePlayerPolicyFixture = process.env.NODE_ENV === "test"
+    && process.env.DEVILUDO_E2E_PLAYER_POLICY_FIXTURE === "1";
   const app = Fastify({
     logger: true,
     bodyLimit: 2 * 1024 * 1024,
@@ -1309,6 +1311,16 @@ export async function runApi(
       runtime: settings.agentRuntime, baseUrl: settings.baseUrl, model,
       credentialSecretRef: settings.credentialSecretRef, configurationDigest,
     });
+    // Code E2E runs a deterministic guest executor without provider access.
+    // Keep this escape hatch impossible outside an explicit test process.
+    if (e2ePlayerPolicyFixture) {
+      await repository.markTestPolicyReady(policy.settingsRevision);
+      return reply.send({ ready: true, policy: {
+        configurationDigest: policy.configurationDigest,
+        settingsRevision: policy.settingsRevision,
+        model: policy.model,
+      } });
+    }
     if (settings.testPolicyReady && settings.testPolicyCheckedRevision === settings.revision) {
       return reply.send({ ready: true, policy: {
         configurationDigest: policy.configurationDigest,

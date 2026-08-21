@@ -50,8 +50,8 @@ test("bound local directory creates immediately, then finishes its source snapsh
     conversation: { id: string; messages: readonly { role: string; content: string }[] };
   }).conversation;
   expect(conversation.messages.map(message => message.role)).toEqual(["USER", "ASSISTANT"]);
-  expect(conversation.messages[1].content).toContain("## 项目内容");
-  expect(conversation.messages[1].content).toContain("## 推荐开发计划");
+  expect(conversation.messages[1].content).toContain("## Project content");
+  expect(conversation.messages[1].content).toContain("## Recommended development plan");
 
   const sources = await stack.queryRows<{
     revision:number;content_digest:string;relative_path:string;file_count:number;
@@ -67,7 +67,7 @@ test("bound local directory creates immediately, then finishes its source snapsh
     data: { conversationId: conversation.id, content: "接下来增加一个可以保留线索的日志面板。" },
   });
   expect(continued.status(), await continued.text()).toBe(200);
-  expect((await continued.json() as { conversation: { messages: unknown[] } }).conversation.messages).toHaveLength(4);
+  expect((await continued.json() as { conversation: { messages: unknown[] } }).conversation.messages).toHaveLength(6);
 
   const replay = await stack.web(localBindingUrl, {
     method: "POST",

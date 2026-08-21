@@ -199,7 +199,7 @@ test("a failed Agent generation retries with the currently registered runtime im
     headers: { "idempotency-key": retryKey },
   });
   expect(duplicate.status(), await duplicate.text()).toBe(200);
-  expect(await duplicate.json()).toEqual({ accepted: false, stage: "AGENT_GENERATION" });
+  expect(await duplicate.json()).toEqual({ accepted: false });
   const jobs = await stack.queryRows<{ id: string; runtime_image: string; state: string }>(`
     SELECT id::text, runtime_image, state::text
       FROM deviludo.jobs
@@ -207,7 +207,7 @@ test("a failed Agent generation retries with the currently registered runtime im
      ORDER BY created_at
   `);
   expect(jobs).toHaveLength(2);
-  expect(jobs[0]).toMatchObject({ id: failedJobId, runtime_image: obsoleteRuntime, state: "FAILED" });
+  expect(jobs[0]).toMatchObject({ id: failedJobId, runtime_image: obsoleteRuntime, state: "CANCELLED" });
   expect(jobs[1].runtime_image).not.toBe(obsoleteRuntime);
   expect(["QUEUED", "RUNNING", "RETRY"]).toContain(jobs[1].state);
 });

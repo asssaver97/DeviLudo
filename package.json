@@ -26,6 +26,7 @@
     "local:permissions:test": "node scripts/local-permission-smoke.mjs",
     "local:status": "node scripts/local-status.mjs",
     "local:logs": "node scripts/local-logs.mjs",
+    "test:e2e:code": "node scripts/run-e2e.mjs",
     "test:e2e": "node scripts/run-e2e.mjs",
     "test:e2e:platform": "node scripts/real-platform-e2e.mjs",
     "test:e2e:headed": "node scripts/run-e2e.mjs --headed",

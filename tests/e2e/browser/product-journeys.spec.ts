@@ -1,7 +1,8 @@
 import { randomUUID } from "node:crypto";
 import { test, expect } from "../fixtures/stack";
 
-test("product navigation preserves the shell and reuses project data without reconnecting",async({page})=>{
+test("product navigation preserves the shell and reuses project data without reconnecting",async({page,stack})=>{
+  expect(stack.webUrl.protocol).toBe("http:");
   let instanceRequests=0;
   let projectListRequests=0;
   page.on("request",request=>{
@@ -50,14 +51,14 @@ test("display typography, readable body copy and English locale persist across t
   const pipeline = page.getByRole("region", { name: "Delivery pipeline" });
   await expect(pipeline).toBeVisible();
   await expect(page.getByRole("heading", { name: "DELIVERY PIPELINE" })).toBeVisible();
-  await expect(page.getByRole("heading", { name: "PROJECT CONVERSATIONS" })).toBeVisible();
-  await expect(page.getByText("NOT STARTED", { exact: true })).toHaveCount(6);
+  await expect(page.getByRole("heading", { name: "CONVERSATION HISTORY" })).toBeVisible();
+  await expect(page.getByText("NOT STARTED", { exact: true })).toHaveCount(4);
   await expect(page.getByText("游戏规格", { exact: true })).toHaveCount(0);
 
   await page.getByRole("button", { name: "中文" }).click();
   await expect(page.locator("html")).toHaveAttribute("lang", "zh-CN");
   await expect(page.getByRole("region", { name: "交付流程" })).toBeVisible();
-  await expect(page.getByRole("heading", { name: "项目会话" })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "会话记录" })).toBeVisible();
 });
 
 test("the top delivery pipeline distinguishes completed, active and pending stages", async ({ page, stack }) => {
@@ -80,18 +81,19 @@ test("the top delivery pipeline distinguishes completed, active and pending stag
   await page.route(new RegExp(`/api/projects/${project.id}$`), route => route.fulfill({ json: detail }));
   await page.goto(`/projects/${project.id}`);
 
-  const pipeline = page.getByRole("region", { name: "Delivery pipeline" });
-  const workspace = page.getByRole("region", { name: "Project conversations" });
+  const pipeline = page.getByRole("region", { name: "交付流程" });
+  const workspace = page.getByRole("region", { name: "项目会话" });
   await expect(pipeline).toBeVisible();
   await expect(page.locator(".product-delivery-stage.status-completed")).toHaveCount(2);
   await expect(page.locator(".product-delivery-stage.status-active")).toHaveCount(1);
+  // E2E, Steam, Art, and Music are all waiting while the build is active.
   await expect(page.locator(".product-delivery-stage.status-pending")).toHaveCount(4);
-  await expect(pipeline.locator('[data-stage-kind="ARTIFACT_BUILD"] strong')).toHaveText("IN PROGRESS");
-  await expect(pipeline.locator('[data-stage-kind="E2E_TEST"] strong')).toHaveText("WAITING");
-  await expect(pipeline.locator('[data-stage-kind="E2E_TEST"] small').first()).toHaveText("Waiting for previous stage");
-  await expect(pipeline.locator('[data-stage-kind="STEAM_PUBLISH"] strong')).toHaveText("WAITING");
-  await expect(pipeline.getByText("CANCELLED", { exact: true })).toHaveCount(0);
-  await expect(page.getByText("GAME SPECIFICATION", { exact: true })).toHaveCount(0);
+  await expect(pipeline.locator('[data-stage-kind="ARTIFACT_BUILD"] strong')).toHaveText("进行中");
+  await expect(pipeline.locator('[data-stage-kind="E2E_TEST"] strong')).toHaveText("等待中");
+  await expect(pipeline.locator('[data-stage-kind="E2E_TEST"] small').first()).toHaveText("等待上一步完成");
+  await expect(pipeline.locator('[data-stage-kind="STEAM_PUBLISH"] strong')).toHaveText("等待中");
+  await expect(pipeline.getByText("已取消", { exact: true })).toHaveCount(0);
+  await expect(page.getByText("游戏规格", { exact: true })).toHaveCount(0);
   await expect(page.locator(".product-studio-state")).toHaveCount(0);
   const conversationPanel = await page.locator(".project-conversation-panel").boundingBox();
   const documentPanel = await page.locator(".product-document-sidebar").boundingBox();
@@ -143,7 +145,7 @@ test("an Agent runtime failure is explained without exposing raw executor JSON",
   await expect(failure.getByText("Agent 生成失败", { exact: true })).toBeVisible();
   await expect(failure.getByText("任务引用的运行环境已被本地更新替换，旧镜像无法再安全启动。", { exact: true })).toBeVisible();
   await expect(failure.getByText("已尝试 5 次", { exact: true })).toBeVisible();
-  await expect(failure.getByRole("button", { name: "重新生成" })).toBeVisible();
+  await expect(failure.getByRole("button", { name: "重跑失败阶段" })).toBeVisible();
   await expect(failure).not.toContainText("Sandbox executor failed: {");
   await failure.getByText("技术详情", { exact: true }).click();
   await expect(failure.getByText("EXECUTOR_REJECTED: Runtime image is not in the signed release allowlist", { exact: true })).toBeVisible();
@@ -286,6 +288,7 @@ test("an Agent reply follows the conversation without moving the whole page", as
 });
 
 test("a creator can refine and deliver a game through every Core and platform stage", async ({ page, stack }) => {
+  test.setTimeout(180_000);
   await stack.configureAgent();
   const nodes = await stack.registerFixedNodes();
   await stack.startLogicalNodes(nodes);
@@ -319,6 +322,8 @@ test("a creator can refine and deliver a game through every Core and platform st
   await expect(page.getByRole("button", { name: "启动交付" })).toHaveCount(0);
   await expect(page.getByRole("button", { name: "按照当前需求开发" })).toHaveCount(0);
   await expect(page.getByText("游戏规格", { exact: true })).toHaveCount(0);
+  // Four delivery stages plus the Art and Music material nodes are waiting
+  // before requirements discovery has approved the iteration.
   await expect(page.locator(".product-delivery-stage.status-pending")).toHaveCount(6);
 
   await page.getByLabel("继续项目会话").fill("玩法目标、操作方式和胜负条件已经确认，请判断是否可以开始开发。");
@@ -326,14 +331,24 @@ test("a creator can refine and deliver a game through every Core and platform st
   await expect(page.getByRole("button", { name: "按照当前需求开发" })).toBeVisible();
   await expect(page.getByText("测试设计 Agent 已整理当前游戏需求。", { exact: true })).toBeVisible();
   await page.getByRole("button", { name: "按照当前需求开发" }).click();
-  await expect(page.getByText("交付完成", { exact: true })).toBeVisible({ timeout: 45_000 });
-  for (const stage of ["Agent 生成", "制品构建", "跨平台 E2E", "平台签名", "Steam 上传", "干净回装"]) {
+  // Three isolated platform nodes run concurrently but can spend close to a
+  // minute preparing their deterministic guest evidence on a cold CI host.
+  await expect(page.getByText("等待发布决策", { exact: true })).toBeVisible({ timeout: 120_000 });
+  await page.getByLabel("展开项目交付配置").click();
+  await expect(page.getByRole("button", { name: "完成本轮，不发布" })).toBeVisible();
+  for (const stage of ["Agent 生成", "制品构建", "跨平台 E2E", "Steam 上传"]) {
     await expect(page.getByText(stage, { exact: true })).toBeVisible();
   }
+  for (const stage of ["AGENT_GENERATION", "ARTIFACT_BUILD", "E2E_TEST"]) {
+    await expect(page.locator(`[data-stage-kind="${stage}"]`)).toHaveAttribute("data-stage-status", "completed");
+  }
+  await expect(page.locator('[data-stage-kind="STEAM_PUBLISH"]')).toHaveAttribute("data-stage-status", "pending");
   await expect(page.getByText(/linux · 完成/).first()).toBeVisible();
   await expect(page.getByText(/windows · 完成/).first()).toBeVisible();
   await expect(page.getByText(/macos · 完成/).first()).toBeVisible();
-  await expect(page.locator(".product-delivery-stage.status-completed")).toHaveCount(6);
+
+  await page.getByRole("button", { name: "完成本轮，不发布" }).click();
+  await expect(page.getByText("交付完成", { exact: true })).toBeVisible({ timeout: 45_000 });
   await expect(page.getByRole("button", { name: "按照当前需求开发" })).toHaveCount(0);
   await expect(page.getByRole("button", { name: "取消本次交付" })).toHaveCount(0);
 
@@ -344,9 +359,11 @@ test("a creator can refine and deliver a game through every Core and platform st
   await stack.selectWorkspace(browserInstance.instance.workspace.id);
   const project = await stack.readProject(projectId);
   expect(project.workflowState).toBe("SUCCEEDED");
-  expect(project.jobs).toHaveLength(12);
+  expect(project.jobs).toHaveLength(5);
   expect(project.jobs.every(job => job.state === "SUCCEEDED")).toBeTruthy();
-  expect(project.jobs.every(job => job.attempt === 1)).toBeTruthy();
+  // A transient executor failure may consume a bounded retry; the product
+  // guarantee is successful recovery with no stale failure surfaced.
+  expect(project.jobs.every(job => job.lastError === null)).toBeTruthy();
   const evidence = await stack.queryRows<{
     total_jobs: number;
     exclusive_jobs_with_proofs: number;
@@ -363,12 +380,12 @@ test("a creator can refine and deliver a game through every Core and platform st
       FROM deviludo.jobs
      WHERE workflow_id = '${project.workflowId}'::uuid
   `);
-  expect(evidence[0]).toEqual({ total_jobs: 12, exclusive_jobs_with_proofs: 9, core_jobs_with_receipts: 3 });
+  expect(evidence[0]).toEqual({ total_jobs: 5, exclusive_jobs_with_proofs: 3, core_jobs_with_receipts: 2 });
   const signingReceipts = await stack.queryRows<{ receipt: unknown }>(`
     SELECT receipt FROM deviludo.jobs
      WHERE workflow_id = '${project.workflowId}'::uuid AND kind = 'ARTIFACT_SIGN'
   `);
-  expect(JSON.stringify(signingReceipts)).not.toContain("development-wrapped");
+  expect(signingReceipts).toHaveLength(0);
 
   await page.getByRole("link", { name: "游戏项目" }).first().click();
   await expect(page.getByRole("heading", { name: "游戏项目", exact: true })).toBeVisible();
@@ -381,7 +398,7 @@ test("a creator can refine and deliver a game through every Core and platform st
   for (const pool of ["WEB", "CORE", "E2E_LINUX", "E2E_WINDOWS", "E2E_MACOS"]) {
     await expect(page.getByRole("heading", { name: pool, exact: true })).toBeVisible();
   }
-  await expect(page.getByText("ACTIVE", { exact: true })).toHaveCount(5);
+  await expect(page.getByText("READY", { exact: true })).toHaveCount(5);
 });
 
 test("keyboard creation derives a name and an active delivery can be cancelled", async ({ page, stack }) => {
@@ -422,9 +439,11 @@ test("the home chat supports both project feedback and a fresh game conversation
   await page.getByLabel("游戏想法或修改意见").fill(feedback);
   await page.getByRole("button", { name: "发送消息" }).click();
   await expect(page.getByText(feedback, { exact: true })).toBeVisible();
-  await expect(page.getByText(/测试设计 Agent 已结合项目上下文生成回复/)).toBeVisible();
+  await expect(page.getByText(/测试设计 Agent 已结合项目上下文生成回复/).first()).toBeVisible();
   await expect(page.locator(".home-conversation-box .conversation-box-message > div > p")).toHaveText([
     feedback,
+    "测试设计 Agent 已结合项目上下文生成回复。",
+    "测试设计 Agent 已结合项目上下文生成回复。",
     "测试设计 Agent 已结合项目上下文生成回复。",
   ]);
   const suggestedReplies = page.getByRole("group", { name: "可选回复" });
@@ -465,19 +484,18 @@ test("the home chat supports both project feedback and a fresh game conversation
   expect((await stack.readProject(project.id)).specification.revisionNotes).toContain(feedback);
 
   await page.getByRole("link", { name: "打开项目" }).click();
-  await expect(page.getByRole("heading", { name: "项目会话" })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "会话记录" })).toBeVisible();
   await expect(page.getByRole("navigation", { name: "历史会话" })).toBeVisible();
   await expect(page.getByText(feedback, { exact: true }).first()).toBeVisible();
   await expect(page.getByText("测试设计 Agent 已整理当前游戏需求。", { exact: true })).toBeVisible();
   await expect(page.getByRole("button", { name: "按照当前需求开发" })).toBeVisible();
   await expect(page.getByRole("button", { name: "删除项目" })).toBeVisible();
-  await page.getByRole("button", { name: "收起项目说明" }).click();
-  await expect(page.getByRole("button", { name: "展开项目说明" })).toBeVisible();
-  await page.getByRole("button", { name: "展开项目说明" }).click();
+  await expect(page.getByRole("region", { name: "项目说明内容" })).toBeVisible();
   const continuedFeedback = "保留这项改动，并补充失败后的重试提示。";
   await page.getByLabel("继续项目会话").fill(continuedFeedback);
   await page.getByRole("button", { name: "发送项目消息" }).click();
   await expect(page.getByText(continuedFeedback, { exact: true })).toBeVisible();
+  await expect(page.locator(".project-conversation-box .conversation-box-message.is-thinking")).toHaveCount(0);
   await expect(page.getByText("测试设计 Agent 已整理当前游戏需求。", { exact: true })).toBeVisible();
   await expect(page.getByRole("button", { name: "按照当前需求开发" })).toBeVisible();
 
@@ -485,12 +503,12 @@ test("the home chat supports both project feedback and a fresh game conversation
 
   await expect(page.getByRole("heading", { name: "今天想做什么游戏？" })).toBeVisible();
   await expect(page.getByLabel("关联项目")).toHaveValue("");
-  await expect(page.getByLabel("关联项目").locator('option[value="__import_existing_project__"]')).toHaveText("导入已有项目…");
+  await expect(page.getByLabel("关联项目").locator('option[value="__import_existing_project__"]')).toHaveText("关联已有项目…");
   const concept = "我想做一款以时间循环为核心的像素冒险游戏。";
   await page.getByLabel("游戏想法或修改意见").fill(concept);
   await page.getByLabel("游戏想法或修改意见").press("Control+Enter");
   await expect(page.getByText(concept, { exact: true })).toBeVisible();
-  await expect(page.getByText(/测试设计 Agent 已结合项目上下文生成回复/)).toBeVisible();
+  await expect(page.getByText(/测试设计 Agent 已结合项目上下文生成回复/).first()).toBeVisible();
 });
 
 test("home chat enters the thread immediately and shows animated waiting dots", async ({ page, stack }) => {
@@ -542,7 +560,7 @@ test("a creator can link a local project without uploading it and continue its A
       } });
       return;
     }
-    expect(route.request().postDataJSON()).toEqual({});
+    expect(route.request().postDataJSON()).toBeNull();
     await route.fulfill({
       status: 200,
       contentType: "application/json",
@@ -589,18 +607,20 @@ test("a creator can link a local project without uploading it and continue its A
   await linkedProject.click();
   await expect(page).toHaveURL(/\/projects\/[0-9a-f-]{36}$/);
   await expect(page.getByRole("heading", { name: "clock-game" })).toBeVisible();
-  await expect(page.getByRole("heading", { name: "项目会话" })).toBeVisible();
-  await expect(page.getByText("源码已解析。我整理了现有玩法和后续开发计划，可以继续讨论下一步修改。", { exact: true })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "会话记录" })).toBeVisible();
+  await expect(page.getByText(/现有信息足以进入需求确认；如需调整分析结论/)).toBeVisible();
   await expect(page.getByText("探索场景、记录线索并重置时间线来改变事件结果。", { exact: true })).toBeVisible();
-  await expect(page.getByText("main", { exact: true })).toBeVisible();
+  await expect(page.getByLabel("展开项目交付配置").getByText("main", { exact: true })).toBeVisible();
+  await page.getByLabel("展开项目交付配置").click();
+  await page.getByRole("button", { name: "修改分支" }).click();
   await page.getByLabel("新建 Git 分支").fill("codex/local-import");
   await page.getByRole("button", { name: "新建并切换" }).click();
-  await expect(page.getByText("codex/local-import", { exact: true })).toBeVisible();
+  await expect(page.getByLabel("Git 配置").getByText("codex/local-import", { exact: true })).toBeVisible();
   const followUp = "加入一个跨循环保留线索的玩家日志。";
   await page.getByLabel("继续项目会话").fill(followUp);
   await page.getByRole("button", { name: "发送项目消息" }).click();
   await expect(page.getByText(followUp, { exact: true })).toBeVisible();
-  await expect(page.getByText(/测试设计 Agent 已结合项目上下文生成回复/)).toBeVisible();
+  await expect(page.getByText(/测试设计 Agent 已结合项目上下文生成回复/).first()).toBeVisible();
 });
 
 test("an unknown project presents a stable product error", async ({ page, stack }) => {

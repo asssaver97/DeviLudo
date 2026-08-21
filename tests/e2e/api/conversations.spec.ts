@@ -25,19 +25,25 @@ test("conversation stream emits reply deltas before the persisted result", async
   });
   expect(response.status()).toBe(200);
   const events = (await response.text()).trim().split("\n").map(line => JSON.parse(line) as Record<string, unknown>);
-  const deltas = events.filter(event => event.type === "delta");
+  const deltas = events.filter(event => event.type === "agent_delta");
   const completedAt = events.findIndex(event => event.type === "complete");
   const documentAt = events.findIndex(event => event.type === "project_document");
   expect(deltas.length).toBeGreaterThan(1);
-  expect(events.findIndex(event => event.type === "delta")).toBeLessThan(completedAt);
-  expect(documentAt).toBeGreaterThan(events.findIndex(event => event.type === "delta"));
+  expect(events.findIndex(event => event.type === "agent_delta")).toBeLessThan(completedAt);
+  expect(documentAt).toBeGreaterThan(events.findIndex(event => event.type === "agent_delta"));
   expect(documentAt).toBeLessThan(completedAt);
   expect(deltas.map(event => event.delta).join("")).toContain("测试设计 Agent");
+  expect(new Set(deltas.map(event => event.agentRole))).toEqual(new Set(["DESIGN", "DEVELOPMENT", "TEST"]));
   const complete = events[completedAt] as {
     conversation: Conversation;
     project: { document: { content: { introduction: string } } };
   };
-  expect(complete.conversation.messages.map(message => message.role)).toEqual(["USER", "ASSISTANT"]);
+  expect(complete.conversation.messages.map(message => message.role)).toEqual([
+    "USER", "ASSISTANT", "ASSISTANT", "ASSISTANT",
+  ]);
+  expect(complete.conversation.messages.slice(1).map(message => message.metadata.agentRole)).toEqual([
+    "DESIGN", "DEVELOPMENT", "TEST",
+  ]);
   expect(complete.project.document.content.introduction).toBe("测试设计 Agent 已整理当前游戏需求。");
 });
 
@@ -85,7 +91,9 @@ test("new-game conversations validate, persist and keep their context locked", a
   expect(first.projectId).toBe(startedBody.project.id);
   expect(startedBody.project.name).toBe("时间回廊");
   expect(startedBody.workspace.name).toBe("Local workspace");
-  expect(first.messages.map(message => message.role)).toEqual(["USER", "ASSISTANT"]);
+  expect(first.messages.map(message => message.role)).toEqual([
+    "USER", "ASSISTANT", "ASSISTANT", "ASSISTANT",
+  ]);
   expect(first.messages[1].content).toContain("测试设计 Agent");
   expect(first.messages[1].metadata).toMatchObject({
     source: "AI_AGENT",
@@ -102,12 +110,12 @@ test("new-game conversations validate, persist and keep their context locked", a
   });
   expect(continued.status()).toBe(200);
   const second = (await continued.json() as { conversation: Conversation }).conversation;
-  expect(second.messages).toHaveLength(4);
-  expect(second.messages[3].content).toContain("测试设计 Agent");
+  expect(second.messages).toHaveLength(8);
+  expect(second.messages[7].content).toContain("测试设计 Agent");
 
   const read = await stack.web(`/api/conversations/${first.id}`);
   expect(read.ok()).toBeTruthy();
-  expect((await read.json() as { conversation: Conversation }).conversation.messages).toHaveLength(4);
+  expect((await read.json() as { conversation: Conversation }).conversation.messages).toHaveLength(8);
   expect((await stack.web(`/api/conversations/${randomUUID()}`)).status()).toBe(404);
   expect((await stack.web("/api/conversations/not-a-uuid")).status()).toBe(404);
 
@@ -239,8 +247,8 @@ test("messages sent during Agent generation become durable live guidance", async
   const completed = (await guided.text()).trim().split("\n")
     .map(line => JSON.parse(line) as Record<string, unknown>)
     .find(event => event.type === "complete") as { conversation: Conversation };
-  expect(completed.conversation.messages).toHaveLength(3);
-  expect(completed.conversation.messages[2]).toMatchObject({
+  expect(completed.conversation.messages).toHaveLength(5);
+  expect(completed.conversation.messages[4]).toMatchObject({
     role: "USER",
     content: guidance,
     metadata: { source: "PLAYER_GUIDANCE", jobId },
@@ -305,13 +313,13 @@ test("project conversations are listed by recency and project deletion removes t
   expect(summaries.map(item => item.id)).toEqual([secondConversation.id, firstConversation.id]);
   expect(summaries[0]).toMatchObject({
     preview: "再单独讨论美术风格和声音反馈。",
-    messageCount: 2,
+    messageCount: 4,
     userMessageCount: 1,
     systemGenerated: false,
   });
   expect(summaries[1]).toMatchObject({
     preview: "先讨论录音回放与历史改写之间的核心循环。",
-    messageCount: 4,
+    messageCount: 8,
     userMessageCount: 2,
     systemGenerated: false,
   });

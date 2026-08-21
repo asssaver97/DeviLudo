@@ -79,6 +79,7 @@ test("every workspace-owned table fails closed with forced row isolation", async
   assert.match(sql, /credential_secret_ref LIKE 'vault:\/\/instance\/agent-runtime\/api-key\/versions\/%'/);
   assert.doesNotMatch(sql, /instance_agent_provider_profiles/);
   assert.match(sql, /WHEN 'AGENT_GENERATION' THEN[\s\S]*p_payload \? 'repairFromE2eJobId'[\s\S]*artifact\.kind = 'E2E_REPORT'[\s\S]*repairFromE2eJobId/);
+  assert.match(sql, /artifact\.kind = 'SPECIFICATION'[\s\S]*latest_specification\.workflow_id = p_workflow_id[\s\S]*ORDER BY latest_specification\.created_at DESC, latest_specification\.id DESC/);
   assert.match(sql, /IF p_kind IN \('AGENT_GENERATION', 'ARTIFACT_BUILD', 'E2E_TEST'\) THEN[\s\S]*'sourceRelativePath', v_source\.relative_path/);
   assert.match(sql, /CREATE TRIGGER jobs_snapshot_agent_baseline_source/);
   assert.match(sql, /'baselineSourceRelativePath', baseline\.relative_path/);
@@ -135,6 +136,18 @@ test("every workspace-owned table fails closed with forced row isolation", async
   assert.match(sql, /artifact\.workflow_id = NEW\.workflow_id[\s\S]*artifact\.target_platform IS NOT DISTINCT FROM NEW\.target_platform/);
   assert.match(sql, /source IN \('PROJECT_CREATED', 'PROJECT_IMPORTED', 'USER_EDIT', 'AGENT_CONVERSATION', 'AGENT_IDLE_MAINTENANCE'\)/);
   assert.doesNotMatch(sql, /api_key\s+text/i);
+});
+
+test("Agent reruns select only the latest historical draft specification", async () => {
+  const migration = await readFile(
+    new URL("../infra/postgres/migrations/057_latest_agent_specification_input.sql", import.meta.url),
+    "utf8",
+  );
+  assert.match(migration, /pg_get_functiondef/);
+  assert.match(migration, /latest_specification\.workflow_id = p_workflow_id/);
+  assert.match(migration, /latest_specification\.producing_job_id IS NULL/);
+  assert.match(migration, /ORDER BY latest_specification\.created_at DESC, latest_specification\.id DESC/);
+  assert.match(migration, /replace\(definition, old_condition, latest_condition\)/);
 });
 
 test("manual Agent reruns retain product-failure evidence and reset the bounded repair cycle", async () => {

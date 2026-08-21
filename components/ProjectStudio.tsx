@@ -180,9 +180,13 @@ export function ProjectStudio({ projectId }: { projectId: string }) {
   useEffect(() => {
     let active = true;
     const initial = setTimeout(() => {
-      void Promise.all([loadProject(), loadConversations(), loadArtifacts(), loadIterations(), loadAssetManifest()]).catch(reason => {
-        if (active) setError(reason instanceof Error ? reason.message : text("项目读取失败", "Unable to load project"));
-      });
+      // Resolve the parent resource first. For an unknown project this avoids
+      // racing five 404 responses and presenting a random child-resource error.
+      void loadProject()
+        .then(() => Promise.all([loadConversations(), loadArtifacts(), loadIterations(), loadAssetManifest()]))
+        .catch(reason => {
+          if (active) setError(reason instanceof Error ? reason.message : text("项目读取失败", "Unable to load project"));
+        });
     }, 0);
     return () => { active = false; clearTimeout(initial); };
   }, [loadArtifacts, loadAssetManifest, loadConversations, loadIterations, loadProject, text]);

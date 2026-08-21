@@ -59,11 +59,11 @@ test("claim, heartbeat, proof validation and lease fencing protect exclusive E2E
   });
   expect(await heartbeat.json()).toEqual({ accepted: true });
 
-  const forbiddenGrant = await stack.coreNode(`/v1/e2e/jobs/${job.jobId}/signing-grant`, {
+  const retiredGrant = await stack.coreNode(`/v1/e2e/jobs/${job.jobId}/signing-grant`, {
     method: "POST",
-    data: { ...identity(job), beforeReimageProof: proof("before") },
+    data: identity(job),
   });
-  expect(forbiddenGrant.status()).toBe(403);
+  expect(retiredGrant.status()).toBe(404);
 
   const missingProofs = await completeResponse(stack, job, {
     beforeReimageProof: undefined,
@@ -78,7 +78,7 @@ test("claim, heartbeat, proof validation and lease fencing protect exclusive E2E
   expect(wrongGeneration.status()).toBe(400);
 
   const completed = await completeResponse(stack, job);
-  expect(completed.ok()).toBeTruthy();
+  expect(completed.status(), await completed.text()).toBe(200);
   expect(await completed.json()).toEqual({ accepted: true });
 
   const replay = await completeResponse(stack, job);
@@ -87,52 +87,24 @@ test("claim, heartbeat, proof validation and lease fencing protect exclusive E2E
   expect(stored.jobs.find(item => item.id === job.jobId)?.attempt).toBe(1);
 });
 
-test("signing grants are short-lived, proof-gated and do not persist wrapped authority", async ({ stack }) => {
+test("validated E2E completion reaches release review without scheduling signing authority", async ({ stack }) => {
   const { project, nodes } = await prepareE2eStage(stack);
   for (const poolKind of ["E2E_LINUX", "E2E_WINDOWS", "E2E_MACOS"] as const) {
     const job = await claim(stack, requiredNode(nodes, poolKind));
     expect(job.jobKind).toBe("E2E_TEST");
     expect((await completeResponse(stack, job)).ok()).toBeTruthy();
   }
-  await stack.waitForProject(project.id, value => value.workflowState === "SIGNING");
+  await stack.waitForProject(project.id, value => value.workflowState === "RELEASE_DECISION_PENDING");
 
-  const signingJob = await claim(stack, requiredNode(nodes, "E2E_MACOS"));
-  expect(signingJob.jobKind).toBe("ARTIFACT_SIGN");
-
-  const proofRequired = await stack.coreNode(`/v1/e2e/jobs/${signingJob.jobId}/signing-grant`, {
-    method: "POST",
-    data: { ...identity(signingJob), beforeReimageProof: "short" },
-  });
-  expect(proofRequired.status()).toBe(409);
-
-  const grantResponse = await stack.coreNode(`/v1/e2e/jobs/${signingJob.jobId}/signing-grant`, {
-    method: "POST",
-    data: { ...identity(signingJob), beforeReimageProof: proof("before") },
-  });
-  expect(grantResponse.ok()).toBeTruthy();
-  const grant = await grantResponse.json() as {
-    grantId: string;
-    wrappedToken: string;
-    expiresAt: string;
-    operationId: string;
-  };
-  expect(Date.parse(grant.expiresAt)).toBeGreaterThan(Date.now());
-  expect(Date.parse(grant.expiresAt)).toBeLessThanOrEqual(Date.now() + 5 * 60_000);
-  expect(grant.wrappedToken.length).toBeGreaterThan(20);
-
-  const completed = await completeResponse(stack, signingJob, {
-    receipt: { grantId: grant.grantId, operationId: grant.operationId, signed: true },
-  });
-  expect(completed.ok()).toBeTruthy();
-
-  const operations = await stack.queryRows<{ state: string; receipt: unknown }>(`
-    SELECT state::text, receipt
-      FROM deviludo.operation_receipts
-     WHERE job_id = '${signingJob.jobId}'::uuid
+  const authorityRows = await stack.queryRows<{ signing_jobs: number; operations: number }>(`
+    SELECT
+      (SELECT count(*)::int FROM deviludo.jobs
+        WHERE workflow_id = '${project.workflowId}'::uuid AND kind = 'ARTIFACT_SIGN') AS signing_jobs,
+      (SELECT count(*)::int FROM deviludo.operation_receipts
+        WHERE workflow_id = '${project.workflowId}'::uuid) AS operations
   `);
-  expect(operations).toHaveLength(1);
-  expect(operations[0].state).toBe("RECEIPTED");
-  expect(JSON.stringify(operations)).not.toContain(grant.wrappedToken);
+  expect(authorityRows).toEqual([{ signing_jobs: 0, operations: 0 }]);
+  expect(JSON.stringify(await stack.readProject(project.id))).not.toContain("wrappedToken");
 });
 
 test("job failure retries with a new fence and eventually fails the workflow", async ({ stack }) => {
@@ -227,35 +199,74 @@ async function completeResponse(
   const identityKey = await readFile(process.env.DEVILUDO_E2E_IDENTITY_KEY_FILE ?? "", "utf8");
   let executorReceipt = cachedExecutorReceipts.get(job.jobId);
   if (!executorReceipt) {
-    const outputContent = Buffer.from(JSON.stringify({
-      schemaVersion: "deviludo.playwright-protocol-output.v1",
-      jobId: job.jobId,
-      kind: job.jobKind,
-    }));
-    const outputSha256 = `sha256:${createHash("sha256").update(outputContent).digest("hex")}`;
-    const outputKind = job.jobKind === "E2E_TEST" ? "E2E_REPORT"
-      : job.jobKind === "ARTIFACT_SIGN" ? "SIGNED_BUILD" : "CLEAN_INSTALL_REPORT";
-    const authorization = await stack.coreNode(`/v1/e2e/jobs/${job.jobId}/outputs`, {
-      method: "POST",
-      data: {
-        ...identity(job),
-        kind: outputKind,
-        sha256: outputSha256,
-        sizeBytes: outputContent.length,
+    const regressionContractDigest = `sha256:${"c".repeat(64)}`;
+    const outputDefinitions = job.jobKind === "E2E_TEST" ? [
+      {
+        kind: "E2E_REPORT",
+        content: Buffer.from(JSON.stringify({
+          schemaVersion: "deviludo.playwright-protocol-output.v1",
+          jobId: job.jobId,
+          kind: "E2E_REPORT",
+        })),
       },
-    });
-    if (!authorization.ok()) return authorization;
-    const upload = await authorization.json() as {
-      uploadUrl: string;
-      requiredHeaders: Record<string, string>;
-      object: JobProtocolV4["inputObjects"][number];
-    };
-    const uploaded = await fetch(upload.uploadUrl, {
-      method: "PUT",
-      body: outputContent,
-      headers: upload.requiredHeaders,
-    });
-    expect(uploaded.ok).toBeTruthy();
+      {
+        kind: "E2E_REGRESSION",
+        content: Buffer.from(JSON.stringify({
+          schema: "deviludo.e2e-regression",
+          contractDigest: regressionContractDigest,
+          inputProfile: "KEYBOARD_MOUSE",
+          estimatedDurationMs: 5_000,
+          goal: "Complete the protocol fixture journey",
+          actions: [{ type: "key_tap", key: "SPACE" }],
+          successAssertions: [{ source: "PROGRESS", key: "turn", operator: "CHANGED" }],
+        })),
+      },
+    ] : [{
+      kind: job.jobKind === "ARTIFACT_SIGN" ? "SIGNED_BUILD" : "CLEAN_INSTALL_REPORT",
+      content: Buffer.from(JSON.stringify({
+        schemaVersion: "deviludo.playwright-protocol-output.v1",
+        jobId: job.jobId,
+        kind: job.jobKind,
+      })),
+    }];
+    const outputObjects: JobProtocolV4["inputObjects"][number][] = [];
+    for (const output of outputDefinitions) {
+      const sha256 = `sha256:${createHash("sha256").update(output.content).digest("hex")}`;
+      const authorization = await stack.coreNode(`/v1/e2e/jobs/${job.jobId}/outputs`, {
+        method: "POST",
+        data: {
+          ...identity(job),
+          kind: output.kind,
+          sha256,
+          sizeBytes: output.content.length,
+        },
+      });
+      if (!authorization.ok()) return authorization;
+      const upload = await authorization.json() as {
+        uploadUrl: string;
+        requiredHeaders: Record<string, string>;
+        object: JobProtocolV4["inputObjects"][number];
+      };
+      const uploaded = await fetch(upload.uploadUrl, {
+        method: "PUT",
+        body: new Uint8Array(output.content),
+        headers: upload.requiredHeaders,
+        signal: AbortSignal.timeout(120_000),
+      });
+      expect(uploaded.ok).toBeTruthy();
+      outputObjects.push(Object.freeze({
+        ...upload.object,
+        ...(output.kind === "E2E_REGRESSION" ? {
+          metadata: Object.freeze({
+            e2eRegression: Object.freeze({
+              regressionContractDigest,
+              regressionInputProfile: "KEYBOARD_MOUSE",
+              regressionEstimatedDurationMs: 5_000,
+            }),
+          }),
+        } : {}),
+      }));
+    }
     const now = new Date().toISOString();
     const unsignedExecutorReceipt = {
       schemaVersion: "deviludo.executor-receipt.v2" as const,
@@ -264,13 +275,15 @@ async function completeResponse(
       finishedAt: now,
       exitCode: 0,
       simulated: false as const,
-      outputObjects: [upload.object],
+      outputObjects,
     };
     executorReceipt = {
       ...unsignedExecutorReceipt,
       signature: sign(null, executorReceiptSigningPayload(unsignedExecutorReceipt), identityKey).toString("base64url"),
     };
-    cachedExecutorReceipts.set(job.jobId, executorReceipt);
+    // Invalid proof/fencing probes are rejected before object verification.
+    // Do not reuse their uncommitted uploads for the later valid completion.
+    if (Object.keys(overrides).length === 0) cachedExecutorReceipts.set(job.jobId, executorReceipt);
   }
   return await stack.coreNode(`/v1/e2e/jobs/${job.jobId}/complete`, {
     method: "POST",
@@ -284,6 +297,12 @@ async function completeResponse(
           outcome: "PASSED",
           failureDomain: null,
           summary: "Playwright protocol completion passed",
+          ...(job.jobKind === "E2E_TEST" ? {
+            evidence: {
+              testManifestDigest: `sha256:${"d".repeat(64)}`,
+              regressionContractDigest: `sha256:${"c".repeat(64)}`,
+            },
+          } : {}),
         },
       },
       executorReceipt,
@@ -309,10 +328,6 @@ async function fail(stack: StackHarness, job: JobProtocolV4, reason: string): Pr
 
 function identity(job: JobProtocolV4): Readonly<{ workspaceId: string; leaseToken: string }> {
   return Object.freeze({ workspaceId: job.workspaceId, leaseToken: job.lease.token });
-}
-
-function proof(stage: string): string {
-  return `playwright-trusted-${stage}-proof`;
 }
 
 function signedIsolationProof(

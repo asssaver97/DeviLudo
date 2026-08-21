@@ -173,7 +173,12 @@ export class CoreObjectStore {
         || !object.key.startsWith(`workspaces/${job.workspaceId}/projects/${job.projectId}/jobs/${job.jobId}/`)) {
         throw new Error("Executor output escaped the leased object boundary");
       }
-      const head = await this.client.send(new HeadObjectCommand({ Bucket: object.bucket, Key: object.key }));
+      let head;
+      try {
+        head = await this.client.send(new HeadObjectCommand({ Bucket: object.bucket, Key: object.key }));
+      } catch (error) {
+        throw new Error(`Executor output object is unavailable: ${object.kind ?? "UNKNOWN"}`, { cause: error });
+      }
       if (head.ContentLength !== object.sizeBytes || head.Metadata?.sha256 !== object.sha256) {
         throw new Error("Executor output object digest or size does not match storage metadata");
       }

@@ -77,7 +77,7 @@ CREATE TABLE deviludo.schema_metadata (
   applied_at timestamptz NOT NULL DEFAULT clock_timestamp()
 );
 INSERT INTO deviludo.schema_metadata(singleton, baseline, compatibility, current_version)
-VALUES (true, '001', 'deviludo-self-hosted-v1', '056_freeze_e2e_test_plan');
+VALUES (true, '001', 'deviludo-self-hosted-v1', '057_latest_agent_specification_input');
 
 -- Every post-baseline change is immutable and checksummed. Fresh databases are
 -- created from this full snapshot and then stamp the migrations incorporated by
@@ -1274,10 +1274,30 @@ BEGIN
      AND CASE p_kind
        WHEN 'AGENT_GENERATION' THEN
          CASE WHEN p_payload ? 'repairFromE2eJobId' THEN
-           (artifact.kind = 'SPECIFICATION' AND artifact.producing_job_id IS NULL)
+           (artifact.kind = 'SPECIFICATION' AND artifact.producing_job_id IS NULL
+             AND artifact.id = (
+               SELECT latest_specification.id
+                 FROM deviludo.artifacts latest_specification
+                WHERE latest_specification.workspace_id = p_workspace_id
+                  AND latest_specification.workflow_id = p_workflow_id
+                  AND latest_specification.kind = 'SPECIFICATION'
+                  AND latest_specification.producing_job_id IS NULL
+                ORDER BY latest_specification.created_at DESC, latest_specification.id DESC
+                LIMIT 1
+             ))
            OR (artifact.kind = 'E2E_REPORT'
              AND artifact.producing_job_id = (p_payload->>'repairFromE2eJobId')::uuid)
-         ELSE artifact.kind = 'SPECIFICATION' AND artifact.producing_job_id IS NULL END
+         ELSE artifact.kind = 'SPECIFICATION' AND artifact.producing_job_id IS NULL
+           AND artifact.id = (
+             SELECT latest_specification.id
+               FROM deviludo.artifacts latest_specification
+              WHERE latest_specification.workspace_id = p_workspace_id
+                AND latest_specification.workflow_id = p_workflow_id
+                AND latest_specification.kind = 'SPECIFICATION'
+                AND latest_specification.producing_job_id IS NULL
+              ORDER BY latest_specification.created_at DESC, latest_specification.id DESC
+              LIMIT 1
+           ) END
        WHEN 'PROJECT_DOCUMENT_MAINTENANCE' THEN false
        WHEN 'ARTIFACT_BUILD' THEN artifact.kind = 'SPECIFICATION'
          AND artifact.producing_job_id = (
