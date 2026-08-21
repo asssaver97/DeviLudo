@@ -22,6 +22,33 @@ const goldenName = "deviludo-e2e-tahoe";
 const stagingName = `${goldenName}-building`;
 const baseCacheName = "deviludo-e2e-tahoe-base-cache";
 const baseImage = "ghcr.io/cirruslabs/macos-tahoe-base:latest";
+export const LOCAL_TART_E2E_RUNTIME_FILES = Object.freeze([
+  "scripts/executors/godot-window-e2e-guest.mjs",
+  "scripts/executors/game-test-environment.mjs",
+  "scripts/executors/gui-event-batches.mjs",
+  "scripts/executors/godot-system-gamepad-smoke.mjs",
+  "scripts/e2e-evidence.mjs",
+  "scripts/e2e-ui-probe.mjs",
+  "scripts/e2e-interaction-contract.mjs",
+  "scripts/e2e-regression-actions.mjs",
+  "scripts/e2e-performance.mjs",
+  "scripts/executors/macos-gui-driver.swift",
+  "scripts/executors/macos-gamepad-driver.swift",
+  "fixtures/godot-input-smoke/project.godot",
+  "fixtures/godot-input-smoke/main.tscn",
+  "fixtures/godot-input-smoke/main.gd",
+  "scripts/local-tart-provision.sh",
+]);
+
+export async function fingerprintLocalTartE2eRuntimeInputs() {
+  const hash = createHash("sha256").update("deviludo-local-tart-runtime-inputs-v1\0");
+  for (const file of LOCAL_TART_E2E_RUNTIME_FILES) {
+    const content = await readFile(resolve(root, file));
+    hash.update(`${Buffer.byteLength(file)}:${file}:${content.length}:`);
+    hash.update(content);
+  }
+  return `sha256:${hash.digest("hex")}`;
+}
 
 export async function preflightLocalTartE2e() {
   if (platform() !== "darwin" || arch() !== "arm64") throw new Error("Local real-window E2E requires Apple Silicon macOS and does not fall back to host execution");
@@ -410,7 +437,7 @@ function sshArguments() { return ["-i", keyFile, "-o", "BatchMode=yes", "-o", "S
 async function configurationFingerprint(baseImageDigest) {
   const hash = createHash("sha256").update("deviludo-tart-adaptive-e2e\0tahoe-26\0node-22.22.0\0godot-4.5.1\0ffmpeg\0memory-6144\0display-1440x900\0swift-Onone\0").update(baseImageDigest);
   hash.update(await readFile(`${keyFile}.pub`));
-  for (const file of ["scripts/executors/godot-window-e2e-guest.mjs", "scripts/executors/game-test-environment.mjs", "scripts/executors/gui-event-batches.mjs", "scripts/executors/godot-system-gamepad-smoke.mjs", "scripts/e2e-evidence.mjs", "scripts/e2e-ui-probe.mjs", "scripts/e2e-interaction-contract.mjs", "scripts/e2e-regression-actions.mjs", "scripts/e2e-performance.mjs", "scripts/executors/macos-gui-driver.swift", "scripts/executors/macos-gamepad-driver.swift", "fixtures/godot-input-smoke/project.godot", "fixtures/godot-input-smoke/main.tscn", "fixtures/godot-input-smoke/main.gd", "scripts/local-tart-provision.sh"]) hash.update(await readFile(resolve(root, file)));
+  for (const file of LOCAL_TART_E2E_RUNTIME_FILES) hash.update(await readFile(resolve(root, file)));
   return `sha256:${hash.digest("hex")}`;
 }
 async function tartVmExists(name) {

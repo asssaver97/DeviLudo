@@ -44,6 +44,8 @@ test("local deployment keeps Core private by default and exposes it only for exp
   assert.match(tartGuest, /\/usr\/local\/lib\/deviludo\/executors\/godot-window-e2e-guest\.mjs/);
   const localUp = await readFile(new URL("../scripts/local-up.mjs", import.meta.url), "utf8");
   assert.match(localUp, /stopLocalE2e/);
+  assert.match(localUp, /fingerprintLocalTartE2eRuntimeInputs\(\)/);
+  assert.match(localUp, /"e2e-macos", imageInputFingerprint, e2eRuntimeFingerprint/);
   assert.match(localUp, /retainActiveJobRuntimeImages\(baseEnvironment\)/);
   assert.match(localUp, /state IN \('QUEUED', 'RETRY', 'RUNNING'\)/);
   assert.match(localUp, /deviludo-retained-job-runtime/);
@@ -592,6 +594,7 @@ test("CI uses the fixed no-provider Agent while local macOS requires Tart E2E", 
   assert.match(tartPrepare, /gui-event-batches\.mjs"\), "\/Users\/Shared\/gui-event-batches\.mjs"/);
   assert.match(tartPrepare, /e2e-regression-actions\.mjs"\), "\/Users\/Shared\/e2e-regression-actions\.mjs"/);
   assert.match(tartPrepare, /e2e-performance\.mjs"\), "\/Users\/Shared\/e2e-performance\.mjs"/);
+  assert.match(tartPrepare, /export async function fingerprintLocalTartE2eRuntimeInputs\(\)/);
   assert.match(tartPrepare, /randomBytes\(12\)\.toString\("hex"\)/);
   assert.doesNotMatch(tartPrepare, /\/Users\/Shared\/macos-gui-driver\.swift/);
   assert.match(tartPrepare, /const rebootedVm = spawn\("tart"/);

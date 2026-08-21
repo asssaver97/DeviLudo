@@ -36,7 +36,7 @@ import {
   validateProbeAssertion as validProbeAssertion,
 } from "../e2e-interaction-contract.mjs";
 import { plannedCoreRegressionCandidates } from "../e2e-regression-actions.mjs";
-import { parseGodotFpsSamples, summarizeE2ePerformance } from "../e2e-performance.mjs";
+import { detectSoftwareRenderer, parseGodotFpsSamples, summarizeE2ePerformance } from "../e2e-performance.mjs";
 import { checkpointOutputSeen } from "./gui-event-batches.mjs";
 import { GameTestEnvironment, gamepadEventCount } from "./game-test-environment.mjs";
 
@@ -1605,6 +1605,8 @@ async function finish(outcome, failureDomain, summary, manifest) {
       p95InputResponseMs: performanceSummary.inputResponse.p95Ms,
       maxInputResponseMs: performanceSummary.inputResponse.maximumMs,
       performancePassed: performanceSummary.passed,
+      softwareRenderer: performanceSummary.environment.softwareRenderer,
+      frameRateEnforced: performanceSummary.environment.frameRateEnforced,
       testManifestDigest: jsonDigest(manifest),
       regressionTraceDigest: regressionBytes ? `sha256:${createHash("sha256").update(regressionBytes).digest("hex")}` : null,
       regressionContractDigest: regressionTrace?.contractDigest ?? null,
@@ -1722,7 +1724,7 @@ function recordFrameRateRun(runId, ...logs) {
     samples = parseGodotFpsSamples(log);
     if (samples.length > 0) break;
   }
-  frameRateRuns.push({ runId, samples });
+  frameRateRuns.push({ runId, samples, softwareRenderer: detectSoftwareRenderer(...logs) });
 }
 function checkpointEvidenceId(journeyId, checkpointId) { return `journey-${journeyId.length}-${journeyId}-${checkpointId}`; }
 function safeGodotPath(value) { return typeof value === "string" && /^res:\/\/[A-Za-z0-9][A-Za-z0-9._/-]{0,219}\.gd$/.test(value) && !/(^|\/)\.{1,2}(\/|$)|\/\//.test(value.slice(6)); }

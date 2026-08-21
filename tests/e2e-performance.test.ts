@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { parseGodotFpsSamples, summarizeE2ePerformance } from "../scripts/e2e-performance.mjs";
+import { detectSoftwareRenderer, parseGodotFpsSamples, summarizeE2ePerformance } from "../scripts/e2e-performance.mjs";
 
 const responses = [
   { runId: "core", stepId: "start", source: "DETERMINISTIC", latencyMs: 90 },
@@ -17,6 +17,12 @@ test("parses Godot release --print-fps output", () => {
     { fps: 60, mspf: 16.67 },
     { fps: 47, mspf: null },
   ]);
+});
+
+test("detects common software renderer diagnostics", () => {
+  assert.equal(detectSoftwareRenderer("Using Device: Apple Inc. - Apple Software Renderer"), true);
+  assert.equal(detectSoftwareRenderer("OpenGL renderer: llvmpipe (LLVM 18.1)"), true);
+  assert.equal(detectSoftwareRenderer("Using Device: Apple M4 Pro"), false);
 });
 
 test("smooth exported gameplay passes the fixed performance gate after warmup", () => {
@@ -50,6 +56,35 @@ test("slow native-input response is a product stutter failure", () => {
   assert.equal(result.passed, false);
   assert.equal(result.failures[0].code, "GAME_STUTTER_DETECTED");
   assert.equal(result.inputResponse.maximumMs, 3_100);
+});
+
+test("software rendering records low FPS but gates bounded real input response", () => {
+  const result = summarizeE2ePerformance({
+    frameRateRuns: [{
+      runId: "tart-macos",
+      samples: [1, 1, 2, 3, 4, 4],
+      softwareRenderer: true,
+    }],
+    inputResponses: [responses[0], { ...responses[1], latencyMs: 2_587 }],
+  });
+  assert.equal(result.passed, true);
+  assert.equal(result.environment.softwareRenderer, true);
+  assert.equal(result.environment.frameRateEnforced, false);
+  assert.equal(result.frameRate.medianFps, 3);
+});
+
+test("software rendering still fails genuinely unresponsive input", () => {
+  const result = summarizeE2ePerformance({
+    frameRateRuns: [{
+      runId: "tart-macos",
+      samples: [1, 1, 2, 3, 4, 4],
+      softwareRenderer: true,
+    }],
+    inputResponses: [responses[0], { ...responses[1], latencyMs: 5_481 }],
+  });
+  assert.equal(result.passed, false);
+  assert.equal(result.failures[0].code, "GAME_STUTTER_DETECTED");
+  assert.match(result.failures[0].message, /软件渲染环境/);
 });
 
 test("missing real runtime samples fails closed", () => {

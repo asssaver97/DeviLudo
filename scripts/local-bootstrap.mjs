@@ -28,9 +28,9 @@ try {
     if (digest !== homebrewInstaller.sha256) throw new Error("Homebrew installer SHA-256 mismatch");
     return target;
   });
-  await bootstrapStage("Install Homebrew", () => executeVisible("/bin/bash", [installer], {
+  await bootstrapForegroundStage("Install Homebrew", "/bin/bash", [installer], {
     env: { ...process.env, NONINTERACTIVE: "1" },
-  }));
+  });
   await access(brew);
 }
 const formulae = ["node@22", "docker", "docker-compose", "colima"];
@@ -43,31 +43,40 @@ for (const formula of formulae) {
   }
 }
 if (missing.length) {
-  await bootstrapStage("Update the Homebrew package index", () => executeVisible(brew, ["update"]));
+  await bootstrapForegroundStage("Update the Homebrew package index", brew, ["update"]);
   for (const formula of missing) {
-    await bootstrapStage(`Install ${formula}`, () => executeVisible(brew, ["install", formula]));
+    await bootstrapForegroundStage(`Install ${formula}`, brew, ["install", formula]);
   }
 }
 await Promise.all(formulae.map(formula => execute(brew, ["pin", formula]).catch(() => undefined)));
 try {
   await execute("docker", ["info"], { timeout: 5_000 });
 } catch {
-  await bootstrapStage("Start the Colima container runtime", () => executeVisible("colima", ["start", "--cpu", "4", "--memory", "8", "--disk", "60"]));
+  await bootstrapForegroundStage("Start the Colima container runtime", "colima", ["start", "--cpu", "4", "--memory", "8", "--disk", "60"]);
 }
 console.log("\n✓ Local dependencies are ready\n");
 console.log(JSON.stringify({ bootstrapped: true, node: 22, containerRuntime: "colima" }));
 
-async function bootstrapStage(label, operation) {
+function bootstrapForegroundStage(label, command, arguments_, options = {}) {
+  return bootstrapStage(label, () => executeVisible(command, arguments_, options), { showHeartbeat: false });
+}
+
+async function bootstrapStage(label, operation, { showHeartbeat = true } = {}) {
   const startedAt = Date.now();
   console.log(`[dependency] ${label}...`);
-  const heartbeat = setInterval(() => console.log(`    Still working (${Math.round((Date.now() - startedAt) / 1_000)}s)`), 10_000);
-  heartbeat.unref();
+  // Foreground installers own the terminal and may pause for input. Their own
+  // output is the progress indicator, so a parent heartbeat would overwrite or
+  // visually bury the prompt while the user is deciding how to respond.
+  const heartbeat = showHeartbeat
+    ? setInterval(() => console.log(`    Still working (${Math.round((Date.now() - startedAt) / 1_000)}s)`), 10_000)
+    : undefined;
+  heartbeat?.unref();
   try {
     const result = await operation();
     console.log(`    ✓ Done (${Math.round((Date.now() - startedAt) / 1_000)}s)\n`);
     return result;
   } finally {
-    clearInterval(heartbeat);
+    if (heartbeat) clearInterval(heartbeat);
   }
 }
 

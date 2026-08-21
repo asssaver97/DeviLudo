@@ -11,6 +11,7 @@ import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 import { selectCodexAccountDefaultModel } from "./local-codex-model.mjs";
 import { resolveMachineInstallationId } from "./machine-installation-id.mjs";
+import { fingerprintLocalTartE2eRuntimeInputs } from "./local-tart-prepare.mjs";
 
 const execute = promisify(execFile);
 const root = new URL("..", import.meta.url);
@@ -341,6 +342,7 @@ const gitImportPid = await runStartupStage("Start the local project bridge", asy
 let e2ePid = null;
 let e2eConfigurationFingerprint = null;
 if (!ciMode) {
+  const e2eRuntimeFingerprint = await fingerprintLocalTartE2eRuntimeInputs();
   const prepared = await runStartupStage("Start macOS E2E preparation in the background", async () => {
     if (!initialized.macNodeId) throw new Error("Local macOS E2E node initialization failed");
     const e2eConfiguration = {
@@ -354,7 +356,7 @@ if (!ciMode) {
     mkdirSync(e2eConfiguration.jobRoot, { recursive: true, mode: 0o700 });
     await writeFile(new URL("../.deviludo/local/e2e-macos.json", import.meta.url), JSON.stringify(e2eConfiguration, null, 2), { mode: 0o600 });
     const fingerprint = digest([
-      "e2e-macos", imageInputFingerprint, JSON.stringify(e2eConfiguration),
+      "e2e-macos", imageInputFingerprint, e2eRuntimeFingerprint, JSON.stringify(e2eConfiguration),
       await readOptionalFile(new URL("../.deviludo/local/e2e-macos-ed25519.pem", import.meta.url)),
     ]);
     const { runningPid, startLocalE2e, stopLocalE2e } = await import("./local-e2e-daemon.mjs");

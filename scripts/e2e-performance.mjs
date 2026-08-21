@@ -8,10 +8,19 @@ export const E2E_PERFORMANCE_THRESHOLDS = Object.freeze({
   slowFrameRateFps: 20,
   maximumP95InputResponseMs: 1_500,
   maximumInputResponseMs: 3_000,
+  softwareRendererMaximumP95InputResponseMs: 4_000,
+  softwareRendererMaximumInputResponseMs: 6_000,
 });
 
 const MAX_SAMPLES_PER_RUN = 3_600;
 const MAX_INPUT_RESPONSE_SAMPLES = 2_000;
+const SOFTWARE_RENDERER_PATTERNS = Object.freeze([
+  /Apple Software Renderer/i,
+  /Microsoft Basic Render Driver/i,
+  /SwiftShader/i,
+  /llvmpipe/i,
+  /software rasterizer/i,
+]);
 
 export function parseGodotFpsSamples(...logs) {
   const samples = [];
@@ -30,6 +39,13 @@ export function parseGodotFpsSamples(...logs) {
   return Object.freeze(samples);
 }
 
+export function detectSoftwareRenderer(...logs) {
+  return logs.some(log => {
+    const text = Buffer.isBuffer(log) ? log.toString("utf8") : String(log ?? "");
+    return SOFTWARE_RENDERER_PATTERNS.some(pattern => pattern.test(text));
+  });
+}
+
 export function summarizeE2ePerformance({ frameRateRuns = [], inputResponses = [] } = {}) {
   const normalizedRuns = frameRateRuns
     .filter(run => run && typeof run === "object" && typeof run.runId === "string")
@@ -43,6 +59,7 @@ export function summarizeE2ePerformance({ frameRateRuns = [], inputResponses = [
       const measured = valid.length >= 2 ? valid.slice(1) : valid;
       return Object.freeze({
         runId: run.runId.slice(0, 240),
+        softwareRenderer: run.softwareRenderer === true || detectSoftwareRenderer(run.log ?? ""),
         warmupSampleDiscarded: valid.length >= 2,
         sampleCount: measured.length,
         minimumFps: measured.length ? round(Math.min(...measured)) : null,
@@ -51,6 +68,8 @@ export function summarizeE2ePerformance({ frameRateRuns = [], inputResponses = [
         samples: Object.freeze(measured.map(round)),
       });
     });
+  const softwareRendererRunCount = normalizedRuns.filter(run => run.softwareRenderer).length;
+  const softwareRenderer = normalizedRuns.length > 0 && softwareRendererRunCount === normalizedRuns.length;
   const frameRates = normalizedRuns.flatMap(run => run.samples);
   const normalizedResponses = inputResponses
     .filter(sample => sample && typeof sample === "object"
@@ -80,6 +99,19 @@ export function summarizeE2ePerformance({ frameRateRuns = [], inputResponses = [
     maximumMs: responseTimes.length ? Math.max(...responseTimes) : null,
     samples: Object.freeze(normalizedResponses),
   });
+  const environment = Object.freeze({
+    softwareRenderer,
+    softwareRendererRunCount,
+    frameRateEnforced: !softwareRenderer,
+    inputResponseThresholds: Object.freeze({
+      maximumP95Ms: softwareRenderer
+        ? E2E_PERFORMANCE_THRESHOLDS.softwareRendererMaximumP95InputResponseMs
+        : E2E_PERFORMANCE_THRESHOLDS.maximumP95InputResponseMs,
+      maximumMs: softwareRenderer
+        ? E2E_PERFORMANCE_THRESHOLDS.softwareRendererMaximumInputResponseMs
+        : E2E_PERFORMANCE_THRESHOLDS.maximumInputResponseMs,
+    }),
+  });
   const failures = [];
   if (frameRate.sampleCount < E2E_PERFORMANCE_THRESHOLDS.minimumFrameRateSamples
     || inputResponse.sampleCount < E2E_PERFORMANCE_THRESHOLDS.minimumInputResponseSamples) {
@@ -88,24 +120,30 @@ export function summarizeE2ePerformance({ frameRateRuns = [], inputResponses = [
       message: `性能证据不足：帧率 ${frameRate.sampleCount}/${E2E_PERFORMANCE_THRESHOLDS.minimumFrameRateSamples}，输入响应 ${inputResponse.sampleCount}/${E2E_PERFORMANCE_THRESHOLDS.minimumInputResponseSamples}`,
     }));
   }
-  const frameRateFailed = frameRate.sampleCount >= E2E_PERFORMANCE_THRESHOLDS.minimumFrameRateSamples
+  // Tart, SwiftShader and other software rasterizers have an execution-environment
+  // frame-rate ceiling that product code cannot repair. Keep their real FPS in the
+  // report, but gate them on bounded native-input response instead. Hardware-backed
+  // runs retain the strict absolute FPS thresholds.
+  const frameRateFailed = environment.frameRateEnforced
+    && frameRate.sampleCount >= E2E_PERFORMANCE_THRESHOLDS.minimumFrameRateSamples
     && (frameRate.medianFps < E2E_PERFORMANCE_THRESHOLDS.minimumMedianFps
       || frameRate.p10Fps < E2E_PERFORMANCE_THRESHOLDS.minimumP10Fps
       || frameRate.minimumFps < E2E_PERFORMANCE_THRESHOLDS.criticalMinimumFps
       || frameRate.slowSampleRatio > E2E_PERFORMANCE_THRESHOLDS.maximumSlowFrameRateRatio);
   const inputResponseFailed = inputResponse.sampleCount >= E2E_PERFORMANCE_THRESHOLDS.minimumInputResponseSamples
-    && (inputResponse.p95Ms > E2E_PERFORMANCE_THRESHOLDS.maximumP95InputResponseMs
-      || inputResponse.maximumMs > E2E_PERFORMANCE_THRESHOLDS.maximumInputResponseMs);
+    && (inputResponse.p95Ms > environment.inputResponseThresholds.maximumP95Ms
+      || inputResponse.maximumMs > environment.inputResponseThresholds.maximumMs);
   if (frameRateFailed || inputResponseFailed) {
     failures.push(Object.freeze({
       code: "GAME_STUTTER_DETECTED",
-      message: `检测到游戏卡顿：最低/P10/中位 FPS ${display(frameRate.minimumFps)}/${display(frameRate.p10Fps)}/${display(frameRate.medianFps)}，慢帧率样本 ${(Number(frameRate.slowSampleRatio ?? 0) * 100).toFixed(1)}%，输入响应 P95/最大 ${display(inputResponse.p95Ms)}/${display(inputResponse.maximumMs)}ms`,
+      message: `检测到游戏卡顿：最低/P10/中位 FPS ${display(frameRate.minimumFps)}/${display(frameRate.p10Fps)}/${display(frameRate.medianFps)}，慢帧率样本 ${(Number(frameRate.slowSampleRatio ?? 0) * 100).toFixed(1)}%，输入响应 P95/最大 ${display(inputResponse.p95Ms)}/${display(inputResponse.maximumMs)}ms${softwareRenderer ? `（软件渲染环境，帧率仅记录，输入门槛 ${environment.inputResponseThresholds.maximumP95Ms}/${environment.inputResponseThresholds.maximumMs}ms）` : ""}`,
     }));
   }
   return Object.freeze({
     schema: "deviludo.e2e-performance.v1",
     passed: failures.length === 0,
     thresholds: E2E_PERFORMANCE_THRESHOLDS,
+    environment,
     frameRate,
     inputResponse,
     failures: Object.freeze(failures),

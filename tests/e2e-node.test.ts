@@ -112,6 +112,7 @@ test("a trusted failed guest report is a product outcome instead of an E2E node 
       visualBaselineCount: 0, videoCount: 1, hasVisualDiff: false,
       frameRateSampleCount: 0, minimumFps: null, p10Fps: null, medianFps: null,
       inputResponseSampleCount: 0, p95InputResponseMs: null, maxInputResponseMs: null, performancePassed: false,
+      softwareRenderer: false, frameRateEnforced: true,
       testManifestDigest: `sha256:${"d".repeat(64)}`,
       regressionTraceDigest: null, regressionInputProfile: null, regressionEstimatedDurationMs: null,
       packageLaunchMode: "MACOS_LAUNCH_SERVICES" }),
@@ -135,6 +136,7 @@ test("a trusted failed guest report is a product outcome instead of an E2E node 
       visualBaselineCount: 0, videoCount: 1, hasVisualDiff: false,
       frameRateSampleCount: 0, minimumFps: null, p10Fps: null, medianFps: null,
       inputResponseSampleCount: 0, p95InputResponseMs: null, maxInputResponseMs: null, performancePassed: false,
+      softwareRenderer: false, frameRateEnforced: true,
       testManifestDigest: `sha256:${"d".repeat(64)}`,
       regressionTraceDigest: null, regressionInputProfile: null, regressionEstimatedDurationMs: null,
       packageLaunchMode: "MACOS_LAUNCH_SERVICES" }),
@@ -142,6 +144,47 @@ test("a trusted failed guest report is a product outcome instead of an E2E node 
     outputSha256: `sha256:${"c".repeat(64)}`,
     outputSizeBytes: 1024,
   })));
+});
+
+test("a software-rendered passed receipt keeps FPS evidence but uses the bounded input gate", () => {
+  const digest = `sha256:${"a".repeat(64)}` as const;
+  const job: JobProtocolV4 = Object.freeze({
+    ...baseJob,
+    inputObjects: Object.freeze([Object.freeze({
+      kind: "BUILD",
+      targetPlatform: "macos",
+      bucket: "deviludo-artifacts",
+      key: `workspaces/${baseJob.workspaceId}/projects/${baseJob.projectId}/jobs/build/build-macos.tar.gz`,
+      sha256: digest,
+      sizeBytes: 1024,
+    })]),
+  });
+  const receipt = {
+    schema: "deviludo.godot-guest-report", action: "test", jobId: job.jobId, inputDigest: digest,
+    outcome: "PASSED", failureDomain: null, summary: "All real-window checks passed",
+    guest: { exitCode: 0 },
+    evidence: {
+      schema: "deviludo.e2e-evidence", result: "PASSED", headlessCheckCount: 2,
+      interactiveJourneyCount: 1, deterministicInputCount: 3, realInputCount: 5,
+      keyboardMouseInputCount: 5, gamepadInputCount: 0, adaptiveRolloutCount: 3,
+      adaptiveSuccessCount: 2, adaptiveDecisionCount: 9, coveredPlayerRequirementCount: 4,
+      playerRequirementCount: 4, screenshotCount: 8, visualBaselineCount: 3, videoCount: 1,
+      hasVisualDiff: false, frameRateSampleCount: 20, minimumFps: 1, p10Fps: 1, medianFps: 4,
+      inputResponseSampleCount: 5, p95InputResponseMs: 2_587, maxInputResponseMs: 2_587,
+      performancePassed: true, softwareRenderer: true, frameRateEnforced: false,
+      testManifestDigest: `sha256:${"d".repeat(64)}`,
+      regressionTraceDigest: `sha256:${"e".repeat(64)}`, regressionInputProfile: "KEYBOARD_MOUSE",
+      regressionEstimatedDurationMs: 30_000, packageLaunchMode: "MACOS_LAUNCH_SERVICES",
+    },
+    outputPath: "/tmp/deviludo-e2e/evidence.zip", outputSha256: `sha256:${"c".repeat(64)}`, outputSizeBytes: 1024,
+    regressionOutputPath: "/tmp/deviludo-e2e/regression.json",
+    regressionOutputSha256: `sha256:${"f".repeat(64)}`, regressionOutputSizeBytes: 512,
+  };
+  assert.doesNotThrow(() => validateExecutionReceipt(job, Object.freeze(receipt)));
+  assert.throws(() => validateExecutionReceipt(job, Object.freeze({
+    ...receipt,
+    evidence: Object.freeze({ ...receipt.evidence, softwareRenderer: false, frameRateEnforced: true }),
+  })), /PASSED_GATE/);
 });
 
 test("ordinary E2E tests never receive signing authority", async () => {

@@ -186,6 +186,7 @@ test("local startup returns with E2E preparation in the background and exposes c
   assert.match(dashboard, /role="progressbar"/);
   assert.doesNotMatch(bootstrap, /"cosign"/);
   assert.match(bootstrap, /function executeVisible/);
+  assert.match(bootstrap, /function bootstrapForegroundStage[\s\S]*showHeartbeat: false/);
   assert.match(startup, /Still working:[\s\S]*formatDuration/);
   assert.match(startup, /"--wait",\s*"--no-deps",\s*\.\.\.localRuntimeServices/);
   assert.match(startup, /"run", "--rm", "--no-deps", "minio-init"/);

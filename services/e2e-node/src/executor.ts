@@ -17,6 +17,7 @@ import type { E2eNodeConfig } from "./config";
 import type { CoreE2eClient } from "./core-client";
 import type { IsolationController } from "./isolation";
 import { e2eExecutableInvocation, e2eToolPath } from "./tool-path";
+import { E2E_PERFORMANCE_THRESHOLDS } from "../../../scripts/e2e-performance.mjs";
 
 export async function executeE2eJob(
   rawJob: unknown,
@@ -228,6 +229,9 @@ export function validateExecutionReceipt(job: JobProtocolV4, receipt: Readonly<R
       || !nullableNonNegativeNumber(evidence.p95InputResponseMs)
       || !nullableNonNegativeNumber(evidence.maxInputResponseMs)
       || typeof evidence.performancePassed !== "boolean"
+      || typeof evidence.softwareRenderer !== "boolean"
+      || typeof evidence.frameRateEnforced !== "boolean"
+      || evidence.frameRateEnforced !== !evidence.softwareRenderer
       || !metricsMatchSampleCount(Number(evidence.frameRateSampleCount), [evidence.minimumFps, evidence.p10Fps, evidence.medianFps])
       || !metricsMatchSampleCount(Number(evidence.inputResponseSampleCount), [evidence.p95InputResponseMs, evidence.maxInputResponseMs])
       || typeof evidence.testManifestDigest !== "string" || !/^sha256:[0-9a-f]{64}$/.test(evidence.testManifestDigest)
@@ -245,11 +249,7 @@ export function validateExecutionReceipt(job: JobProtocolV4, receipt: Readonly<R
         || Number(evidence.frameRateSampleCount) < 5
         || Number(evidence.inputResponseSampleCount) < 2
         || evidence.performancePassed !== true
-        || Number(evidence.minimumFps) < 5
-        || Number(evidence.p10Fps) < 20
-        || Number(evidence.medianFps) < 30
-        || Number(evidence.p95InputResponseMs) > 1_500
-        || Number(evidence.maxInputResponseMs) > 3_000
+        || !passesPerformanceEvidenceGate(evidence)
         || Number(evidence.videoCount) < 1
         || Number(evidence.coveredPlayerRequirementCount) !== Number(evidence.playerRequirementCount)))
       || typeof evidence.hasVisualDiff !== "boolean"
@@ -301,6 +301,8 @@ function diagnoseE2eEvidenceReceipt(
     if (!nullableNonNegativeNumber(evidence[field])) return `NON_NEGATIVE_METRIC:${field}`;
   }
   if (typeof evidence.performancePassed !== "boolean") return "PERFORMANCE_RESULT";
+  if (typeof evidence.softwareRenderer !== "boolean" || typeof evidence.frameRateEnforced !== "boolean"
+    || evidence.frameRateEnforced !== !evidence.softwareRenderer) return "PERFORMANCE_ENVIRONMENT";
   if (!metricsMatchSampleCount(Number(evidence.frameRateSampleCount), [evidence.minimumFps, evidence.p10Fps, evidence.medianFps])) {
     return "FRAME_RATE_METRIC_COUNT";
   }
@@ -322,8 +324,7 @@ function diagnoseE2eEvidenceReceipt(
     || Number(evidence.interactiveJourneyCount) < 1 || Number(evidence.realInputCount) < 2
     || Number(evidence.adaptiveSuccessCount) < 2 || Number(evidence.frameRateSampleCount) < 5
     || Number(evidence.inputResponseSampleCount) < 2 || evidence.performancePassed !== true
-    || Number(evidence.minimumFps) < 5 || Number(evidence.p10Fps) < 20 || Number(evidence.medianFps) < 30
-    || Number(evidence.p95InputResponseMs) > 1_500 || Number(evidence.maxInputResponseMs) > 3_000
+    || !passesPerformanceEvidenceGate(evidence)
     || Number(evidence.videoCount) < 1
     || Number(evidence.coveredPlayerRequirementCount) !== Number(evidence.playerRequirementCount))) return "PASSED_GATE";
   if (typeof evidence.hasVisualDiff !== "boolean") return "VISUAL_DIFF";
@@ -344,6 +345,22 @@ function metricsMatchSampleCount(count: number, metrics: readonly unknown[]): bo
   return count === 0
     ? metrics.every(value => value === null)
     : metrics.every(value => typeof value === "number" && Number.isFinite(value));
+}
+
+function passesPerformanceEvidenceGate(evidence: Readonly<Record<string, unknown>>): boolean {
+  const softwareRenderer = evidence.softwareRenderer === true;
+  const inputP95Limit = softwareRenderer
+    ? E2E_PERFORMANCE_THRESHOLDS.softwareRendererMaximumP95InputResponseMs
+    : E2E_PERFORMANCE_THRESHOLDS.maximumP95InputResponseMs;
+  const inputMaximumLimit = softwareRenderer
+    ? E2E_PERFORMANCE_THRESHOLDS.softwareRendererMaximumInputResponseMs
+    : E2E_PERFORMANCE_THRESHOLDS.maximumInputResponseMs;
+  const inputPassed = Number(evidence.p95InputResponseMs) <= inputP95Limit
+    && Number(evidence.maxInputResponseMs) <= inputMaximumLimit;
+  if (!inputPassed) return false;
+  return softwareRenderer || (Number(evidence.minimumFps) >= E2E_PERFORMANCE_THRESHOLDS.criticalMinimumFps
+    && Number(evidence.p10Fps) >= E2E_PERFORMANCE_THRESHOLDS.minimumP10Fps
+    && Number(evidence.medianFps) >= E2E_PERFORMANCE_THRESHOLDS.minimumMedianFps);
 }
 
 async function runUnprivileged(
