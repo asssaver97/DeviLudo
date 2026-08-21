@@ -4,6 +4,7 @@ import { createHash } from "node:crypto";
 import { access, appendFile, copyFile, lstat, mkdir, readFile, readdir, rm, symlink, writeFile } from "node:fs/promises";
 import { dirname, relative, resolve, sep } from "node:path";
 import { StringDecoder } from "node:string_decoder";
+import { assertBuildAssetsReferenced } from "./build-asset-usage.mjs";
 
 let progressWrites = Promise.resolve();
 let agentOutputBuffer = "";
@@ -124,7 +125,10 @@ async function runAgent(plan) {
     performanceInstruction,
     "agent.json must contain exactly the current assetManifest planning object plus any non-test metadata required by the source; it must not contain testManifest.",
     "assetManifest uses schemaVersion deviludo.asset-manifest.v1 and 1-500 unique items. Each item needs assetKey, assetType, description, generationPrompt, nullable frameCount, and nullable dimensions.",
-    "Plan every image used by gameplay or UI. The game must load controlled assets from res://assets/generated/<assetKey>.png, .jpg, or .webp and use a deliberate placeholder only when none exists.",
+    "Plan every image required by the complete player-facing gameplay and UI. The game must load controlled assets from res://assets/generated/<assetKey>.png, .jpg, or .webp and use a deliberate placeholder only when none exists.",
+    "Every planned generated asset key must be referenced by executable runtime source and visibly connected to the actual scene or control that uses it. Remove a genuinely unnecessary plan item instead of leaving generated art on disk; the controlled Builder rejects materialized generated assets that only appear in agent.json, tests, tools, comments, or documentation.",
+    "Build a composed production UI, not an engineering dashboard: the current objective and next action must be clear, required art cannot be replaced by blank/dash slots or raw state dumps, textures must be cropped/aspected for their real controls, and secondary diagnostics must not dominate gameplay.",
+    "Make layout and input resolution-independent across window sizes and display scales. Use containers/anchors and root-viewport coordinate conversion; do not tie hit testing or UI placement to one fixed pixel resolution.",
     "Make every planned and existing asset visibly connected to the actual scene or control that uses it; the E2E node will verify texture placement, visibility, aspect, and gameplay/UI context.",
   ];
   const specificationInstructions = [
@@ -399,7 +403,7 @@ async function discoverSourceImages(root) {
 
 function sourceImageAliases(strippedPath) {
   const aliases = new Set([strippedPath]);
-  for (const prefix of ["assets/generated/", "assets/", "art/", "images/"]) {
+  for (const prefix of ["assets/generated/", "assets/", "art/", "images/", "data/sprites/", "data/generated_assets/"]) {
     if (strippedPath.startsWith(prefix)) aliases.add(strippedPath.slice(prefix.length));
   }
   return aliases;
@@ -931,6 +935,7 @@ async function materializeBuildAssets(plan) {
     schemaVersion: "deviludo.generated-assets.v1",
     items: manifestItems,
   }), "utf8");
+  await assertBuildAssetsReferenced("/workspace/project", assets.map(asset => asset.assetKey));
   emitProgress("PHASE", `已同步 ${assets.length} 个图片素材到构建源码`);
 }
 

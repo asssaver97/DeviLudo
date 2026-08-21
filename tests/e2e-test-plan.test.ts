@@ -54,7 +54,7 @@ test("the cross-platform E2E planner does not multiply Provider or CLI failures"
       assert.deepEqual(input.outputSchema?.required, ["semanticJourney", "coverage"]);
       assert.deepEqual(
         (input.outputSchema?.properties as Record<string, Record<string, unknown>>)?.semanticJourney?.required,
-        ["startAction", "primaryAction", "completeAction", "primaryProgressKey", "completionProgressKey", "changeTargetId"],
+        ["startAction", "startRequirementIds", "coreActions"],
       );
       assert.deepEqual(
         (input.outputSchema?.properties as Record<string, Record<string, unknown>>)?.coverage?.required,
@@ -91,17 +91,31 @@ test("the cross-platform E2E planner never executes generic semantic controls as
     apiKey: "{}",
     model: "fixture-model",
     codexRunner: async () => JSON.stringify({
-      semanticJourney: {
-        startAction: semanticAction("new-game"),
-        primaryAction: semanticAction("primary-control"),
-        completeAction: semanticAction("complete-loop"),
-        primaryProgressKey: "core-loop-action",
-        completionProgressKey: "core-loop-completion",
-        changeTargetId: "game-viewport",
-      },
+      semanticJourney: semanticJourney("new-game", ["primary-control", "game-viewport", "complete-loop"]),
       coverage: planningCoverage(),
     }),
   }), /plan still contains schema-template controls/);
+});
+
+test("the cross-platform E2E planner rejects a start-primary-end shortcut without intermediate play", async () => {
+  await assert.rejects(generateE2eTestPlan({
+    context: planningContext(),
+    runtime: "CODEX_CLI",
+    baseUrl: "https://fixture.invalid",
+    apiKey: "{}",
+    model: "fixture-model",
+    codexRunner: async () => JSON.stringify({
+      semanticJourney: {
+        startAction: semanticAction("start-campaign"),
+        startRequirementIds: ["req-feature-001-fb00a811"],
+        coreActions: [
+          { action: semanticAction("roll-dice"), progressKey: "move-budget", changeTargetId: "roll-dice", coversRequirementIds: ["req-feature-001-fb00a811"] },
+          { action: semanticAction("end-turn-button"), progressKey: "campaign-turn", changeTargetId: "end-turn-button", coversRequirementIds: ["req-acceptance-001-213f5922"] },
+        ],
+      },
+      coverage: planningCoverage(),
+    }),
+  }), /invalid project plan/);
 });
 
 test("the cross-platform E2E planner deterministically repairs a semantic journey envelope", async () => {
@@ -112,14 +126,7 @@ test("the cross-platform E2E planner deterministically repairs a semantic journe
     apiKey: "{}",
     model: "fixture-model",
     codexRunner: async () => JSON.stringify({
-      semanticJourney: {
-        startAction: semanticAction("start-campaign"),
-        primaryAction: semanticAction("territory-board"),
-        completeAction: semanticAction("end-turn-button"),
-        primaryProgressKey: "campaign-action",
-        completionProgressKey: "campaign-turn",
-        changeTargetId: "territory-board",
-      },
+      semanticJourney: semanticJourney("start-campaign", ["territory-board", "confirm-territory", "end-turn-button"]),
       coverage: planningCoverage(),
     }),
   });
@@ -151,14 +158,9 @@ test("the cross-platform E2E planner prefers the prior successful regression reg
     apiKey: "{}",
     model: "fixture-model",
     codexRunner: async () => JSON.stringify({
-      semanticJourney: {
-        startAction: semanticAction("start-campaign"),
-        primaryAction: semanticAction("roll-dice"),
-        completeAction: semanticAction("end-turn-button"),
-        primaryProgressKey: "move-budget",
-        completionProgressKey: "campaign-turn",
-        changeTargetId: "tiny-roll-indicator",
-      },
+      semanticJourney: semanticJourney("start-campaign", ["roll-dice", "campaign-board", "end-turn-button"], [
+        "move-budget", "campaign-position", "campaign-turn",
+      ], ["tiny-roll-indicator", "campaign-board", "end-turn-button"]),
       coverage: planningCoverage(),
     }),
   });
@@ -177,7 +179,10 @@ test("the cross-platform E2E planner revalidates and reuses a matching project s
     baseUrl: "https://fixture.invalid",
     apiKey: "{}",
     model: "fixture-model",
-    testFixture: true,
+    codexRunner: async () => JSON.stringify({
+      semanticJourney: semanticJourney("start-campaign", ["territory-board", "confirm-territory", "end-turn-button"]),
+      coverage: planningCoverage(),
+    }),
   });
   let attempts = 0;
   const plan = await generateE2eTestPlan({
@@ -214,6 +219,25 @@ function planningContext() {
 
 function semanticAction(targetId: string) {
   return { type: "click", targetId, key: null, button: null, durationMs: null };
+}
+
+function semanticJourney(
+  startTargetId: string,
+  actionTargetIds: readonly string[],
+  progressKeys: readonly string[] = ["campaign-action", "campaign-confirmation", "campaign-turn"],
+  changeTargetIds: readonly string[] = actionTargetIds,
+) {
+  const requirementIds = ["req-feature-001-fb00a811", "req-acceptance-001-213f5922"];
+  return {
+    startAction: semanticAction(startTargetId),
+    startRequirementIds: [requirementIds[0]],
+    coreActions: actionTargetIds.map((targetId, index) => ({
+      action: semanticAction(targetId),
+      progressKey: progressKeys[index],
+      changeTargetId: changeTargetIds[index],
+      coversRequirementIds: [requirementIds[Math.min(index, requirementIds.length - 1)]],
+    })),
+  };
 }
 
 function planningCoverage() {

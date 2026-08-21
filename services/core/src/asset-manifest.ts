@@ -460,7 +460,7 @@ function safeSourceImagePath(value: string): boolean {
 
 function sourceImageAliases(strippedPath: string): ReadonlySet<string> {
   const aliases = new Set([strippedPath]);
-  for (const prefix of ["assets/generated/", "assets/", "art/", "images/"]) {
+  for (const prefix of ["assets/generated/", "assets/", "art/", "images/", "data/sprites/", "data/generated_assets/"]) {
     if (strippedPath.startsWith(prefix)) aliases.add(strippedPath.slice(prefix.length));
   }
   return aliases;

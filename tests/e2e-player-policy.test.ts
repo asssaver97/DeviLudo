@@ -308,6 +308,10 @@ describe("E2E Test Agent policy", () => {
     assert.match(providerInput, /title\/menu over passive artwork is valid/);
     assert.match(providerInput, /tutorial, help, pause, confirmation, or settings modal over a dimmed active game is also a legitimate topmost interaction layer/);
     assert.match(providerInput, /active board, HUD, tutorial, gameplay controls/);
+    assert.match(providerInput, /blank or dash-only asset slots/);
+    assert.match(providerInput, /raw debug\/state dump replacing a composed player-facing HUD/);
+    assert.match(providerInput, /Take one state-changing gameplay action per decision/);
+    assert.match(providerInput, /Entering a session is setup, not completion/);
     assert.match(providerInput, /Never click through, dismiss, or work around a PRODUCT_DEFECT/);
     assert.match(providerInput, /Never send a keyboard key through a blocking overlay/);
     assert.match(providerInput, /Do not guess SPACE, ENTER, movement keys/);

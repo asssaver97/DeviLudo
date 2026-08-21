@@ -60,6 +60,7 @@ const MIN_FULL_FRAME_TRANSITION_PIXELS = 32;
 const MAX_SCREENSHOTS = 64;
 const ADAPTIVE_ROLLOUT_COUNT = 3;
 const ADAPTIVE_REQUIRED_SUCCESSES = 2;
+const MIN_ADAPTIVE_GAMEPLAY_PROGRESS_TRANSITIONS = 2;
 const streamProtocol = process.env.DEVILUDO_E2E_STREAM_PROTOCOL === "1";
 const policyInput = streamProtocol ? createInterface({ input: process.stdin, crlfDelay: Infinity }) : null;
 const policyLines = policyInput?.[Symbol.asyncIterator]() ?? null;
@@ -695,6 +696,9 @@ async function runAdaptiveRollout(gamePackage, manifest, rolloutIndex) {
   const visitedProbeDigests = new Set();
   let currentProbe;
   let initialProbe;
+  let gameplayBaselineProbe = null;
+  let gameplayProgressTransitionCount = 0;
+  const gameplayProgressDigests = new Set();
   let madeVerifiedProgress = false;
   let noProgressDecisions = 0;
   let policyWaitMs = 0;
@@ -711,6 +715,10 @@ async function runAdaptiveRollout(gamePackage, manifest, rolloutIndex) {
     currentProbe = await waitForProbeSnapshot(probePath, { sessionNonce, pid: launched.pid }, PROBE_TIMEOUT_MS);
     initialProbe = currentProbe;
     visitedProbeDigests.add(probeStateDigest(currentProbe));
+    if (isGameplayReadyProbe(currentProbe)) {
+      gameplayBaselineProbe = currentProbe;
+      gameplayProgressDigests.add(jsonDigest(currentProbe.progress));
+    }
     for (let decisionIndex = 0; decisionIndex < contract.maxDecisions; decisionIndex += 1) {
       assertPlatformBudget();
       if (activeRolloutMs() > contract.rolloutTimeoutMs) { failureCode = "ADAPTIVE_TIMEOUT"; break; }
@@ -719,8 +727,9 @@ async function runAdaptiveRollout(gamePackage, manifest, rolloutIndex) {
       // otherwise it may act twice on a modal that has already closed.
       if (decisionIndex > 0) await delay(ADAPTIVE_VISUAL_SETTLE_MS);
       if (!await processAlive(launched.pid)) { failureCode = "GAME_CRASHED"; break; }
-      const success = evaluateProbeAssertions(contract.successAssertions, initialProbe, currentProbe);
-      if (decisions.length > 0 && madeVerifiedProgress && success.every(assertion => assertion.passed)) {
+      const success = evaluateProbeAssertions(contract.successAssertions, gameplayBaselineProbe ?? initialProbe, currentProbe);
+      if (adaptiveCoreLoopProven({ decisions, madeVerifiedProgress, gameplayBaselineProbe,
+        gameplayProgressTransitionCount, success })) {
         outcome = "PASSED"; failureCode = null; break;
       }
       const failed = evaluateProbeAssertions(contract.failureAssertions, null, currentProbe);
@@ -797,6 +806,19 @@ async function runAdaptiveRollout(gamePackage, manifest, rolloutIndex) {
         inputResponses.push({ runId, stepId: `decision-${decisionIndex}`, source: "ADAPTIVE", latencyMs: inputResponseMs });
       }
       if (changed) madeVerifiedProgress = true;
+      if (gameplayBaselineProbe === null && isGameplayReadyProbe(after)) {
+        // Starting a session establishes the gameplay baseline. It is not a
+        // completed core-loop operation and must never satisfy CHANGED merely
+        // because the progress key was absent from the clean menu snapshot.
+        gameplayBaselineProbe = after;
+        gameplayProgressDigests.add(jsonDigest(after.progress));
+      } else if (nativeEvents.length > 0 && changed && isGameplayProgressTransition(currentProbe, after)) {
+        const progressDigest = jsonDigest(after.progress);
+        if (!gameplayProgressDigests.has(progressDigest)) {
+          gameplayProgressDigests.add(progressDigest);
+          gameplayProgressTransitionCount += 1;
+        }
+      }
       const reachedNewState = changed && !visitedProbeDigests.has(afterDigest);
       visitedProbeDigests.add(afterDigest);
       if (reachedNewState) {
@@ -813,7 +835,7 @@ async function runAdaptiveRollout(gamePackage, manifest, rolloutIndex) {
           recoveryDecisionIndex = decisionIndex;
         }
       }
-      const successOracle = evaluateProbeAssertions(contract.successAssertions, initialProbe, after);
+      const successOracle = evaluateProbeAssertions(contract.successAssertions, gameplayBaselineProbe ?? initialProbe, after);
       const failureOracle = evaluateProbeAssertions(contract.failureAssertions, null, after);
       const record = {
         schema: "deviludo.e2e-trajectory-event", rolloutIndex, decisionIndex, seed,
@@ -836,8 +858,10 @@ async function runAdaptiveRollout(gamePackage, manifest, rolloutIndex) {
       currentProbe = after;
       if (decision.status === "UNRECOVERABLE") { failureCode = "PLAYER_UNRECOVERABLE"; break; }
       if (decision.status === "GOAL_REACHED"
-        && (!madeVerifiedProgress
-          || !evaluateProbeAssertions(contract.successAssertions, initialProbe, currentProbe).every(assertion => assertion.passed))) {
+        && !adaptiveCoreLoopProven({
+          decisions, madeVerifiedProgress, gameplayBaselineProbe, gameplayProgressTransitionCount,
+          success: evaluateProbeAssertions(contract.successAssertions, gameplayBaselineProbe ?? initialProbe, currentProbe),
+        })) {
         failureCode = "ORACLE_REJECTED_GOAL";
         break;
       }
@@ -847,8 +871,10 @@ async function runAdaptiveRollout(gamePackage, manifest, rolloutIndex) {
         break;
       }
     }
-    const finalSuccess = evaluateProbeAssertions(contract.successAssertions, initialProbe, currentProbe);
-    if (decisions.length > 0 && madeVerifiedProgress && finalSuccess.every(assertion => assertion.passed)) {
+    const finalSuccess = evaluateProbeAssertions(contract.successAssertions, gameplayBaselineProbe ?? initialProbe, currentProbe);
+    if (adaptiveCoreLoopProven({
+      decisions, madeVerifiedProgress, gameplayBaselineProbe, gameplayProgressTransitionCount, success: finalSuccess,
+    })) {
       outcome = "PASSED"; failureCode = null;
     }
     const finalScreenshot = join(workspace, "evidence-screenshots", `${runId}-final.png`);
@@ -870,8 +896,29 @@ async function runAdaptiveRollout(gamePackage, manifest, rolloutIndex) {
   trajectories.push({ id: runId, path: trajectoryPath });
   return Object.freeze({
     rolloutIndex, seed, outcome, failureCode, decisionCount: decisions.length,
+    gameplayProgressTransitionCount,
     durationMs: Date.now() - rolloutStartedAt, decisions: Object.freeze(decisions),
   });
+}
+
+function adaptiveCoreLoopProven(input) {
+  return input.decisions.length > 0
+    && input.madeVerifiedProgress
+    && input.gameplayBaselineProbe !== null
+    && input.gameplayProgressTransitionCount >= MIN_ADAPTIVE_GAMEPLAY_PROGRESS_TRANSITIONS
+    && input.success.every(assertion => assertion.passed);
+}
+
+function isGameplayReadyProbe(probe) {
+  return probe?.state?.screen_mode === "PLAYING"
+    && probe.state.session_active === true
+    && probe.state.gameplay_input_enabled === true
+    && probe.state.blocking_layer_count === 0;
+}
+
+function isGameplayProgressTransition(before, after) {
+  return isGameplayReadyProbe(before)
+    && jsonDigest(before.progress) !== jsonDigest(after.progress);
 }
 
 async function solidifyRegression(gamePackage, manifest, successfulRollouts) {
@@ -1504,10 +1551,13 @@ function assertManifest(value) {
       if (feature.coreJourney === true && feature.category === "core-loop" && feature.launchProfile.type === "FRESH") {
         const checkpoints = events.filter(event => event.type === "checkpoint");
         const roles = new Set(checkpoints.map(event => event.role));
-        const intents = new Set(events.filter(isActionEvent).map(event => event.intent));
+        const coreActions = events.filter(isActionEvent);
+        const postEntryActions = coreActions.filter(event => !["START_SESSION", "NAVIGATION"].includes(event.intent));
+        const intents = new Set(coreActions.map(event => event.intent));
         if (["START", "READY", "PROGRESS", "COMPLETION"].every(role => roles.has(role))
           && checkpoints.some(event => event.visualMode === "STABLE_REPLAY")
-          && intents.has("PRIMARY_ACTION") && intents.has("COMPLETE_LOOP")
+          && postEntryActions.length >= 3
+          && intents.has("PRIMARY_ACTION") && intents.has("FEATURE_ACTION") && intents.has("COMPLETE_LOOP")
           && validateCoreJourneyLifecycle(events)) hasCore = true;
       }
     } else if (feature.verificationMethod === "visual") {

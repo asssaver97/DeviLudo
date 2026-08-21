@@ -4,6 +4,7 @@ COPY --from=node-runtime /usr/local /usr/local
 RUN useradd --create-home --uid 10001 task
 COPY services/sandbox-executor/task-runner.mjs /usr/local/bin/deviludo-task
 COPY services/sandbox-executor/task-io.mjs /usr/local/bin/deviludo-task-io
+COPY services/sandbox-executor/build-asset-usage.mjs /usr/local/bin/build-asset-usage.mjs
 RUN chmod 0555 /usr/local/bin/deviludo-task /usr/local/bin/deviludo-task-io
 USER 10001:10001
 ENTRYPOINT ["/usr/local/bin/deviludo-task"]

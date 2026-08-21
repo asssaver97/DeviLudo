@@ -274,6 +274,10 @@ test("the production Guest, relay, executor and node all wire the lifecycle guar
   assert.match(guest, /if \(action\.type === "wait"\) return Number\.isInteger\(action\.duration_ms\)/);
   assert.match(guest, /if \(decision\.stateChanged !== true\) continue;/);
   assert.match(guest, /const visitedProbeDigests = new Set\(\);[\s\S]*reachedNewState = changed && !visitedProbeDigests\.has\(afterDigest\)[\s\S]*returned to a previously observed state; no verified progress/);
+  assert.match(guest, /let gameplayBaselineProbe = null;[\s\S]*Starting a session establishes the gameplay baseline/);
+  assert.match(guest, /evaluateProbeAssertions\(contract\.successAssertions, gameplayBaselineProbe \?\? initialProbe, currentProbe\)/);
+  assert.match(guest, /gameplayProgressTransitionCount >= MIN_ADAPTIVE_GAMEPLAY_PROGRESS_TRANSITIONS/);
+  assert.match(guest, /postEntryActions\.length >= 3[\s\S]*intents\.has\("FEATURE_ACTION"\)/);
   assert.match(guest, /if \(decisionIndex > 0\) await delay\(ADAPTIVE_VISUAL_SETTLE_MS\)/);
   assert.match(guest, /materializeRegressionActionWhenReady\([\s\S]*afterSequence: probe\.sequence[\s\S]*Math\.min\(1_000, remaining\)/);
   assert.match(guest, /isRegressionTargetUnavailable\(error\)[\s\S]*E2E control \..+is missing or duplicated/);

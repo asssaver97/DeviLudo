@@ -25,14 +25,17 @@ export const E2E_TEST_PLAN_OUTPUT_SCHEMA = Object.freeze({
     semanticJourney: {
       type: "object",
       additionalProperties: false,
-      required: ["startAction", "primaryAction", "completeAction", "primaryProgressKey", "completionProgressKey", "changeTargetId"],
+      required: ["startAction", "startRequirementIds", "coreActions"],
       properties: {
         startAction: semanticActionOutputSchema(),
-        primaryAction: semanticActionOutputSchema(),
-        completeAction: semanticActionOutputSchema(),
-        primaryProgressKey: { type: "string", pattern: "^[A-Za-z0-9][A-Za-z0-9_.-]{0,199}$" },
-        completionProgressKey: { type: "string", pattern: "^[A-Za-z0-9][A-Za-z0-9_.-]{0,199}$" },
-        changeTargetId: { type: "string", pattern: "^[a-z0-9][a-z0-9-]{0,119}$" },
+        startRequirementIds: {
+          type: "array", maxItems: 500, uniqueItems: true,
+          items: { type: "string", pattern: "^[a-z0-9][a-z0-9-]{0,119}$" },
+        },
+        coreActions: {
+          type: "array", minItems: 3, maxItems: 32,
+          items: semanticCoreActionOutputSchema(),
+        },
       },
     },
     coverage: {
@@ -71,6 +74,23 @@ function semanticActionOutputSchema(): Readonly<Record<string, unknown>> {
           "LEFT_SHOULDER", "RIGHT_SHOULDER", "DPAD_UP", "DPAD_DOWN", "DPAD_LEFT", "DPAD_RIGHT"] },
       ),
     ],
+  };
+}
+
+function semanticCoreActionOutputSchema(): Readonly<Record<string, unknown>> {
+  return {
+    type: "object",
+    additionalProperties: false,
+    required: ["action", "progressKey", "changeTargetId", "coversRequirementIds"],
+    properties: {
+      action: semanticActionOutputSchema(),
+      progressKey: { type: "string", pattern: "^[A-Za-z0-9][A-Za-z0-9_.-]{0,199}$" },
+      changeTargetId: { type: "string", pattern: "^[a-z0-9][a-z0-9-]{0,119}$" },
+      coversRequirementIds: {
+        type: "array", minItems: 1, maxItems: 500, uniqueItems: true,
+        items: { type: "string", pattern: "^[a-z0-9][a-z0-9-]{0,119}$" },
+      },
+    },
   };
 }
 
@@ -201,6 +221,13 @@ function assertConcreteProjectPlan(manifest: TestManifest): void {
     || /"(?:targetId|changeTargetId)":"(?:primary-control|complete-loop|game-viewport)"/i.test(serialized)) {
     throw new Error("plan still contains schema-template controls instead of project semantic targets");
   }
+  const coreJourney = manifest.features.find(feature => feature.coreJourney === true
+    && feature.category === "core-loop" && feature.verificationMethod === "interactive");
+  const coreActions = coreJourney?.interactionScript?.events.filter(event => event.type !== "checkpoint" && event.type !== "wait") ?? [];
+  const postEntryActions = coreActions.filter(event => event.intent !== "START_SESSION" && event.intent !== "NAVIGATION");
+  if (postEntryActions.length < 3 || !postEntryActions.some(event => event.intent === "FEATURE_ACTION")) {
+    throw new Error("plan collapses the playable core loop into setup and completion without enough real intermediate operations");
+  }
 }
 
 function projectContractPlan(
@@ -211,6 +238,7 @@ function projectContractPlan(
   if (!validateTestManifest(value)) return null;
   try {
     assertFrozenRequirements(value, requirements);
+    assertConcreteProjectPlan(value);
   } catch {
     return null;
   }
@@ -261,24 +289,127 @@ function manifestFromSemanticJourney(
   requirements: ReturnType<typeof specificationRequirementCatalog>,
   verifiedChangeTargetId: string | null = null,
 ): TestManifest | null {
-  if (!isRecord(value) || !isStablePath(value.primaryProgressKey)
-    || !isStablePath(value.completionProgressKey) || !isStableId(value.changeTargetId)) return null;
-  const primaryProgress = { source: "PROGRESS", key: value.primaryProgressKey, operator: "CHANGED" } as const;
-  const completionProgress = { source: "PROGRESS", key: value.completionProgressKey, operator: "CHANGED" } as const;
+  if (!isRecord(value) || !Array.isArray(value.startRequirementIds)
+    || !Array.isArray(value.coreActions) || value.coreActions.length < 3 || value.coreActions.length > 32) return null;
+  const requirementIds = requirements.map(requirement => requirement.requirementId);
+  const requirementSet = new Set(requirementIds);
+  const rawCoreActions = value.coreActions;
+  const startRequirementIds = normalizedRequirementIds(value.startRequirementIds, requirementSet, true);
   const start = semanticEnvelopeAction(value.startAction, "START_SESSION");
-  const primary = semanticEnvelopeAction(value.primaryAction, "PRIMARY_ACTION");
-  const complete = semanticEnvelopeAction(value.completeAction, "COMPLETE_LOOP");
-  if (!start || !primary || !complete) return null;
-  return repairGeneratedManifest({
-    adaptivePlayer: { successAssertions: [completionProgress] },
-    features: [{ interactionScript: { events: [
-      start,
-      { ...primary, postconditions: [primaryProgress] },
-      { type: "checkpoint", role: "PROGRESS", changeTargetId: verifiedChangeTargetId ?? value.changeTargetId, assertions: [primaryProgress] },
-      { ...complete, postconditions: [completionProgress] },
-      { type: "checkpoint", role: "COMPLETION", assertions: [completionProgress] },
-    ] } }],
-  }, requirements);
+  if (!start || startRequirementIds === null) return null;
+  const coreActions = rawCoreActions.map((item, index) => normalizeSemanticCoreAction(
+    item, index, rawCoreActions.length, requirementSet,
+    index === 0 ? verifiedChangeTargetId : null,
+  ));
+  if (coreActions.some(item => item === null)) return null;
+  const normalizedCoreActions = coreActions as readonly NonNullable<(typeof coreActions)[number]>[];
+  const covered = new Set([...startRequirementIds, ...normalizedCoreActions.flatMap(item => item.coversRequirementIds)]);
+  if (requirementIds.some(requirementId => !covered.has(requirementId))) return null;
+  const coreRequirementIds = requirements.filter(item => item.source === "CORE_LOOP").map(item => item.requirementId);
+  if (coreRequirementIds.some(requirementId => !covered.has(requirementId))) return null;
+
+  const events: Record<string, unknown>[] = [
+    { type: "checkpoint", id: "project-start", role: "START", visualMode: "STABLE_REPLAY", assertions: CORE_START_ASSERTIONS },
+    { ...start, stepId: "planned-start-session", coversRequirementIds: startRequirementIds, postconditions: CORE_READY_ASSERTIONS },
+    { type: "checkpoint", id: "project-ready", role: "READY", visualMode: "STABLE_REPLAY", assertions: CORE_READY_ASSERTIONS },
+  ];
+  for (const item of normalizedCoreActions) {
+    events.push(item.action);
+    events.push(item.checkpoint);
+  }
+  const completionProgress = normalizedCoreActions.at(-1)!.progress;
+  const actions: readonly Record<string, unknown>[] = [
+    start,
+    ...normalizedCoreActions.map(item => item.action as Readonly<Record<string, unknown>>),
+  ];
+  const usesGamepad = actions.some(action => String(action.type).startsWith("gamepad_"));
+  const usesKeyboard = actions.some(action => ["key_tap", "key_hold"].includes(String(action.type)));
+  const usesPointer = actions.some(action => ["click", "double_click", "drag", "scroll", "text_input"].includes(String(action.type)));
+  const inputProfiles = [
+    ...(usesKeyboard || usesPointer ? ["KEYBOARD_MOUSE" as const] : []),
+    ...(usesGamepad ? ["GAMEPAD" as const] : []),
+  ];
+  const allowedActions = [
+    ...(usesKeyboard ? ["KEYBOARD" as const] : []),
+    ...(usesPointer ? ["POINTER" as const] : []),
+    ...(usesGamepad ? ["GAMEPAD" as const] : []),
+  ];
+  const candidate: unknown = {
+    schema: "deviludo.test-manifest",
+    inputProfiles,
+    primaryInputProfile: inputProfiles[0],
+    adaptivePlayer: {
+      goal: "Start a clean game and complete every player-visible operation in one real project core-loop boundary",
+      requirementIds,
+      allowedActions,
+      successAssertions: [completionProgress],
+      failureAssertions: [{ source: "STATE", key: "fatal-error", operator: "EQUALS", value: true }],
+      rolloutTimeoutMs: 300_000,
+      maxDecisions: 40,
+      seedStrategy: "STABLE_PROJECT_PLATFORM",
+    },
+    requirements,
+    features: [{
+      id: "project-core-loop",
+      requirementIds,
+      category: "core-loop",
+      description: "Exercise every semantic operation in the current project's clean core-loop path",
+      verificationMethod: "interactive",
+      timeoutMs: 300_000,
+      coreJourney: true,
+      launchProfile: { type: "FRESH" },
+      interactionScript: { events },
+    }],
+  };
+  return validateTestManifest(candidate) ? candidate : null;
+}
+
+function normalizeSemanticCoreAction(
+  value: unknown,
+  index: number,
+  count: number,
+  requirementIds: ReadonlySet<string>,
+  verifiedChangeTargetId: string | null,
+) {
+  if (!isRecord(value) || !isStablePath(value.progressKey) || !isStableId(value.changeTargetId)) return null;
+  const coversRequirementIds = normalizedRequirementIds(value.coversRequirementIds, requirementIds, false);
+  if (coversRequirementIds === null) return null;
+  const intent = index === 0 ? "PRIMARY_ACTION" : index === count - 1 ? "COMPLETE_LOOP" : "FEATURE_ACTION";
+  const action = semanticEnvelopeAction(value.action, intent);
+  if (!action) return null;
+  const progress = { source: "PROGRESS", key: value.progressKey, operator: "CHANGED" } as const;
+  const suffix = String(index + 1).padStart(2, "0");
+  const checkpointRole = index === 0 ? "PROGRESS" : index === count - 1 ? "COMPLETION" : "ACTION";
+  const changeTargetId = verifiedChangeTargetId ?? value.changeTargetId;
+  return Object.freeze({
+    progress,
+    coversRequirementIds,
+    action: Object.freeze({
+      ...action,
+      stepId: `planned-core-action-${suffix}`,
+      coversRequirementIds,
+      postconditions: [progress],
+    }),
+    checkpoint: Object.freeze({
+      type: "checkpoint",
+      id: `project-core-action-${suffix}`,
+      role: checkpointRole,
+      visualMode: "DYNAMIC",
+      changeTargetId,
+      assertions: [progress],
+    }),
+  });
+}
+
+function normalizedRequirementIds(
+  value: unknown,
+  allowed: ReadonlySet<string>,
+  allowEmpty: boolean,
+): readonly string[] | null {
+  if (!Array.isArray(value) || (!allowEmpty && value.length < 1) || value.length > 500
+    || value.some(item => typeof item !== "string" || !allowed.has(item))
+    || new Set(value).size !== value.length) return null;
+  return Object.freeze([...value] as string[]);
 }
 
 function regressionChangeTarget(value: unknown): string | null {
@@ -562,6 +693,8 @@ function safeBaselinePlan(
         { type: "checkpoint", id: "fixture-ready", role: "READY", visualMode: "STABLE_REPLAY", assertions: playing },
         { type: "click", stepId: "fixture-primary", intent: "PRIMARY_ACTION", targetId: "primary-control", coversRequirementIds: requirementIds, postconditions: [progress] },
         { type: "checkpoint", id: "fixture-progress", role: "PROGRESS", visualMode: "DYNAMIC", changeTargetId: "game-viewport", assertions: [progress] },
+        { type: "click", stepId: "fixture-feature", intent: "FEATURE_ACTION", targetId: "primary-control", coversRequirementIds: requirementIds, postconditions: [progress] },
+        { type: "checkpoint", id: "fixture-action", role: "ACTION", visualMode: "DYNAMIC", changeTargetId: "game-viewport", assertions: [progress] },
         { type: "click", stepId: "fixture-complete", intent: "COMPLETE_LOOP", targetId: "complete-loop", coversRequirementIds: requirementIds, postconditions: [progress] },
         { type: "checkpoint", id: "fixture-complete", role: "COMPLETION", visualMode: "STABLE_REPLAY", assertions: [progress] },
       ] },
@@ -586,12 +719,13 @@ function testPlanPrompt(
   requirements: ReturnType<typeof specificationRequirementCatalog>,
 ): string {
   return [
-    "You are the cross-platform E2E Test Agent. Identify the current project's semantic core-loop controls and progress signal; Development Agent does not own this plan.",
+    "You are the cross-platform E2E Test Agent. Identify every player-visible operation needed to complete the current project's semantic core loop; Development Agent does not own this plan.",
     "Return only one JSON object shaped {semanticJourney,coverage}. No markdown and no testManifest.",
     "Core will freeze requirements and deterministically build the full validated manifest. You own only project-specific semanticJourney values.",
-    "semanticJourney needs startAction, primaryAction, completeAction, primaryProgressKey, completionProgressKey, and changeTargetId. Each action needs type plus targetId/key/button/durationMs; set fields unused by that action to null.",
+    "semanticJourney needs startAction, startRequirementIds, and coreActions. startRequirementIds lists only frozen requirement IDs actually proven by entering a clean playable session and may be empty.",
+    "coreActions is the ordered post-entry player path and must contain at least three items. Decompose combined prose into every real operation: selection, roll/draw, target choice, movement, interaction/confirmation, turn completion, AI/response resolution, and result settlement whenever the approved core loop requires them. Never collapse a multi-operation loop into one generic primary action plus end turn.",
+    "Each coreActions item contains action, progressKey, changeTargetId, and coversRequirementIds. action needs type plus targetId/key/button/durationMs; set unused fields to null. progressKey must change because of that exact action, changeTargetId must be the visible Probe region whose pixels change, and coversRequirementIds must list only frozen requirements that action genuinely proves. The final item must cross the approved loop-completion boundary.",
     "Prefer click or double_click with a real Probe control targetId. Use key_tap/key_hold or gamepad_button_tap/gamepad_button_hold only when the game has no Probe control for that action. Do not use coordinates.",
-    "primaryProgressKey must be the real Probe PROGRESS key changed immediately by primaryAction. completionProgressKey must be the real Probe PROGRESS key changed by completeAction. They may differ. changeTargetId must be the real visible Probe control/region whose rendered pixels change after primaryAction.",
     "The plan must test the installed/exported game through real OS keyboard, pointer, and declared gamepad input. Probe data is an oracle only and must never invoke actions.",
     "When priorRegressionTrace is present, treat its previously successful semantic targets, actions, and assertions as the strongest evidence. Preserve them unless the current specification explicitly changes that player path.",
     "coverage.regressionOperations lists prior and full-project player operations exercised; coverage.regressionUi lists menus, overlays, HUD/layout and clean-start regressions; coverage.changeImpact lists every risk from the current iteration versus the previous specification; coverage.assetApplication lists every materialized assetKey and the plan must verify it is loaded, visible in the correct game/UI context, correctly cropped/aspected, and not merely present on disk.",
