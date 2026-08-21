@@ -1053,6 +1053,8 @@ test("image assets gate the first build and Steam upload remains an explicit loc
   assert.match(daemon, /Build asset inputs do not satisfy the fixed materialization contract/);
   assert.match(runner, /materializeBuildAssets\(plan\)/);
   assert.match(runner, /assertBuildAssetsReferenced\("\/workspace\/project", assets\.map\(asset => asset\.assetKey\)\)/);
+  assert.match(runner, /BLOCKING BUILD REPAIR/);
+  assert.match(runner, /ASSET USAGE REPAIR:[\s\S]*connect that generated texture visibly[\s\S]*remove the genuinely unnecessary key/);
   assert.match(runner, /res:\/\/assets\/generated\/\$\{asset\.assetKey\}\.\$\{extension\}/);
   assert.match(runner, /"data\/sprites\/", "data\/generated_assets\/"/);
   assert.match(await readFile(new URL("../services/core/src/asset-manifest.ts", import.meta.url), "utf8"), /"data\/sprites\/", "data\/generated_assets\/"/);

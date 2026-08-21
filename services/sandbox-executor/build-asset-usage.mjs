@@ -19,7 +19,7 @@ export async function assertBuildAssetsReferenced(projectRoot, assetKeys) {
   if (missing.length === 0) return;
   const shown = missing.slice(0, 20).join(", ");
   const omitted = missing.length > 20 ? ` (+${missing.length - 20} more)` : "";
-  throw new Error(`Generated assets were materialized but are not referenced by runtime source: ${shown}${omitted}`);
+  throw new Error(`BUILD_PRODUCT: Generated assets were materialized but are not referenced by runtime source: ${shown}${omitted}`);
 }
 
 export async function missingBuildAssetReferences(projectRoot, assetKeys) {

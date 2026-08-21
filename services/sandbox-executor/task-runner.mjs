@@ -126,7 +126,7 @@ async function runAgent(plan) {
     "agent.json must contain exactly the current assetManifest planning object plus any non-test metadata required by the source; it must not contain testManifest.",
     "assetManifest uses schemaVersion deviludo.asset-manifest.v1 and 1-500 unique items. Each item needs assetKey, assetType, description, generationPrompt, nullable frameCount, and nullable dimensions.",
     "Plan every image required by the complete player-facing gameplay and UI. The game must load controlled assets from res://assets/generated/<assetKey>.png, .jpg, or .webp and use a deliberate placeholder only when none exists.",
-    "Every planned generated asset key must be referenced by executable runtime source and visibly connected to the actual scene or control that uses it. Remove a genuinely unnecessary plan item instead of leaving generated art on disk; the controlled Builder rejects materialized generated assets that only appear in agent.json, tests, tools, comments, or documentation.",
+    "Every planned generated asset key must be referenced by executable runtime source and visibly connected to the actual scene or control that uses it. Remove a genuinely unnecessary plan item instead of leaving generated art on disk; the controlled Builder rejects materialized generated assets that only appear in agent.json, tests, tools, comments, or documentation and automatically returns the failure to this Agent for repair.",
     "Build a composed production UI, not an engineering dashboard: the current objective and next action must be clear, required art cannot be replaced by blank/dash slots or raw state dumps, textures must be cropped/aspected for their real controls, and secondary diagnostics must not dominate gameplay.",
     "Make layout and input resolution-independent across window sizes and display scales. Use containers/anchors and root-viewport coordinate conversion; do not tie hit testing or UI placement to one fixed pixel resolution.",
     "Make every planned and existing asset visibly connected to the actual scene or control that uses it; the E2E node will verify texture placement, visibility, aspect, and gameplay/UI context.",
@@ -157,8 +157,12 @@ async function runAgent(plan) {
   const upstreamRepairInstructions = upstreamFailureSummary && !e2eRepairContext ? [
     "",
     "BLOCKING BUILD REPAIR: fix the trusted controlled Builder failure before any broad audit, feature work, refactor, or explanation.",
-    "Open the exact file and line named by the diagnostic first, make the smallest concrete source correction, and preserve unrelated working behavior and the validated test manifest.",
+    "Open the exact file and line named by the diagnostic first when one is present, make the smallest concrete source correction, and preserve unrelated working behavior.",
     "Do not dismiss, rewrite, or work around the diagnostic. The next controlled Builder will rerun the real Godot import and export checks.",
+    ...(upstreamFailureSummary.includes("Generated assets were materialized but are not referenced by runtime source") ? [
+      "ASSET USAGE REPAIR: for every asset key named by the Builder, either connect that generated texture visibly to its intended production scene/control and runtime code, or remove the genuinely unnecessary key from agent.json assetManifest. Do not add a comment, test-only string, hidden node, or dead preload merely to satisfy the reference check.",
+      "Prefer completing the incomplete player-facing UI with the named art when its planned description matches a visible feature. If the item was a duplicate of an existing source image, keep the existing image reference and remove the duplicate generated plan item.",
+    ] : []),
     `Builder failure summary: ${JSON.stringify(upstreamFailureSummary)}`,
     "",
   ] : [];

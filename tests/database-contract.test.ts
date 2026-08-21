@@ -60,6 +60,10 @@ test("every workspace-owned table fails closed with forced row isolation", async
   assert.match(sql, /CREATE TABLE deviludo\.job_progress_events[\s\S]*event_kind IN \('PHASE', 'AGENT_OUTPUT', 'GUIDANCE_ACCEPTED', 'COMPLETED', 'FAILED'\)/);
   assert.match(sql, /CREATE TABLE deviludo\.job_guidance_messages[\s\S]*state IN \('PENDING', 'DELIVERED', 'REJECTED'\)/);
   assert.match(sql, /FUNCTION deviludo\.fail_job[\s\S]*job\.kind = 'AGENT_GENERATION'[\s\S]*job_guidance_messages[\s\S]*state = 'PENDING'/);
+  assert.match(sql, /automatic_build_repair := job\.kind = 'ARTIFACT_BUILD'[\s\S]*position\('BUILD_PRODUCT:' IN p_reason\) > 0/);
+  assert.match(sql, /terminal := automatic_build_repair OR job\.attempt >= job\.max_attempts/);
+  assert.match(sql, /automatic_build_repair[\s\S]*'repairFailureJobId', job\.id[\s\S]*'repairFailureKind', 'ARTIFACT_BUILD'[\s\S]*'repairFailureSummary', left\(p_reason, 1800\)/);
+  assert.match(sql, /snapshot_artifact_build_assets[\s\S]*source_job\.receipt #> '\{assetManifest,items\}'[\s\S]*latest_agent\.state = 'SUCCEEDED'/);
   assert.match(sql, /FUNCTION deviludo\.recover_expired_jobs[\s\S]*replay_guidance AS[\s\S]*job_guidance_messages/);
   assert.match(sql, /FUNCTION deviludo\.recover_expired_jobs[\s\S]*failed_workflows AS[\s\S]*UPDATE deviludo\.workflow_instances[\s\S]*terminal\.workflow_id/);
   assert.match(sql, /GRANT SELECT, UPDATE ON deviludo\.job_guidance_messages TO deviludo_claim_executor/);
@@ -158,6 +162,22 @@ test("manual Agent reruns retain product-failure evidence and reset the bounded 
   assert.match(buildMigration, /'repairFailureJobId', repair_build_job_id/);
   assert.match(buildMigration, /'repairFailureKind', 'ARTIFACT_BUILD'/);
   assert.match(buildMigration, /'repairFailureSummary', repair_build_summary/);
+});
+
+test("deterministic Builder product failures automatically return to Agent repair", async () => {
+  const migration = await readFile(
+    new URL("../infra/postgres/migrations/055_automatic_build_product_repair.sql", import.meta.url),
+    "utf8",
+  );
+  assert.match(migration, /CREATE OR REPLACE FUNCTION deviludo\.fail_job/);
+  assert.match(migration, /position\('BUILD_PRODUCT:' IN p_reason\) > 0/);
+  assert.match(migration, /terminal := automatic_build_repair OR job\.attempt >= job\.max_attempts/);
+  assert.match(migration, /'repairFailureJobId', job\.id/);
+  assert.match(migration, /'repairFailureKind', 'ARTIFACT_BUILD'/);
+  assert.match(migration, /'repairAttempt', repair_count \+ 1/);
+  assert.match(migration, /repair_count < 5/);
+  assert.match(migration, /CREATE OR REPLACE FUNCTION deviludo\.snapshot_artifact_build_assets/);
+  assert.match(migration, /source_job\.receipt #> '\{assetManifest,items\}'/);
 });
 
 test("Core stores only opaque local actor identifiers and has no identity authority", async () => {

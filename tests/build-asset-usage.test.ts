@@ -29,7 +29,7 @@ test("generated build assets must be referenced by runtime source", async () => 
     assert.deepEqual(missing, ["regions/manifest-only", "skills/comment-only", "skills/test-only"]);
     await assert.rejects(
       assertBuildAssetsReferenced(root, ["backgrounds/menu", "regions/manifest-only"]),
-      /Generated assets were materialized but are not referenced by runtime source: regions\/manifest-only/,
+      /BUILD_PRODUCT: Generated assets were materialized but are not referenced by runtime source: regions\/manifest-only/,
     );
   } finally {
     await rm(root, { recursive: true, force: true });
