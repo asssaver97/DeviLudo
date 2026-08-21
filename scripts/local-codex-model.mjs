@@ -1,15 +1,17 @@
 const MODEL_NAME = /^[A-Za-z0-9][A-Za-z0-9._:/-]{0,199}$/;
+const CLIENT_VERSION = /^[0-9]+\.[0-9]+\.[0-9]+(?:[-+][0-9A-Za-z.-]+)?$/;
 
 /**
  * Resolve the host Codex account's current default from its non-secret model
- * catalogue. Local task containers intentionally receive only official login
- * data, so freezing this slug keeps an already selected account default usable
- * when the optional catalogue refresh is temporarily unavailable.
+ * catalogue. The desktop app and CLI can update their shared non-secret cache
+ * independently, so a structurally valid catalogue from another current client
+ * version remains usable. Freezing its top visible slug keeps isolated calls
+ * from depending on an optional catalogue refresh at startup.
  */
 export function selectCodexAccountDefaultModel(cache, cliVersion) {
   if (!cache || typeof cache !== "object" || Array.isArray(cache)
-    || typeof cliVersion !== "string" || !cliVersion
-    || cache.client_version !== cliVersion
+    || typeof cliVersion !== "string" || !CLIENT_VERSION.test(cliVersion)
+    || typeof cache.client_version !== "string" || !CLIENT_VERSION.test(cache.client_version)
     || !Array.isArray(cache.models)) {
     return null;
   }

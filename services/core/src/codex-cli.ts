@@ -1,7 +1,7 @@
 import { spawn, type ChildProcess } from "node:child_process";
-import { mkdtemp, readFile, readdir, rm, stat, writeFile } from "node:fs/promises";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { mkdir, mkdtemp, readFile, readdir, rm, stat, writeFile } from "node:fs/promises";
+import { homedir, tmpdir } from "node:os";
+import { isAbsolute, join, resolve, sep } from "node:path";
 import { CODEX_ACCOUNT_DEFAULT_MODEL } from "@/lib/product/contracts";
 
 export type CodexPromptInput = Readonly<{
@@ -28,7 +28,9 @@ export type CodexImageRunner = (input: CodexImageInput) => Promise<Buffer>;
 const MAX_CODEX_IMAGE_BYTES = 8 * 1024 * 1024;
 const MAX_CODEX_OUTPUT_BYTES = 8 * 1024 * 1024;
 const MAX_CODEX_DIAGNOSTIC_BYTES = 64 * 1024;
+const MAX_CODEX_MODELS_CACHE_BYTES = 8 * 1024 * 1024;
 const CODEX_TERMINATION_GRACE_MS = 2_000;
+const CODEX_CLIENT_VERSION = /^\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?$/;
 
 export function resolveCodexExecutionModel(
   requestedModel: string,
@@ -42,12 +44,25 @@ export function resolveCodexExecutionModel(
   return accountDefaultModel;
 }
 
+export function resolveCodexRunRoot(
+  configuredRoot = process.env.DEVILUDO_CODEX_RUN_ROOT?.trim() || join(homedir(), ".deviludo", "codex-runs"),
+  temporaryRoot = tmpdir(),
+): string {
+  if (!isAbsolute(configuredRoot)) throw new Error("Codex run root must be absolute");
+  const root = resolve(configuredRoot);
+  const temporary = resolve(temporaryRoot);
+  if (root === temporary || root.startsWith(`${temporary}${sep}`)) {
+    throw new Error("Codex run root cannot be inside the system temporary directory");
+  }
+  return root;
+}
+
 export async function runCodexPrompt(input: CodexPromptInput): Promise<string> {
   validateAuth(input.authJson);
-  const root = await mkdtemp(join(tmpdir(), "deviludo-codex-"));
+  const root = await createCodexRun("prompt");
   try {
-    await writeFile(join(root, "auth.json"), input.authJson, { mode: 0o600 });
-    const args = codexExecutionArgs();
+    const hasStaticCatalog = await prepareCodexHome(root, input.authJson);
+    const args = codexExecutionArgs(hasStaticCatalog ? join(root, "model-catalog.json") : null);
     const executionModel = resolveCodexExecutionModel(input.model);
     if (executionModel !== CODEX_ACCOUNT_DEFAULT_MODEL) args.push("-m", executionModel);
     if (input.reasoningEffort) {
@@ -84,10 +99,10 @@ export async function runCodexPrompt(input: CodexPromptInput): Promise<string> {
  */
 export async function runCodexImage(input: CodexImageInput): Promise<Buffer> {
   validateAuth(input.authJson);
-  const root = await mkdtemp(join(tmpdir(), "deviludo-codex-image-"));
+  const root = await createCodexRun("image");
   try {
-    await writeFile(join(root, "auth.json"), input.authJson, { mode: 0o600 });
-    const args = codexExecutionArgs();
+    const hasStaticCatalog = await prepareCodexHome(root, input.authJson);
+    const args = codexExecutionArgs(hasStaticCatalog ? join(root, "model-catalog.json") : null);
     args.push("--enable", "image_generation", "--sandbox", "read-only");
     const executionModel = resolveCodexExecutionModel(input.model);
     if (executionModel !== CODEX_ACCOUNT_DEFAULT_MODEL) args.push("-m", executionModel);
@@ -108,8 +123,74 @@ export async function runCodexImage(input: CodexImageInput): Promise<Buffer> {
   }
 }
 
-function codexExecutionArgs(): string[] {
-  return [
+async function createCodexRun(prefix: "prompt" | "image"): Promise<string> {
+  const parent = resolveCodexRunRoot();
+  await mkdir(parent, { recursive: true, mode: 0o700 });
+  return mkdtemp(join(parent, `${prefix}-`));
+}
+
+async function prepareCodexHome(root: string, authJson: string): Promise<boolean> {
+  await writeFile(join(root, "auth.json"), authJson, { mode: 0o600 });
+  return installCodexModelsCache(root);
+}
+
+/**
+ * Seed each isolated CODEX_HOME with the host CLI's non-secret model catalogue.
+ * `model_catalog_json` selects Codex's static model manager; a cache alone still
+ * starts an asynchronous provider refresh even when `-m` is explicit. The API
+ * cache omits one protocol field, so default it conservatively when producing
+ * the static startup catalogue.
+ */
+export async function installCodexModelsCache(
+  codexHome: string,
+  source = process.env.DEVILUDO_CODEX_MODELS_CACHE_FILE?.trim() ?? "",
+  bundledCliVersion = process.env.DEVILUDO_BUNDLED_CODEX_CLI_VERSION?.trim() ?? "",
+): Promise<boolean> {
+  if (!source) return false;
+  if (!isAbsolute(source)) throw new Error("Codex models cache path must be absolute");
+  if (bundledCliVersion && !CODEX_CLIENT_VERSION.test(bundledCliVersion)) {
+    throw new Error("Bundled Codex CLI version metadata is invalid");
+  }
+  const metadata = await stat(source);
+  if (!metadata.isFile() || metadata.size < 2 || metadata.size > MAX_CODEX_MODELS_CACHE_BYTES) {
+    throw new Error("Codex models cache file is invalid");
+  }
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(await readFile(source, "utf8"));
+  } catch {
+    throw new Error("Codex models cache file is invalid");
+  }
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)
+    || !Array.isArray((parsed as { models?: unknown }).models)
+    || typeof (parsed as { client_version?: unknown }).client_version !== "string"
+    || !CODEX_CLIENT_VERSION.test((parsed as { client_version: string }).client_version)) {
+    throw new Error("Codex models cache file is invalid");
+  }
+  if (bundledCliVersion
+    && (parsed as { client_version: string }).client_version !== bundledCliVersion) {
+    throw new Error("Codex models cache does not match the bundled CLI version");
+  }
+  const models = (parsed as { models: unknown[] }).models.map(model => {
+    if (!model || typeof model !== "object" || Array.isArray(model)) {
+      throw new Error("Codex models cache file is invalid");
+    }
+    const supportsParallelToolCalls = (model as { supports_parallel_tool_calls?: unknown }).supports_parallel_tool_calls;
+    if (supportsParallelToolCalls !== undefined && typeof supportsParallelToolCalls !== "boolean") {
+      throw new Error("Codex models cache file is invalid");
+    }
+    return {
+      ...model as Record<string, unknown>,
+      supports_parallel_tool_calls: supportsParallelToolCalls ?? false,
+    };
+  });
+  await writeFile(join(codexHome, "models_cache.json"), JSON.stringify(parsed), { mode: 0o600 });
+  await writeFile(join(codexHome, "model-catalog.json"), JSON.stringify({ models }), { mode: 0o600 });
+  return true;
+}
+
+function codexExecutionArgs(modelCatalog: string | null): string[] {
+  const args = [
     "exec",
     "--ephemeral",
     "--json",
@@ -122,6 +203,8 @@ function codexExecutionArgs(): string[] {
     "--config", "model_providers.deviludo_chatgpt.supports_websockets=false",
     "--skip-git-repo-check",
   ];
+  if (modelCatalog) args.push("--config", `model_catalog_json=${modelCatalog}`);
+  return args;
 }
 
 function codexImageInstruction(prompt: string): string {

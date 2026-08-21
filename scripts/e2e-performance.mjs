@@ -65,7 +65,11 @@ export function summarizeE2ePerformance({ frameRateRuns = [], inputResponses = [
         minimumFps: measured.length ? round(Math.min(...measured)) : null,
         p10Fps: percentile(measured, 0.1),
         medianFps: percentile(measured, 0.5),
-        samples: Object.freeze(measured.map(round)),
+        // Array.prototype.map passes (value, index, array). Passing `round`
+        // directly made the sample index act as the decimal precision; long
+        // runs eventually overflowed 10 ** digits and serialized NaN metrics
+        // as null, so otherwise valid E2E receipts failed validation.
+        samples: Object.freeze(measured.map(value => round(value))),
       });
     });
   const softwareRendererRunCount = normalizedRuns.filter(run => run.softwareRenderer).length;

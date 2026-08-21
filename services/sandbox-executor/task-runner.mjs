@@ -141,6 +141,8 @@ async function runAgent(plan) {
     "Open only the exact source/test file named by the evidence first, locate the reported symbol or behavior, and make the smallest concrete source edit immediately. Inspect wider code only when that edit genuinely requires it.",
     "This is an automatic repair pass after a trusted E2E product failure. Reproduce the reported game behavior from the existing source, fix the game content, scripts, scenes, or project configuration, and preserve unrelated working behavior.",
     "Do not dismiss the report as infrastructure failure and do not merely rewrite the report. Make concrete source changes that address its diagnostics.",
+    "When present, report.json interactionContracts contains the complete frozen native-input contract for each interactive feature. It is read-only evidence owned by the E2E node; never copy it into agent.json or modify the E2E plan.",
+    "After fixing the named failure, when its interactionContract is present, perform one bounded consistency pass over that same failed feature: every remaining targetId and changeTargetId must resolve to exactly one truthful production Probe control when its step is reachable, and every remaining postcondition/checkpoint key must be published from the real resulting state after native input. Fix directly related omissions now so the same frozen journey does not fail one step at a time. Do not finish until this pass is complete. Do not audit other features, invent test-only controls/state, or execute future actions.",
     "If the report contains PACKAGE_WINDOW_TIMEOUT, treat an alive process that never creates an operable window as a product startup failure. Inspect the included startup logs first and fix the initialization loop, resource error storm, or blocking startup work; preserve a real player launch and window.",
     ...((e2eRepairContext.report ?? e2eRepairContext).performance?.passed === false ? [
       "PERFORMANCE REPAIR: use report.performance to identify the slow run and input step, then fix the real runtime hotspot in game scripts, scenes, resources, rendering, or project configuration. Profile the narrow path suggested by the evidence; preserve gameplay behavior and visual quality unless the approved design itself causes the hotspot.",
@@ -905,9 +907,20 @@ async function runGodotBuild(plan) {
 }
 
 async function godotCommand(arguments_) {
-  const result = await command("godot", arguments_, godotEnvironment());
+  let result;
+  try {
+    result = await command("godot", arguments_, godotEnvironment());
+  } catch (error) {
+    const reason = error instanceof Error ? error.message : "Godot command failed";
+    if (/SCRIPT ERROR|Parse Error|Failed to load script|Invalid call|Invalid assignment/i.test(reason)) {
+      throw new Error(`BUILD_PRODUCT: Godot project validation failed: ${reason}`, { cause: error });
+    }
+    throw error;
+  }
   const errors = godotErrorLines(result.stdout, result.stderr);
-  if (errors.length > 0) throw new Error(`Godot reported script errors despite exit code 0: ${errors.join(" | ")}`);
+  if (errors.length > 0) {
+    throw new Error(`BUILD_PRODUCT: Godot reported script errors despite exit code 0: ${errors.join(" | ")}`);
+  }
   return result;
 }
 

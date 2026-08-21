@@ -5,12 +5,15 @@ x-core: &core
   build:
     context: ..
     dockerfile: Dockerfile.core
+    args:
+      NPM_CONFIG_REGISTRY: ${DEVILUDO_NPM_REGISTRY:-https://registry.npmjs.org/}
   restart: unless-stopped
   read_only: true
   cap_drop: ["ALL"]
   security_opt: ["no-new-privileges:true"]
   tmpfs:
     - /tmp:rw,noexec,nosuid,nodev,size=64m,mode=0700,uid=1001,gid=1001
+    - /var/lib/deviludo-codex:rw,noexec,nosuid,nodev,size=64m,mode=0700,uid=1001,gid=1001
   environment: &core-environment
     NODE_ENV: development
     DEVILUDO_DATABASE_SET_ROLE: "1"
@@ -21,6 +24,8 @@ x-core: &core
     DEVILUDO_CODEX_LOGIN_METHOD: "${DEVILUDO_CODEX_LOGIN_METHOD:-SIGNED_OUT}"
     DEVILUDO_CODEX_ACCOUNT_DEFAULT_MODEL: "${DEVILUDO_CODEX_ACCOUNT_DEFAULT_MODEL:-}"
     DEVILUDO_CODEX_AUTH_FILE: /run/deviludo-codex/auth.json
+    DEVILUDO_CODEX_MODELS_CACHE_FILE: /run/deviludo-codex/models_cache.json
+    DEVILUDO_CODEX_RUN_ROOT: /var/lib/deviludo-codex
     DEVILUDO_CODEX_PROXY_URL: http://provider-proxy:3128
     DEVILUDO_SANDBOX_CONCURRENCY: ${DEVILUDO_SANDBOX_CONCURRENCY:-1}
     DEVILUDO_TELEMETRY_ENDPOINT: ${DEVILUDO_TELEMETRY_ENDPOINT:-}
@@ -109,6 +114,7 @@ services:
       - vault-tokens:/run/deviludo-vault:ro
       - projects-data:/var/lib/deviludo-projects
       - ../.deviludo/local/codex-auth.json:/run/deviludo-codex/auth.json:ro
+      - ../.deviludo/local/codex-models-cache.json:/run/deviludo-codex/models_cache.json:ro
     depends_on:
       postgres:
         condition: service_healthy
@@ -154,6 +160,7 @@ services:
     volumes:
       - projects-data:/var/lib/deviludo-projects
       - vault-tokens:/run/deviludo-vault:ro
+      - ../.deviludo/local/codex-models-cache.json:/run/deviludo-codex/models_cache.json:ro
     depends_on:
       postgres:
         condition: service_healthy
@@ -430,6 +437,8 @@ services:
     build:
       context: ..
       dockerfile: Dockerfile.agent-codex
+      args:
+        NPM_CONFIG_REGISTRY: ${DEVILUDO_NPM_REGISTRY:-https://registry.npmjs.org/}
     profiles: ["images"]
 
   agent-fixture-image:

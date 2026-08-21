@@ -38,6 +38,22 @@ test("smooth exported gameplay passes the fixed performance gate after warmup", 
   assert.equal(result.frameRate.minimumFps, 55);
 });
 
+test("long gameplay keeps every frame-rate metric finite", () => {
+  const result = summarizeE2ePerformance({
+    frameRateRuns: [{
+      runId: "long-adaptive-run",
+      samples: Array.from({ length: 600 }, (_, index) => 55 + (index % 6)),
+    }],
+    inputResponses: responses,
+  });
+  assert.equal(result.frameRate.sampleCount, 599);
+  assert.equal(result.frameRate.runs[0].samples.every(Number.isFinite), true);
+  assert.equal(Number.isFinite(result.frameRate.minimumFps), true);
+  assert.equal(Number.isFinite(result.frameRate.p10Fps), true);
+  assert.equal(Number.isFinite(result.frameRate.medianFps), true);
+  assert.doesNotThrow(() => JSON.stringify(result));
+});
+
 test("sustained low frame rate is a product stutter failure", () => {
   const result = summarizeE2ePerformance({
     frameRateRuns: [{ runId: "core", samples: [60, 18, 17, 19, 16, 18, 17] }],

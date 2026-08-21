@@ -77,7 +77,7 @@ CREATE TABLE deviludo.schema_metadata (
   applied_at timestamptz NOT NULL DEFAULT clock_timestamp()
 );
 INSERT INTO deviludo.schema_metadata(singleton, baseline, compatibility, current_version)
-VALUES (true, '001', 'deviludo-self-hosted-v1', '055_automatic_build_product_repair');
+VALUES (true, '001', 'deviludo-self-hosted-v1', '056_freeze_e2e_test_plan');
 
 -- Every post-baseline change is immutable and checksummed. Fresh databases are
 -- created from this full snapshot and then stamp the migrations incorporated by
@@ -767,6 +767,24 @@ CREATE TABLE deviludo.e2e_policy_decisions (
   FOREIGN KEY (workspace_id, job_id) REFERENCES deviludo.jobs(workspace_id, id) ON DELETE CASCADE
 );
 
+CREATE TABLE deviludo.e2e_test_plans (
+  workspace_id uuid NOT NULL,
+  workflow_id uuid NOT NULL,
+  project_id uuid NOT NULL,
+  target_platform deviludo.server_os NOT NULL,
+  test_manifest jsonb NOT NULL CHECK (
+    jsonb_typeof(test_manifest) = 'object'
+    AND test_manifest->>'schema' = 'deviludo.test-manifest'
+  ),
+  test_manifest_digest text NOT NULL CHECK (test_manifest_digest ~ '^sha256:[0-9a-f]{64}$'),
+  created_at timestamptz NOT NULL DEFAULT clock_timestamp(),
+  PRIMARY KEY (workspace_id, workflow_id, target_platform),
+  FOREIGN KEY (workspace_id, workflow_id)
+    REFERENCES deviludo.workflow_instances(workspace_id, id) ON DELETE CASCADE,
+  FOREIGN KEY (workspace_id, project_id)
+    REFERENCES deviludo.projects(workspace_id, id) ON DELETE CASCADE
+);
+
 CREATE TABLE deviludo.e2e_regression_traces (
   workspace_id uuid NOT NULL,
   project_id uuid NOT NULL,
@@ -1087,7 +1105,7 @@ BEGIN
     'agent_installations', 'workflow_instances', 'steam_releases', 'workflow_events',
     'jobs', 'external_signals', 'job_progress_events', 'job_guidance_messages',
     'operation_receipts', 'workspace_claim_fairness',
-    'artifacts', 'artifact_inputs', 'object_cleanup_queue', 'e2e_policy_locks', 'e2e_policy_decisions',
+    'artifacts', 'artifact_inputs', 'object_cleanup_queue', 'e2e_policy_locks', 'e2e_policy_decisions', 'e2e_test_plans',
     'e2e_regression_traces', 'executor_receipts', 'project_creation_receipts',
     'asset_manifests', 'asset_items'
   ]
@@ -3389,6 +3407,7 @@ GRANT SELECT, INSERT, UPDATE, DELETE ON
   deviludo.asset_manifests, deviludo.asset_items,
   deviludo.e2e_policy_locks, deviludo.e2e_policy_decisions, deviludo.e2e_regression_traces
   TO deviludo_api;
+GRANT SELECT, INSERT ON deviludo.e2e_test_plans TO deviludo_api;
 GRANT SELECT, INSERT, UPDATE ON deviludo.instance_agent_settings TO deviludo_api;
 -- complete_job is SECURITY INVOKER. Agent settlement checks whether the selected
 -- connection has an image model before it decides between asset preparation and

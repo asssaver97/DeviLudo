@@ -5,7 +5,7 @@ import test from "node:test";
 import { selectCodexAccountDefaultModel } from "../scripts/local-codex-model.mjs";
 import { resolveCodexExecutionModel } from "@/services/core/src/codex-cli";
 
-test("local Codex default selection requires the current CLI cache and picks the visible priority", () => {
+test("local Codex default selection accepts a valid shared cache and picks the visible priority", () => {
   const cache = {
     client_version: "0.147.0",
     models: [
@@ -15,7 +15,8 @@ test("local Codex default selection requires the current CLI cache and picks the
     ],
   };
   assert.equal(selectCodexAccountDefaultModel(cache, "0.147.0"), "gpt-primary");
-  assert.equal(selectCodexAccountDefaultModel(cache, "0.148.0"), null);
+  assert.equal(selectCodexAccountDefaultModel(cache, "0.148.0"), "gpt-primary");
+  assert.equal(selectCodexAccountDefaultModel({ ...cache, client_version: "invalid" }, "0.147.0"), null);
   assert.equal(selectCodexAccountDefaultModel({ ...cache, models: [{ slug: "bad model", priority: 1 }] }, "0.147.0"), null);
 });
 

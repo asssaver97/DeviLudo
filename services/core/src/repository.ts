@@ -622,6 +622,71 @@ export class CoreRepository {
     });
   }
 
+  async readFrozenE2eTestPlan(input: Readonly<{
+    workspaceId: string;
+    workflowId: string;
+    projectId: string;
+    platform: ServerOperatingSystem;
+  }>): Promise<Readonly<{ testManifest: Readonly<Record<string, unknown>>; testManifestDigest: string }> | null> {
+    return this.database.withWorkspace(input.workspaceId, async client => {
+      const result = await client.query<{
+        project_id: string;
+        test_manifest: Record<string, unknown>;
+        test_manifest_digest: string;
+      }>(
+        `SELECT project_id::text, test_manifest, test_manifest_digest
+           FROM deviludo.e2e_test_plans
+          WHERE workspace_id = $1::uuid AND workflow_id = $2::uuid
+            AND target_platform = $3::deviludo.server_os`,
+        [input.workspaceId, input.workflowId, input.platform],
+      );
+      const row = result.rows[0];
+      if (!row) return null;
+      if (row.project_id !== input.projectId) throw new Error("Frozen E2E test plan belongs to another project");
+      return Object.freeze({
+        testManifest: Object.freeze(row.test_manifest),
+        testManifestDigest: row.test_manifest_digest,
+      });
+    });
+  }
+
+  async freezeE2eTestPlan(input: Readonly<{
+    workspaceId: string;
+    workflowId: string;
+    projectId: string;
+    platform: ServerOperatingSystem;
+    testManifest: Readonly<Record<string, unknown>>;
+    testManifestDigest: string;
+  }>): Promise<Readonly<{ testManifest: Readonly<Record<string, unknown>>; testManifestDigest: string }>> {
+    return this.database.withWorkspace(input.workspaceId, async client => {
+      await client.query(
+        `INSERT INTO deviludo.e2e_test_plans(
+           workspace_id, workflow_id, project_id, target_platform, test_manifest, test_manifest_digest
+         ) VALUES ($1::uuid, $2::uuid, $3::uuid, $4::deviludo.server_os, $5::jsonb, $6)
+         ON CONFLICT (workspace_id, workflow_id, target_platform) DO NOTHING`,
+        [input.workspaceId, input.workflowId, input.projectId, input.platform,
+          JSON.stringify(input.testManifest), input.testManifestDigest],
+      );
+      const frozen = await client.query<{
+        project_id: string;
+        test_manifest: Record<string, unknown>;
+        test_manifest_digest: string;
+      }>(
+        `SELECT project_id::text, test_manifest, test_manifest_digest
+           FROM deviludo.e2e_test_plans
+          WHERE workspace_id = $1::uuid AND workflow_id = $2::uuid
+            AND target_platform = $3::deviludo.server_os`,
+        [input.workspaceId, input.workflowId, input.platform],
+      );
+      const row = frozen.rows[0];
+      if (!row || row.project_id !== input.projectId) throw new Error("Frozen E2E test plan could not be read back");
+      return Object.freeze({
+        testManifest: Object.freeze(row.test_manifest),
+        testManifestDigest: row.test_manifest_digest,
+      });
+    });
+  }
+
   /**
    * Projects created before E2E planning moved to the test node can contain a
    * semantic test contract in their last successful Agent manifest. It is an

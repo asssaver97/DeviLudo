@@ -1583,6 +1583,12 @@ async function finish(outcome, failureDomain, summary, manifest) {
     schema: E2E_EVIDENCE_SCHEMA, jobId, platform, action, outcome, failureDomain, summary,
     packageLaunches: launchRecords,
     planningCoverage: activePlanningCoverage,
+    interactionContracts: (manifest?.features ?? [])
+      .filter(feature => feature?.verificationMethod === "interactive")
+      .map(feature => ({
+        featureId: feature.id,
+        interactionScript: feature.interactionScript,
+      })),
     coverage: {
       headlessCheckCount: headlessChecks.size,
       interactiveJourneyCount: interactiveJourneys.size,

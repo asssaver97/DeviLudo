@@ -60,6 +60,7 @@ test("the cross-platform E2E planner does not multiply Provider or CLI failures"
         (input.outputSchema?.properties as Record<string, Record<string, unknown>>)?.coverage?.required,
         ["regressionOperations", "regressionUi", "changeImpact", "assetApplication"],
       );
+      assert.doesNotMatch(JSON.stringify(input.outputSchema), /uniqueItems/);
       assert.match(input.prompt, /Return only one JSON object shaped \{semanticJourney,coverage\}/);
       throw new Error("fixture Provider unavailable");
     },
@@ -137,6 +138,41 @@ test("the cross-platform E2E planner deterministically repairs a semantic journe
   ]);
   assert.match(JSON.stringify(plan.testManifest), /"targetId":"territory-board"/);
   assert.doesNotMatch(JSON.stringify(plan.testManifest), /"targetId":"(?:primary-control|complete-loop)"|fixture-/);
+});
+
+test("the cross-platform E2E planner gives the Test Agent one bounded correction for omitted frozen requirements", async () => {
+  let attempts = 0;
+  const plan = await generateE2eTestPlan({
+    context: planningContext(),
+    runtime: "CODEX_CLI",
+    baseUrl: "https://fixture.invalid",
+    apiKey: "{}",
+    model: "fixture-model",
+    codexRunner: async input => {
+      attempts += 1;
+      if (attempts === 1) {
+        return JSON.stringify({
+          semanticJourney: {
+            ...semanticJourney("start-campaign", ["territory-board", "confirm-territory", "end-turn-button"]),
+            startRequirementIds: [],
+            coreActions: semanticJourney(
+              "start-campaign", ["territory-board", "confirm-territory", "end-turn-button"],
+            ).coreActions.map(item => ({ ...item, coversRequirementIds: ["req-feature-001-fb00a811"] })),
+          },
+          coverage: planningCoverage(),
+        });
+      }
+      assert.equal(input.timeoutMs, 180_000);
+      assert.match(input.prompt, /failed frozen-requirement coverage validation/);
+      assert.match(input.prompt, /req-acceptance-001-213f5922/);
+      return JSON.stringify({
+        semanticJourney: semanticJourney("start-campaign", ["territory-board", "confirm-territory", "end-turn-button"]),
+        coverage: planningCoverage(),
+      });
+    },
+  });
+  assert.equal(attempts, 2);
+  assert.equal(validateTestManifest(plan.testManifest), true);
 });
 
 test("the cross-platform E2E planner prefers the prior successful regression region for visual progress", async () => {

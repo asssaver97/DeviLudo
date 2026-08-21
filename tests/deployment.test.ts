@@ -4,6 +4,7 @@ import test from "node:test";
 
 test("local deployment keeps Core private by default and exposes it only for explicit remote E2E", async () => {
   const compose = await readFile(new URL("../infra/docker-compose.yml", import.meta.url), "utf8");
+  const coreImage = await readFile(new URL("../Dockerfile.core", import.meta.url), "utf8");
   const executorImage = await readFile(new URL("../Dockerfile.executor", import.meta.url), "utf8");
   const [claudeAgentImage, codexAgentImage] = await Promise.all([
     readFile(new URL("../Dockerfile.agent-claude", import.meta.url), "utf8"),
@@ -18,7 +19,15 @@ test("local deployment keeps Core private by default and exposes it only for exp
   assert.match(compose, /minio:[\s\S]*\$\{DEVILUDO_ARTIFACT_BIND_ADDRESS:-127\.0\.0\.1\}:\$\{DEVILUDO_MINIO_HOST_PORT:-39000\}:9000/);
   assert.match(compose, /DEVILUDO_CLAUDE_CODE_VERSION/);
   assert.match(compose, /DEVILUDO_CODEX_CLI_VERSION/);
+  assert.match(compose, /NPM_CONFIG_REGISTRY: \$\{DEVILUDO_NPM_REGISTRY:-https:\/\/registry\.npmjs\.org\/\}/);
+  assert.match(coreImage, /ARG CODEX_CLI_VERSION=0\.149\.0/);
+  assert.match(coreImage, /DEVILUDO_BUNDLED_CODEX_CLI_VERSION=\$\{CODEX_CLI_VERSION\}/);
+  assert.match(codexAgentImage, /ARG CODEX_CLI_VERSION=0\.149\.0/);
   assert.match(compose, /DEVILUDO_CODEX_ACCOUNT_DEFAULT_MODEL/);
+  assert.match(compose, /DEVILUDO_CODEX_MODELS_CACHE_FILE: \/run\/deviludo-codex\/models_cache\.json/);
+  assert.match(compose, /DEVILUDO_CODEX_RUN_ROOT: \/var\/lib\/deviludo-codex/);
+  assert.match(compose, /codex-models-cache\.json:\/run\/deviludo-codex\/models_cache\.json:ro/);
+  assert.match(compose, /\/var\/lib\/deviludo-codex:rw,noexec,nosuid,nodev,size=64m,mode=0700,uid=1001,gid=1001/);
   assert.match(compose, /DEVILUDO_SANDBOX_CONCURRENCY: \$\{DEVILUDO_SANDBOX_CONCURRENCY:-1\}/);
   assert.match(compose, /DEVILUDO_INSTALLATION_ID: \$\{DEVILUDO_INSTALLATION_ID:-\}/);
   assert.match(compose, /project-sources-init:[\s\S]*cap_add: \["CHOWN", "FOWNER", "FSETID"\][\s\S]*chmod 2770 \/var\/lib\/deviludo-projects/);
@@ -56,6 +65,8 @@ test("local deployment keeps Core private by default and exposes it only for exp
   assert.match(localUp, /DEVILUDO_DOCKER_GID/);
   assert.match(localUp, /BEGIN DEVILUDO LOCAL RUNTIME/);
   assert.match(localUp, /detectLocalProviderUpstreamProxy\(\)/);
+  assert.match(localUp, /npm["], \["config", "get", "registry"\]/);
+  assert.match(localUp, /DEVILUDO_NPM_REGISTRY: npmRegistry/);
   assert.match(localUp, /198\.18\.0\.0\/15 fake IP/);
   assert.match(localUp, /supportsHttpConnectProxy/);
   assert.match(localUp, /optionValue\("--remote-e2e"\)/);
@@ -110,6 +121,8 @@ test("local shutdown and E2E recovery reap resources after interrupted work", as
   assert.match(codexCli, /detached: killProcessGroup/);
   assert.match(codexCli, /process\.kill\(-Number\(child\.pid\), signal\)/);
   assert.match(codexCli, /Codex CLI timed out after \$\{timeoutMs\} ms/);
+  assert.match(codexCli, /Codex run root cannot be inside the system temporary directory/);
+  assert.match(codexCli, /model_catalog_json=\$\{modelCatalog\}/);
   assert.match(compose, /sandbox-executord:[\s\S]*stop_grace_period: 90s/);
   assert.match(systemdExecutor, /docker stop --time 90/);
 });
@@ -457,6 +470,7 @@ test("Core keeps Docker authority in executord and isolates Agent and Steam egre
   assert.match(taskRunner, /cross-platform E2E node owns test-plan generation/);
   assert.match(taskRunner, /agent\.json must contain exactly the current assetManifest/);
   assert.match(taskRunner, /BLOCKING E2E REPAIR:[\s\S]*E2E failure summary:[\s\S]*e2eRepairPromptSummary\(e2eRepairContext\)/);
+  assert.match(taskRunner, /When present, report\.json interactionContracts contains the complete frozen native-input contract[\s\S]*when its interactionContract is present, perform one bounded consistency pass over that same failed feature[\s\S]*remaining targetId and changeTargetId[\s\S]*remaining postcondition\/checkpoint key/);
   assert.match(taskRunner, /plan\.job\.payload\.repairFailureKind === "ARTIFACT_BUILD"/);
   assert.match(taskRunner, /repairFailureSummary\.length <= 1_800/);
   assert.match(taskRunner, /BLOCKING BUILD REPAIR:[\s\S]*Builder failure summary: \$\{JSON\.stringify\(upstreamFailureSummary\)\}/);
@@ -665,6 +679,7 @@ test("Godot E2E plans at the platform node and runs a real window with portable 
   assert.match(planner, /loaded, visible in the correct game\/UI context, correctly cropped\/aspected/);
   assert.match(guest, /deviludo\.test-manifest/);
   assert.match(guest, /deviludo\.e2e-ui-probe|waitForProbeSnapshot/);
+  assert.match(guest, /interactionContracts:[\s\S]*verificationMethod === "interactive"[\s\S]*interactionScript: feature\.interactionScript/);
   assert.match(guest, /gameWindowArguments\(gameLogPath\)/);
   assert.match(guest, /measurePerformance \? \["--debug", "--print-fps"\]/);
   assert.match(guest, /--print-fps/);
@@ -748,7 +763,8 @@ test("Godot E2E plans at the platform node and runs a real window with portable 
   assert.match(evidence, /玩家需求覆盖/);
   assert.match(evidence, /ZIP cannot contain symbolic links/);
   assert.doesNotMatch(builder, /preparePackagedE2eContract|copyPackagedE2eContract|\.deviludo-e2e-package/);
-  assert.match(builder, /Godot reported script errors despite exit code 0/);
+  assert.match(builder, /BUILD_PRODUCT: Godot reported script errors despite exit code 0/);
+  assert.match(builder, /BUILD_PRODUCT: Godot project validation failed/);
   assert.match(macDriver, /CGEvent\(keyboardEventSource/);
   assert.match(macDriver, /"P": 35/);
   assert.match(macDriver, /value\.hasPrefix\("KEY_"\)/);
@@ -797,6 +813,18 @@ test("Godot E2E plans at the platform node and runs a real window with portable 
   assert.match(windowsDriver, /\$dueMilliseconds-\$clock\.Elapsed\.TotalMilliseconds/);
   assert.match(linuxIsolation, /--graphics spice,listen=none --video virtio/);
   assert.doesNotMatch(linuxIsolation, /--graphics none/);
+});
+
+test("a validated Test Agent manifest is frozen across product repair and E2E reruns", async () => {
+  const [api, repository] = await Promise.all([
+    readFile(new URL("../services/core/src/api.ts", import.meta.url), "utf8"),
+    readFile(new URL("../services/core/src/repository.ts", import.meta.url), "utf8"),
+  ]);
+  assert.match(api, /readFrozenE2eTestPlan/);
+  assert.match(api, /freezeE2eTestPlan/);
+  assert.match(api, /projectTestContract: frozen\.testManifest/);
+  assert.match(repository, /ON CONFLICT \(workspace_id, workflow_id, target_platform\) DO NOTHING/);
+  assert.match(repository, /Frozen E2E test plan belongs to another project/);
 });
 
 test("release is blocked on native Linux, Windows, and macOS Godot acceptance", async () => {

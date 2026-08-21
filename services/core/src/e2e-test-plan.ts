@@ -17,6 +17,7 @@ import {
 import { runCodexPrompt, type CodexPromptRunner } from "./codex-cli";
 
 const E2E_TEST_PLAN_PROVIDER_BUDGET_MS = 360_000;
+const E2E_TEST_PLAN_CORRECTION_BUDGET_MS = 180_000;
 export const E2E_TEST_PLAN_OUTPUT_SCHEMA = Object.freeze({
   type: "object",
   additionalProperties: false,
@@ -29,7 +30,7 @@ export const E2E_TEST_PLAN_OUTPUT_SCHEMA = Object.freeze({
       properties: {
         startAction: semanticActionOutputSchema(),
         startRequirementIds: {
-          type: "array", maxItems: 500, uniqueItems: true,
+          type: "array", maxItems: 500,
           items: { type: "string", pattern: "^[a-z0-9][a-z0-9-]{0,119}$" },
         },
         coreActions: {
@@ -87,7 +88,7 @@ function semanticCoreActionOutputSchema(): Readonly<Record<string, unknown>> {
       progressKey: { type: "string", pattern: "^[A-Za-z0-9][A-Za-z0-9_.-]{0,199}$" },
       changeTargetId: { type: "string", pattern: "^[a-z0-9][a-z0-9-]{0,119}$" },
       coversRequirementIds: {
-        type: "array", minItems: 1, maxItems: 500, uniqueItems: true,
+        type: "array", minItems: 1, maxItems: 500,
         items: { type: "string", pattern: "^[a-z0-9][a-z0-9-]{0,119}$" },
       },
     },
@@ -200,8 +201,34 @@ export async function generateE2eTestPlan(input: Readonly<{
     const reason = error instanceof Error ? error.message : "Test Agent provider request failed";
     throw new Error(`Test Agent provider request failed: ${reason}`, { cause: error });
   }
+  const verifiedChangeTargetId = regressionChangeTarget(input.context.regressionTrace);
+  let parsed: ReturnType<typeof parsePlan>;
   try {
-    const parsed = parsePlan(raw, requirements, materializedAssetKeys, regressionChangeTarget(input.context.regressionTrace));
+    parsed = parsePlan(raw, requirements, materializedAssetKeys, verifiedChangeTargetId);
+  } catch (error) {
+    const reason = error instanceof Error ? error.message : "invalid structured plan";
+    if (input.runtime !== "CODEX_CLI" || !reason.includes("does not cover ")) {
+      throw new Error(`Test Agent returned an invalid project plan: ${reason}`, { cause: error });
+    }
+    try {
+      raw = await codexRunner({
+        authJson: input.apiKey,
+        model: input.model,
+        prompt: testPlanCorrectionPrompt(prompt, raw, reason, requirements),
+        outputSchema: E2E_TEST_PLAN_OUTPUT_SCHEMA,
+        reasoningEffort: "low",
+        timeoutMs: E2E_TEST_PLAN_CORRECTION_BUDGET_MS,
+      });
+      parsed = parsePlan(raw, requirements, materializedAssetKeys, verifiedChangeTargetId);
+    } catch (correctionError) {
+      const correctionReason = correctionError instanceof Error
+        ? correctionError.message : "Test Agent plan correction failed";
+      throw new Error(`Test Agent returned an invalid project plan after one correction: ${correctionReason}`, {
+        cause: correctionError,
+      });
+    }
+  }
+  try {
     assertFrozenRequirements(parsed.testManifest, requirements);
     assertPlanningCoverage(parsed.coverage, materializedAssetKeys);
     assertConcreteProjectPlan(parsed.testManifest);
@@ -268,20 +295,79 @@ function parsePlan(
     try { testManifest = JSON.parse(testManifest); } catch { /* The validator below reports the bounded failure. */ }
   }
   if (!isRecord(value)) throw new Error("response must contain a testManifest and coverage object");
+  let semanticFailure: string | null = null;
   if (!validateTestManifest(testManifest)) {
     testManifest = manifestFromSemanticJourney(value.semanticJourney, requirements, verifiedChangeTargetId);
+    if (!validateTestManifest(testManifest)) {
+      semanticFailure = explainSemanticJourneyFailure(value.semanticJourney, requirements, verifiedChangeTargetId);
+    }
   }
   if (!validateTestManifest(testManifest)) {
     testManifest = repairGeneratedManifest(testManifest, requirements);
   }
   if (!validateTestManifest(testManifest)) {
-    throw new Error("response does not contain a usable project-semantic core journey");
+    throw new Error(`response does not contain a usable project-semantic core journey: ${semanticFailure ?? "manifest validation failed"}`);
   }
   const coverage = normalizePlanningCoverage(value.coverage, materializedAssetKeys);
   return Object.freeze({
     testManifest,
     coverage,
   });
+}
+
+function explainSemanticJourneyFailure(
+  value: unknown,
+  requirements: ReturnType<typeof specificationRequirementCatalog>,
+  verifiedChangeTargetId: string | null,
+): string {
+  if (!isRecord(value)) return "semanticJourney is missing or is not an object";
+  if (!Array.isArray(value.startRequirementIds)) return "startRequirementIds is not an array";
+  if (!Array.isArray(value.coreActions)) return "coreActions is not an array";
+  if (value.coreActions.length < 3 || value.coreActions.length > 32) {
+    return `coreActions has ${value.coreActions.length} items; expected 3..32`;
+  }
+  const requirementIds = requirements.map(requirement => requirement.requirementId);
+  const requirementSet = new Set(requirementIds);
+  const startFailure = requirementIdFailure(value.startRequirementIds, requirementSet, true);
+  if (startFailure) return `startRequirementIds ${startFailure}`;
+  if (!semanticEnvelopeAction(value.startAction, "START_SESSION")) return "startAction is not executable";
+  for (const [index, item] of value.coreActions.entries()) {
+    if (!isRecord(item)) return `coreActions[${index}] is not an object`;
+    if (!isStablePath(item.progressKey)) return `coreActions[${index}].progressKey is invalid`;
+    if (!isStableId(item.changeTargetId) && !(index === 0 && verifiedChangeTargetId)) {
+      return `coreActions[${index}].changeTargetId is invalid`;
+    }
+    const requirementFailure = requirementIdFailure(item.coversRequirementIds, requirementSet, false);
+    if (requirementFailure) return `coreActions[${index}].coversRequirementIds ${requirementFailure}`;
+    const intent = index === 0 ? "PRIMARY_ACTION"
+      : index === value.coreActions.length - 1 ? "COMPLETE_LOOP" : "FEATURE_ACTION";
+    if (!semanticEnvelopeAction(item.action, intent)) return `coreActions[${index}].action is not executable`;
+  }
+  const covered = new Set([
+    ...(value.startRequirementIds as readonly string[]),
+    ...value.coreActions.flatMap(item => isRecord(item) && Array.isArray(item.coversRequirementIds)
+      ? item.coversRequirementIds.filter((id): id is string => typeof id === "string") : []),
+  ]);
+  const missing = requirementIds.filter(requirementId => !covered.has(requirementId));
+  if (missing.length > 0) return `does not cover ${missing.length} frozen requirement(s): ${missing.slice(0, 20).join(", ")}`;
+  return "the deterministically assembled test manifest violates the E2E contract";
+}
+
+function requirementIdFailure(
+  value: unknown,
+  allowed: ReadonlySet<string>,
+  allowEmpty: boolean,
+): string | null {
+  if (!Array.isArray(value)) return "is not an array";
+  if (!allowEmpty && value.length < 1) return "must not be empty";
+  if (value.length > 500) return `has ${value.length} items; maximum is 500`;
+  const nonStrings = value.filter(item => typeof item !== "string").length;
+  if (nonStrings > 0) return `contains ${nonStrings} non-string item(s)`;
+  const ids = value as readonly string[];
+  const unknown = [...new Set(ids.filter(item => !allowed.has(item)))];
+  if (unknown.length > 0) return `contains unknown ID(s): ${unknown.slice(0, 20).join(", ")}`;
+  if (new Set(ids).size !== ids.length) return "contains duplicate IDs";
+  return null;
 }
 
 function manifestFromSemanticJourney(
@@ -722,7 +808,8 @@ function testPlanPrompt(
     "You are the cross-platform E2E Test Agent. Identify every player-visible operation needed to complete the current project's semantic core loop; Development Agent does not own this plan.",
     "Return only one JSON object shaped {semanticJourney,coverage}. No markdown and no testManifest.",
     "Core will freeze requirements and deterministically build the full validated manifest. You own only project-specific semanticJourney values.",
-    "semanticJourney needs startAction, startRequirementIds, and coreActions. startRequirementIds lists only frozen requirement IDs actually proven by entering a clean playable session and may be empty.",
+    "semanticJourney needs startAction, startRequirementIds, and coreActions. Every frozen requirement ID must appear in startRequirementIds or at least one coreActions.coversRequirementIds array. Never omit a frozen ID.",
+    "startRequirementIds may be empty. Put clean-launch/menu-state requirements there because the START checkpoint proves the pre-action state and the startAction proves the transition to READY. Also put explicit out-of-scope/exclusion requirements there to preserve the approved boundary without inventing an excluded player operation.",
     "coreActions is the ordered post-entry player path and must contain at least three items. Decompose combined prose into every real operation: selection, roll/draw, target choice, movement, interaction/confirmation, turn completion, AI/response resolution, and result settlement whenever the approved core loop requires them. Never collapse a multi-operation loop into one generic primary action plus end turn.",
     "Each coreActions item contains action, progressKey, changeTargetId, and coversRequirementIds. action needs type plus targetId/key/button/durationMs; set unused fields to null. progressKey must change because of that exact action, changeTargetId must be the visible Probe region whose pixels change, and coversRequirementIds must list only frozen requirements that action genuinely proves. The final item must cross the approved loop-completion boundary.",
     "Prefer click or double_click with a real Probe control targetId. Use key_tap/key_hold or gamepad_button_tap/gamepad_button_hold only when the game has no Probe control for that action. Do not use coordinates.",
@@ -731,6 +818,22 @@ function testPlanPrompt(
     "coverage.regressionOperations lists prior and full-project player operations exercised; coverage.regressionUi lists menus, overlays, HUD/layout and clean-start regressions; coverage.changeImpact lists every risk from the current iteration versus the previous specification; coverage.assetApplication lists every materialized assetKey and the plan must verify it is loaded, visible in the correct game/UI context, correctly cropped/aspected, and not merely present on disk.",
     `Frozen requirements: ${JSON.stringify(requirements)}`,
     `Frozen planning context: ${JSON.stringify(compactPlanningContext(context))}`,
+  ].join("\n");
+}
+
+function testPlanCorrectionPrompt(
+  originalPrompt: string,
+  previousOutput: string,
+  validationReason: string,
+  requirements: ReturnType<typeof specificationRequirementCatalog>,
+): string {
+  return [
+    originalPrompt,
+    "Your previous structured plan was otherwise usable but failed frozen-requirement coverage validation.",
+    `Validation failure: ${validationReason}`,
+    `Required frozen IDs: ${JSON.stringify(requirements.map(requirement => requirement.requirementId))}`,
+    "Return a corrected complete {semanticJourney,coverage} object. Preserve real semantic target IDs and action ordering. Add every missing ID to the action that proves it; use startRequirementIds for clean-launch/menu-state or explicit scope-exclusion requirements. Do not invent an action for excluded scope.",
+    `Previous structured output: ${previousOutput.slice(0, 80_000)}`,
   ].join("\n");
 }
 

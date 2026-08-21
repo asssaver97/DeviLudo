@@ -121,15 +121,17 @@ const {
   codexVersion,
   codexLoginMethod,
   codexAccountDefaultModel,
+  npmRegistry,
   dockerIdentity,
   providerUpstreamProxy,
   installationId,
 } = await runStartupStage("Check Docker, Git, and Agent runtimes", async () => {
-  const [[detectedClaudeVersion, detectedCodexVersion, detectedCodexLoginMethod], resolvedDockerIdentity, resolvedInstallationId] = await Promise.all([
+  const [[detectedClaudeVersion, detectedCodexVersion, detectedCodexLoginMethod, detectedNpmRegistry], resolvedDockerIdentity, resolvedInstallationId] = await Promise.all([
     Promise.all([
       detectLocalRuntime("claude"),
       detectLocalRuntime("codex"),
       detectLocalCodexAuthentication(),
+      detectLocalNpmRegistry(),
     ]),
     Promise.all([
       requireCommand("docker", ["version", "--format", "{{.Server.Version}}"]),
@@ -139,11 +141,13 @@ const {
     resolveMachineInstallationId(),
   ]);
   await prepareLocalCodexOfficialLogin(detectedCodexLoginMethod);
+  await prepareLocalCodexModelsCache(detectedCodexLoginMethod);
   return {
     claudeVersion: detectedClaudeVersion,
     codexVersion: detectedCodexVersion,
     codexLoginMethod: detectedCodexLoginMethod,
     codexAccountDefaultModel: await resolveLocalCodexAccountDefaultModel(detectedCodexLoginMethod, detectedCodexVersion),
+    npmRegistry: detectedNpmRegistry,
     dockerIdentity: resolvedDockerIdentity,
     providerUpstreamProxy: await detectLocalProviderUpstreamProxy(),
     installationId: resolvedInstallationId,
@@ -175,6 +179,7 @@ const baseEnvironment = {
   DEVILUDO_LOCAL_PROJECT_BRIDGE_TOKEN: gitImportConfiguration.internalToken,
   DEVILUDO_LOCAL_DIRECTORY_BINDINGS: "1",
   DEVILUDO_PROVIDER_UPSTREAM_PROXY: providerUpstreamProxy,
+  DEVILUDO_NPM_REGISTRY: npmRegistry,
   DEVILUDO_CODEX_ACCOUNT_DEFAULT_MODEL: codexAccountDefaultModel ?? "",
 };
 await runStartupStage("Start PostgreSQL, Vault, and object storage", () => executeVisible("docker", [
@@ -857,6 +862,23 @@ async function detectLocalCodexAuthentication() {
   }
 }
 
+async function detectLocalNpmRegistry() {
+  const fallback = "https://registry.npmjs.org/";
+  try {
+    const result = await execute("npm", ["config", "get", "registry"], {
+      encoding: "utf8",
+      maxBuffer: 4 * 1024,
+      timeout: 10_000,
+    });
+    const registry = new URL(result.stdout.trim());
+    if (registry.protocol !== "https:" || registry.username || registry.password
+      || registry.search || registry.hash || registry.href.length > 500) return fallback;
+    return registry.href;
+  } catch {
+    return fallback;
+  }
+}
+
 async function prepareLocalCodexOfficialLogin(loginMethod) {
   const target = fileURLToPath(new URL("../.deviludo/local/codex-auth.json", import.meta.url));
   await mkdir(dirname(target), { recursive: true, mode: 0o700 });
@@ -874,6 +896,26 @@ async function prepareLocalCodexOfficialLogin(loginMethod) {
     throw new Error("Codex CLI auth.json is invalid; run codex login again");
   }
   await writeFile(target, `${JSON.stringify(parsed)}\n`, { mode: 0o600 });
+  await chmod(target, 0o600);
+}
+
+async function prepareLocalCodexModelsCache(loginMethod) {
+  const target = fileURLToPath(new URL("../.deviludo/local/codex-models-cache.json", import.meta.url));
+  await mkdir(dirname(target), { recursive: true, mode: 0o700 });
+  if (loginMethod !== "CHATGPT") {
+    await writeFile(target, "{}\n", { mode: 0o600 });
+    await chmod(target, 0o600);
+    return;
+  }
+  const configuredRoot = process.env.CODEX_HOME?.trim();
+  const source = configuredRoot && isAbsolute(configuredRoot)
+    ? join(configuredRoot, "models_cache.json")
+    : join(homedir(), ".codex", "models_cache.json");
+  const cache = JSON.parse(await readFile(source, "utf8"));
+  if (!selectCodexAccountDefaultModel(cache, cache.client_version)) {
+    throw new Error("Codex CLI models cache is invalid; run codex once, then run npm run local:up again");
+  }
+  await writeFile(target, `${JSON.stringify(cache)}\n`, { mode: 0o600 });
   await chmod(target, 0o600);
 }
 
@@ -1019,6 +1061,7 @@ async function persistLocalComposeEnvironment(environment) {
     "DEVILUDO_AGENT_RUNTIME_DETECTION_SCOPE",
     "DEVILUDO_CLAUDE_CODE_VERSION",
     "DEVILUDO_CODEX_CLI_VERSION",
+    "DEVILUDO_NPM_REGISTRY",
     "DEVILUDO_CODEX_LOGIN_METHOD",
     "DEVILUDO_CODEX_ACCOUNT_DEFAULT_MODEL",
     "DEVILUDO_EXECUTOR_ALLOWED_IMAGES",

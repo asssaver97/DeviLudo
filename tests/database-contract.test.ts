@@ -18,7 +18,7 @@ test("the fresh baseline fixes pool kinds and contains the durable workflow prim
     "job_guidance_messages", "operation_receipts",
     "project_source_revisions",
     "artifacts", "artifact_inputs", "object_cleanup_queue", "executor_receipts",
-    "asset_manifests", "asset_items",
+    "asset_manifests", "asset_items", "e2e_test_plans",
   ]) {
     assert.match(sql, new RegExp(`CREATE TABLE deviludo\\.${table}\\s*\\(`));
   }
@@ -34,7 +34,7 @@ test("every workspace-owned table fails closed with forced row isolation", async
     "workflow_instances", "workflow_events",
     "jobs", "external_signals", "job_progress_events", "job_guidance_messages",
     "operation_receipts", "workspace_claim_fairness",
-    "artifacts", "artifact_inputs", "object_cleanup_queue", "e2e_policy_locks", "e2e_policy_decisions", "e2e_regression_traces",
+    "artifacts", "artifact_inputs", "object_cleanup_queue", "e2e_policy_locks", "e2e_policy_decisions", "e2e_test_plans", "e2e_regression_traces",
     "executor_receipts", "project_creation_receipts",
     "asset_manifests", "asset_items",
   ]) {
@@ -124,6 +124,8 @@ test("every workspace-owned table fails closed with forced row isolation", async
   assert.match(sql, /fail_local_git_commit[\s\S]*attempts >= 3[\s\S]*GIT_COMMIT_FAILED/);
   assert.doesNotMatch(sql, /schedule_e2e_protocol_revalidation|e2eProtocolRevalidation/);
   assert.match(sql, /E2E_REGRESSION/);
+  assert.match(sql, /CREATE TABLE deviludo\.e2e_test_plans[\s\S]*PRIMARY KEY \(workspace_id, workflow_id, target_platform\)/);
+  assert.match(sql, /GRANT SELECT, INSERT ON deviludo\.e2e_test_plans TO deviludo_api/);
   assert.match(sql, /e2e_policy_decisions/);
   assert.match(sql, /current E2E output set is invalid/);
   assert.match(sql, /claim_object_cleanup\(p_lease_seconds integer\)[\s\S]*FOR UPDATE SKIP LOCKED/);
