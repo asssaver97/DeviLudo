@@ -96,7 +96,8 @@ test("Docker dependency downloads are cached and health checks probe quickly onl
   assert.doesNotMatch(web, /COPY \. \./);
   assert.match(web, /COPY package\.json package-lock\.json \.\//);
   assert.match(web, /COPY app \.\/app/);
-  assert.match(web, /COPY next\.config\.ts next-env\.d\.ts tsconfig\.json tsconfig\.web\.json/);
+  assert.match(web, /COPY next\.config\.ts tsconfig\.json tsconfig\.web\.json/);
+  assert.doesNotMatch(web, /next-env\.d\.ts/);
   assert.match(webTsconfig, /"app\/\*\*\/\*\.tsx"/);
   for (const ignored of ["test-results", "playwright-report", "*.tsbuildinfo", "README.md", "deploy", ".github"]) {
     assert.match(dockerignore, new RegExp(`^${ignored.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}$`, "m"));
