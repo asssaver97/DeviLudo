@@ -181,7 +181,9 @@ try {
     // provider time while delaying the evidence-driven repair loop.
     if (successes + remaining < ADAPTIVE_REQUIRED_SUCCESSES) break;
     assertPlatformBudget();
-    adaptiveRollouts.push(await runAdaptiveRollout(gamePackage, manifest, rolloutIndex));
+    const rollout = await runAdaptiveRollout(gamePackage, manifest, rolloutIndex);
+    adaptiveRollouts.push(rollout);
+    if (rollout.failureCode === "VISUAL_INTEGRITY_DEFECT") break;
   }
   const adaptiveSuccesses = adaptiveRollouts.filter(rollout => rollout.outcome === "PASSED");
   const visualIntegrityFailure = adaptiveRollouts.find(rollout => rollout.failureCode === "VISUAL_INTEGRITY_DEFECT");
@@ -1528,29 +1530,33 @@ function assertAssetPlacementPlan(value) {
 async function verifyCheckpointAssetPlacements({ role, probe, screenshotPath, journeyId, checkpointId, recordEvidence }) {
   const expected = (activeAssetPlacementPlan?.placements ?? []).filter(placement => placement.checkpointRole === role);
   const evidence = [];
+  const failures = [];
   for (const placement of expected) {
     const target = probe.controls.find(control => control.id === placement.targetId);
     if (!target?.visible) continue;
     let binding;
     try {
       binding = resolveProbeAssetBinding(probe, placement.assetKey, placement.targetId);
-    } catch (error) {
-      throw productFailure(
-        "ASSET_CONTROL_BINDING_MISSING",
-        `${journeyId}/${checkpointId}: ${error instanceof Error ? error.message : String(error)}`,
-      );
+    } catch {
+      failures.push({
+        code: "ASSET_CONTROL_BINDING_MISSING",
+        detail: `${placement.assetKey}@${placement.targetId} missing-or-duplicated`,
+      });
+      continue;
     }
     if (binding.resourcePath !== placement.expectedResourcePath) {
-      throw productFailure(
-        "ASSET_CONTROL_BINDING_MISMATCH",
-        `${journeyId}/${checkpointId}: ${placement.assetKey} 在 ${placement.targetId} 使用了 ${binding.resourcePath}，预期 ${placement.expectedResourcePath}`,
-      );
+      failures.push({
+        code: "ASSET_CONTROL_BINDING_MISMATCH",
+        detail: `${placement.assetKey}@${placement.targetId} path=${binding.resourcePath} expected=${placement.expectedResourcePath}`,
+      });
+      continue;
     }
     if (placement.expectedSha256 && binding.sha256 !== placement.expectedSha256) {
-      throw productFailure(
-        "ASSET_CONTROL_BINDING_MISMATCH",
-        `${journeyId}/${checkpointId}: ${placement.assetKey} 在 ${placement.targetId} 的内容摘要不匹配`,
-      );
+      failures.push({
+        code: "ASSET_CONTROL_BINDING_MISMATCH",
+        detail: `${placement.assetKey}@${placement.targetId} digest-mismatch`,
+      });
+      continue;
     }
     const pixelRect = {
       x: Math.floor(binding.rect.x),
@@ -1560,10 +1566,11 @@ async function verifyCheckpointAssetPlacements({ role, probe, screenshotPath, jo
     };
     const region = await inspectScreenshotRegion(screenshotPath, pixelRect);
     if (region.uniqueColorCount < 2 || region.dominantPixelRatio > 0.9995) {
-      throw productFailure(
-        "ASSET_CONTROL_VISUALLY_BLANK",
-        `${journeyId}/${checkpointId}: ${placement.assetKey} 已绑定 ${placement.targetId}，但指定贴图区域不可见或近乎空白`,
-      );
+      failures.push({
+        code: "ASSET_CONTROL_VISUALLY_BLANK",
+        detail: `${placement.assetKey}@${placement.targetId} visually-blank`,
+      });
+      continue;
     }
     const item = Object.freeze({
       assetKey: placement.assetKey,
@@ -1580,6 +1587,12 @@ async function verifyCheckpointAssetPlacements({ role, probe, screenshotPath, jo
     if (recordEvidence && !verifiedAssetPlacements.has(assetPlacementKey(placement))) {
       verifiedAssetPlacements.set(assetPlacementKey(placement), item);
     }
+  }
+  if (failures.length > 0) {
+    throw productFailure(
+      failures[0].code,
+      `${journeyId}/${checkpointId}: ${failures.map(failure => `${failure.code} ${failure.detail}`).join(", ")}`,
+    );
   }
   return Object.freeze(evidence);
 }

@@ -91,6 +91,9 @@ async function runAgent(plan) {
     await command("tar", ["-xzf", "/workspace/inputs/checkpoint.tar.gz", "-C", "/workspace/project"], safeEnvironment());
     emitProgress("PHASE", "上次尝试的源码检查点已恢复，Agent 将从现有成果继续");
   }
+  const startingAgentManifestIssue = importedSource || restoredCheckpoint
+    ? await currentAgentManifestValidationError()
+    : null;
   const e2eReportObject = plan.job.inputObjects.find(input => input.kind === "E2E_REPORT");
   let e2eRepairContext = null;
   if (e2eReportObject) {
@@ -125,12 +128,12 @@ async function runAgent(plan) {
     performanceInstruction,
     "agent.json must contain exactly the current assetManifest planning object plus any non-test metadata required by the source; it must not contain testManifest.",
     "assetManifest uses schemaVersion deviludo.asset-manifest.v1 and 1-500 unique items. Each Agent-planned item needs assetKey, assetType, description, generationPrompt, nullable frameCount, nullable dimensions, and usageTargets.",
-    "usageTargets is a non-empty list of {targetId, checkpointRole}. targetId is the stable production Probe control that must render this asset; checkpointRole is START, READY, ACTION, PROGRESS, or COMPLETION and declares when it must be visible. Add multiple targets when one asset is deliberately used by multiple controls or stages. Do not map an asset to a parent/root control unless that exact control renders it.",
+    "usageTargets is a non-empty list of {targetId, checkpointRole}. targetId is the stable production Probe control that must render this asset; checkpointRole is START, READY, ACTION, PROGRESS, or COMPLETION and declares when it must be visible. Each targetId/checkpointRole pair belongs to exactly one asset; give independently visible child controls distinct IDs. Add multiple targets when one asset is deliberately used by multiple controls or stages. Never map mutually exclusive or conditional variants as if they were simultaneously visible. Leave existing optional variants to the executor's discovered-source inventory instead of inventing a placement. Do not map an asset to a parent/root control unless that exact control renders it.",
     "Plan every image required by the complete player-facing gameplay and UI. The game must load controlled assets from res://assets/generated/<assetKey>.png, .jpg, or .webp and use a deliberate placeholder only when none exists.",
     "Every planned generated asset key must be referenced by executable runtime source and visibly connected to the actual scene or control that uses it. Remove a genuinely unnecessary plan item instead of leaving generated art on disk; the controlled Builder rejects materialized generated assets that only appear in agent.json, tests, tools, comments, or documentation and automatically returns the failure to this Agent for repair.",
     "Build a composed production UI, not an engineering dashboard: the current objective and next action must be clear, required art cannot be replaced by blank/dash slots or raw state dumps, textures must be cropped/aspected for their real controls, and secondary diagnostics must not dominate gameplay.",
     "Make layout and input resolution-independent across window sizes and display scales. Use containers/anchors and root-viewport coordinate conversion; do not tie hit testing or UI placement to one fixed pixel resolution.",
-    "Make every planned and existing asset visibly connected to the actual scene or control that uses it; the E2E node will verify texture placement, visibility, aspect, and gameplay/UI context.",
+    "Make every Agent-planned asset visibly connected to the actual scene or control that uses it; the E2E node will verify texture placement, visibility, aspect, and gameplay/UI context.",
   ];
   const specificationInstructions = [
     `Specification: ${JSON.stringify(specification)}`,
@@ -170,6 +173,12 @@ async function runAgent(plan) {
     `Builder failure summary: ${JSON.stringify(upstreamFailureSummary)}`,
     "",
   ] : [];
+  const outputContractInstructions = startingAgentManifestIssue ? [
+    "",
+    "BLOCKING OUTPUT CONTRACT REPAIR: the current agent.json cannot be published under the active contract. Fix every item named by the diagnostic before finishing; this is required work, not an optional broad audit.",
+    `Current manifest diagnostic: ${startingAgentManifestIssue}`,
+    "",
+  ] : [];
   const languageInstruction = promptLanguageInstruction(plan.job.payload.responseLanguage);
   const prompt = [
     importedSource || restoredCheckpoint
@@ -177,6 +186,7 @@ async function runAgent(plan) {
       : "Create a complete Godot 4 project in /workspace/project.",
     ...e2eRepairInstructions,
     ...upstreamRepairInstructions,
+    ...outputContractInstructions,
     "Do not access paths outside /workspace/project except to read /run/deviludo/guidance.ndjson, the optional read-only /workspace/baseline, and, on an E2E repair pass, /workspace/inputs/e2e-repair. Include project.godot, main scene, source, tests, Linux/Windows/macOS export presets, and LICENSES.json.",
     ...(baselineSourceAvailable ? [
       "A read-only snapshot of the workflow-start source is available at /workspace/baseline. The current /workspace/project remains authoritative for approved work. Use the baseline only to compare behavior and restore accidentally deleted or structurally damaged existing declarations; never copy it wholesale, revert unrelated approved changes, or edit files under /workspace/baseline.",
@@ -295,22 +305,44 @@ async function readGeneratedAgentManifest() {
   } catch {
     throw new Error("Agent did not produce a valid agent.json");
   }
-  if (!value || typeof value !== "object" || Array.isArray(value)) {
-    throw new Error("Agent did not produce a valid agent.json");
-  }
-  if (Object.hasOwn(value, "testManifest")) throw new Error("Agent must leave E2E test-plan generation to the E2E node");
-  const assetManifest = value.assetManifest;
-  if (!assetManifest || typeof assetManifest !== "object" || Array.isArray(assetManifest)
-    || assetManifest.schemaVersion !== "deviludo.asset-manifest.v1"
-    || !Array.isArray(assetManifest.items)
-    || assetManifest.items.length < 1 || assetManifest.items.length > 500
-    || assetManifest.items.some(item => !validPlannedAsset(item))) {
-    throw new Error("Agent did not produce a valid assetManifest");
-  }
-  if (new Set(assetManifest.items.map(item => item.assetKey)).size !== assetManifest.items.length) {
-    throw new Error("Agent assetManifest keys must be unique");
-  }
+  const issue = agentManifestValidationError(value);
+  if (issue) throw new Error(`Agent did not produce a valid assetManifest: ${issue}`);
   return value;
+}
+
+async function currentAgentManifestValidationError() {
+  try {
+    return agentManifestValidationError(JSON.parse(await readFile("/workspace/project/agent.json", "utf8")));
+  } catch {
+    return "agent.json is missing or invalid JSON";
+  }
+}
+
+function agentManifestValidationError(value) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return "agent.json must contain one JSON object";
+  if (Object.hasOwn(value, "testManifest")) return "remove testManifest because the E2E node owns it";
+  const assetManifest = value.assetManifest;
+  if (!assetManifest || typeof assetManifest !== "object" || Array.isArray(assetManifest)) return "assetManifest must be an object";
+  if (assetManifest.schemaVersion !== "deviludo.asset-manifest.v1") return "assetManifest.schemaVersion must be deviludo.asset-manifest.v1";
+  if (!Array.isArray(assetManifest.items) || assetManifest.items.length < 1 || assetManifest.items.length > 500) {
+    return "assetManifest.items must contain between 1 and 500 entries";
+  }
+  const invalid = assetManifest.items
+    .map((item, index) => validPlannedAsset(item) ? null : String(item?.assetKey ?? `item ${index}`))
+    .filter(Boolean);
+  if (invalid.length > 0) return `fix invalid assetManifest items: ${invalid.join(", ")}`;
+  const keys = assetManifest.items.map(item => item.assetKey);
+  if (new Set(keys).size !== keys.length) return "assetManifest assetKey values must be unique";
+  const owners = new Map();
+  for (const item of assetManifest.items.filter(item => item.discoveredSourceImage !== true)) {
+    for (const target of item.usageTargets) {
+      const key = `${target.targetId}:${target.checkpointRole}`;
+      owners.set(key, [...(owners.get(key) ?? []), item.assetKey]);
+    }
+  }
+  const conflicts = [...owners].filter(([, assetKeys]) => assetKeys.length > 1);
+  return conflicts.length === 0 ? null
+    : `each control checkpoint must identify exactly one asset; fix ${conflicts.map(([key, assetKeys]) => `${key}=[${assetKeys.slice(0, 6).join(",")}${assetKeys.length > 6 ? `,+${assetKeys.length - 6}` : ""}]`).join("; ")}`;
 }
 
 function validPlannedAsset(item) {
@@ -629,7 +661,15 @@ async function runGenerationAgent(configuration, environment, prompt, onOutput, 
         }
         if (commandError) throw commandError;
         if (verifyCompletion) await verifyCompletion();
-        if (validateOutput) await validateOutput();
+        if (validateOutput) {
+          try {
+            await validateOutput();
+          } catch (error) {
+            throw Object.assign(error instanceof Error ? error : new Error("Agent output contract validation failed"), {
+              code: "OUTPUT_CONTRACT",
+            });
+          }
+        }
         const settledGuidance = await waitForAgentGuidanceQuiescence(guidanceAfter);
         const completionGuidance = agentGuidanceArrivedDuringRun(guidanceBefore, settledGuidance);
         if (completionGuidance.length > 0) {
@@ -649,6 +689,7 @@ async function runGenerationAgent(configuration, environment, prompt, onOutput, 
       const failure = classifyAgentFailure(lastError);
       const maxAttemptsForFailure = failure.code === "INCOMPLETE_OUTPUT"
         ? 4
+        : failure.code === "OUTPUT_CONTRACT" ? 3
         : failure.code === "GUIDANCE_PENDING" ? 3
         : failure.code === "PROVIDER_ERROR" ? maxProviderAttempts : 2;
       if (attempt >= maxAttemptsForFailure || !failure.recoverable) {
@@ -665,6 +706,8 @@ async function runGenerationAgent(configuration, environment, prompt, onOutput, 
         ].join("\n");
       } else if (failure.code === "INCOMPLETE_OUTPUT") {
         resumeInstruction = "Resume from the current session and files now. Your previous response stopped before changing any source files. Make the smallest concrete source change required by the latest player guidance or reported E2E failure. For normal development, update only the directly affected automated tests and manifest mapping; for an E2E repair, preserve valid tests and manifests unless the report proves they are wrong. Run one bounded validation pass, then finish. Do not repeat the project audit or merely describe the next step.";
+      } else if (failure.code === "OUTPUT_CONTRACT") {
+        resumeInstruction = `Your previous result failed the executor output contract: ${failure.detail}. Fix every named agent.json entry, preserve completed game changes, run one bounded validation, and finish.`;
       }
       const delaySeconds = failure.code === "GUIDANCE_PENDING"
         ? 0
@@ -703,6 +746,7 @@ function classifyAgentFailure(error) {
   const message = error instanceof Error ? error.message : String(error);
   const detail = sanitizeError(message.replace(/^claude exited [^:]+:\s*/i, "").replace(/^codex exited [^:]+:\s*/i, ""));
   if (error?.code === "GUIDANCE_PENDING") return { code: "GUIDANCE_PENDING", detail, recoverable: true };
+  if (error?.code === "OUTPUT_CONTRACT") return { code: "OUTPUT_CONTRACT", detail, recoverable: true };
   // Codex refreshes its account model catalogue independently from the
   // Responses request. A CDN/proxy can reject that refresh while the official
   // login and inference route remain valid; treating this diagnostic as a

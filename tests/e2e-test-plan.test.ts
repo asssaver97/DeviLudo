@@ -87,6 +87,38 @@ test("the cross-platform E2E planner exposes missing planned asset-to-control ma
   assert.deepEqual(plan.assetPlacementPlan.unmappedAssetKeys, ["ui/start-panel"]);
 });
 
+test("the cross-platform E2E planner ignores materialized assets removed from the current plan", async () => {
+  const plan = await generateE2eTestPlan({
+    context: Object.freeze({
+      ...planningContext(),
+      assets: Object.freeze([
+        Object.freeze({
+          assetKey: "ui/current-panel", materialized: true,
+          expectedResourcePath: "res://assets/generated/ui/current-panel.png",
+        }),
+        Object.freeze({
+          assetKey: "ui/obsolete-panel", materialized: true,
+          expectedResourcePath: "res://assets/generated/ui/obsolete-panel.png",
+        }),
+      ]),
+      assetUsageManifest: Object.freeze({
+        schemaVersion: "deviludo.asset-manifest.v1",
+        items: Object.freeze([Object.freeze({
+          assetKey: "ui/current-panel",
+          usageTargets: Object.freeze([{ targetId: "current-panel", checkpointRole: "READY" }]),
+        })]),
+      }),
+    }),
+    runtime: "CODEX_CLI",
+    baseUrl: "https://fixture.invalid",
+    apiKey: "{}",
+    model: "fixture-model",
+    testFixture: true,
+  });
+  assert.deepEqual(plan.assetPlacementPlan.plannedAssetKeys, ["ui/current-panel"]);
+  assert.deepEqual(plan.assetPlacementPlan.unmappedAssetKeys, []);
+});
+
 test("the cross-platform E2E planner does not multiply Provider or CLI failures", async () => {
   let attempts = 0;
   await assert.rejects(generateE2eTestPlan({

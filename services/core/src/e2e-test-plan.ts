@@ -698,7 +698,7 @@ function buildAssetPlacementPlan(context: Readonly<Record<string, unknown>>): As
   const hasUsageManifest = usageItems.length > 0;
   const plannedAssets = assets.filter(asset => {
     const usage = usageByKey.get(String(asset.assetKey));
-    return !hasUsageManifest || usage?.discoveredSourceImage !== true;
+    return !hasUsageManifest || (usage !== undefined && usage.discoveredSourceImage !== true);
   });
   const placements: PlannedAssetPlacement[] = [];
   const unmappedAssetKeys: string[] = [];

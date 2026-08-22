@@ -268,6 +268,7 @@ test("the production Guest, relay, executor and node all wire the lifecycle guar
   assert.match(guest, /POSTCONDITION_TRANSITION_MISSING/);
   assert.match(guest, /let executionError = null;[\s\S]*failures\.some\(failure => failure\.startsWith\("GODOT_SCRIPT_ERROR"\)\)[\s\S]*if \(executionError\) throw executionError/);
   assert.match(guest, /decision\.screenIntegrity === "PRODUCT_DEFECT"[\s\S]*VISUAL_INTEGRITY_DEFECT/);
+  assert.match(guest, /if \(rollout\.failureCode === "VISUAL_INTEGRITY_DEFECT"\) break/);
   assert.match(guest, /adaptiveRollouts\.find\(rollout => rollout\.failureCode === "VISUAL_INTEGRITY_DEFECT"\)[\s\S]*throw productFailure\([\s\S]*"VISUAL_INTEGRITY_DEFECT"/);
   assert.match(guest, /relativePointForTarget\(target, action\.x, action\.y\)[\s\S]*basis-point offsets inside the stable target/);
   assert.match(guest, /materializeRelativePoint\(resolved, action\.relativeX, action\.relativeY\)/);
@@ -292,6 +293,8 @@ test("the production Guest, relay, executor and node all wire the lifecycle guar
   assert.match(guest, /if \(measuredStutter && error\.code !== measuredStutter\.code\)[\s\S]*primaryFailure = productFailure\(measuredStutter\.code, measuredStutter\.message\)/);
   assert.match(guest, /const summary = productFailureMessage\(primaryFailure\.code, primaryFailure\.message\)/);
   assert.match(guest, /detail \|\| `\$\{code\} 未提供详细错误`/);
+  assert.match(guest, /const failures = \[\];[\s\S]*failures\.push\(\{[\s\S]*continue;/);
+  assert.match(guest, /if \(failures\.length > 0\)[\s\S]*`\$\{journeyId\}\/\$\{checkpointId\}:[\s\S]*failures\.map\(failure => `\$\{failure\.code\} \$\{failure\.detail\}`\)\.join\(", "\)/);
   assert.match(guest, /finish\("FAILED", "PRODUCT", summary, activeManifest\)/);
   assert.match(guest, /Buffer\.isBuffer\(error\?\.stderr\)[\s\S]*error\.stderr\.toString\("utf8"\)\.trim\(\)/);
   assert.match(guest, /const detail = stderr \|\| message \|\| String\(error \?\? ""\)\.trim\(\) \|\| `GUI driver \$\{command\} failed without diagnostics`/);

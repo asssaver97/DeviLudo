@@ -462,6 +462,13 @@ test("Core keeps Docker authority in executord and isolates Agent and Steam egre
   assert.match(taskRunner, /Agent returned before making required source changes/);
   assert.match(taskRunner, /"INCOMPLETE_OUTPUT"/);
   assert.match(taskRunner, /failure\.code === "INCOMPLETE_OUTPUT"[\s\S]*\? 4/);
+  assert.match(taskRunner, /BLOCKING OUTPUT CONTRACT REPAIR:[\s\S]*Current manifest diagnostic:/);
+  assert.match(taskRunner, /fix invalid assetManifest items: \$\{invalid\.join\(", "\)\}/);
+  assert.match(taskRunner, /each control checkpoint must identify exactly one asset; fix/);
+  assert.match(taskRunner, /owners\.set\(key, \[\.\.\.\(owners\.get\(key\) \?\? \[\]\), item\.assetKey\]\)/);
+  assert.match(taskRunner, /code: "OUTPUT_CONTRACT"/);
+  assert.match(taskRunner, /failure\.code === "OUTPUT_CONTRACT" \? 3/);
+  assert.match(taskRunner, /failed the executor output contract:[\s\S]*Fix every named agent\.json entry/);
   assert.match(taskRunner, /const maxProviderAttempts = 16/);
   assert.match(taskRunner, /for \(let attempt = 1; attempt <= maxProviderAttempts; attempt \+= 1\)/);
   assert.match(taskRunner, /All[\s\S]*calls still share the single 80-minute deadline/);
