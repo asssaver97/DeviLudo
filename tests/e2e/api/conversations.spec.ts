@@ -265,6 +265,7 @@ test("messages sent during Agent generation become durable live guidance", async
     { headers: { cookie: cookies }, signal: controller.signal },
   );
   expect(progressResponse.ok).toBeTruthy();
+  expect(progressResponse.headers.get("content-type")).toContain("text/event-stream");
   const reader = progressResponse.body?.getReader();
   expect(reader).toBeTruthy();
   const chunk = await reader!.read();

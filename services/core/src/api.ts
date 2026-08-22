@@ -699,17 +699,18 @@ export async function runApi(
       reply.hijack();
       reply.raw.writeHead(200, {
         "cache-control": "no-store, no-transform",
-        "content-type": "application/x-ndjson; charset=utf-8",
+        "content-type": "text/event-stream; charset=utf-8",
         "x-accel-buffering": "no",
       });
+      reply.raw.flushHeaders();
       for (let poll = 0; poll < 60 && !closed && !reply.raw.destroyed; poll += 1) {
         const events = await repository.readAgentProgress(workspace.id, project.id, after);
         for (const event of events) {
           after = Math.max(after, event.sequence);
-          reply.raw.write(`${JSON.stringify({ type: "progress", event })}\n`);
+          reply.raw.write(`event: progress\ndata: ${JSON.stringify({ type: "progress", event })}\n\n`);
         }
         if (events.length || poll === 0) {
-          reply.raw.write(`${JSON.stringify({ type: "cursor", after })}\n`);
+          reply.raw.write(`event: cursor\ndata: ${JSON.stringify({ type: "cursor", after })}\n\n`);
         }
         await new Promise(resolve => setTimeout(resolve, 400));
       }

@@ -3452,6 +3452,7 @@ textarea {
   display: flex;
   flex-direction: column;
   min-width: 0;
+  overflow-anchor: none;
   width: 100%;
 }
 

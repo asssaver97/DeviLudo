@@ -1397,6 +1397,7 @@ test("project delivery is a top horizontal pipeline without the game specificati
   assert.match(styles, /\.project-conversation-panel\s*\{[\s\S]*height:\s*min\(700px, calc\(100dvh - 140px\)\)[\s\S]*overflow:\s*hidden/);
   assert.match(styles, /\.project-conversation-box\s*\{[\s\S]*height:\s*100%[\s\S]*overflow:\s*hidden/);
   assert.match(styles, /\.project-conversation-box \.conversation-box-messages\s*\{[\s\S]*flex:\s*1 1 auto[\s\S]*max-height:\s*none/);
+  assert.match(styles, /\.conversation-box\s*\{[\s\S]*overflow-anchor:\s*none/);
   assert.doesNotMatch(studio, /源码修订|SOURCE REVISION|受控目录|Managed path/);
   assert.match(studio, /product-delivery-stage-artifacts/);
   assert.match(studio, /product-delivery-configuration-grid/);
