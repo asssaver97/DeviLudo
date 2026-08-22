@@ -43,6 +43,7 @@ test("Core exposes Agent progress as an unbuffered event stream", async () => {
   ));
   assert.match(source, /agent-progress\/stream[\s\S]*"content-type": "text\/event-stream; charset=utf-8"/);
   assert.match(source, /reply\.raw\.flushHeaders\(\)/);
+  assert.match(source, /for \(let poll = 0; poll < 5/);
   assert.match(source, /event: progress\\ndata:/);
   assert.match(source, /event: cursor\\ndata:/);
 });

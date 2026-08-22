@@ -276,8 +276,13 @@ test("an Agent reply follows the conversation without moving the whole page", as
     const input = page.getByLabel("继续项目会话");
     await input.scrollIntoViewIfNeeded();
     await input.fill("请给这个玩法增加一个新的循环机制。");
+    const sendButton = page.getByRole("button", { name: "发送项目消息" });
+    // Establish the user's viewport after the actionable control is visible.
+    // Otherwise Playwright's WebKit driver may scroll the page merely to click
+    // the button, which measures test automation rather than message insertion.
+    await sendButton.scrollIntoViewIfNeeded();
     const pageScrollBefore = await page.evaluate(() => window.scrollY);
-    await page.getByRole("button", { name: "发送项目消息" }).click();
+    await sendButton.click();
     await expect(page.locator(".project-conversation-box .conversation-box-message.is-thinking")).toBeVisible();
     await page.waitForTimeout(250);
     const pageScrollAfter = await page.evaluate(() => window.scrollY);

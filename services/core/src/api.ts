@@ -703,7 +703,10 @@ export async function runApi(
         "x-accel-buffering": "no",
       });
       reply.raw.flushHeaders();
-      for (let poll = 0; poll < 60 && !closed && !reply.raw.destroyed; poll += 1) {
+      // WebKit can buffer a fetch body until the response closes even when it
+      // is a valid SSE stream. Keep each connection bounded so the client can
+      // reconnect from its cursor and still receive progress within seconds.
+      for (let poll = 0; poll < 5 && !closed && !reply.raw.destroyed; poll += 1) {
         const events = await repository.readAgentProgress(workspace.id, project.id, after);
         for (const event of events) {
           after = Math.max(after, event.sequence);
