@@ -195,6 +195,14 @@ test("deterministic Builder product failures automatically return to Agent repai
   assert.match(migration, /source_job\.receipt #> '\{assetManifest,items\}'/);
 });
 
+test("database smoke freezes only assets planned by its successful Agent", async () => {
+  const smoke = await readFile(new URL("../scripts/local-database-smoke.mjs", import.meta.url), "utf8");
+  assert.match(
+    smoke,
+    /SET state = 'SUCCEEDED',[\s\S]*receipt = jsonb_build_object\([\s\S]*'assetManifest'[\s\S]*'items'[\s\S]*'assetKey', 'ui\/smoke'/,
+  );
+});
+
 test("Core stores only opaque local actor identifiers and has no identity authority", async () => {
   const sql = await readFile(sqlUrl, "utf8");
   const repository = await readFile(new URL("../services/core/src/repository.ts", import.meta.url), "utf8");

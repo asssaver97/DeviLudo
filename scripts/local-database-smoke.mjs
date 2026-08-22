@@ -276,7 +276,15 @@ async function runDatabaseSmoke(url) {
     // Generated art is a durable build gate: a planned item holds the workflow,
     // and the same scheduler sweep advances it exactly once after upload.
     await owner.query(`UPDATE deviludo.jobs
-       SET state = 'SUCCEEDED', lease_owner = NULL, lease_token = NULL,
+       SET state = 'SUCCEEDED',
+           receipt = jsonb_build_object(
+             'assetManifest', jsonb_build_object(
+               'items', jsonb_build_array(
+                 jsonb_build_object('assetKey', 'ui/smoke')
+               )
+             )
+           ),
+           lease_owner = NULL, lease_token = NULL,
            lease_expires_at = NULL, heartbeat_at = NULL
      WHERE workspace_id = $1::uuid AND id = $2::uuid`, [workspaceIds[0], jobIds[0]]);
     await owner.query(`UPDATE deviludo.workflow_instances SET state = 'ASSET_GENERATING'
