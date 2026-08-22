@@ -155,6 +155,33 @@ export async function compareScreenshotRegion(actualPath, referencePath, rect, d
   return Object.freeze({ differentPixels, totalPixels, differenceRatio: differentPixels / totalPixels, region });
 }
 
+export async function inspectScreenshotRegion(path, rect) {
+  const decoded = decodePng(await readFile(path));
+  const region = normalizePixelRect(rect, decoded.width, decoded.height);
+  const counts = new Map();
+  const hash = createHash("sha256");
+  let dominantPixels = 0;
+  for (let y = region.y; y < region.y + region.height; y += 1) {
+    for (let x = region.x; x < region.x + region.width; x += 1) {
+      const offset = (y * decoded.width + x) * 4;
+      const pixel = decoded.rgba.subarray(offset, offset + 4);
+      hash.update(pixel);
+      const color = decoded.rgba.readUInt32BE(offset);
+      const count = (counts.get(color) ?? 0) + 1;
+      counts.set(color, count);
+      dominantPixels = Math.max(dominantPixels, count);
+    }
+  }
+  const totalPixels = region.width * region.height;
+  return Object.freeze({
+    region,
+    totalPixels,
+    uniqueColorCount: counts.size,
+    dominantPixelRatio: dominantPixels / totalPixels,
+    pixelSha256: `sha256:${hash.digest("hex")}`,
+  });
+}
+
 export async function createEvidenceBundle({
   outputRoot,
   jobId,
@@ -367,6 +394,7 @@ async function evidenceHtml(report, imagesInput, stdout, stderr, videosInput) {
       realPlayerJourneys: "真实玩家旅程",
       systemRealInputs: "系统级真实输入",
       requirementCoverage: "玩家需求覆盖",
+      assetPlacementCoverage: "素材控件贴图覆盖",
       screenshots: "截图",
       stableBaselines: "稳定视觉基线",
       adaptivePlay: "自适应游玩",
@@ -424,6 +452,7 @@ async function evidenceHtml(report, imagesInput, stdout, stderr, videosInput) {
       realPlayerJourneys: "Real Player Journeys",
       systemRealInputs: "System-level Real Inputs",
       requirementCoverage: "Player Requirement Coverage",
+      assetPlacementCoverage: "Asset-to-control Coverage",
       screenshots: "Screenshots",
       stableBaselines: "Stable Visual Baselines",
       adaptivePlay: "Adaptive Play",
@@ -495,6 +524,7 @@ async function evidenceHtml(report, imagesInput, stdout, stderr, videosInput) {
     ["realPlayerJourneys", coverage.interactiveJourneyCount ?? 0],
     ["systemRealInputs", coverage.realInputCount ?? 0],
     ["requirementCoverage", `${coverage.coveredPlayerRequirementCount ?? 0}/${coverage.playerRequirementCount ?? 0}`],
+    ["assetPlacementCoverage", `${coverage.verifiedAssetPlacementCount ?? 0}/${coverage.plannedAssetPlacementCount ?? 0}`],
     ["screenshots", report.screenshotCount ?? imagesInput.filter(item => item.label.startsWith("checkpoint")).length],
     ["stableBaselines", coverage.visualBaselineCount ?? 0],
     ["adaptivePlay", `${coverage.adaptiveSuccessCount ?? 0}/${coverage.adaptiveRolloutCount ?? 0}`],

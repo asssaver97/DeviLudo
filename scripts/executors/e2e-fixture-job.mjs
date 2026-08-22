@@ -51,6 +51,8 @@ const regression = {
 const regressionBytes = Buffer.from(`${JSON.stringify(regression)}\n`);
 await writeFile(regressionPath, regressionBytes);
 const platform = request.operatingSystem ?? "macos";
+const plannedAssetPlacementCount = Array.isArray(request.testPlan?.assetPlacementPlan?.placements)
+  ? request.testPlan.assetPlacementPlan.placements.length : 0;
 const summary = "Deterministic checks and two of three adaptive rollouts passed";
 const report = {
   schema: "deviludo.e2e-evidence", jobId: request.jobId, platform, action: "test",
@@ -58,7 +60,9 @@ const report = {
   coverage: { headlessCheckCount: 1, interactiveJourneyCount: 1, deterministicInputCount: 2,
     realInputCount: 8, keyboardMouseInputCount: 8, gamepadInputCount: 0,
     adaptiveRolloutCount: 3, adaptiveSuccessCount: 2, adaptiveDecisionCount: 6,
-    coveredPlayerRequirementCount: 1, playerRequirementCount: 1, visualBaselineCount: 1 },
+    coveredPlayerRequirementCount: 1, playerRequirementCount: 1,
+    plannedAssetPlacementCount, verifiedAssetPlacementCount: plannedAssetPlacementCount,
+    visualBaselineCount: 1 },
   performance: { schema: "deviludo.e2e-performance.v1", passed: true, thresholds: {},
     environment: { softwareRenderer: true, softwareRendererRunCount: 1, frameRateEnforced: false,
       inputResponseThresholds: { maximumP95Ms: 4_000, maximumMs: 6_000 } },
@@ -80,7 +84,9 @@ const receipt = {
     interactiveJourneyCount: 1, deterministicInputCount: 2, realInputCount: 8,
     keyboardMouseInputCount: 8, gamepadInputCount: 0, adaptiveRolloutCount: 3,
     adaptiveSuccessCount: 2, adaptiveDecisionCount: 6, coveredPlayerRequirementCount: 1,
-    playerRequirementCount: 1, screenshotCount: 3, visualBaselineCount: 1, videoCount: 1,
+    playerRequirementCount: 1, plannedAssetPlacementCount,
+    verifiedAssetPlacementCount: plannedAssetPlacementCount,
+    screenshotCount: 3, visualBaselineCount: 1, videoCount: 1,
     hasVisualDiff: false, regressionTraceDigest: `sha256:${createHash("sha256").update(regressionBytes).digest("hex")}`,
     frameRateSampleCount: 6, minimumFps: 60, p10Fps: 60, medianFps: 60,
     inputResponseSampleCount: 2, p95InputResponseMs: 100, maxInputResponseMs: 100,

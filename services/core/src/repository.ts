@@ -47,6 +47,11 @@ import {
 } from "@/lib/product/project-document";
 import { parseResponseLanguage, type ResponseLanguage } from "@/lib/product/response-language";
 
+function generatedAssetResourcePath(assetKey: string, objectKey: string | null): string | null {
+  const extension = objectKey?.match(/\.(png|jpg|webp)$/i)?.[1]?.toLowerCase();
+  return extension ? `res://assets/generated/${assetKey}.${extension}` : null;
+}
+
 export class CoreRepository {
   constructor(private readonly database: Database) {}
 
@@ -573,10 +578,10 @@ export class CoreRepository {
       if (!row) throw new Error("E2E planning workflow is unavailable");
       const assets = await client.query<{
         asset_key: string; asset_type: string; description: string; status: string;
-        source_path: string | null; object_key: string | null;
+        source_path: string | null; object_key: string | null; sha256: string | null;
       }>(
         `SELECT item.asset_key, item.asset_type, item.description, item.status::text,
-                item.source_path, item.object_key
+                item.source_path, item.object_key, item.sha256
            FROM deviludo.asset_manifests manifest
            JOIN deviludo.asset_items item
              ON item.workspace_id = manifest.workspace_id AND item.manifest_id = manifest.id
@@ -617,6 +622,10 @@ export class CoreRepository {
           status: asset.status,
           sourcePath: asset.source_path,
           materialized: asset.object_key !== null || asset.source_path !== null,
+          expectedResourcePath: asset.source_path
+            ? `res://${asset.source_path}`
+            : generatedAssetResourcePath(asset.asset_key, asset.object_key),
+          expectedSha256: asset.sha256,
         }))),
       });
     });
@@ -687,13 +696,9 @@ export class CoreRepository {
     });
   }
 
-  /**
-   * Projects created before E2E planning moved to the test node can contain a
-   * semantic test contract in their last successful Agent manifest. It is an
-   * untrusted planning hint only: the E2E planner revalidates its schema and
-   * frozen requirements before it can be used.
-   */
-  async readProjectE2eContractHintObject(input: Readonly<{
+  /** The last successful Agent manifest owns immutable asset-to-control intent
+   * and can also carry a legacy semantic test hint that the planner revalidates. */
+  async readProjectAgentManifestObject(input: Readonly<{
     workspaceId: string;
     workflowId: string;
     projectId: string;
@@ -3911,12 +3916,14 @@ function e2eEvidenceSummary(value: unknown): ArtifactRecord["e2eEvidence"] | nul
   const counts = [
     "headlessCheckCount", "interactiveJourneyCount", "deterministicInputCount", "realInputCount",
     "keyboardMouseInputCount", "gamepadInputCount", "adaptiveRolloutCount", "adaptiveSuccessCount",
-    "adaptiveDecisionCount", "coveredPlayerRequirementCount", "playerRequirementCount", "visualBaselineCount", "videoCount",
+    "adaptiveDecisionCount", "coveredPlayerRequirementCount", "playerRequirementCount",
+    "plannedAssetPlacementCount", "verifiedAssetPlacementCount", "visualBaselineCount", "videoCount",
     "frameRateSampleCount", "inputResponseSampleCount",
   ] as const;
   if (summary.schema !== "deviludo.e2e-evidence" || Object.hasOwn(summary, "protocol")
     || counts.some(key => !Number.isSafeInteger(summary[key]) || Number(summary[key]) < 0)
     || Number(summary.coveredPlayerRequirementCount) > Number(summary.playerRequirementCount)
+    || Number(summary.verifiedAssetPlacementCount) > Number(summary.plannedAssetPlacementCount)
     || Number(summary.adaptiveRolloutCount) > 3
     || Number(summary.adaptiveSuccessCount) > Number(summary.adaptiveRolloutCount)
     || !nullableNonNegativeNumber(summary.minimumFps)
@@ -3943,7 +3950,10 @@ function e2eEvidenceSummary(value: unknown): ArtifactRecord["e2eEvidence"] | nul
     adaptiveRolloutCount: Number(summary.adaptiveRolloutCount), adaptiveSuccessCount: Number(summary.adaptiveSuccessCount),
     adaptiveDecisionCount: Number(summary.adaptiveDecisionCount),
     coveredPlayerRequirementCount: Number(summary.coveredPlayerRequirementCount),
-    playerRequirementCount: Number(summary.playerRequirementCount), screenshotCount: Number(summary.screenshotCount),
+    playerRequirementCount: Number(summary.playerRequirementCount),
+    plannedAssetPlacementCount: Number(summary.plannedAssetPlacementCount),
+    verifiedAssetPlacementCount: Number(summary.verifiedAssetPlacementCount),
+    screenshotCount: Number(summary.screenshotCount),
     visualBaselineCount: Number(summary.visualBaselineCount), videoCount: Number(summary.videoCount), hasVisualDiff: summary.hasVisualDiff,
     frameRateSampleCount: Number(summary.frameRateSampleCount), minimumFps: summary.minimumFps as number | null,
     p10Fps: summary.p10Fps as number | null, medianFps: summary.medianFps as number | null,

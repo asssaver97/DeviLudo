@@ -28,6 +28,10 @@ export function probeSnapshotValidationError(value, expected = {}) {
   if (typeof value.sceneId !== "string" || !stableId(value.sceneId)) return "sceneId must be a stable semantic ID";
   if (!plainRecord(value.state) || !plainRecord(value.progress)) return "state and progress must be JSON objects";
   if (!Array.isArray(value.controls) || value.controls.length > 2_000) return "controls must be an array containing at most 2000 entries";
+  if (value.assetBindings !== undefined
+    && (!Array.isArray(value.assetBindings) || value.assetBindings.length > 2_000)) {
+    return "assetBindings must be an array containing at most 2000 entries";
+  }
   if (expected.sessionNonce && value.sessionNonce !== expected.sessionNonce) return "session nonce does not match the launched game";
   if (expected.pid && value.pid !== expected.pid) return "process ID does not match the launched game";
   if (expected.afterSequence !== undefined && value.sequence <= expected.afterSequence) return `sequence ${value.sequence} did not advance beyond ${expected.afterSequence}`;
@@ -46,6 +50,26 @@ export function probeSnapshotValidationError(value, expected = {}) {
     if (control.text !== undefined && (typeof control.text !== "string" || control.text.length > 2_000)) return `control ${label} text exceeds the probe contract`;
     if (control.value !== undefined && !primitive(control.value)) return `control ${label} value must be primitive`;
     ids.add(control.id);
+  }
+  const bindingKeys = new Set();
+  for (const [index, binding] of (value.assetBindings ?? []).entries()) {
+    const label = typeof binding?.assetKey === "string" ? binding.assetKey : `#${index}`;
+    if (!binding || typeof binding !== "object" || Array.isArray(binding)
+      || Object.keys(binding).some(key => !["assetKey", "targetId", "resourcePath", "sha256", "visible", "rect"].includes(key))
+      || typeof binding.assetKey !== "string" || !safeAssetKey(binding.assetKey)
+      || !stableId(binding.targetId)
+      || typeof binding.resourcePath !== "string" || !safeImageResourcePath(binding.resourcePath)
+      || (binding.sha256 !== undefined && !/^sha256:[0-9a-f]{64}$/.test(binding.sha256))
+      || typeof binding.visible !== "boolean" || !validRect(binding.rect)) {
+      return `asset binding ${label} has an invalid structure`;
+    }
+    const control = value.controls.find(item => item.id === binding.targetId);
+    if (!control) return `asset binding ${label} target ${binding.targetId} is not a published control`;
+    if (binding.visible && !control.visible) return `asset binding ${label} cannot be visible on hidden control ${binding.targetId}`;
+    if (!rectContains(control.rect, binding.rect)) return `asset binding ${label} rectangle must remain inside control ${binding.targetId}`;
+    const bindingKey = `${binding.assetKey}:${binding.targetId}`;
+    if (bindingKeys.has(bindingKey)) return `asset binding ${label} on ${binding.targetId} is duplicated`;
+    bindingKeys.add(bindingKey);
   }
   if (value.state.screen_mode === "MENU"
     && value.controls.some(control => control.scope === "GAMEPLAY" && control.visible && control.enabled)) {
@@ -152,6 +176,14 @@ export function resolveProbeControlAtPoint(snapshot, x, y) {
   return matches[0].control;
 }
 
+export function resolveProbeAssetBinding(snapshot, assetKey, targetId) {
+  const matches = (snapshot.assetBindings ?? [])
+    .filter(binding => binding.assetKey === assetKey && binding.targetId === targetId);
+  if (matches.length !== 1) throw new Error(`E2E asset ${assetKey} binding on ${targetId} is missing or duplicated`);
+  if (!matches[0].visible) throw new Error(`E2E asset ${assetKey} is not visible on ${targetId}`);
+  return matches[0];
+}
+
 export function evaluateProbeAssertions(assertions, before, after) {
   if (!Array.isArray(assertions) || !assertions.length) throw new Error("Probe assertions are required");
   return assertions.map(assertion => {
@@ -166,7 +198,13 @@ export function probeStateDigest(snapshot) {
   const controls = [...snapshot.controls]
     .map(control => ({ id: control.id, scope: control.scope, visible: control.visible, enabled: control.enabled, text: control.text ?? null, value: control.value ?? null }))
     .sort((left, right) => left.id.localeCompare(right.id));
-  const content = stableJson({ sceneId: snapshot.sceneId, state: snapshot.state, progress: snapshot.progress, controls });
+  const assetBindings = [...(snapshot.assetBindings ?? [])]
+    .map(binding => ({
+      assetKey: binding.assetKey, targetId: binding.targetId, resourcePath: binding.resourcePath,
+      sha256: binding.sha256 ?? null, visible: binding.visible, rect: binding.rect,
+    }))
+    .sort((left, right) => left.assetKey.localeCompare(right.assetKey) || left.targetId.localeCompare(right.targetId));
+  const content = stableJson({ sceneId: snapshot.sceneId, state: snapshot.state, progress: snapshot.progress, controls, assetBindings });
   return `sha256:${createHash("sha256").update(content).digest("hex")}`;
 }
 
@@ -212,6 +250,24 @@ function validRect(value) {
     && [value.x, value.y, value.width, value.height].every(Number.isFinite)
     && value.x >= 0 && value.y >= 0 && value.width > 0 && value.height > 0
     && value.x + value.width <= E2E_CLIENT_WIDTH && value.y + value.height <= E2E_CLIENT_HEIGHT;
+}
+
+function rectContains(outer, inner) {
+  return inner.x >= outer.x && inner.y >= outer.y
+    && inner.x + inner.width <= outer.x + outer.width
+    && inner.y + inner.height <= outer.y + outer.height;
+}
+
+function safeAssetKey(value) {
+  return /^[A-Za-z0-9][A-Za-z0-9._/-]{0,199}$/.test(value)
+    && !/(^|\/)\.{1,2}(\/|$)|\/\//.test(value) && !value.endsWith("/");
+}
+
+function safeImageResourcePath(value) {
+  const path = value.startsWith("res://") ? value.slice("res://".length) : "";
+  return value.startsWith("res://") && value.length <= 506
+    && /\.(?:png|jpe?g|webp|svg)$/i.test(value)
+    && !path.includes("\\") && !path.includes("//") && !/(^|\/)\.{1,2}(\/|$)/.test(path);
 }
 
 function rectDiagnostic(value) {

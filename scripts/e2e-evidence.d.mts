@@ -13,6 +13,13 @@ export function inspectScreenshot(path: string, expectedWidth?: number, expected
 export function captureAndInspectScreenshot(path: string, capture: (path: string) => Promise<unknown>, options?: Readonly<{ attempts?: number; delayMs?: number }>): Promise<Readonly<Record<string, unknown>>>;
 export function compareScreenshots(actualPath: string, referencePath: string, diffPath?: string, threshold?: number): Promise<Readonly<{ passed: boolean; differentPixels: number; totalPixels: number; differenceRatio: number; threshold: number }>>;
 export function compareScreenshotRegion(actualPath: string, referencePath: string, rect: Readonly<{ x: number; y: number; width: number; height: number }>, diffPath?: string | null): Promise<Readonly<{ differentPixels: number; totalPixels: number; differenceRatio: number; region: Readonly<{ x: number; y: number; width: number; height: number }> }>>;
+export function inspectScreenshotRegion(path: string, rect: Readonly<{ x: number; y: number; width: number; height: number }>): Promise<Readonly<{
+  region: Readonly<{ x: number; y: number; width: number; height: number }>;
+  totalPixels: number;
+  uniqueColorCount: number;
+  dominantPixelRatio: number;
+  pixelSha256: string;
+}>>;
 export function encodeRgbaPng(width: number, height: number, rgba: Buffer): Buffer;
 export function createEvidenceBundle(input: Readonly<Record<string, unknown>>): Promise<Readonly<{ outputPath: string; outputSha256: string; outputSizeBytes: number; manifest: Readonly<Record<string, unknown>> }>>;
 export function extractAndValidateEvidenceBundle(zipPath: string, destination: string, maximumBytes?: number): Promise<Readonly<{ manifest: Readonly<Record<string, unknown>>; report: Readonly<Record<string, unknown>>; indexPath: string }>>;

@@ -6,6 +6,7 @@ import {
   ASSET_TYPES,
   ASSET_ITEM_STATUSES,
   ASSET_MANIFEST_STATUSES,
+  validateAssetUsageTargets,
 } from "../lib/product/asset-manifest.js";
 import { AssetManifestStore } from "@/services/core/src/asset-manifest";
 import type { Database } from "@/services/core/src/database";
@@ -60,11 +61,27 @@ describe("Asset manifest validation", () => {
       generationPrompt: "pixel art character idle",
       frameCount: 4,
       dimensions: "32x32",
+      usageTargets: [{ targetId: "player-avatar", checkpointRole: "READY" }],
       status: "planned",
       createdAt: "2024-01-01T00:00:00Z",
       updatedAt: "2024-01-01T00:00:00Z",
     };
     assert.ok(validateAssetItem(item));
+  });
+
+  it("requires bounded unique stable control targets for planned asset placement", () => {
+    assert.equal(validateAssetUsageTargets([
+      { targetId: "start-dialog-frame", checkpointRole: "START" },
+      { targetId: "pause-dialog-frame", checkpointRole: "ACTION" },
+    ]), true);
+    assert.equal(validateAssetUsageTargets([]), false);
+    assert.equal(validateAssetUsageTargets([
+      { targetId: "start-dialog-frame", checkpointRole: "START" },
+      { targetId: "start-dialog-frame", checkpointRole: "START" },
+    ]), false);
+    assert.equal(validateAssetUsageTargets([
+      { targetId: "Bad Control", checkpointRole: "START" },
+    ]), false);
   });
 
   it("requires existing source images to use a safe project-relative path", () => {

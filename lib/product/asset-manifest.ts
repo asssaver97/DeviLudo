@@ -5,6 +5,19 @@ export const ASSET_MANIFEST_SCHEMA_VERSION = "deviludo.asset-manifest.v1" as con
 export const ASSET_TYPES = ["sprite", "animation", "background", "ui", "icon", "tileset"] as const;
 export type AssetType = typeof ASSET_TYPES[number];
 
+export const ASSET_USAGE_CHECKPOINT_ROLES = ["START", "READY", "ACTION", "PROGRESS", "COMPLETION"] as const;
+export type AssetUsageCheckpointRole = typeof ASSET_USAGE_CHECKPOINT_ROLES[number];
+
+/**
+ * A player-visible placement owned by the asset plan. `targetId` is the stable
+ * production control ID published by the read-only E2E UI Probe. The role says
+ * when that control and texture must be visible in a real-window checkpoint.
+ */
+export type AssetUsageTarget = Readonly<{
+  targetId: string;
+  checkpointRole: AssetUsageCheckpointRole;
+}>;
+
 export const ASSET_ITEM_STATUSES = ["planned", "generating", "generated", "uploaded", "existing", "failed"] as const;
 export type AssetItemStatus = typeof ASSET_ITEM_STATUSES[number];
 
@@ -20,6 +33,8 @@ export type AssetItem = Readonly<{
   generationPrompt?: string;
   frameCount?: number;
   dimensions?: string;
+  /** Planned player-visible controls. Persisted Agent manifests always supply this. */
+  usageTargets?: readonly AssetUsageTarget[];
   status: AssetItemStatus;
   /** Project-relative image already present in the published source revision. */
   sourcePath?: string;
@@ -76,10 +91,27 @@ export function validateAssetItem(value: unknown): value is AssetItem {
     && typeof item.assetType === "string"
     && ASSET_TYPES.includes(item.assetType as AssetType)
     && typeof item.description === "string"
+    && (item.usageTargets === undefined || validateAssetUsageTargets(item.usageTargets, true))
     && typeof item.status === "string"
     && ASSET_ITEM_STATUSES.includes(item.status as AssetItemStatus)
     && sourcePathValid
     && (item.status === "existing" ? typeof item.sourcePath === "string" : item.sourcePath === undefined)
     && typeof item.createdAt === "string"
     && typeof item.updatedAt === "string";
+}
+
+export function validateAssetUsageTargets(value: unknown, allowEmpty = false): value is readonly AssetUsageTarget[] {
+  if (!Array.isArray(value) || (!allowEmpty && value.length < 1) || value.length > 32) return false;
+  const keys = new Set<string>();
+  for (const target of value) {
+    if (!target || typeof target !== "object" || Array.isArray(target)) return false;
+    const item = target as Record<string, unknown>;
+    if (Object.keys(item).some(key => !["targetId", "checkpointRole"].includes(key))
+      || typeof item.targetId !== "string" || !/^[a-z0-9][a-z0-9-]{0,119}$/.test(item.targetId)
+      || !ASSET_USAGE_CHECKPOINT_ROLES.includes(item.checkpointRole as AssetUsageCheckpointRole)) return false;
+    const key = `${item.targetId}:${item.checkpointRole}`;
+    if (keys.has(key)) return false;
+    keys.add(key);
+  }
+  return true;
 }

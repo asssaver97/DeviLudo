@@ -48,6 +48,8 @@ export type ArtifactRecord = Readonly<{
     adaptiveDecisionCount: number;
     coveredPlayerRequirementCount: number;
     playerRequirementCount: number;
+    plannedAssetPlacementCount: number;
+    verifiedAssetPlacementCount: number;
     screenshotCount: number;
     visualBaselineCount: number;
     videoCount: number;

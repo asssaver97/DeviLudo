@@ -51,6 +51,12 @@ const generatedTestPlan = Object.freeze({
   plan: Object.freeze({
     testManifest: Object.freeze({}),
     coverage: Object.freeze({}),
+    assetPlacementPlan: Object.freeze({
+      schema: "deviludo.asset-placement-plan",
+      plannedAssetKeys: Object.freeze([]),
+      placements: Object.freeze([]),
+      unmappedAssetKeys: Object.freeze([]),
+    }),
     testManifestDigest: `sha256:${"d".repeat(64)}`,
     contractDigest: `sha256:${"e".repeat(64)}`,
     executionPlan: Object.freeze({ plannedTimeoutMs: 1_800_000 }),
@@ -108,7 +114,8 @@ test("a trusted failed guest report is a product outcome instead of an E2E node 
     evidence: Object.freeze({ schema: "deviludo.e2e-evidence", result: "FAILED", headlessCheckCount: 2,
       interactiveJourneyCount: 0, deterministicInputCount: 0, realInputCount: 0, keyboardMouseInputCount: 0,
       gamepadInputCount: 0, adaptiveRolloutCount: 0, adaptiveSuccessCount: 0, adaptiveDecisionCount: 0,
-      coveredPlayerRequirementCount: 0, playerRequirementCount: 1, screenshotCount: 1,
+      coveredPlayerRequirementCount: 0, playerRequirementCount: 1,
+      plannedAssetPlacementCount: 0, verifiedAssetPlacementCount: 0, screenshotCount: 1,
       visualBaselineCount: 0, videoCount: 1, hasVisualDiff: false,
       frameRateSampleCount: 0, minimumFps: null, p10Fps: null, medianFps: null,
       inputResponseSampleCount: 0, p95InputResponseMs: null, maxInputResponseMs: null, performancePassed: false,
@@ -132,7 +139,8 @@ test("a trusted failed guest report is a product outcome instead of an E2E node 
     evidence: Object.freeze({ schema: "deviludo.e2e-evidence", result: "FAILED", headlessCheckCount: 2,
       interactiveJourneyCount: 0, deterministicInputCount: 0, realInputCount: 0, keyboardMouseInputCount: 0,
       gamepadInputCount: 0, adaptiveRolloutCount: 0, adaptiveSuccessCount: 0, adaptiveDecisionCount: 0,
-      coveredPlayerRequirementCount: 0, playerRequirementCount: 1, screenshotCount: 1,
+      coveredPlayerRequirementCount: 0, playerRequirementCount: 1,
+      plannedAssetPlacementCount: 0, verifiedAssetPlacementCount: 0, screenshotCount: 1,
       visualBaselineCount: 0, videoCount: 1, hasVisualDiff: false,
       frameRateSampleCount: 0, minimumFps: null, p10Fps: null, medianFps: null,
       inputResponseSampleCount: 0, p95InputResponseMs: null, maxInputResponseMs: null, performancePassed: false,
@@ -168,7 +176,8 @@ test("a software-rendered passed receipt keeps FPS evidence but uses the bounded
       interactiveJourneyCount: 1, deterministicInputCount: 3, realInputCount: 5,
       keyboardMouseInputCount: 5, gamepadInputCount: 0, adaptiveRolloutCount: 3,
       adaptiveSuccessCount: 2, adaptiveDecisionCount: 9, coveredPlayerRequirementCount: 4,
-      playerRequirementCount: 4, screenshotCount: 8, visualBaselineCount: 3, videoCount: 1,
+      playerRequirementCount: 4, plannedAssetPlacementCount: 2, verifiedAssetPlacementCount: 2,
+      screenshotCount: 8, visualBaselineCount: 3, videoCount: 1,
       hasVisualDiff: false, frameRateSampleCount: 20, minimumFps: 1, p10Fps: 1, medianFps: 4,
       inputResponseSampleCount: 5, p95InputResponseMs: 2_587, maxInputResponseMs: 2_587,
       performancePassed: true, softwareRenderer: true, frameRateEnforced: false,
@@ -184,6 +193,10 @@ test("a software-rendered passed receipt keeps FPS evidence but uses the bounded
   assert.throws(() => validateExecutionReceipt(job, Object.freeze({
     ...receipt,
     evidence: Object.freeze({ ...receipt.evidence, softwareRenderer: false, frameRateEnforced: true }),
+  })), /PASSED_GATE/);
+  assert.throws(() => validateExecutionReceipt(job, Object.freeze({
+    ...receipt,
+    evidence: Object.freeze({ ...receipt.evidence, verifiedAssetPlacementCount: 1 }),
   })), /PASSED_GATE/);
 });
 

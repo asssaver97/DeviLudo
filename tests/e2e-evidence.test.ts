@@ -17,6 +17,7 @@ import {
   extractAndValidateEvidenceBundle,
   godotErrorLines,
   inspectScreenshot,
+  inspectScreenshotRegion,
 } from "../scripts/e2e-evidence.mjs";
 
 const execute = promisify(execFile);
@@ -110,6 +111,22 @@ describe("E2E evidence", () => {
       assert.equal(unchanged.differenceRatio, 0);
       assert.ok((await readFile(diff)).length > 0);
       await assert.rejects(compareScreenshotRegion(actual, reference, { x: 1270, y: 0, width: 20, height: 720 }), /region is invalid/);
+    } finally { await rm(directory, { recursive: true, force: true }); }
+  });
+
+  test("records nonblank pixel evidence for a planned asset's rendered control region", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "deviludo-asset-region-"));
+    try {
+      const screenshot = join(directory, "asset.png");
+      await writeFile(screenshot, testImage());
+      const evidence = await inspectScreenshotRegion(screenshot, { x: 100, y: 120, width: 240, height: 96 });
+      assert.ok(evidence.uniqueColorCount > 2);
+      assert.ok(evidence.dominantPixelRatio < 0.9995);
+      assert.match(evidence.pixelSha256, /^sha256:[0-9a-f]{64}$/);
+      await assert.rejects(
+        inspectScreenshotRegion(screenshot, { x: 1270, y: 0, width: 20, height: 20 }),
+        /region is invalid/,
+      );
     } finally { await rm(directory, { recursive: true, force: true }); }
   });
 

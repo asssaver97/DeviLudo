@@ -1393,7 +1393,7 @@ export async function runApi(
         projectId: job.projectId,
         platform: job.targetOperatingSystem,
       }),
-      repository.readProjectE2eContractHintObject({
+      repository.readProjectAgentManifestObject({
         workspaceId: job.workspaceId,
         workflowId: job.workflowId,
         projectId: job.projectId,
@@ -1405,23 +1405,39 @@ export async function runApi(
       }),
     ]);
     let projectTestContract: Readonly<Record<string, unknown>> | null = frozenTestPlan?.testManifest ?? null;
+    let projectAgentManifest: Readonly<Record<string, unknown>> | null = null;
     let regressionTrace: Readonly<Record<string, unknown>> | null = null;
-    try {
-      const [legacyProjectTestContract, storedRegressionTrace] = await Promise.all([
-        projectTestContract ? Promise.resolve(null) : objectStore.readProjectE2eContractHint(contractHintObject),
-        objectStore.readProjectE2eRegressionTrace(regressionTraceObject),
-      ]);
-      projectTestContract ??= legacyProjectTestContract;
-      regressionTrace = storedRegressionTrace;
-    } catch (error) {
+    const [agentManifestResult, regressionTraceResult] = await Promise.allSettled([
+      objectStore.readProjectAgentManifest(contractHintObject),
+      objectStore.readProjectE2eRegressionTrace(regressionTraceObject),
+    ]);
+    if (agentManifestResult.status === "rejected") {
       request.log.warn({
-        event: "e2e_project_contract_hint_ignored",
-        reason: error instanceof Error ? error.message : "Project E2E contract hint could not be read",
-      }, "Ignoring an unreadable historical project E2E contract");
+        event: "e2e_project_agent_manifest_unavailable",
+        reason: agentManifestResult.reason instanceof Error
+          ? agentManifestResult.reason.message : "Project Agent manifest could not be read",
+      }, "Cross-platform E2E could not read the frozen Agent asset-placement contract");
+      return reply.code(503).send({ code: "E2E_TEST_PLAN_CONTEXT", message: "E2E 无法读取冻结的素材控件规划" });
+    }
+    projectAgentManifest = agentManifestResult.value;
+    const legacyProjectTestContract = projectAgentManifest?.testManifest;
+    if (!projectTestContract && legacyProjectTestContract
+      && typeof legacyProjectTestContract === "object" && !Array.isArray(legacyProjectTestContract)) {
+      projectTestContract = Object.freeze(legacyProjectTestContract as Record<string, unknown>);
+    }
+    if (regressionTraceResult.status === "fulfilled") {
+      regressionTrace = regressionTraceResult.value;
+    } else {
+      request.log.warn({
+        event: "e2e_project_regression_hint_ignored",
+        reason: regressionTraceResult.reason instanceof Error
+          ? regressionTraceResult.reason.message : "Project E2E regression trace could not be read",
+      }, "Ignoring an unreadable historical E2E regression trace");
     }
     const context = Object.freeze({
       ...storedContext,
       ...(projectTestContract ? { projectTestContract } : {}),
+      ...(projectAgentManifest?.assetManifest ? { assetUsageManifest: projectAgentManifest.assetManifest } : {}),
       ...(regressionTrace ? { regressionTrace } : {}),
     });
     try {

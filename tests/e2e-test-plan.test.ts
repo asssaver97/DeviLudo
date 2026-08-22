@@ -17,9 +17,30 @@ test("the cross-platform E2E planner freezes regression, change-impact, UI, and 
       revisionNotes: Object.freeze(["Add the turn-completion action"]),
       regression: Object.freeze({ available: true, estimatedDurationMs: 5_000 }),
       assets: Object.freeze([
-        Object.freeze({ assetKey: "ui/end-turn", materialized: true }),
-        Object.freeze({ assetKey: "backgrounds/menu", materialized: true }),
+        Object.freeze({
+          assetKey: "ui/end-turn", materialized: true,
+          expectedResourcePath: "res://assets/generated/ui/end-turn.png",
+          expectedSha256: `sha256:${"a".repeat(64)}`,
+        }),
+        Object.freeze({
+          assetKey: "backgrounds/menu", materialized: true,
+          expectedResourcePath: "res://assets/generated/backgrounds/menu.webp",
+          expectedSha256: `sha256:${"b".repeat(64)}`,
+        }),
       ]),
+      assetUsageManifest: Object.freeze({
+        schemaVersion: "deviludo.asset-manifest.v1",
+        items: Object.freeze([
+          Object.freeze({
+            assetKey: "ui/end-turn",
+            usageTargets: Object.freeze([{ targetId: "end-turn-button", checkpointRole: "ACTION" }]),
+          }),
+          Object.freeze({
+            assetKey: "backgrounds/menu",
+            usageTargets: Object.freeze([{ targetId: "start-screen-background", checkpointRole: "START" }]),
+          }),
+        ]),
+      }),
     }),
     runtime: "CLAUDE_CODE",
     baseUrl: "https://fixture.invalid",
@@ -30,13 +51,40 @@ test("the cross-platform E2E planner freezes regression, change-impact, UI, and 
   });
 
   assert.equal(validateTestManifest(plan.testManifest), true);
-  assert.deepEqual(plan.coverage.assetApplication, ["ui/end-turn", "backgrounds/menu"]);
+  assert.deepEqual(plan.coverage.assetApplication, ["backgrounds/menu", "ui/end-turn"]);
+  assert.deepEqual(plan.assetPlacementPlan.unmappedAssetKeys, []);
+  assert.deepEqual(plan.assetPlacementPlan.placements.map(item => [
+    item.assetKey, item.targetId, item.checkpointRole, item.expectedResourcePath,
+  ]), [
+    ["backgrounds/menu", "start-screen-background", "START", "res://assets/generated/backgrounds/menu.webp"],
+    ["ui/end-turn", "end-turn-button", "ACTION", "res://assets/generated/ui/end-turn.png"],
+  ]);
   assert.ok(plan.coverage.regressionOperations.length > 0);
   assert.ok(plan.coverage.regressionUi.length > 0);
   assert.ok(plan.coverage.changeImpact.length > 0);
   assert.match(plan.testManifestDigest, /^sha256:[0-9a-f]{64}$/);
   assert.match(plan.contractDigest, /^sha256:[0-9a-f]{64}$/);
   assert.ok(plan.executionPlan.plannedTimeoutMs >= 30 * 60_000);
+});
+
+test("the cross-platform E2E planner exposes missing planned asset-to-control mappings as a product gate", async () => {
+  const plan = await generateE2eTestPlan({
+    context: Object.freeze({
+      ...planningContext(),
+      assets: Object.freeze([Object.freeze({
+        assetKey: "ui/start-panel", materialized: true,
+        expectedResourcePath: "res://assets/generated/ui/start-panel.png",
+      })]),
+    }),
+    runtime: "CODEX_CLI",
+    baseUrl: "https://fixture.invalid",
+    apiKey: "{}",
+    model: "fixture-model",
+    testFixture: true,
+  });
+  assert.deepEqual(plan.assetPlacementPlan.plannedAssetKeys, ["ui/start-panel"]);
+  assert.deepEqual(plan.assetPlacementPlan.placements, []);
+  assert.deepEqual(plan.assetPlacementPlan.unmappedAssetKeys, ["ui/start-panel"]);
 });
 
 test("the cross-platform E2E planner does not multiply Provider or CLI failures", async () => {

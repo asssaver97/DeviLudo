@@ -48,7 +48,11 @@ export async function executeE2eJob(
   const plannedTimeoutSeconds = Math.ceil(Number(generatedPlan.plan.executionPlan.plannedTimeoutMs) / 1_000);
   if (!Number.isSafeInteger(plannedTimeoutSeconds) || plannedTimeoutSeconds < 1_800 || plannedTimeoutSeconds > 5_400
     || !/^sha256:[0-9a-f]{64}$/.test(generatedPlan.plan.testManifestDigest)
-    || !/^sha256:[0-9a-f]{64}$/.test(generatedPlan.plan.contractDigest)) {
+    || !/^sha256:[0-9a-f]{64}$/.test(generatedPlan.plan.contractDigest)
+    || generatedPlan.plan.assetPlacementPlan?.schema !== "deviludo.asset-placement-plan"
+    || !Array.isArray(generatedPlan.plan.assetPlacementPlan?.plannedAssetKeys)
+    || !Array.isArray(generatedPlan.plan.assetPlacementPlan?.placements)
+    || !Array.isArray(generatedPlan.plan.assetPlacementPlan?.unmappedAssetKeys)) {
     throw new Error("Cross-platform E2E node received an invalid generated test plan");
   }
   await isolation.assertAgentAbsent();
@@ -289,6 +293,7 @@ function diagnoseE2eEvidenceReceipt(
     "headlessCheckCount", "interactiveJourneyCount", "realInputCount", "deterministicInputCount",
     "keyboardMouseInputCount", "gamepadInputCount", "adaptiveRolloutCount", "adaptiveSuccessCount",
     "adaptiveDecisionCount", "coveredPlayerRequirementCount", "playerRequirementCount", "screenshotCount",
+    "plannedAssetPlacementCount", "verifiedAssetPlacementCount",
     "visualBaselineCount", "videoCount", "frameRateSampleCount", "inputResponseSampleCount",
   ];
   for (const field of nonNegativeIntegers) {
@@ -297,6 +302,7 @@ function diagnoseE2eEvidenceReceipt(
   if (Number(evidence.adaptiveRolloutCount) > 3
     || Number(evidence.adaptiveSuccessCount) > Number(evidence.adaptiveRolloutCount)) return "ADAPTIVE_COUNTS";
   if (Number(evidence.coveredPlayerRequirementCount) > Number(evidence.playerRequirementCount)) return "REQUIREMENT_COUNTS";
+  if (Number(evidence.verifiedAssetPlacementCount) > Number(evidence.plannedAssetPlacementCount)) return "ASSET_PLACEMENT_COUNTS";
   for (const field of ["minimumFps", "p10Fps", "medianFps", "p95InputResponseMs", "maxInputResponseMs"]) {
     if (!nullableNonNegativeNumber(evidence[field])) return `NON_NEGATIVE_METRIC:${field}`;
   }
@@ -326,7 +332,8 @@ function diagnoseE2eEvidenceReceipt(
     || Number(evidence.inputResponseSampleCount) < 2 || evidence.performancePassed !== true
     || !passesPerformanceEvidenceGate(evidence)
     || Number(evidence.videoCount) < 1
-    || Number(evidence.coveredPlayerRequirementCount) !== Number(evidence.playerRequirementCount))) return "PASSED_GATE";
+    || Number(evidence.coveredPlayerRequirementCount) !== Number(evidence.playerRequirementCount)
+    || Number(evidence.verifiedAssetPlacementCount) !== Number(evidence.plannedAssetPlacementCount))) return "PASSED_GATE";
   if (typeof evidence.hasVisualDiff !== "boolean") return "VISUAL_DIFF";
   if (![null, "MACOS_LAUNCH_SERVICES", "WINDOWS_FINAL_EXE", "LINUX_RELEASE_EXECUTABLE"].includes(evidence.packageLaunchMode as never)) {
     return "PACKAGE_LAUNCH_MODE";

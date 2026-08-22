@@ -15,6 +15,14 @@ export type E2EProbeControl = Readonly<{
   text?: string;
   value?: E2EProbeValue;
 }>;
+export type E2EProbeAssetBinding = Readonly<{
+  assetKey: string;
+  targetId: string;
+  resourcePath: string;
+  sha256?: string;
+  visible: boolean;
+  rect: E2EProbeRect;
+}>;
 export type E2EProbeSnapshot = Readonly<{
   schema: typeof E2E_UI_PROBE_SCHEMA;
   sessionNonce: string;
@@ -24,6 +32,7 @@ export type E2EProbeSnapshot = Readonly<{
   state: Readonly<Record<string, E2EProbeValue>>;
   progress: Readonly<Record<string, E2EProbeValue>>;
   controls: readonly E2EProbeControl[];
+  assetBindings?: readonly E2EProbeAssetBinding[];
 }>;
 export type E2EProbeExpectation = Readonly<{
   sessionNonce?: string;
@@ -49,5 +58,6 @@ export function waitForProbePostconditions(path: string, expected: E2EProbeExpec
 }>>;
 export function resolveProbeControl(snapshot: E2EProbeSnapshot, targetId: string, options?: Readonly<{ requireEnabled?: boolean }>): Readonly<{ control: E2EProbeControl; center: Readonly<{ x: number; y: number }> }>;
 export function resolveProbeControlAtPoint(snapshot: E2EProbeSnapshot, x: number, y: number): E2EProbeControl | null;
+export function resolveProbeAssetBinding(snapshot: E2EProbeSnapshot, assetKey: string, targetId: string): E2EProbeAssetBinding;
 export function evaluateProbeAssertions(assertions: readonly ProbeAssertion[], before: E2EProbeSnapshot, after: E2EProbeSnapshot): readonly E2EProbeAssertionResult[];
 export function probeStateDigest(snapshot: E2EProbeSnapshot): string;

@@ -14,6 +14,10 @@ import {
   validateProbeAssertion,
   type ProbeAssertion,
 } from "@/lib/product/interaction-script";
+import {
+  validateAssetUsageTargets,
+  type AssetUsageCheckpointRole,
+} from "@/lib/product/asset-manifest";
 import { runCodexPrompt, type CodexPromptRunner } from "./codex-cli";
 
 const E2E_TEST_PLAN_PROVIDER_BUDGET_MS = 360_000;
@@ -122,9 +126,25 @@ export type E2ePlanningCoverage = Readonly<{
   assetApplication: readonly string[];
 }>;
 
+export type PlannedAssetPlacement = Readonly<{
+  assetKey: string;
+  targetId: string;
+  checkpointRole: AssetUsageCheckpointRole;
+  expectedResourcePath: string;
+  expectedSha256: string | null;
+}>;
+
+export type AssetPlacementPlan = Readonly<{
+  schema: "deviludo.asset-placement-plan";
+  plannedAssetKeys: readonly string[];
+  placements: readonly PlannedAssetPlacement[];
+  unmappedAssetKeys: readonly string[];
+}>;
+
 export type GeneratedE2eTestPlan = Readonly<{
   testManifest: TestManifest;
   coverage: E2ePlanningCoverage;
+  assetPlacementPlan: AssetPlacementPlan;
   testManifestDigest: string;
   contractDigest: string;
   executionPlan: E2eExecutionPlan;
@@ -143,13 +163,11 @@ export async function generateE2eTestPlan(input: Readonly<{
   const specification = record(input.context.approvedSpecification);
   const requirements = specificationRequirementCatalog(specification);
   if (requirements.length < 1) throw new Error("Approved specification has no testable requirements");
-  const assets = Array.isArray(input.context.assets) ? input.context.assets.filter(isRecord) : [];
-  const materializedAssetKeys = assets
-    .filter(asset => asset.materialized === true && typeof asset.assetKey === "string")
-    .map(asset => String(asset.assetKey));
+  const assetPlacementPlan = buildAssetPlacementPlan(input.context);
+  const materializedAssetKeys = assetPlacementPlan.plannedAssetKeys;
   const structuralBaseline = safeBaselinePlan(requirements, materializedAssetKeys);
   if (input.testFixture === true) {
-    return finalizePlan(structuralBaseline, input.context);
+    return finalizePlan(structuralBaseline, input.context, assetPlacementPlan);
   }
   const projectBaseline = projectContractPlan(
     input.context.projectTestContract,
@@ -157,7 +175,7 @@ export async function generateE2eTestPlan(input: Readonly<{
     materializedAssetKeys,
   );
   if (projectBaseline) {
-    return finalizePlan(projectBaseline, input.context);
+    return finalizePlan(projectBaseline, input.context, assetPlacementPlan);
   }
   const prompt = testPlanPrompt(input.context, requirements);
   const fetchImpl = input.fetchImpl ?? fetch;
@@ -232,7 +250,7 @@ export async function generateE2eTestPlan(input: Readonly<{
     assertFrozenRequirements(parsed.testManifest, requirements);
     assertPlanningCoverage(parsed.coverage, materializedAssetKeys);
     assertConcreteProjectPlan(parsed.testManifest);
-    return finalizePlan(parsed, input.context);
+    return finalizePlan(parsed, input.context, assetPlacementPlan);
   } catch (error) {
     // A structurally valid generic manifest cannot know a product's semantic
     // Probe target IDs. Running it would turn a planning defect into a false
@@ -668,8 +686,63 @@ function boundedDuration(value: unknown): number {
   return Number.isInteger(value) && Number(value) >= 1 && Number(value) <= 300_000 ? Number(value) : 100;
 }
 
+function buildAssetPlacementPlan(context: Readonly<Record<string, unknown>>): AssetPlacementPlan {
+  const assets = Array.isArray(context.assets)
+    ? context.assets.filter(asset => isRecord(asset) && asset.materialized === true && typeof asset.assetKey === "string")
+    : [];
+  const usageManifest = record(context.assetUsageManifest);
+  const usageItems = Array.isArray(usageManifest.items) ? usageManifest.items.filter(isRecord) : [];
+  const usageByKey = new Map(usageItems
+    .filter(item => typeof item.assetKey === "string")
+    .map(item => [String(item.assetKey), item] as const));
+  const hasUsageManifest = usageItems.length > 0;
+  const plannedAssets = assets.filter(asset => {
+    const usage = usageByKey.get(String(asset.assetKey));
+    return !hasUsageManifest || usage?.discoveredSourceImage !== true;
+  });
+  const placements: PlannedAssetPlacement[] = [];
+  const unmappedAssetKeys: string[] = [];
+  for (const asset of plannedAssets) {
+    const assetKey = String(asset.assetKey);
+    const usage = usageByKey.get(assetKey);
+    const resourcePath = safeImageResourcePath(asset.expectedResourcePath)
+      ? asset.expectedResourcePath : null;
+    if (!usage || !validateAssetUsageTargets(usage.usageTargets) || !resourcePath) {
+      unmappedAssetKeys.push(assetKey);
+      continue;
+    }
+    const expectedSha256 = typeof asset.expectedSha256 === "string"
+      && /^sha256:[0-9a-f]{64}$/.test(asset.expectedSha256) ? asset.expectedSha256 : null;
+    for (const target of usage.usageTargets) {
+      placements.push(Object.freeze({
+        assetKey,
+        targetId: target.targetId,
+        checkpointRole: target.checkpointRole,
+        expectedResourcePath: resourcePath,
+        expectedSha256,
+      }));
+    }
+  }
+  placements.sort((left, right) => left.assetKey.localeCompare(right.assetKey)
+    || left.checkpointRole.localeCompare(right.checkpointRole)
+    || left.targetId.localeCompare(right.targetId));
+  return Object.freeze({
+    schema: "deviludo.asset-placement-plan",
+    plannedAssetKeys: Object.freeze(plannedAssets.map(asset => String(asset.assetKey)).sort()),
+    placements: Object.freeze(placements),
+    unmappedAssetKeys: Object.freeze(unmappedAssetKeys.sort()),
+  });
+}
+
 function isStableId(value: unknown): value is string {
   return typeof value === "string" && /^[a-z0-9][a-z0-9-]{0,119}$/.test(value);
+}
+
+function safeImageResourcePath(value: unknown): value is string {
+  const path = typeof value === "string" && value.startsWith("res://") ? value.slice("res://".length) : "";
+  return typeof value === "string" && value.startsWith("res://") && value.length <= 506
+    && /\.(?:png|jpe?g|webp|svg)$/i.test(value)
+    && !path.includes("\\") && !path.includes("//") && !/(^|\/)\.{1,2}(\/|$)/.test(path);
 }
 
 function isStablePath(value: unknown): value is string {
@@ -684,14 +757,15 @@ function normalizePlanningCoverage(value: unknown, materializedAssetKeys: readon
       : [];
     return Object.freeze(items.length > 0 ? items : [...fallback]);
   };
-  const assetApplication = [...strings("assetApplication", materializedAssetKeys.length > 0
-    ? materializedAssetKeys : ["No materialized image assets are present in this build"])];
-  for (const assetKey of materializedAssetKeys) if (!assetApplication.includes(assetKey)) assetApplication.push(assetKey);
   return Object.freeze({
     regressionOperations: strings("regressionOperations", ["Start, operate, and complete the project core loop"]),
     regressionUi: strings("regressionUi", ["Verify clean menu, active gameplay, progress, and completion UI"]),
     changeImpact: strings("changeImpact", ["Revalidate every frozen requirement in the current iteration"]),
-    assetApplication: Object.freeze(assetApplication),
+    // This field is an inventory, not proof. Runtime placement evidence is the
+    // only thing allowed to satisfy the asset gate.
+    assetApplication: Object.freeze(materializedAssetKeys.length > 0
+      ? [...materializedAssetKeys]
+      : ["No planned materialized image assets are present in this build"]),
   });
 }
 
@@ -716,6 +790,7 @@ function assertPlanningCoverage(coverage: E2ePlanningCoverage, materializedAsset
 function finalizePlan(
   parsed: Readonly<{ testManifest: TestManifest; coverage: E2ePlanningCoverage }>,
   context: Readonly<Record<string, unknown>>,
+  assetPlacementPlan: AssetPlacementPlan,
 ): GeneratedE2eTestPlan {
   const regression = record(context.regression);
   const regressionMs = regression.available === true && Number.isSafeInteger(regression.estimatedDurationMs)
@@ -725,8 +800,13 @@ function finalizePlan(
   const testManifestDigest = jsonDigest(parsed.testManifest);
   return Object.freeze({
     ...parsed,
+    assetPlacementPlan,
     testManifestDigest,
-    contractDigest: jsonDigest({ testManifest: parsed.testManifest, runner: "adaptive-real-input" }),
+    contractDigest: jsonDigest({
+      testManifest: parsed.testManifest,
+      assetPlacementPlan,
+      runner: "adaptive-real-input",
+    }),
     executionPlan,
   });
 }
@@ -839,6 +919,11 @@ function testPlanCorrectionPrompt(
 
 function compactPlanningContext(context: Readonly<Record<string, unknown>>): Readonly<Record<string, unknown>> {
   const assets = Array.isArray(context.assets) ? context.assets.filter(isRecord) : [];
+  const usageItems = Array.isArray(record(context.assetUsageManifest).items)
+    ? (record(context.assetUsageManifest).items as readonly unknown[]).filter(isRecord) : [];
+  const usageByKey = new Map(usageItems
+    .filter(item => typeof item.assetKey === "string")
+    .map(item => [String(item.assetKey), item] as const));
   return Object.freeze({
     projectName: context.projectName,
     iterationNumber: context.iterationNumber,
@@ -855,6 +940,8 @@ function compactPlanningContext(context: Readonly<Record<string, unknown>>): Rea
         assetKey: asset.assetKey,
         assetType: asset.assetType,
         description: asset.description,
+        expectedResourcePath: asset.expectedResourcePath,
+        usageTargets: usageByKey.get(String(asset.assetKey))?.usageTargets ?? null,
       }))),
   });
 }

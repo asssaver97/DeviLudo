@@ -219,17 +219,15 @@ export class CoreObjectStore {
     return Object.freeze({ assetManifest: parsed.assetManifest });
   }
 
-  async readProjectE2eContractHint(object: ObjectReference | null): Promise<Readonly<Record<string, unknown>> | null> {
+  async readProjectAgentManifest(object: ObjectReference | null): Promise<Readonly<Record<string, unknown>> | null> {
     if (!object) return null;
     if (object.kind !== "SPECIFICATION" || object.bucket !== this.bucket
       || !object.key.startsWith("workspaces/") || object.sizeBytes > 2 * 1024 * 1024) {
-      throw new Error("Project E2E contract hint object is invalid");
+      throw new Error("Project Agent manifest object is invalid");
     }
-    const parsed = await this.readJsonOutput([object], "SPECIFICATION", 2 * 1024 * 1024, "Agent manifest");
-    const hint = parsed.testManifest;
-    return hint && typeof hint === "object" && !Array.isArray(hint)
-      ? Object.freeze(hint as Record<string, unknown>)
-      : null;
+    return Object.freeze(await this.readJsonOutput(
+      [object], "SPECIFICATION", 2 * 1024 * 1024, "Agent manifest",
+    ));
   }
 
   async readProjectE2eRegressionTrace(object: ObjectReference | null): Promise<Readonly<Record<string, unknown>> | null> {

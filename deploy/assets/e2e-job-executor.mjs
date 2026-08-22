@@ -23,6 +23,10 @@ const request = envelope?.type === "execute" ? envelope.request : null;
 if (!/^[0-9a-f-]{36}$/i.test(request.jobId) || !Array.isArray(request.inputs)) throw new Error("E2E request is invalid");
 if (!request.testPlan || typeof request.testPlan !== "object" || Array.isArray(request.testPlan)
   || !request.testPlan.testManifest || typeof request.testPlan.testManifest !== "object"
+  || request.testPlan.assetPlacementPlan?.schema !== "deviludo.asset-placement-plan"
+  || !Array.isArray(request.testPlan.assetPlacementPlan?.plannedAssetKeys)
+  || !Array.isArray(request.testPlan.assetPlacementPlan?.placements)
+  || !Array.isArray(request.testPlan.assetPlacementPlan?.unmappedAssetKeys)
   || !/^sha256:[0-9a-f]{64}$/.test(String(request.testPlan.testManifestDigest ?? ""))
   || !/^sha256:[0-9a-f]{64}$/.test(String(request.testPlan.contractDigest ?? ""))) {
   throw new Error("Cross-platform E2E test plan is invalid");

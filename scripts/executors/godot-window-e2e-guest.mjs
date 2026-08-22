@@ -17,10 +17,12 @@ import {
   createEvidenceBundle,
   godotErrorLines,
   inspectScreenshot,
+  inspectScreenshotRegion,
 } from "../e2e-evidence.mjs";
 import {
   evaluateProbeAssertions,
   probeStateDigest,
+  resolveProbeAssetBinding,
   resolveProbeControl,
   resolveProbeControlAtPoint,
   waitForProbePostconditions,
@@ -93,6 +95,7 @@ const steps = [];
 const headlessChecks = new Set();
 const interactiveJourneys = new Set();
 const coveredPlayerRequirements = new Set();
+const verifiedAssetPlacements = new Map();
 const failures = [];
 const launchRecords = [];
 const adaptiveRollouts = [];
@@ -106,6 +109,7 @@ let playerPolicy = null;
 let gameExitCode = 0;
 let activeManifest = null;
 let activePlanningCoverage = null;
+let activeAssetPlacementPlan = null;
 const startedAt = Date.now();
 let platformDeadline = startedAt + 90 * 60_000;
 
@@ -119,8 +123,17 @@ try {
   assertManifest(manifest);
   activeManifest = manifest;
   activePlanningCoverage = testPlan.coverage ?? null;
-  if (jsonDigest({ testManifest: manifest, runner: "adaptive-real-input" }) !== frozenContractDigest) {
+  const assetPlacementPlan = testPlan?.assetPlacementPlan;
+  assertAssetPlacementPlan(assetPlacementPlan);
+  activeAssetPlacementPlan = assetPlacementPlan;
+  if (jsonDigest({ testManifest: manifest, assetPlacementPlan, runner: "adaptive-real-input" }) !== frozenContractDigest) {
     throw new Error("INFRASTRUCTURE: built test contract does not match the frozen source revision");
+  }
+  if (assetPlacementPlan.unmappedAssetKeys.length > 0) {
+    throw productFailure(
+      "ASSET_PLACEMENT_PLAN_MISSING",
+      `素材规划缺少指定控件与界面阶段：${assetPlacementPlan.unmappedAssetKeys.slice(0, 20).join(", ")}`,
+    );
   }
   const currentRegression = await readCurrentRegression();
   const executionPlan = planExecution(manifest, currentRegression?.estimatedDurationMs ?? 0);
@@ -141,6 +154,7 @@ try {
     await runVisualCheck(gamePackage, visual);
   }
   assertDeterministicCompletion(manifest, journeys);
+  assertAssetPlacementCompletion();
   if (currentRegression) {
     try {
       const passed = await replayRegression(gamePackage, currentRegression, "current");
@@ -577,6 +591,7 @@ async function executeJourney(gamePackage, journey, runLabel, recordEvidence) {
       }
       let visualComparison = null;
       let checkpointRecord = null;
+      let assetPlacementEvidence = [];
       if (recordEvidence) {
         if (screenshots.length >= MAX_SCREENSHOTS) throw productFailure("SCREENSHOT_LIMIT_EXCEEDED", "E2E 截图超过 64 张");
         screenshots.push({ id: evidenceId, path: screenshotPath });
@@ -586,9 +601,24 @@ async function executeJourney(gamePackage, journey, runLabel, recordEvidence) {
           window: { pid: capture.pid, width: capture.width, height: capture.height }, priorInputs: [...priorInputs],
           probe: { sequence: currentProbe.sequence, sceneId: currentProbe.sceneId, digest: probeStateDigest(currentProbe) },
           assertions: checkpointAssertions, screenshotValidation: screenshot, visualComparison: null, stateTransition,
+          assetPlacements: assetPlacementEvidence,
           outputAssertion: event.expectedOutput ? { expectedOutput: event.expectedOutput, observed: true, auxiliary: true } : null,
         };
         checkpoints.push(checkpointRecord);
+      }
+      try {
+        assetPlacementEvidence = await verifyCheckpointAssetPlacements({
+          role: event.role,
+          probe: currentProbe,
+          screenshotPath,
+          journeyId: journey.id,
+          checkpointId: event.id,
+          recordEvidence,
+        });
+        if (checkpointRecord) checkpointRecord.assetPlacements = assetPlacementEvidence;
+      } catch (error) {
+        if (checkpointRecord) checkpointRecord.status = "FAILED";
+        throw error;
       }
       if (event.referenceImage) {
         const baselinePath = resolve(workspace, ".deviludo-e2e", event.referenceImage);
@@ -941,7 +971,7 @@ async function solidifyRegression(gamePackage, manifest, successfulRollouts) {
   let trace = null;
   for (const [candidateIndex, candidate] of candidates.entries()) {
     const proposed = {
-      schema: "deviludo.e2e-regression", contractDigest: jsonDigest({ testManifest: manifest, runner: "adaptive-real-input" }),
+      schema: "deviludo.e2e-regression", contractDigest: frozenContractDigest,
       inputProfile: manifest.primaryInputProfile,
       estimatedDurationMs: Math.min(300_000, Math.max(1, candidate.estimatedDurationMs)),
       goal: manifest.adaptivePlayer.goal, actions: candidate.actions,
@@ -1462,6 +1492,125 @@ function godotUnitRuntime() {
   return configured;
 }
 
+function assertAssetPlacementPlan(value) {
+  if (!value || typeof value !== "object" || Array.isArray(value)
+    || value.schema !== "deviludo.asset-placement-plan"
+    || !Array.isArray(value.plannedAssetKeys) || value.plannedAssetKeys.length > 500
+    || value.plannedAssetKeys.some(assetKey => !safeAssetKey(assetKey))
+    || new Set(value.plannedAssetKeys).size !== value.plannedAssetKeys.length
+    || !Array.isArray(value.unmappedAssetKeys) || value.unmappedAssetKeys.length > 500
+    || value.unmappedAssetKeys.some(assetKey => !value.plannedAssetKeys.includes(assetKey))
+    || new Set(value.unmappedAssetKeys).size !== value.unmappedAssetKeys.length
+    || !Array.isArray(value.placements) || value.placements.length > 16_000) {
+    throw new Error("INFRASTRUCTURE: frozen asset placement plan is invalid");
+  }
+  const keys = new Set();
+  const mappedAssets = new Set();
+  for (const placement of value.placements) {
+    if (!placement || typeof placement !== "object" || Array.isArray(placement)
+      || !value.plannedAssetKeys.includes(placement.assetKey)
+      || !stableId(placement.targetId)
+      || !["START", "READY", "ACTION", "PROGRESS", "COMPLETION"].includes(placement.checkpointRole)
+      || !safeImageResourcePath(placement.expectedResourcePath)
+      || !(placement.expectedSha256 === null || /^sha256:[0-9a-f]{64}$/.test(placement.expectedSha256))) {
+      throw new Error("INFRASTRUCTURE: frozen asset placement entry is invalid");
+    }
+    const key = assetPlacementKey(placement);
+    if (keys.has(key)) throw new Error("INFRASTRUCTURE: frozen asset placement entries are duplicated");
+    keys.add(key);
+    mappedAssets.add(placement.assetKey);
+  }
+  if (value.plannedAssetKeys.some(assetKey => !mappedAssets.has(assetKey) && !value.unmappedAssetKeys.includes(assetKey))) {
+    throw new Error("INFRASTRUCTURE: frozen asset placement plan does not account for every planned asset");
+  }
+}
+
+async function verifyCheckpointAssetPlacements({ role, probe, screenshotPath, journeyId, checkpointId, recordEvidence }) {
+  const expected = (activeAssetPlacementPlan?.placements ?? []).filter(placement => placement.checkpointRole === role);
+  const evidence = [];
+  for (const placement of expected) {
+    const target = probe.controls.find(control => control.id === placement.targetId);
+    if (!target?.visible) continue;
+    let binding;
+    try {
+      binding = resolveProbeAssetBinding(probe, placement.assetKey, placement.targetId);
+    } catch (error) {
+      throw productFailure(
+        "ASSET_CONTROL_BINDING_MISSING",
+        `${journeyId}/${checkpointId}: ${error instanceof Error ? error.message : String(error)}`,
+      );
+    }
+    if (binding.resourcePath !== placement.expectedResourcePath) {
+      throw productFailure(
+        "ASSET_CONTROL_BINDING_MISMATCH",
+        `${journeyId}/${checkpointId}: ${placement.assetKey} 在 ${placement.targetId} 使用了 ${binding.resourcePath}，预期 ${placement.expectedResourcePath}`,
+      );
+    }
+    if (placement.expectedSha256 && binding.sha256 !== placement.expectedSha256) {
+      throw productFailure(
+        "ASSET_CONTROL_BINDING_MISMATCH",
+        `${journeyId}/${checkpointId}: ${placement.assetKey} 在 ${placement.targetId} 的内容摘要不匹配`,
+      );
+    }
+    const pixelRect = {
+      x: Math.floor(binding.rect.x),
+      y: Math.floor(binding.rect.y),
+      width: Math.ceil(binding.rect.x + binding.rect.width) - Math.floor(binding.rect.x),
+      height: Math.ceil(binding.rect.y + binding.rect.height) - Math.floor(binding.rect.y),
+    };
+    const region = await inspectScreenshotRegion(screenshotPath, pixelRect);
+    if (region.uniqueColorCount < 2 || region.dominantPixelRatio > 0.9995) {
+      throw productFailure(
+        "ASSET_CONTROL_VISUALLY_BLANK",
+        `${journeyId}/${checkpointId}: ${placement.assetKey} 已绑定 ${placement.targetId}，但指定贴图区域不可见或近乎空白`,
+      );
+    }
+    const item = Object.freeze({
+      assetKey: placement.assetKey,
+      targetId: placement.targetId,
+      checkpointRole: placement.checkpointRole,
+      resourcePath: binding.resourcePath,
+      sha256: binding.sha256 ?? null,
+      bindingRect: binding.rect,
+      screenshotRegion: region,
+      journeyId,
+      checkpointId,
+    });
+    evidence.push(item);
+    if (recordEvidence && !verifiedAssetPlacements.has(assetPlacementKey(placement))) {
+      verifiedAssetPlacements.set(assetPlacementKey(placement), item);
+    }
+  }
+  return Object.freeze(evidence);
+}
+
+function assertAssetPlacementCompletion() {
+  const missing = (activeAssetPlacementPlan?.placements ?? [])
+    .filter(placement => !verifiedAssetPlacements.has(assetPlacementKey(placement)));
+  if (missing.length > 0) {
+    throw productFailure(
+      "ASSET_PLACEMENT_NOT_OBSERVED",
+      `规划素材未在指定控件和阶段出现：${missing.slice(0, 20).map(item => `${item.assetKey}@${item.targetId}/${item.checkpointRole}`).join(", ")}`,
+    );
+  }
+}
+
+function assetPlacementKey(placement) {
+  return `${placement.assetKey}\0${placement.targetId}\0${placement.checkpointRole}`;
+}
+
+function safeAssetKey(value) {
+  return typeof value === "string" && /^[A-Za-z0-9][A-Za-z0-9._/-]{0,199}$/.test(value)
+    && !/(^|\/)\.{1,2}(\/|$)|\/\//.test(value) && !value.endsWith("/");
+}
+
+function safeImageResourcePath(value) {
+  const path = typeof value === "string" && value.startsWith("res://") ? value.slice("res://".length) : "";
+  return typeof value === "string" && value.startsWith("res://") && value.length <= 506
+    && /\.(?:png|jpe?g|webp|svg)$/i.test(value)
+    && !path.includes("\\") && !path.includes("//") && !/(^|\/)\.{1,2}(\/|$)/.test(path);
+}
+
 function assertManifest(value) {
   if (!value || value.schema !== "deviludo.test-manifest" || Object.hasOwn(value, "schemaVersion")
     || Object.hasOwn(value, "version")
@@ -1583,6 +1732,8 @@ async function finish(outcome, failureDomain, summary, manifest) {
     schema: E2E_EVIDENCE_SCHEMA, jobId, platform, action, outcome, failureDomain, summary,
     packageLaunches: launchRecords,
     planningCoverage: activePlanningCoverage,
+    assetPlacementPlan: activeAssetPlacementPlan,
+    assetPlacementEvidence: [...verifiedAssetPlacements.values()],
     interactionContracts: (manifest?.features ?? [])
       .filter(feature => feature?.verificationMethod === "interactive")
       .map(feature => ({
@@ -1601,6 +1752,8 @@ async function finish(outcome, failureDomain, summary, manifest) {
       adaptiveDecisionCount: adaptiveRollouts.reduce((sum, item) => sum + item.decisionCount, 0),
       coveredPlayerRequirementCount: coveredPlayerRequirements.size,
       playerRequirementCount,
+      plannedAssetPlacementCount: activeAssetPlacementPlan?.placements?.length ?? 0,
+      verifiedAssetPlacementCount: verifiedAssetPlacements.size,
       visualBaselineCount: baselines.length,
     },
     testDetails: {
@@ -1651,7 +1804,10 @@ async function finish(outcome, failureDomain, summary, manifest) {
       adaptiveSuccessCount: adaptiveRollouts.filter(item => item.outcome === "PASSED").length,
       adaptiveDecisionCount: adaptiveRollouts.reduce((sum, item) => sum + item.decisionCount, 0),
       coveredPlayerRequirementCount: coveredPlayerRequirements.size,
-      playerRequirementCount, screenshotCount: screenshots.length, visualBaselineCount: baselines.length,
+      playerRequirementCount,
+      plannedAssetPlacementCount: activeAssetPlacementPlan?.placements?.length ?? 0,
+      verifiedAssetPlacementCount: verifiedAssetPlacements.size,
+      screenshotCount: screenshots.length, visualBaselineCount: baselines.length,
       videoCount: videos.length, hasVisualDiff: diffs.length > 0,
       frameRateSampleCount: performanceSummary.frameRate.sampleCount,
       minimumFps: performanceSummary.frameRate.minimumFps,

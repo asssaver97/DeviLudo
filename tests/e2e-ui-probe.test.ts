@@ -7,6 +7,7 @@ import {
   evaluateProbeAssertions,
   probeSnapshotValidationError,
   probeStateDigest,
+  resolveProbeAssetBinding,
   resolveProbeControl,
   resolveProbeControlAtPoint,
   validateProbeSnapshot,
@@ -32,6 +33,43 @@ describe("deviludo.e2e-ui-probe", () => {
   test("accepts a nonce/PID-scoped semantic UI and state snapshot", () => {
     assert.equal(validateProbeSnapshot(snapshot(), { sessionNonce: "0123456789abcdef0123456789abcdef", pid: 1234 }), true);
     assert.deepEqual(resolveProbeControl(snapshot() as never, "primary-control").control.rect, { x: 100, y: 200, width: 120, height: 50 });
+  });
+
+  test("validates truthful planned-asset bindings on their designated production controls", () => {
+    const assetBindings = [{
+      assetKey: "ui/start-panel",
+      targetId: "primary-control",
+      resourcePath: "res://assets/generated/ui/start-panel.png",
+      sha256: `sha256:${"a".repeat(64)}`,
+      visible: true,
+      rect: { x: 105, y: 205, width: 110, height: 40 },
+    }];
+    const bound = snapshot({ assetBindings });
+    assert.equal(validateProbeSnapshot(bound), true);
+    assert.equal(resolveProbeAssetBinding(bound as never, "ui/start-panel", "primary-control").resourcePath,
+      "res://assets/generated/ui/start-panel.png");
+    assert.equal(validateProbeSnapshot(snapshot({ assetBindings: [{
+      ...assetBindings[0],
+      targetId: "missing-control",
+    }] })), false);
+    assert.equal(validateProbeSnapshot(snapshot({ assetBindings: [{
+      ...assetBindings[0],
+      rect: { x: 90, y: 190, width: 140, height: 70 },
+    }] })), false);
+  });
+
+  test("includes live asset binding changes in the Probe state digest", () => {
+    const assetBindings = [{
+      assetKey: "ui/start-panel", targetId: "primary-control",
+      resourcePath: "res://assets/generated/ui/start-panel.png", visible: true,
+      rect: { x: 100, y: 200, width: 120, height: 50 },
+    }];
+    const before = snapshot({ assetBindings });
+    const after = snapshot({ assetBindings: [{
+      ...assetBindings[0],
+      resourcePath: "res://assets/generated/ui/start-panel.webp",
+    }] });
+    assert.notEqual(probeStateDigest(before as never), probeStateDigest(after as never));
   });
 
   test("rejects contradictory lifecycle states and gameplay controls exposed through a menu", () => {

@@ -74,6 +74,12 @@ export class CoreE2eClient {
       plan: Readonly<{
         testManifest: Readonly<Record<string, unknown>>;
         coverage: Readonly<Record<string, readonly string[]>>;
+        assetPlacementPlan: Readonly<{
+          schema: "deviludo.asset-placement-plan";
+          plannedAssetKeys: readonly string[];
+          placements: readonly Readonly<Record<string, unknown>>[];
+          unmappedAssetKeys: readonly string[];
+        }>;
         testManifestDigest: string;
         contractDigest: string;
         executionPlan: Readonly<{ plannedTimeoutMs: number }>;
