@@ -78,6 +78,15 @@ jobs:
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 22.22.0
+          cache: npm
+      - name: Verify the lockfile installs and loads the Windows runtime
+        shell: pwsh
+        run: |
+          npm ci
+          node -e "require('sharp'); console.log('Sharp Windows runtime loaded')"
       - name: Install PowerShell analyzers
         shell: pwsh
         run: |
