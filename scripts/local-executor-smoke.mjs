@@ -106,7 +106,7 @@ try {
 
   const assetContent = Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M/wHwAF/gL+Avv1AAAAAElFTkSuQmCC", "base64");
   const assetDigest = `sha256:${createHash("sha256").update(assetContent).digest("hex")}`;
-  const assetKey = "ui/smoke-icon";
+  const assetKey = "sprites/player-ship";
   const assetObjectKey = `workspaces/${workspaceId}/projects/${projectId}/assets/${assetKey}-${assetDigest.slice(7, 23)}.png`;
   await localS3().send(new PutObjectCommand({
     Bucket: bucket,

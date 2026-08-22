@@ -570,9 +570,10 @@ test("CI gates code changes on the isolated API and cross-browser E2E suite", as
 
 test("CI uses the fixed no-provider Agent while local macOS requires Tart E2E", async () => {
   const workflow = await readFile(new URL("../.github/workflows/ci.yml", import.meta.url), "utf8");
-  const [localUp, localMac] = await Promise.all([
+  const [localUp, localMac, fixtureMain] = await Promise.all([
     readFile(new URL("../scripts/local-up.mjs", import.meta.url), "utf8"),
     readFile(new URL("../scripts/local-macos-e2e.mjs", import.meta.url), "utf8"),
+    readFile(new URL("../fixtures/godot-smoke/scripts/main.gd", import.meta.url), "utf8"),
   ]);
   const smoke = await readFile(new URL("../scripts/local-executor-smoke.mjs", import.meta.url), "utf8");
   const tartProvision = await readFile(new URL("../scripts/local-tart-provision.sh", import.meta.url), "utf8");
@@ -587,6 +588,8 @@ test("CI uses the fixed no-provider Agent while local macOS requires Tart E2E", 
   assert.doesNotMatch(localUp, /requireGodot|local-macos-job/);
   assert.match(smoke, /const specificationKey = `\$\{objectPrefix\(agentJobId\)\}\/specification\.json`/);
   assert.match(smoke, /inputObjects: \[specificationObject\]/);
+  assert.match(smoke, /const assetKey = "sprites\/player-ship"/);
+  assert.match(fixtureMain, /_apply_generated_art\(ship, "sprites\/player-ship"\)/);
   const tartPrepare = await readFile(new URL("../scripts/local-tart-prepare.mjs", import.meta.url), "utf8");
   assert.match(tartPrepare, /if \(preflight\) await preflightLocalTartE2e\(\)/);
   assert.match(tartPrepare, /assertHomebrewCommandLineTools\(\)/);
@@ -670,7 +673,6 @@ test("CI uses the fixed no-provider Agent while local macOS requires Tart E2E", 
   assert.match(smoke, /deviludo-agent-fixture:local/);
   assert.match(smoke, /skipRealWindowE2e \? null : await runTartMacE2e/);
   assert.doesNotMatch(smoke, /DEVELOPMENT_NATIVE/);
-  const fixtureMain = await readFile(new URL("../fixtures/godot-smoke/scripts/main.gd", import.meta.url), "utf8");
   assert.match(fixtureMain, /func _unhandled_key_input\(event: InputEvent\)/);
   assert.match(fixtureMain, /Input\.is_key_pressed\(KEY_D\)/);
   assert.match(fixtureMain, /func _on_game_input\(event: InputEvent\)/);
