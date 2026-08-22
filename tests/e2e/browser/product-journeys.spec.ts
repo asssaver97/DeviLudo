@@ -253,7 +253,7 @@ test("the project chat streams Agent generation progress and accepts live player
   const guidance = "请优先保证键盘和手柄都能完成核心循环。";
   await input.fill(guidance);
   await page.getByRole("button", { name: "发送项目消息" }).click();
-  await expect(page.getByText(guidance, { exact: true })).toBeVisible();
+  await expect(page.locator(".project-conversation-box .conversation-box-message", { hasText: guidance })).toBeVisible();
   await expect(page.locator(".project-conversation-box .conversation-box-message.is-thinking")).toHaveCount(0);
   await expect.poll(async () => await stack.queryRows<{ content: string; state: string }>(`
     SELECT content, state FROM deviludo.job_guidance_messages WHERE job_id = '${jobId}'::uuid
