@@ -42,7 +42,12 @@ paths:
     put:
       operationId: saveGlobalAgentSettings
       responses:
-        "200": { description: Selected Agent connection and models stored with one protected credential reference; Codex uses official host login }
+        "200": { description: Selected Agent connection and models stored with one protected credential reference }
+  /v1/settings/agent/test:
+    post:
+      operationId: testGlobalAgentSettings
+      responses:
+        "200": { description: The saved Agent connection completed a real Provider round trip }
   /v1/settings/steam:
     get:
       operationId: readWorkspaceSteamSettings

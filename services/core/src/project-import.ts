@@ -256,7 +256,8 @@ async function requestAnalysis(
   ].join("\n");
   if (settings.agentRuntime === "CODEX_CLI") {
     return runCodexPrompt({
-      authJson: apiKey,
+      baseUrl: settings.baseUrl,
+      credential: apiKey,
       model,
       prompt: `${system}\n\nPROJECT SOURCE CONTEXT:\n${sourceContext}`,
       timeoutMs: 180_000,

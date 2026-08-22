@@ -191,7 +191,8 @@ export async function generateE2ePlayerDecision(input: Readonly<{
           signal: AbortSignal.timeout(75_000),
         })
         : new Response(JSON.stringify({ output_text: await codexRunner({
-          authJson: input.apiKey,
+          baseUrl: input.baseUrl,
+          credential: input.apiKey,
           model: input.model,
           prompt: `${PLAYER_POLICY_SYSTEM}\n\n${prompt}${correction}`,
           imageBase64: providerFrameBase64,
@@ -311,7 +312,8 @@ export async function verifyE2ePlayerVision(input: Readonly<{
           signal: AbortSignal.timeout(40_000),
         })
         : new Response(JSON.stringify({ output_text: await codexRunner({
-          authJson: input.apiKey,
+          baseUrl: input.baseUrl,
+          credential: input.apiKey,
           model: input.model,
           prompt: `Inspect the attached calibration image; do not infer colors from text.\n\n${VISION_SMOKE_PROMPT}`,
           imageBase64: testCase.png,

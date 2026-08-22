@@ -56,7 +56,8 @@ type ResolvedImageBackend = Readonly<{
   target: ImageGenerationTarget;
 }> | Readonly<{
   kind: "CODEX_IMAGEGEN";
-  authJson: string;
+  baseUrl: string;
+  credential: string;
   model: string;
   runner: CodexImageRunner;
 }>;
@@ -73,9 +74,8 @@ export async function runAssetGenerationBatch(
   signal?: AbortSignal,
 ): Promise<AssetGenerationOutcome> {
   const { repository, secrets } = dependencies;
-  // Resolve the selected runtime's credential once per batch. Claude receives
-  // its Provider API key; Codex receives the official-login JSON already frozen
-  // into the same protected credential store when that runtime was selected.
+  // Resolve the selected runtime's credential once per batch. It remains in
+  // the protected store until the selected backend is invoked.
   const settings = await repository.readAgentSettings();
   if (!settings) return IDLE;
   // Claude has no image backend until an explicit image model is selected. Do
@@ -117,7 +117,8 @@ function resolveImageBackend(
   if (settings.agentRuntime === "CODEX_CLI") {
     return Object.freeze({
       kind: "CODEX_IMAGEGEN",
-      authJson: credential,
+      baseUrl: settings.baseUrl,
+      credential,
       model: settings.primaryModel,
       runner: codexImageRunner,
     });
@@ -199,7 +200,8 @@ async function generateWithCodex(
   request: Parameters<typeof composeImagePrompt>[0],
 ): Promise<GeneratedImage> {
   const content = await backend.runner({
-    authJson: backend.authJson,
+    baseUrl: backend.baseUrl,
+    credential: backend.credential,
     model: backend.model,
     prompt: composeImagePrompt(request),
     timeoutMs: 300_000,

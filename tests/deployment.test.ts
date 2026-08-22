@@ -78,7 +78,8 @@ test("local deployment keeps Core private by default and exposes it only for exp
   assert.match(localUp, /coreUrl: process\.env\.DEVILUDO_CORE_API_URL\?\.trim\(\) \|\| remoteE2eConfiguration\.coreUrl/);
   assert.match(localUp, /randomBytes\(32\)\.toString\("base64url"\)/);
   assert.match(compose, /DEVILUDO_PROVIDER_UPSTREAM_PROXY/);
-  assert.match(compose, /api\.anthropic\.com,api\.openai\.com,chatgpt\.com/);
+  assert.match(compose, /api\.anthropic\.com,api\.openai\.com,api\.x\.ai,chatgpt\.com,host\.docker\.internal/);
+  assert.match(compose, /host\.docker\.internal:host-gateway/);
   assert.match(compose, /DEVILUDO_CODEX_PROXY_URL: http:\/\/provider-proxy:3128/);
   assert.match(executorImage, /services\/core\/src\/codex-cli\.ts/);
   assert.match(claudeAgentImage, /install -y --no-install-recommends ca-certificates unzip/);
@@ -279,8 +280,9 @@ test("Agent generation preserves partial work and retries transient Provider fai
   assert.match(runner, /"--tools", "Read,Write,Edit,Glob,Grep,Bash"/);
   assert.match(runner, /"--disallowedTools", "Agent,Task"/);
   assert.match(runner, /"--dangerously-bypass-approvals-and-sandbox"/);
-  assert.match(runner, /model_provider=deviludo_chatgpt/);
-  assert.match(runner, /model_providers\.deviludo_chatgpt\.supports_websockets=false/);
+  assert.match(runner, /model_provider=\$\{provider\}/);
+  assert.match(runner, /model_providers\.\$\{provider\}\.supports_websockets=false/);
+  assert.match(runner, /DEVILUDO_CODEX_PROVIDER_API_KEY/);
   assert.match(runner, /The task container is already the security boundary/);
   assert.match(runner, /environment\.CLAUDE_CODE_DISABLE_BACKGROUND_TASKS = "1"/);
   assert.doesNotMatch(runner, /interactionScript contains only events|launchProfile shape|PLAYER_INTERACTION requirement/);

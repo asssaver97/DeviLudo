@@ -205,7 +205,8 @@ export async function generateE2eTestPlan(input: Readonly<{
       raw = String(content.find(item => item.type === "text")?.text ?? "");
     } else {
       raw = await codexRunner({
-        authJson: input.apiKey,
+        baseUrl: input.baseUrl,
+        credential: input.apiKey,
         model: input.model,
         prompt,
         outputSchema: E2E_TEST_PLAN_OUTPUT_SCHEMA,
@@ -230,7 +231,8 @@ export async function generateE2eTestPlan(input: Readonly<{
     }
     try {
       raw = await codexRunner({
-        authJson: input.apiKey,
+        baseUrl: input.baseUrl,
+        credential: input.apiKey,
         model: input.model,
         prompt: testPlanCorrectionPrompt(prompt, raw, reason, requirements),
         outputSchema: E2E_TEST_PLAN_OUTPUT_SCHEMA,

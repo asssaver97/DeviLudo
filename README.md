@@ -70,10 +70,11 @@ npm run local:up
 
 Open [http://127.0.0.1:3100](http://127.0.0.1:3100), then go to **Settings → Agent Settings** and select either:
 
-- Codex CLI already signed in on the host; or
+- Codex CLI with the host's official sign-in or a custom Responses-compatible Provider; or
 - Claude Code with a compatible Images API connection and image model.
 
 Image generation follows the selected agent runtime automatically.
+For a custom Codex Provider, enter its Base URL, API key, and model in the UI, save, then run the built-in connection test. `api.x.ai` and `host.docker.internal` are allowed by default. Add any other external hostname to `DEVILUDO_PROVIDER_ALLOWLIST` in the project-root `.env`, then rerun `npm run local:up`. A Provider running on the host is reachable at `http://host.docker.internal:<port>` on every supported Docker host.
 
 ## Using DeviLudo
 

@@ -15,9 +15,11 @@ import {
   isMaskedApiKey,
   parseAgentSettingsInput,
   resolveAgentModel,
+  usesCodexOfficialLogin,
   type AgentSecretStore,
 } from "./agent-settings";
 import { detectAgentRuntimes } from "./agent-runtime-detection";
+import { testAgentConnection } from "./agent-connection";
 import type { CoreConfig } from "./config";
 import { localAccessContext, type LocalAccessContext } from "./access";
 import {
@@ -185,7 +187,7 @@ export async function runApi(
       repository.readAgentSettings(),
       detectAgentRuntimes(),
     ]);
-    const apiKeyMask = settings?.agentRuntime === "CLAUDE_CODE"
+    const apiKeyMask = settings && !usesOfficialLogin(settings.agentRuntime, settings.baseUrl)
       ? settings.apiKeyMask
         ?? await agentSecrets.readApiKeyMask(settings.credentialSecretRef)
       : null;
@@ -199,7 +201,7 @@ export async function runApi(
     const principal = productAccess(request, config);
     const input = parseAgentSettingsInput(request.body);
     const current = await repository.readAgentSettings();
-    const currentMask = current?.agentRuntime === "CLAUDE_CODE"
+    const currentMask = current && !usesOfficialLogin(current.agentRuntime, current.baseUrl)
       ? current.apiKeyMask
         ?? await agentSecrets.readApiKeyMask(current.credentialSecretRef)
       : null;
@@ -207,10 +209,14 @@ export async function runApi(
       throw new Error("API Key 掩码与已保存凭据不匹配");
     }
     const replacementApiKey = input.apiKey && input.apiKey !== currentMask ? input.apiKey : null;
-    if (input.agentRuntime === "CLAUDE_CODE" && !replacementApiKey && current?.agentRuntime !== "CLAUDE_CODE") {
-      throw new Error("切换到 Claude Code 时必须提供 Provider API Key");
+    const official = usesOfficialLogin(input.agentRuntime, input.baseUrl);
+    const sameCredential = current?.agentRuntime === input.agentRuntime
+      && current.baseUrl === input.baseUrl
+      && !usesOfficialLogin(current.agentRuntime, current.baseUrl);
+    if (!official && !replacementApiKey && !sameCredential) {
+      throw new Error("切换 Agent 连接时必须提供 Provider API Key");
     }
-    const credential = input.agentRuntime === "CODEX_CLI"
+    const credential = official
       ? await agentSecrets.writeApiKey(readCodexOfficialLogin())
       : replacementApiKey
         ? await agentSecrets.writeApiKey(replacementApiKey)
@@ -236,6 +242,21 @@ export async function runApi(
     return reply.header("cache-control", "no-store").send({
       settings: publicAgentSettings(saved),
     });
+  });
+
+  app.post("/v1/settings/agent/test", async (request, reply) => {
+    productAccess(request, config);
+    const settings = await repository.readAgentSettings();
+    if (!settings) throw new Error("请先保存 Agent 配置");
+    const credential = await agentSecrets.readApiKey(settings.credentialSecretRef);
+    if (!credential) throw new Error("无法读取 Agent 凭据，请重新保存配置");
+    try {
+      await testAgentConnection(settings, credential);
+    } catch (error) {
+      throw httpError(424, "AGENT_CONNECTION_FAILED",
+        error instanceof Error ? error.message : "Agent 连接测试失败");
+    }
+    return reply.header("cache-control", "no-store").send({ ok: true });
   });
 
   app.get("/v1/settings/steam", async (request, reply) => {
@@ -2330,6 +2351,7 @@ function publicAgentSettings(
   settings: StoredInstanceAgentSettings | null,
   apiKeyMask = settings?.apiKeyMask ?? null,
 ) {
+  const official = settings !== null && usesOfficialLogin(settings.agentRuntime, settings.baseUrl);
   const imageGenerationBackend = settings?.agentRuntime === "CODEX_CLI"
     ? "CODEX_IMAGEGEN" as const
     : settings?.agentRuntime === "CLAUDE_CODE" && settings.imageModel !== null
@@ -2350,12 +2372,16 @@ function publicAgentSettings(
       ? settings?.apiKeyMask !== null
       : imageGenerationBackend === "HTTP_IMAGES" && settings?.apiKeyMask !== null,
     apiKeyConfigured: settings !== null,
-    apiKeyMasked: settings?.agentRuntime === "CLAUDE_CODE" ? apiKeyMask : null,
-    apiKeyFingerprint: settings?.agentRuntime === "CLAUDE_CODE" ? settings.apiKeyFingerprint : null,
+    apiKeyMasked: official ? null : apiKeyMask,
+    apiKeyFingerprint: official ? null : settings?.apiKeyFingerprint ?? null,
     revision: settings?.revision ?? 0,
     testPolicyReady: settings?.testPolicyReady ?? false,
     updatedAt: settings?.updatedAt ?? null,
   });
+}
+
+function usesOfficialLogin(runtime: StoredInstanceAgentSettings["agentRuntime"], baseUrl: string): boolean {
+  return runtime === "CODEX_CLI" && usesCodexOfficialLogin(baseUrl);
 }
 
 function readCodexOfficialLogin(): string {

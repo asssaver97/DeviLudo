@@ -19,6 +19,15 @@ export type AgentSettingsInput = Readonly<{
   imageModel: string | null;
 }>;
 
+export const CODEX_OFFICIAL_BASE_URL = "https://chatgpt.com";
+
+export function usesCodexOfficialLogin(baseUrl: string): boolean {
+  const url = new URL(baseUrl);
+  return url.protocol === "https:"
+    && url.hostname === "chatgpt.com"
+    && ["", "/", "/backend-api/codex"].includes(url.pathname.replace(/\/$/, ""));
+}
+
 export type AgentSecretVersion = Readonly<{
   secretRef: string;
   mask: string;
@@ -68,16 +77,25 @@ export function parseAgentSettingsInput(
     throw new Error("Agent runtime must be Claude Code or Codex CLI");
   }
   if (input.agentRuntime === "CODEX_CLI") {
-    if (input.baseUrl !== undefined || input.apiKey !== undefined || input.settingsJson !== undefined) {
-      throw new Error("Codex CLI uses the host's official ChatGPT login; custom Provider fields are not accepted");
-    }
+    if (input.settingsJson !== undefined) throw new Error("settings.json mode is only available for Claude Code");
     if (input.imageModel !== undefined && input.imageModel !== null && input.imageModel !== "") {
       throw new Error("Codex CLI uses built-in ImageGen with gpt-image-2; imageModel is not configurable");
     }
+    const requestedBaseUrl = input.baseUrl === undefined
+      ? CODEX_OFFICIAL_BASE_URL
+      : normalizeBaseUrl(String(input.baseUrl), environment);
+    const official = usesCodexOfficialLogin(requestedBaseUrl);
+    const baseUrl = official ? CODEX_OFFICIAL_BASE_URL : requestedBaseUrl;
+    if (!official && (input.primaryModel === undefined || input.primaryModel === CODEX_ACCOUNT_DEFAULT_MODEL)) {
+      throw new Error("A custom Codex Provider requires an explicit model");
+    }
+    const apiKey = official || input.apiKey === undefined || input.apiKey === null || input.apiKey === ""
+      ? null
+      : normalizeApiKey(input.apiKey);
     return Object.freeze({
       agentRuntime: "CODEX_CLI",
-      baseUrl: "https://chatgpt.com",
-      apiKey: null,
+      baseUrl,
+      apiKey,
       primaryModel: input.primaryModel === undefined
         ? CODEX_ACCOUNT_DEFAULT_MODEL
         : normalizeAgentModel(input.primaryModel),
@@ -99,17 +117,9 @@ export function parseAgentSettingsInput(
     : { baseUrl: input.baseUrl, apiKey: input.apiKey, primaryModel: input.primaryModel };
   if (typeof connection.baseUrl !== "string") throw new Error("Provider Base URL is required");
   const baseUrl = normalizeBaseUrl(connection.baseUrl, environment);
-  let apiKey: string | null = null;
-  if (connection.apiKey !== undefined && connection.apiKey !== null && connection.apiKey !== "") {
-    if (typeof connection.apiKey !== "string"
-      || connection.apiKey.length < 8
-      || connection.apiKey.length > 4096
-      || connection.apiKey !== connection.apiKey.trim()
-      || /[\u0000-\u001f\u007f]/.test(connection.apiKey)) {
-      throw new Error("API Key format is invalid");
-    }
-    apiKey = connection.apiKey;
-  }
+  const apiKey = connection.apiKey === undefined || connection.apiKey === null || connection.apiKey === ""
+    ? null
+    : normalizeApiKey(connection.apiKey);
   const primaryModel = normalizeAgentModel(connection.primaryModel);
   const modelOverrides = input.modelOverrides === undefined
     ? emptyAgentModelOverrides()
@@ -219,12 +229,24 @@ export function normalizeBaseUrl(value: string, environment: string): string {
   if (url.username || url.password || url.search || url.hash) {
     throw new Error("Provider Base URL cannot contain credentials, query, or fragment");
   }
-  const loopback = ["localhost", "127.0.0.1", "[::1]"].includes(url.hostname)
+  const loopback = ["localhost", "127.0.0.1", "[::1]", "host.docker.internal"].includes(url.hostname)
     || url.hostname.endsWith(".localhost");
-  if (url.protocol !== "https:" && !(environment !== "production" && url.protocol === "http:" && loopback)) {
+  const hostGateway = url.hostname === "host.docker.internal";
+  if (url.protocol !== "https:" && !(url.protocol === "http:" && (hostGateway || (environment !== "production" && loopback)))) {
     throw new Error("Provider Base URL must use HTTPS");
   }
   return url.href.replace(/\/$/, "");
+}
+
+function normalizeApiKey(value: unknown): string {
+  if (typeof value !== "string"
+    || value.length < 8
+    || value.length > 4096
+    || value !== value.trim()
+    || /[\u0000-\u001f\u007f]/.test(value)) {
+    throw new Error("API Key format is invalid");
+  }
+  return value;
 }
 
 export function createAgentSecretStore(env: NodeJS.ProcessEnv = process.env): AgentSecretStore {

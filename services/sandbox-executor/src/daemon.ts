@@ -16,7 +16,7 @@ const socketPath = process.env.DEVILUDO_EXECUTOR_SOCKET ?? "/run/deviludo-execut
 const executorId = process.env.DEVILUDO_EXECUTOR_ID ?? "";
 const identityKeyFile = process.env.DEVILUDO_EXECUTOR_IDENTITY_KEY_FILE ?? "";
 const allowlistedImages = new Set((process.env.DEVILUDO_EXECUTOR_ALLOWED_IMAGES ?? "").split(",").filter(Boolean));
-const providerHosts = new Set((process.env.DEVILUDO_PROVIDER_ALLOWLIST ?? "api.anthropic.com,api.openai.com,chatgpt.com").split(",").map(value => value.trim()).filter(Boolean));
+const providerHosts = new Set((process.env.DEVILUDO_PROVIDER_ALLOWLIST ?? "api.anthropic.com,api.openai.com,api.x.ai,chatgpt.com,host.docker.internal").split(",").map(value => value.trim()).filter(Boolean));
 const workRoot = process.env.DEVILUDO_EXECUTOR_WORK_ROOT ?? "/var/lib/deviludo-executor";
 const secretRoot = process.env.DEVILUDO_EXECUTOR_SECRET_ROOT ?? "/run/deviludo-secrets";
 const projectsRoot = process.env.DEVILUDO_PROJECTS_ROOT ?? "/var/lib/deviludo-projects";
@@ -724,7 +724,8 @@ function validatePlan(value: unknown): SandboxPlan {
   if (agentJob) {
     if (!plan.agentConfiguration) throw new Error("Agent configuration is required");
     const providerUrl = new URL(plan.agentConfiguration.baseUrl);
-    if (providerUrl.protocol !== "https:"
+    const localGateway = providerUrl.protocol === "http:" && providerUrl.hostname === "host.docker.internal";
+    if ((providerUrl.protocol !== "https:" && !localGateway)
       || (job.runtimeImage !== fixtureAgentImage && !providerHosts.has(providerUrl.hostname))) {
       throw new Error("Provider host is not in the executor egress allowlist");
     }
@@ -816,7 +817,7 @@ function validateAgentConfiguration(configuration: NonNullable<SandboxPlan["agen
     }
   } else if (configuration.runtime === "CODEX_CLI") {
     const executionModel = environment.DEVILUDO_CODEX_MODEL;
-    if (configuration.credentialEnvironmentVariable !== "CODEX_AUTH_JSON"
+    if (configuration.credentialEnvironmentVariable !== "CODEX_PROVIDER_CREDENTIAL"
       || Object.keys(environment).some(key => key !== "DEVILUDO_CODEX_MODEL")
       || typeof executionModel !== "string"
       || !/^[A-Za-z0-9][A-Za-z0-9._:/-]{0,199}$/.test(executionModel)

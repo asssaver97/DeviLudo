@@ -107,7 +107,7 @@ export async function generateProductConversationReply(input: ConversationReplyI
   const fetchImpl = input.fetchImpl ?? fetch;
   const raw = input.settings.agentRuntime === "CLAUDE_CODE"
     ? await requestClaudeReply(fetchImpl, input.settings.baseUrl, input.apiKey, model, system, history, input.userContent, input.providerIdleTimeoutMs)
-    : await requestCodexReply(input.codexRunner ?? runCodexPrompt, input.apiKey, model, system, history, input.userContent, input.providerIdleTimeoutMs);
+    : await requestCodexReply(input.codexRunner ?? runCodexPrompt, input.settings.baseUrl, input.apiKey, model, system, history, input.userContent, input.providerIdleTimeoutMs);
   const parsed = parseAgentReply(raw);
   return reply(input, model, parsed, input.allowDraftMutation);
 }
@@ -145,6 +145,7 @@ export async function streamProductConversationReply(
     )
     : await requestCodexReplyStream(
       input.codexRunner ?? runCodexPrompt,
+      input.settings.baseUrl,
       input.apiKey,
       model,
       system,
@@ -307,7 +308,8 @@ async function requestClaudeReply(
 
 async function requestCodexReply(
   codexRunner: CodexPromptRunner,
-  authJson: string,
+  baseUrl: string,
+  credential: string,
   model: string,
   system: string,
   history: readonly Readonly<{ role: "user" | "assistant"; content: string }>[],
@@ -315,7 +317,8 @@ async function requestCodexReply(
   idleTimeoutMs?: number,
 ): Promise<string> {
   return codexRunner({
-    authJson,
+    baseUrl,
+    credential,
     model,
     prompt: codexConversationPrompt(system, history, userContent),
     timeoutMs: idleTimeoutMs,
@@ -377,7 +380,8 @@ async function requestClaudeReplyStream(
 
 async function requestCodexReplyStream(
   codexRunner: CodexPromptRunner,
-  authJson: string,
+  baseUrl: string,
+  credential: string,
   model: string,
   system: string,
   history: readonly Readonly<{ role: "user" | "assistant"; content: string }>[],
@@ -387,7 +391,7 @@ async function requestCodexReplyStream(
   idleTimeoutMs?: number,
 ): Promise<string> {
   if (signal?.aborted) throw new DOMException("Aborted", "AbortError");
-  const result = await requestCodexReply(codexRunner, authJson, model, system, history, userContent, idleTimeoutMs);
+  const result = await requestCodexReply(codexRunner, baseUrl, credential, model, system, history, userContent, idleTimeoutMs);
   onRawText(result);
   return result;
 }

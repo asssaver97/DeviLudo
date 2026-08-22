@@ -24,10 +24,30 @@ test("Agent settings accept fixed runtimes and normalize safe provider URLs", ()
     modelOverrides: { design: null, development: null, test: null },
     imageModel: null,
   });
-  assert.throws(() => parseAgentSettingsInput({
+  assert.deepEqual(parseAgentSettingsInput({
     agentRuntime: "CODEX_CLI",
     baseUrl: "https://api.example.com/v1/",
-  }, "production"), /official ChatGPT login/i);
+    apiKey: "custom-secret-key",
+    primaryModel: "vendor/model-v1",
+  }, "production"), {
+    agentRuntime: "CODEX_CLI",
+    baseUrl: "https://api.example.com/v1",
+    apiKey: "custom-secret-key",
+    primaryModel: "vendor/model-v1",
+    modelOverrides: { design: null, development: null, test: null },
+    imageModel: null,
+  });
+  assert.deepEqual(parseAgentSettingsInput({
+    agentRuntime: "CODEX_CLI",
+    baseUrl: "http://host.docker.internal:8080/v1",
+    apiKey: "custom-secret-key",
+    primaryModel: "local-model",
+  }, "production").baseUrl, "http://host.docker.internal:8080/v1");
+  assert.equal(parseAgentSettingsInput({
+    agentRuntime: "CODEX_CLI",
+    baseUrl: "https://api.example.com/v1",
+    primaryModel: "vendor/model-v1",
+  }, "production").apiKey, null);
   assert.throws(() => parseAgentSettingsInput({
     agentRuntime: "CODEX_CLI",
     imageModel: "gpt-image-1",
@@ -110,7 +130,7 @@ test("Claude settings.json accepts only the supported connection fields", () => 
   assert.throws(() => parseAgentSettingsInput({
     agentRuntime: "CODEX_CLI",
     settingsJson,
-  }), /official ChatGPT login/i);
+  }), /only available for Claude Code/i);
   assert.throws(() => parseClaudeSettingsJson(JSON.stringify({
     env: { ANTHROPIC_BASE_URL: "https://api.anthropic.com", SHELL: "/bin/sh" },
   })), /unsupported environment fields/i);

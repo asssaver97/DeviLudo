@@ -1150,7 +1150,7 @@ async function detectLocalProviderUpstreamProxy() {
   const explicit = process.env.DEVILUDO_PROVIDER_UPSTREAM_PROXY?.trim();
   if (explicit) return normalizeLocalUpstreamProxy(explicit);
   if (process.platform !== "darwin") return "";
-  const hosts = (process.env.DEVILUDO_PROVIDER_ALLOWLIST ?? "api.anthropic.com,api.openai.com,chatgpt.com")
+  const hosts = (process.env.DEVILUDO_PROVIDER_ALLOWLIST ?? "api.anthropic.com,api.openai.com,api.x.ai,chatgpt.com,host.docker.internal")
     .split(",").map(value => value.trim()).filter(Boolean);
   let fakeIpDetected = false;
   for (const host of hosts) {
@@ -1162,7 +1162,7 @@ async function detectLocalProviderUpstreamProxy() {
     }
   }
   if (!fakeIpDetected) return "";
-  const target = hosts.at(-1) ?? "api.anthropic.com";
+  const target = hosts.findLast(host => host !== "host.docker.internal") ?? "api.anthropic.com";
   for (const port of [6152, 7890, 1087]) {
     if (await supportsHttpConnectProxy(port, target)) return `http://host.docker.internal:${port}`;
   }

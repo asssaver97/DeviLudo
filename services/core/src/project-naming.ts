@@ -67,12 +67,12 @@ async function requestClaudeName(
 
 async function requestCodexName(
   settings: StoredInstanceAgentSettings,
-  authJson: string,
+  credential: string,
   prompt: string,
 ): Promise<string> {
   if (settings.agentRuntime !== "CODEX_CLI") throw new Error("Codex CLI 模型尚未配置");
   const model = resolveAgentModel(settings.primaryModel, settings.modelOverrides, "design");
-  return runCodexPrompt({ authJson, model, prompt, timeoutMs: 30_000 });
+  return runCodexPrompt({ baseUrl: settings.baseUrl, credential, model, prompt, timeoutMs: 30_000 });
 }
 
 function messagesEndpoint(baseUrl: string): string {

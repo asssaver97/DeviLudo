@@ -1,7 +1,7 @@
 #!/bin/sh
 set -eu
 
-allowlist=${DEVILUDO_PROVIDER_ALLOWLIST:-api.anthropic.com,api.openai.com,chatgpt.com}
+allowlist=${DEVILUDO_PROVIDER_ALLOWLIST:-api.anthropic.com,api.openai.com,api.x.ai,chatgpt.com,host.docker.internal}
 upstream=${DEVILUDO_PROVIDER_UPSTREAM_PROXY:-}
 domains=
 old_ifs=$IFS
@@ -40,8 +40,10 @@ config=/tmp/deviludo-squid.conf
   printf 'http_port 3128\n'
   printf 'acl allowed_provider dstdomain%s\n' "$domains"
   printf 'acl SSL_ports port 443\n'
+  printf 'acl local_provider dstdomain .host.docker.internal\n'
   printf 'acl CONNECT method CONNECT\n'
   printf 'http_access allow CONNECT SSL_ports allowed_provider\n'
+  printf 'http_access allow local_provider allowed_provider\n'
   printf 'http_access deny all\n'
   if [ -n "$upstream_host" ]; then
     printf 'cache_peer %s parent %s 0 no-query default\n' "$upstream_host" "$upstream_port"

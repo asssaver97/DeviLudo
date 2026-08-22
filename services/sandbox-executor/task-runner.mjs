@@ -580,10 +580,7 @@ async function runGenerationAgent(configuration, environment, prompt, onOutput, 
     environment.CLAUDE_CODE_DISABLE_BACKGROUND_TASKS = "1";
   }
   else {
-    environment.CODEX_HOME = "/workspace/codex-home";
-    await mkdir(environment.CODEX_HOME, { recursive: true });
-    validateCodexAuth(apiKey);
-    await writeFile(`${environment.CODEX_HOME}/auth.json`, apiKey, { mode: 0o600 });
+    await prepareCodexCredential(environment, configuration.baseUrl, apiKey);
   }
 
   const deadline = Date.now() + Math.max(60_000, Math.min(80 * 60_000, (timeoutSeconds - 600) * 1_000));
@@ -613,7 +610,7 @@ async function runGenerationAgent(configuration, environment, prompt, onOutput, 
     const executable = configuration.runtime === "CLAUDE_CODE" ? "claude" : "codex";
     const arguments_ = configuration.runtime === "CLAUDE_CODE"
       ? claudeGenerationArguments(configuration, continuation, jobId, resumedClaude)
-      : codexArguments(configuration.environment.DEVILUDO_CODEX_MODEL ?? configuration.model);
+      : codexArguments(configuration.environment.DEVILUDO_CODEX_MODEL ?? configuration.model, configuration.baseUrl);
     try {
       const remaining = deadline - Date.now();
       if (remaining <= 0) throw new Error("Agent deadline exceeded after 80 minutes");
@@ -887,19 +884,32 @@ async function runConfiguredAgent(configuration, apiKey, prompt) {
       "--dangerously-skip-permissions", prompt,
     ], environment);
   }
-  environment.CODEX_HOME = "/workspace/codex-home";
-  await mkdir(environment.CODEX_HOME, { recursive: true });
-  validateCodexAuth(apiKey);
-  await writeFile(`${environment.CODEX_HOME}/auth.json`, apiKey, { mode: 0o600 });
-  return command("codex", codexArguments(configuration.environment.DEVILUDO_CODEX_MODEL ?? configuration.model), environment, prompt);
+  await prepareCodexCredential(environment, configuration.baseUrl, apiKey);
+  return command("codex", codexArguments(
+    configuration.environment.DEVILUDO_CODEX_MODEL ?? configuration.model,
+    configuration.baseUrl,
+  ), environment, prompt);
 }
 
-function codexArguments(model) {
+async function prepareCodexCredential(environment, baseUrl, credential) {
+  environment.CODEX_HOME = "/workspace/codex-home";
+  await mkdir(environment.CODEX_HOME, { recursive: true });
+  if (usesCodexOfficialLogin(baseUrl)) {
+    validateCodexAuth(credential);
+    await writeFile(`${environment.CODEX_HOME}/auth.json`, credential, { mode: 0o600 });
+  } else {
+    environment.DEVILUDO_CODEX_PROVIDER_API_KEY = credential;
+  }
+}
+
+function codexArguments(model, baseUrl) {
   // The task container is already the security boundary: it has a read-only
   // root filesystem, a bounded writable project mount, dropped capabilities,
   // no host credentials, and allowlisted Provider egress. Running Codex's
   // nested Linux sandbox inside that container depends on user namespaces and
   // bubblewrap features that hardened Docker/Kata tasks deliberately deny.
+  const official = usesCodexOfficialLogin(baseUrl);
+  const provider = official ? "deviludo_chatgpt" : "deviludo_custom";
   const arguments_ = [
     "exec",
     "--ephemeral",
@@ -910,18 +920,26 @@ function codexArguments(model) {
     // preserve that upgrade reliably. Register the same official backend as
     // an HTTP-only Responses provider so a transport failure cannot be
     // mistaken for an Agent or product failure.
-    "--config", "model_provider=deviludo_chatgpt",
-    "--config", "model_providers.deviludo_chatgpt.name=OpenAI",
-    "--config", "model_providers.deviludo_chatgpt.base_url=https://chatgpt.com/backend-api/codex",
-    "--config", "model_providers.deviludo_chatgpt.wire_api=responses",
-    "--config", "model_providers.deviludo_chatgpt.requires_openai_auth=true",
-    "--config", "model_providers.deviludo_chatgpt.supports_websockets=false",
+    "--config", `model_provider=${provider}`,
+    "--config", `model_providers.${provider}.name=${official ? "OpenAI" : "DeviLudo custom Provider"}`,
+    "--config", `model_providers.${provider}.base_url=${official ? "https://chatgpt.com/backend-api/codex" : baseUrl}`,
+    "--config", `model_providers.${provider}.wire_api=responses`,
+    "--config", `model_providers.${provider}.requires_openai_auth=${official}`,
+    "--config", `model_providers.${provider}.supports_websockets=false`,
     "--skip-git-repo-check",
     "--dangerously-bypass-approvals-and-sandbox",
   ];
+  if (!official) arguments_.push("--config", `model_providers.${provider}.env_key=DEVILUDO_CODEX_PROVIDER_API_KEY`);
   if (model !== "account-default") arguments_.push("-m", model);
   arguments_.push("-C", "/workspace/project", "-");
   return arguments_;
+}
+
+function usesCodexOfficialLogin(baseUrl) {
+  const url = new URL(baseUrl);
+  return url.protocol === "https:"
+    && url.hostname === "chatgpt.com"
+    && ["", "/", "/backend-api/codex"].includes(url.pathname.replace(/\/$/, ""));
 }
 
 function validateCodexAuth(value) {

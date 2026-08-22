@@ -127,3 +127,40 @@ test("instance Agent settings persist safely and freeze into workspace jobs", as
   expect(rows[0].api_key_mask).toBe(createdBody.settings.apiKeyMasked);
   expect(rows.every(row => /^vault:\/\/instance\/agent-runtime\/api-key\/versions\//.test(row.credential_secret_ref))).toBe(true);
 });
+
+test("custom Codex Responses settings persist as one protected connection", async ({ stack }) => {
+  const apiKey = "xai-custom-provider-secret";
+  const response = await stack.web("/api/settings/agent", {
+    method: "PUT",
+    data: {
+      agentRuntime: "CODEX_CLI",
+      baseUrl: "https://api.x.ai/v1/",
+      apiKey,
+      primaryModel: "xai/grok-4.6",
+      modelOverrides: { design: null, development: "xai/grok-code-fast-1", test: null },
+    },
+  });
+  const text = await response.text();
+  expect(response.ok(), text).toBeTruthy();
+  const body = JSON.parse(text);
+  expect(body.settings).toMatchObject({
+    agentRuntime: "CODEX_CLI",
+    baseUrl: "https://api.x.ai/v1",
+    primaryModel: "xai/grok-4.6",
+    modelOverrides: { design: null, development: "xai/grok-code-fast-1", test: null },
+    apiKeyConfigured: true,
+    apiKeyMasked: "xai********cret",
+    imageGenerationBackend: "CODEX_IMAGEGEN",
+  });
+  expect(JSON.stringify(body)).not.toContain(apiKey);
+
+  const rows = await stack.queryRows<{ base_url: string; primary_model: string; credential_secret_ref: string }>(`
+    SELECT base_url, primary_model, credential_secret_ref
+      FROM deviludo.instance_agent_settings
+  `);
+  expect(rows).toEqual([{
+    base_url: "https://api.x.ai/v1",
+    primary_model: "xai/grok-4.6",
+    credential_secret_ref: expect.stringMatching(/^vault:\/\/instance\/agent-runtime\/api-key\/versions\//),
+  }]);
+});

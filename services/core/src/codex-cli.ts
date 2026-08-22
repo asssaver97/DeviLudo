@@ -3,9 +3,11 @@ import { mkdir, mkdtemp, readFile, readdir, rm, stat, writeFile } from "node:fs/
 import { homedir, tmpdir } from "node:os";
 import { isAbsolute, join, resolve, sep } from "node:path";
 import { CODEX_ACCOUNT_DEFAULT_MODEL } from "@/lib/product/contracts";
+import { usesCodexOfficialLogin } from "./agent-settings";
 
 export type CodexPromptInput = Readonly<{
-  authJson: string;
+  baseUrl: string;
+  credential: string;
   model: string;
   prompt: string;
   imageBase64?: string;
@@ -17,7 +19,8 @@ export type CodexPromptInput = Readonly<{
 export type CodexPromptRunner = (input: CodexPromptInput) => Promise<string>;
 
 export type CodexImageInput = Readonly<{
-  authJson: string;
+  baseUrl: string;
+  credential: string;
   model: string;
   prompt: string;
   timeoutMs?: number;
@@ -58,11 +61,12 @@ export function resolveCodexRunRoot(
 }
 
 export async function runCodexPrompt(input: CodexPromptInput): Promise<string> {
-  validateAuth(input.authJson);
+  const official = usesCodexOfficialLogin(input.baseUrl);
+  validateCodexCredential(input.credential, official);
   const root = await createCodexRun("prompt");
   try {
-    const hasStaticCatalog = await prepareCodexHome(root, input.authJson);
-    const args = codexExecutionArgs(hasStaticCatalog ? join(root, "model-catalog.json") : null);
+    const hasStaticCatalog = await prepareCodexHome(root, input.credential, official);
+    const args = codexExecutionArgs(input.baseUrl, hasStaticCatalog ? join(root, "model-catalog.json") : null);
     const executionModel = resolveCodexExecutionModel(input.model);
     if (executionModel !== CODEX_ACCOUNT_DEFAULT_MODEL) args.push("-m", executionModel);
     if (input.reasoningEffort) {
@@ -82,7 +86,8 @@ export async function runCodexPrompt(input: CodexPromptInput): Promise<string> {
       args.push("--output-schema", schema);
     }
     args.push("-");
-    return await executeCodex(args, input.prompt, root, input.timeoutMs ?? 180_000);
+    return await executeCodex(args, input.prompt, root, input.timeoutMs ?? 180_000, true,
+      official ? {} : { DEVILUDO_CODEX_PROVIDER_API_KEY: input.credential });
   } finally {
     await rm(root, { recursive: true, force: true });
   }
@@ -98,16 +103,18 @@ export async function runCodexPrompt(input: CodexPromptInput): Promise<string> {
  * image cannot advance the asset gate.
  */
 export async function runCodexImage(input: CodexImageInput): Promise<Buffer> {
-  validateAuth(input.authJson);
+  const official = usesCodexOfficialLogin(input.baseUrl);
+  validateCodexCredential(input.credential, official);
   const root = await createCodexRun("image");
   try {
-    const hasStaticCatalog = await prepareCodexHome(root, input.authJson);
-    const args = codexExecutionArgs(hasStaticCatalog ? join(root, "model-catalog.json") : null);
+    const hasStaticCatalog = await prepareCodexHome(root, input.credential, official);
+    const args = codexExecutionArgs(input.baseUrl, hasStaticCatalog ? join(root, "model-catalog.json") : null);
     args.push("--enable", "image_generation", "--sandbox", "read-only");
     const executionModel = resolveCodexExecutionModel(input.model);
     if (executionModel !== CODEX_ACCOUNT_DEFAULT_MODEL) args.push("-m", executionModel);
     args.push("-C", root, "-");
-    await executeCodex(args, codexImageInstruction(input.prompt), root, input.timeoutMs ?? 300_000, false);
+    await executeCodex(args, codexImageInstruction(input.prompt), root, input.timeoutMs ?? 300_000, false,
+      official ? {} : { DEVILUDO_CODEX_PROVIDER_API_KEY: input.credential });
     const candidates = await generatedImages(join(root, "generated_images"));
     if (candidates.length !== 1) {
       throw new Error(candidates.length === 0
@@ -129,8 +136,9 @@ async function createCodexRun(prefix: "prompt" | "image"): Promise<string> {
   return mkdtemp(join(parent, `${prefix}-`));
 }
 
-async function prepareCodexHome(root: string, authJson: string): Promise<boolean> {
-  await writeFile(join(root, "auth.json"), authJson, { mode: 0o600 });
+async function prepareCodexHome(root: string, credential: string, official: boolean): Promise<boolean> {
+  if (!official) return false;
+  await writeFile(join(root, "auth.json"), credential, { mode: 0o600 });
   return installCodexModelsCache(root);
 }
 
@@ -189,20 +197,23 @@ export async function installCodexModelsCache(
   return true;
 }
 
-function codexExecutionArgs(modelCatalog: string | null): string[] {
+function codexExecutionArgs(baseUrl: string, modelCatalog: string | null): string[] {
+  const official = usesCodexOfficialLogin(baseUrl);
+  const provider = official ? "deviludo_chatgpt" : "deviludo_custom";
   const args = [
     "exec",
     "--ephemeral",
     "--json",
     "--ignore-user-config",
-    "--config", "model_provider=deviludo_chatgpt",
-    "--config", "model_providers.deviludo_chatgpt.name=OpenAI",
-    "--config", "model_providers.deviludo_chatgpt.base_url=https://chatgpt.com/backend-api/codex",
-    "--config", "model_providers.deviludo_chatgpt.wire_api=responses",
-    "--config", "model_providers.deviludo_chatgpt.requires_openai_auth=true",
-    "--config", "model_providers.deviludo_chatgpt.supports_websockets=false",
+    "--config", `model_provider=${provider}`,
+    "--config", `model_providers.${provider}.name=${official ? "OpenAI" : "DeviLudo custom Provider"}`,
+    "--config", `model_providers.${provider}.base_url=${official ? "https://chatgpt.com/backend-api/codex" : baseUrl}`,
+    "--config", `model_providers.${provider}.wire_api=responses`,
+    "--config", `model_providers.${provider}.requires_openai_auth=${official}`,
+    "--config", `model_providers.${provider}.supports_websockets=false`,
     "--skip-git-repo-check",
   ];
+  if (!official) args.push("--config", `model_providers.${provider}.env_key=DEVILUDO_CODEX_PROVIDER_API_KEY`);
   if (modelCatalog) args.push("--config", `model_catalog_json=${modelCatalog}`);
   return args;
 }
@@ -238,7 +249,13 @@ async function generatedImages(root: string): Promise<readonly string[]> {
   return Object.freeze(found);
 }
 
-function validateAuth(value: string): void {
+function validateCodexCredential(value: string, official: boolean): void {
+  if (!official) {
+    if (value.length < 8 || value.length > 4096 || /[\u0000-\u001f\u007f]/.test(value)) {
+      throw new Error("Codex Provider API Key is invalid");
+    }
+    return;
+  }
   let parsed: unknown;
   try { parsed = JSON.parse(value); } catch { throw new Error("Codex official login data is invalid"); }
   if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
@@ -252,6 +269,7 @@ function executeCodex(
   codexHome: string,
   timeoutMs: number,
   requireAgentMessage = true,
+  providerEnvironment: Readonly<Record<string, string>> = {},
 ): Promise<string> {
   return new Promise((resolve, reject) => {
     const proxy = process.env.DEVILUDO_CODEX_PROXY_URL?.trim();
@@ -269,6 +287,7 @@ function executeCodex(
       env: {
         ...process.env,
         CODEX_HOME: codexHome,
+        ...providerEnvironment,
         ...(proxy ? { HTTP_PROXY: proxy, HTTPS_PROXY: proxy, ALL_PROXY: proxy } : {}),
       },
     });

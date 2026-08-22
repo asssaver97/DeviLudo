@@ -26,7 +26,7 @@ export type SandboxPlan = Readonly<{
     baseUrl: string;
     model: string;
     credentialRef: string;
-    credentialEnvironmentVariable: "ANTHROPIC_AUTH_TOKEN" | "CODEX_AUTH_JSON";
+    credentialEnvironmentVariable: "ANTHROPIC_AUTH_TOKEN" | "CODEX_PROVIDER_CREDENTIAL";
     environment: Readonly<Record<string, string>>;
     revision: number;
   }> | null;
@@ -346,7 +346,7 @@ function agentConfigurationFromPayload(
     baseUrl,
     model,
     credentialRef: input.credentialRef,
-    credentialEnvironmentVariable: input.runtime === "CLAUDE_CODE" ? "ANTHROPIC_AUTH_TOKEN" : "CODEX_AUTH_JSON",
+    credentialEnvironmentVariable: input.runtime === "CLAUDE_CODE" ? "ANTHROPIC_AUTH_TOKEN" : "CODEX_PROVIDER_CREDENTIAL",
     environment: input.runtime === "CLAUDE_CODE"
       ? claudeCodeEnvironment(baseUrl, model)
       : Object.freeze({ DEVILUDO_CODEX_MODEL: resolveCodexExecutionModel(model) }),

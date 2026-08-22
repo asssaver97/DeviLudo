@@ -13,6 +13,7 @@ import { FileIcon, SettingsIcon, ShieldIcon } from "./console/Icons";
 import { useLanguage } from "./i18n/LanguageProvider";
 
 type ConfigurationMode = "SIMPLE" | "SETTINGS_JSON";
+type CodexConnectionMode = "OFFICIAL" | "CUSTOM";
 type AgentSettingsPayload = Readonly<{
   settings: InstanceAgentSettings;
   runtimes: readonly AgentRuntimeAvailability[];
@@ -51,10 +52,14 @@ export function AgentSettings() {
   const [imageModel, setImageModel] = useState(initialSettings.imageModel ?? "");
   const [apiKey, setApiKey] = useState("");
   const [configurationMode, setConfigurationMode] = useState<ConfigurationMode>("SIMPLE");
+  const [codexConnectionMode, setCodexConnectionMode] = useState<CodexConnectionMode>(
+    initialSettings.agentRuntime === "CODEX_CLI" && initialSettings.baseUrl !== "https://chatgpt.com" ? "CUSTOM" : "OFFICIAL",
+  );
   const [settingsJson, setSettingsJson] = useState(() => formatClaudeSettingsJson(initialSettings.baseUrl, initialSettings.apiKeyMasked ?? "", initialSettings.primaryModel));
   const [runtimes, setRuntimes] = useState<readonly AgentRuntimeAvailability[]>(initialPayload?.runtimes ?? []);
   const [loading, setLoading] = useState(!initialPayload);
   const [saving, setSaving] = useState(false);
+  const [testing, setTesting] = useState(false);
   const [notice, setNotice] = useState("");
   const [error, setError] = useState("");
 
@@ -76,6 +81,7 @@ export function AgentSettings() {
         setSettings(value);
         setAgentRuntime(value.agentRuntime);
         setBaseUrl(value.baseUrl);
+        setCodexConnectionMode(value.agentRuntime === "CODEX_CLI" && value.baseUrl !== "https://chatgpt.com" ? "CUSTOM" : "OFFICIAL");
         setPrimaryModel(value.primaryModel);
         setModelOverrides(value.modelOverrides);
         setImageModel(value.imageModel ?? "");
@@ -108,6 +114,9 @@ export function AgentSettings() {
                 baseUrl,
                 imageModel,
                 ...(apiKey ? { apiKey } : {}),
+              } : codexConnectionMode === "CUSTOM" ? {
+                baseUrl,
+                ...(apiKey ? { apiKey } : {}),
               } : {}),
             }),
       });
@@ -117,6 +126,7 @@ export function AgentSettings() {
       setSettings(body.settings);
       setAgentRuntime(body.settings.agentRuntime);
       setBaseUrl(body.settings.baseUrl);
+      setCodexConnectionMode(body.settings.agentRuntime === "CODEX_CLI" && body.settings.baseUrl !== "https://chatgpt.com" ? "CUSTOM" : "OFFICIAL");
       setPrimaryModel(body.settings.primaryModel);
       setModelOverrides(body.settings.modelOverrides);
       setImageModel(body.settings.imageModel ?? "");
@@ -134,10 +144,29 @@ export function AgentSettings() {
     }
   }
 
+  async function testConnection() {
+    setTesting(true);
+    setNotice("");
+    setError("");
+    try {
+      const response = await fetch("/api/settings/agent/test", { method: "POST" });
+      const body = await response.json() as { ok?: boolean; message?: string };
+      if (!response.ok || !body.ok) throw new Error(errorText(body.message, "连接测试失败", "Connection test failed"));
+      setNotice(text("Agent 连接测试成功。", "Agent connection test passed."));
+    } catch (testError) {
+      setError(testError instanceof Error ? testError.message : text("连接测试失败", "Connection test failed"));
+    } finally {
+      setTesting(false);
+    }
+  }
+
   function selectRuntime(kind: AgentRuntimeKind) {
     setAgentRuntime(kind);
     if (kind === "CODEX_CLI") {
       setConfigurationMode("SIMPLE");
+      const custom = settings.agentRuntime === "CODEX_CLI" && settings.baseUrl !== "https://chatgpt.com";
+      setCodexConnectionMode(custom ? "CUSTOM" : "OFFICIAL");
+      setBaseUrl(custom ? settings.baseUrl : "https://api.x.ai/v1");
       setPrimaryModel(settings.agentRuntime === "CODEX_CLI" ? settings.primaryModel : "account-default");
       setModelOverrides(settings.agentRuntime === "CODEX_CLI" ? settings.modelOverrides : emptyModelOverrides());
       setImageModel("");
@@ -211,7 +240,7 @@ export function AgentSettings() {
                 {AGENT_RUNTIME_KINDS.map(kind => (
                   <label className={`agent-runtime-choice ${agentRuntime === kind ? "is-selected" : ""}`} key={kind}>
                     <input checked={agentRuntime === kind} name="agentRuntime" onChange={() => selectRuntime(kind)} type="radio" value={kind} />
-                    <span><span className="agent-runtime-name"><b>{RUNTIME_COPY[kind].name}</b><em className={runtimeClass(runtimes, kind, loading)}>{runtimeLabel(runtimes, kind, loading, text)}</em></span><small>{runtimeDescription(kind, text)}</small></span>
+                    <span><span className="agent-runtime-name"><b>{RUNTIME_COPY[kind].name}</b><em className={runtimeClass(runtimes, kind, loading, codexConnectionMode)}>{runtimeLabel(runtimes, kind, loading, text)}</em></span><small>{runtimeDescription(kind, text)}</small></span>
                     <i aria-hidden="true" />
                   </label>
                 ))}
@@ -220,16 +249,42 @@ export function AgentSettings() {
 
             {agentRuntime === "CODEX_CLI" ? (
               <>
-                <div className="agent-connection-status" role="status">
-                  <ShieldIcon />
-                  <div><b>{text("OpenAI 官方登录", "OFFICIAL OPENAI SIGN-IN")}</b><p>{text(
-                    "使用宿主机 Codex CLI 的 ChatGPT 登录。Provider、Base URL 和凭据由官方登录管理，模型可在下方配置。",
-                    "Uses the host Codex CLI ChatGPT session. Official sign-in manages the Provider, Base URL, and credential; the model remains configurable below.",
-                  )}</p></div>
-                </div>
+                <label>{text("Codex 连接", "Codex connection")}
+                  <select disabled={loading || saving} onChange={event => {
+                    const mode = event.target.value as CodexConnectionMode;
+                    setCodexConnectionMode(mode);
+                    setBaseUrl(mode === "OFFICIAL" ? "https://chatgpt.com" : "https://api.x.ai/v1");
+                    setPrimaryModel(mode === "OFFICIAL" ? "account-default" : "xai/grok-4.6");
+                    setApiKey("");
+                  }} value={codexConnectionMode}>
+                    <option value="OFFICIAL">{text("OpenAI 官方登录（默认）", "Official OpenAI sign-in (default)")}</option>
+                    <option value="CUSTOM">{text("自定义 Responses Provider", "Custom Responses Provider")}</option>
+                  </select>
+                </label>
+                {codexConnectionMode === "OFFICIAL" ? (
+                  <div className="agent-connection-status" role="status">
+                    <ShieldIcon />
+                    <div><b>{text("OpenAI 官方登录", "OFFICIAL OPENAI SIGN-IN")}</b><p>{text(
+                      "使用宿主机 Codex CLI 的 ChatGPT 登录，不读取其他用户配置。",
+                      "Uses the host Codex CLI ChatGPT session without importing other user configuration.",
+                    )}</p></div>
+                  </div>
+                ) : (
+                  <>
+                    <label>Responses Base URL
+                      <input autoComplete="url" disabled={loading || saving} maxLength={2048} onChange={event => setBaseUrl(event.target.value)} placeholder="https://api.x.ai/v1" required type="url" value={baseUrl} />
+                      <small className="field-help">{text("外部域名必须在 DEVILUDO_PROVIDER_ALLOWLIST 中；宿主机网关使用 http://host.docker.internal:端口。", "External domains must be in DEVILUDO_PROVIDER_ALLOWLIST; use http://host.docker.internal:port for a host gateway.")}</small>
+                    </label>
+                    <label>API Key
+                      <input autoCapitalize="none" autoComplete="off" disabled={loading || saving} maxLength={4096} minLength={8} onChange={event => setApiKey(event.target.value)} placeholder={settings.apiKeyMasked ?? text("输入 API Key", "Enter API Key")} required={settings.agentRuntime !== "CODEX_CLI" || settings.baseUrl !== baseUrl || !settings.apiKeyConfigured} spellCheck={false} type="text" value={apiKey} />
+                    </label>
+                  </>
+                )}
                 <label>{text("主模型", "Primary model")}
                   <input autoCapitalize="none" autoComplete="off" disabled={loading || saving} maxLength={200} name="primaryModel" onChange={event => setPrimaryModel(event.target.value)} placeholder="account-default" required type="text" value={primaryModel} />
-                  <small className="field-help">{text("填写 Codex CLI 可用模型；使用 account-default 时由官方登录选择账户默认模型。", "Enter a model available to Codex CLI, or use account-default to let official sign-in select the account default.")}</small>
+                  <small className="field-help">{codexConnectionMode === "OFFICIAL"
+                    ? text("填写 Codex CLI 可用模型；account-default 使用账户默认模型。", "Enter a Codex CLI model; account-default uses the account default.")
+                    : text("填写 Provider 暴露的模型，例如 xai/grok-4.6。", "Enter a model exposed by the Provider, such as xai/grok-4.6.")}</small>
                 </label>
               </>
             ) : configurationMode === "SIMPLE" ? (
@@ -279,10 +334,10 @@ export function AgentSettings() {
               <p className="agent-role-model-description">{text(
                 agentRuntime === "CLAUDE_CODE"
                   ? "设计、开发和测试模型留空时继承主模型。Claude Code 使用当前连接的兼容 Images API；图片模型留空时关闭自动生成。"
-                  : "设计、开发和测试模型留空时继承主模型；图片生成自动使用 Codex 内置 ImageGen（gpt-image-2），沿用官方登录且无需额外 Provider。",
+                  : "设计、开发和测试模型留空时继承主模型；图片生成使用 Codex 内置 ImageGen（gpt-image-2）和当前 Codex 连接。",
                 agentRuntime === "CLAUDE_CODE"
                   ? "Design, Development, and Test inherit the primary model when empty. Claude Code uses the selected connection's compatible Images API; an empty image model disables generation."
-                  : "Design, Development, and Test inherit the primary model when empty. Image generation automatically uses Codex built-in ImageGen (gpt-image-2) with the official sign-in and no second Provider.",
+                  : "Design, Development, and Test inherit the primary model when empty. Image generation uses Codex built-in ImageGen (gpt-image-2) through the current Codex connection.",
               )}</p>
               <div className="agent-model-expanded">
                 <ModelInput disabled={loading || saving} inheritLabel={text("继承主模型", "Inherits primary")} label={text("设计 Agent", "Design Agent")} onChange={value => updateModelOverride("design", value)} placeholder={primaryModel} value={modelOverrides.design ?? ""} />
@@ -299,7 +354,8 @@ export function AgentSettings() {
 
             {notice ? <p className="agent-config-notice is-success" role="status">{notice}</p> : null}
             {error ? <p className="agent-config-notice is-error" role="alert">{error}</p> : null}
-            <button className="button button-primary agent-config-submit" disabled={loading || saving} type="submit">{saving ? text("正在保存…", "SAVING…") : text("保存配置", "SAVE SETTINGS")}</button>
+            <button className="button button-primary agent-config-submit" disabled={loading || saving || testing} type="submit">{saving ? text("正在保存…", "SAVING…") : text("保存配置", "SAVE SETTINGS")}</button>
+            <button className="button agent-config-submit" disabled={loading || saving || testing || settings.revision < 1} onClick={testConnection} type="button">{testing ? text("正在测试…", "TESTING…") : text("测试已保存连接", "TEST SAVED CONNECTION")}</button>
           </form>
         </section>
 
@@ -352,16 +408,19 @@ function runtimeLabel(
 function runtimeDescription(kind: AgentRuntimeKind, text: (chinese: string, english: string) => string): string {
   return kind === "CLAUDE_CODE"
     ? text("使用 Anthropic Messages 兼容网关执行 Agent。", "Runs Agents through an Anthropic Messages-compatible gateway.")
-    : text("只使用宿主机 OpenAI 官方登录，不读取 Claude Provider 配置。", "Uses only the host's official OpenAI login and never reads Claude Provider settings.");
+    : text("使用官方登录或显式配置的 Responses Provider。", "Uses official sign-in or an explicitly configured Responses Provider.");
 }
 
 function runtimeClass(
   runtimes: readonly AgentRuntimeAvailability[],
   kind: AgentRuntimeKind,
   loading: boolean,
+  codexConnectionMode: CodexConnectionMode,
 ): string {
   const runtime = runtimes.find(candidate => candidate.kind === kind);
-  const ready = runtime?.installed && (kind !== "CODEX_CLI" || runtime.authentication === "CHATGPT");
+  const ready = runtime?.installed && (kind !== "CODEX_CLI"
+    || codexConnectionMode === "CUSTOM"
+    || runtime.authentication === "CHATGPT");
   return `agent-runtime-status ${loading ? "is-checking" : ready ? "is-installed" : "is-missing"}`;
 }
 

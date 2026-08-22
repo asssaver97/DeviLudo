@@ -70,10 +70,11 @@ npm run local:up
 
 打开 [http://127.0.0.1:3100](http://127.0.0.1:3100)，进入“**设置 → Agent 设置**”，选择以下任一运行时：
 
-- 已在宿主机登录的 Codex CLI；或
+- Codex CLI，可使用宿主机官方登录或自定义 Responses 兼容 Provider；或
 - Claude Code，并配置兼容的 Images API 连接和图片模型。
 
 图片生成会自动使用所选 Agent 运行时。
+使用自定义 Codex Provider 时，在界面填写 Base URL、API Key 和模型，保存后执行内置连接测试。`api.x.ai` 与 `host.docker.internal` 默认已放行；其他外部域名需加入项目根目录 `.env` 的 `DEVILUDO_PROVIDER_ALLOWLIST`，再重新运行 `npm run local:up`。宿主机上的 Provider 在所有受支持的 Docker 环境中统一使用 `http://host.docker.internal:<端口>` 访问。
 
 ## 使用 DeviLudo
 
