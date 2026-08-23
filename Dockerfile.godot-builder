@@ -18,6 +18,7 @@ RUN apt-get update \
 COPY services/sandbox-executor/task-runner.mjs /usr/local/bin/deviludo-task
 COPY services/sandbox-executor/task-io.mjs /usr/local/bin/deviludo-task-io
 COPY services/sandbox-executor/build-asset-usage.mjs /usr/local/bin/build-asset-usage.mjs
+COPY services/sandbox-executor/asset-garbage-collection.mjs /usr/local/bin/asset-garbage-collection.mjs
 COPY services/sandbox-executor/godot-build.mjs /usr/local/bin/godot-build.mjs
 COPY scripts/e2e-evidence.mjs /usr/local/lib/deviludo/e2e-evidence.mjs
 RUN chmod 0555 /usr/local/bin/deviludo-task /usr/local/bin/deviludo-task-io

@@ -329,6 +329,19 @@ test("non-Builder task images can start without the Godot-only helper module", a
   assert.match(taskRunner, /async function runGodotBuild\(plan\)[\s\S]*await import\("\.\/godot-build\.mjs"\)/);
 });
 
+test("every task image contains the statically imported runner modules", async () => {
+  const dockerfiles = await Promise.all([
+    "Dockerfile.agent-codex",
+    "Dockerfile.agent-claude",
+    "Dockerfile.godot-builder",
+    "Dockerfile.steam-publisher",
+  ].map(name => readFile(new URL(`../${name}`, import.meta.url), "utf8")));
+  for (const dockerfile of dockerfiles) {
+    assert.match(dockerfile, /COPY services\/sandbox-executor\/build-asset-usage\.mjs \/usr\/local\/bin\/build-asset-usage\.mjs/);
+    assert.match(dockerfile, /COPY services\/sandbox-executor\/asset-garbage-collection\.mjs \/usr\/local\/bin\/asset-garbage-collection\.mjs/);
+  }
+});
+
 test("production deployment has exactly five role-local idempotent entrypoints", async () => {
   const scripts = [
     "web/deploy.sh",
