@@ -142,6 +142,7 @@ test("the cross-platform E2E planner does not multiply Provider or CLI failures"
       );
       assert.doesNotMatch(JSON.stringify(input.outputSchema), /uniqueItems/);
       assert.match(input.prompt, /Return only one JSON object shaped \{semanticJourney,coverage\}/);
+      assert.match(input.prompt, /All natural-language output must be in English/);
       throw new Error("fixture Provider unavailable");
     },
   }), /Test Agent provider request failed: fixture Provider unavailable/);

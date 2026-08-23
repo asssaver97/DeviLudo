@@ -202,7 +202,7 @@ async function groupReply(
     replies.push(Object.freeze({ ...generated, agentRole }));
     history.push(Object.freeze({
       role: "ASSISTANT" as const,
-      content: `[${agentRoleLabel(agentRole)}本轮意见]\n${generated.content}`,
+      content: `[${agentRole === "DESIGN" ? "Design" : agentRole === "DEVELOPMENT" ? "Development" : "Test"} Agent guidance this round]\n${generated.content}`,
     }));
   }
   const readyForDevelopment = replies.every(candidate => candidate.readyForDevelopment);

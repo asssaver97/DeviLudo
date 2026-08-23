@@ -30,16 +30,16 @@ test("Claude-compatible naming uses the configured instance endpoint and primary
     fetchImpl: (async (input, init) => {
       requestedUrl = String(input);
       requestedBody = JSON.parse(String(init?.body)) as Record<string, unknown>;
-      return Response.json({ content: [{ type: "text", text: "《逐浪灯塔》" }] });
+      return Response.json({ content: [{ type: "text", text: "Stormbound Lighthouse" }] });
     }) as typeof fetch,
   });
-  assert.equal(name, "逐浪灯塔");
+  assert.equal(name, "Stormbound Lighthouse");
   assert.equal(requestedUrl, "https://gateway.example.com/anthropic/v1/messages");
   assert.equal(requestedBody.model, "claude-primary");
   assert.equal(requestedBody.max_tokens, 512);
   const prompt = String((requestedBody.messages as { content: string }[])[0]?.content);
   assert.match(prompt, /Generate a concise, distinctive project name/);
-  assert.doesNotMatch(prompt, /请用中文回答/);
+  assert.match(prompt, /All natural-language output must be in English/);
 });
 
 test("Chinese UI injects an answer-language instruction into project naming", async () => {
@@ -55,7 +55,7 @@ test("Chinese UI injects an answer-language instruction into project naming", as
     }) as typeof fetch,
   });
   const prompt = String((requestedBody.messages as { content: string }[])[0]?.content);
-  assert.match(prompt, /请用中文回答/);
+  assert.match(prompt, /所有自然语言输出必须使用中文/);
 });
 
 test("generated project names fail closed when the provider returns invalid text", () => {

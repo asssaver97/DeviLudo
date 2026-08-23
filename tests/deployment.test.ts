@@ -989,14 +989,17 @@ test("settings and project details use unnumbered sections and Codex remains sel
   assert.match(settingsPage, /settings-secondary-grid/);
 });
 
-test("English mode is the first-run default and localizes settings, assets, metadata, and server fallbacks", async () => {
-  const [agentSettings, assetPanel, language, layout, metadata, proxy] = await Promise.all([
+test("English mode is the first-run default and drives UI and generated project content", async () => {
+  const [agentSettings, assetPanel, language, layout, metadata, proxy, api, repository, taskRunner] = await Promise.all([
     readFile(new URL("../components/AgentSettings.tsx", import.meta.url), "utf8"),
     readFile(new URL("../components/AssetManifestPanel.tsx", import.meta.url), "utf8"),
     readFile(new URL("../components/i18n/LanguageProvider.tsx", import.meta.url), "utf8"),
     readFile(new URL("../app/layout.tsx", import.meta.url), "utf8"),
     readFile(new URL("../lib/web/localized-metadata.ts", import.meta.url), "utf8"),
     readFile(new URL("../app/api/[...segments]/route.ts", import.meta.url), "utf8"),
+    readFile(new URL("../services/core/src/api.ts", import.meta.url), "utf8"),
+    readFile(new URL("../services/core/src/repository.ts", import.meta.url), "utf8"),
+    readFile(new URL("../services/sandbox-executor/task-runner.mjs", import.meta.url), "utf8"),
   ]);
   for (const component of [agentSettings, assetPanel]) {
     assert.match(component, /useLanguage\(\)/);
@@ -1008,6 +1011,13 @@ test("English mode is the first-run default and localizes settings, assets, meta
   assert.match(metadata, /value !== "zh"/);
   assert.match(proxy, /=== "zh" \? chinese : english/);
   assert.match(proxy, /requestText\(request, "请求来源校验失败", "Request origin validation failed"\)/);
+  assert.match(language, /deviludo_locale=\$\{nextLocale\}/);
+  assert.match(api, /specificationFromConcept\(name, concept, responseLanguage\)/);
+  assert.match(api, /A new player can complete the first session without external instructions/);
+  assert.match(repository, /responseLanguage === "zh"[\s\S]*Source analysis/);
+  assert.match(repository, /message\.metadata\.intentDecision\)\.summary/);
+  assert.match(repository, /jsonb_build_object\('responseLanguage', \$2::text\)/);
+  assert.match(taskRunner, /All natural-language output must be in English/);
 });
 
 test("remote E2E node connectivity refreshes from server heartbeats", async () => {

@@ -369,7 +369,7 @@ export async function runApi(
       name,
       concept,
       responseLanguage,
-      specification: specificationFromConcept(name, concept),
+      specification: specificationFromConcept(name, concept, responseLanguage),
       ...defaultWorkflowConfiguration(),
     });
     const selectedWorkspace = currentWorkspace ?? await repository.readWorkspace(workspace.id);
@@ -1938,7 +1938,7 @@ async function processConversationMessage(input: Readonly<{
     if (!initialSettings) throw httpError(424, "AGENT_CONFIG_REQUIRED", "请先配置全局 Agent 连接");
     const initialApiKey = await agentSecrets.readApiKey(initialSettings.credentialSecretRef);
     if (!initialApiKey) throw httpError(424, "AGENT_CONFIG_REQUIRED", "无法读取全局 Agent 凭据，请重新保存配置");
-    const seedSpecification = specificationFromConcept("Untitled", command.content);
+    const seedSpecification = specificationFromConcept("Untitled", command.content, command.responseLanguage);
     let intentDecision: ConversationIntentDecision;
     try {
       intentDecision = await classifyConversationIntent({
@@ -1964,7 +1964,7 @@ async function processConversationMessage(input: Readonly<{
     }
     input.onStage?.("NAMING");
     const name = await agentProjectName(command.content, repository, agentSecrets, command.responseLanguage);
-    const specification = specificationFromConcept(name, command.content);
+    const specification = specificationFromConcept(name, command.content, command.responseLanguage);
     input.onStage?.("RESPONDING");
     const agentReplies = await conversationAgentReplies({
       userContent: command.content,
@@ -3037,18 +3037,32 @@ function steamNumericId(value: unknown, label: string): string {
   return normalized;
 }
 
-function specificationFromConcept(name: string, concept: string): Readonly<Record<string, unknown>> {
+function specificationFromConcept(
+  name: string,
+  concept: string,
+  responseLanguage: ResponseLanguage,
+): Readonly<Record<string, unknown>> {
+  const chinese = responseLanguage === "zh";
   return Object.freeze({
     title: name,
     vision: concept,
-    playerExperience: "让玩家在清晰反馈中快速理解目标，并持续获得可验证的成长与挑战。",
-    coreLoop: Object.freeze(["进入一局并识别当前目标", "做出关键操作并获得即时反馈", "结算进度并解锁下一轮变化"]),
+    playerExperience: chinese
+      ? "让玩家在清晰反馈中快速理解目标，并持续获得可验证的成长与挑战。"
+      : "Help players understand the objective through clear feedback and sustain verifiable progress and challenge.",
+    coreLoop: Object.freeze(chinese
+      ? ["进入一局并识别当前目标", "做出关键操作并获得即时反馈", "结算进度并解锁下一轮变化"]
+      : ["Enter a session and identify the current objective", "Take a key action and receive immediate feedback", "Resolve progress and unlock the next variation"]),
     targetPlatforms: Object.freeze(["Linux", "Windows", "macOS"]),
-    acceptanceCriteria: Object.freeze([
+    acceptanceCriteria: Object.freeze(chinese ? [
       "新玩家无需外部说明即可完成第一局",
       "核心循环可在自动化测试中重复执行",
       "三个桌面平台使用同一规则与存档格式",
       "发布前通过真实窗口 E2E，并由管理员明确选择是否上传 Steam",
+    ] : [
+      "A new player can complete the first session without external instructions",
+      "The core loop can be repeated in automated tests",
+      "All three desktop platforms use the same rules and save format",
+      "Real-window E2E passes before release, and an administrator explicitly decides whether to upload to Steam",
     ]),
     revisionNotes: Object.freeze([]),
   });

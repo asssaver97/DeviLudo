@@ -834,8 +834,8 @@ async function runProjectDocumentMaintenance(plan) {
 
 function promptLanguageInstruction(value) {
   return value === "zh"
-    ? "请用中文回答。Keep code, file paths, schema names, JSON property names, and enum values unchanged."
-    : null;
+    ? "所有自然语言输出必须使用中文，包括项目名称、回复、项目说明、需求、计划、摘要和玩家可见文本。Keep code, file paths, schema names, JSON property names, and enum values unchanged."
+    : "All natural-language output must be in English, including project names, replies, project documents, requirements, plans, summaries, and player-facing text. Keep code, file paths, schema names, JSON property names, and enum values unchanged.";
 }
 
 async function runConfiguredAgent(configuration, apiKey, prompt) {

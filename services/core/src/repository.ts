@@ -616,6 +616,7 @@ export class CoreRepository {
       const previous = row.previous_state_data ?? {};
       return Object.freeze({
         projectName: row.name,
+        responseLanguage: parseResponseLanguage(state.responseLanguage),
         iterationNumber: row.iteration_number,
         platform: input.platform,
         concept: state.concept ?? "",
@@ -1237,17 +1238,24 @@ export class CoreRepository {
         })],
       );
       const conversationId = randomUUID();
+      const responseLanguage = parseResponseLanguage(input.responseLanguage ?? row.state_data.responseLanguage);
       await client.query(
         `INSERT INTO deviludo.project_conversations(workspace_id, id, project_id, mode, title)
          VALUES ($1::uuid, $2::uuid, $3::uuid, 'PROJECT_FEEDBACK', $4)`,
-        [input.workspaceId, conversationId, input.projectId, `${row.project_name} · 关联分析`],
+        [input.workspaceId, conversationId, input.projectId, responseLanguage === "zh"
+          ? `${row.project_name} · 关联分析`
+          : `${row.project_name} · Source analysis`],
       );
       await client.query(
         `INSERT INTO deviludo.conversation_messages(workspace_id, conversation_id, role, content)
          VALUES ($1::uuid, $2::uuid, 'USER', $3)`,
-        [input.workspaceId, conversationId, input.source.repositoryUrl
-          ? `关联并分析 Git 项目：${input.source.repositoryUrl}`
-          : `关联并分析本地项目：${input.source.displayName}`],
+        [input.workspaceId, conversationId, responseLanguage === "zh"
+          ? input.source.repositoryUrl
+            ? `关联并分析 Git 项目：${input.source.repositoryUrl}`
+            : `关联并分析本地项目：${input.source.displayName}`
+          : input.source.repositoryUrl
+            ? `Import and analyze Git project: ${input.source.repositoryUrl}`
+            : `Import and analyze local project: ${input.source.displayName}`],
       );
       await client.query(
         `INSERT INTO deviludo.conversation_messages(workspace_id, conversation_id, role, content, metadata)
@@ -1957,13 +1965,27 @@ export class CoreRepository {
         });
       }
       const content = parseProjectDocumentContent(input.content);
+      const responseLanguage = parseResponseLanguage(input.responseLanguage);
       const markdown = projectDocumentMarkdown(
         project.rows[0].name,
         content,
-        parseResponseLanguage(input.responseLanguage),
+        responseLanguage,
       );
       const revision = input.expectedRevision + 1;
       await touchProjectActivity(client, input.workspaceId, input.projectId);
+      await client.query(
+        `UPDATE deviludo.workflow_instances
+            SET state_data = coalesce(state_data, '{}'::jsonb)
+                  || jsonb_build_object('responseLanguage', $2::text),
+                updated_at = clock_timestamp()
+          WHERE id = (
+            SELECT id FROM deviludo.workflow_instances
+             WHERE project_id = $1::uuid
+             ORDER BY iteration_number DESC
+             LIMIT 1
+          )`,
+        [input.projectId, responseLanguage],
+      );
       await client.query(
         `UPDATE deviludo.project_documents
             SET revision = $2::bigint, content = $3::jsonb, markdown = $4,
@@ -2314,6 +2336,9 @@ export class CoreRepository {
       }
 
       if (!conversation) {
+        const generatedTitle = input.assistantMessages
+          .map(message => objectValue(message.metadata.intentDecision).summary)
+          .find(summary => typeof summary === "string" && summary.trim());
         const created = await client.query<ProductConversationRow>(
           `INSERT INTO deviludo.project_conversations(workspace_id, id, project_id, mode, title)
            VALUES ($1::uuid, $2::uuid, $3::uuid, $4, $5)
@@ -2323,7 +2348,7 @@ export class CoreRepository {
             input.conversationId,
             input.projectId,
             "PROJECT_FEEDBACK",
-            project.name,
+            typeof generatedTitle === "string" ? generatedTitle.trim().slice(0, 200) : project.name,
           ],
         );
         conversation = created.rows[0];

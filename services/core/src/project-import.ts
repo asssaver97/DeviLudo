@@ -608,10 +608,10 @@ function sourceContext(files: readonly SourceFile[]): string {
     used += block.length;
   }
   return [
-    `项目文件数：${files.length}`,
-    "文件树：",
+    `Project file count: ${files.length}`,
+    "File tree:",
     tree.join("\n"),
-    "关键文件内容：",
+    "Key file contents:",
     ...excerpts,
   ].join("\n");
 }

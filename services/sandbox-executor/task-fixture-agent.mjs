@@ -8,7 +8,8 @@ await mkdir("/workspace/project", { recursive: true });
 await mkdir("/workspace/outputs", { recursive: true });
 await waitFor("/run/deviludo/ready", "Executor did not provide the fixture plan");
 const plan = JSON.parse(await readFile("/run/deviludo/plan.json", "utf8"));
-await progress("PHASE", "Fixture Agent 已启动并读取项目需求");
+const chinese = plan.job?.payload?.responseLanguage === "zh";
+await progress("PHASE", chinese ? "Fixture Agent 已启动并读取项目需求" : "Fixture Agent started and read the project requirements");
 let taskError = null;
 try {
   if (!["AGENT_GENERATION", "PROJECT_DOCUMENT_MAINTENANCE", "ARTIFACT_BUILD", "STEAM_PUBLISH"].includes(plan.job?.jobKind)) {
@@ -17,7 +18,7 @@ try {
   if (plan.job.jobKind === "STEAM_PUBLISH") {
     const operationId = plan.job.payload?.operation?.id;
     if (!/^[0-9a-f-]{36}$/i.test(operationId ?? "")) throw new Error("Fixture Steam operation is invalid");
-    await progress("PHASE", "Fixture Publisher 已登记固定的 Steam 发布回执");
+    await progress("PHASE", chinese ? "Fixture Publisher 已登记固定的 Steam 发布回执" : "Fixture Publisher registered the fixed Steam publication receipt");
     await writeFile("/workspace/outputs/steam-publish.json", JSON.stringify({
       schemaVersion: "deviludo.fixture-steam-publish.v1",
       published: true,
@@ -60,7 +61,7 @@ try {
       await command("tar", ["-czf", `/workspace/outputs/${archive}`, "-C", directory, "."]);
       outputs.push({ file: archive, kind: "BUILD", targetPlatform: platform, contentType: "application/gzip" });
     }
-    await progress("PHASE", "Fixture Builder 已生成固定的三平台构建制品");
+    await progress("PHASE", chinese ? "Fixture Builder 已生成固定的三平台构建制品" : "Fixture Builder generated the fixed three-platform builds");
     await writeFile("/workspace/outputs/manifest.json", JSON.stringify({
       schemaVersion: "deviludo.task-outputs.v1",
       outputs,
@@ -72,10 +73,10 @@ try {
     await writeFile("/workspace/outputs/project-document.json", JSON.stringify({
       schemaVersion: "deviludo.project-document.v1",
       content: {
-        introduction: String(current.introduction ?? "Fixture 游戏项目"),
-        gameplay: String(current.gameplay ?? "完成固定的自动化游戏循环。"),
-        categories: Array.isArray(current.categories) ? current.categories : ["自动化测试"],
-        features: Array.isArray(current.features) ? current.features : ["可重复验证"],
+        introduction: String(current.introduction ?? (chinese ? "Fixture 游戏项目" : "Fixture game project")),
+        gameplay: String(current.gameplay ?? (chinese ? "完成固定的自动化游戏循环。" : "Complete the fixed automated gameplay loop.")),
+        categories: Array.isArray(current.categories) ? current.categories : [chinese ? "自动化测试" : "Automated testing"],
+        features: Array.isArray(current.features) ? current.features : [chinese ? "可重复验证" : "Repeatable verification"],
       },
     }));
     await writeFile("/workspace/outputs/manifest.json", JSON.stringify({
@@ -83,12 +84,12 @@ try {
       outputs: [{ file: "project-document.json", kind: "PROJECT_DOCUMENT", contentType: "application/json" }],
     }));
   } else {
-    await progress("AGENT_OUTPUT", "正在生成 Godot 项目结构、主场景和自动化测试。");
+    await progress("AGENT_OUTPUT", chinese ? "正在生成 Godot 项目结构、主场景和自动化测试。" : "Generating the Godot project structure, main scene, and automated tests.");
     await cp("/opt/deviludo-fixture", "/workspace/project", { recursive: true, force: false });
     const generatedManifest = JSON.parse(await readFile("/workspace/project/agent.json", "utf8"));
     delete generatedManifest.testManifest;
     await writeFile("/workspace/project/agent.json", `${JSON.stringify(generatedManifest, null, 2)}\n`);
-    await progress("AGENT_OUTPUT", "项目结构生成完成，正在发布源码 revision。");
+    await progress("AGENT_OUTPUT", chinese ? "项目结构生成完成，正在发布源码 revision。" : "Project structure generated; publishing the source revision.");
     // Match the real Agent runner: the output contract is the generated
     // project's agent.json, not diagnostic metadata about the fixture process.
     await writeFile(

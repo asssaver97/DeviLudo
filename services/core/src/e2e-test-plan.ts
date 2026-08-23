@@ -18,6 +18,7 @@ import {
   validateAssetUsageTargets,
   type AssetUsageCheckpointRole,
 } from "@/lib/product/asset-manifest";
+import { parseResponseLanguage, responseLanguageInstruction } from "@/lib/product/response-language";
 import { runCodexPrompt, type CodexPromptRunner } from "./codex-cli";
 
 const E2E_TEST_PLAN_PROVIDER_BUDGET_MS = 360_000;
@@ -915,6 +916,7 @@ function testPlanPrompt(
 ): string {
   return [
     "You are the cross-platform E2E Test Agent. Identify every player-visible operation needed to complete the current project's semantic core loop; Development Agent does not own this plan.",
+    responseLanguageInstruction(parseResponseLanguage(context.responseLanguage)),
     "Return only one JSON object shaped {semanticJourney,coverage}. No markdown and no testManifest.",
     "Core will freeze requirements and deterministically build the full validated manifest. You own only project-specific semanticJourney values.",
     "semanticJourney needs startAction, startRequirementIds, and coreActions. Every frozen requirement ID must appear in startRequirementIds or at least one coreActions.coversRequirementIds array. Never omit a frozen ID.",

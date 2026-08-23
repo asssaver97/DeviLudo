@@ -269,10 +269,13 @@ export class CoreObjectStore {
       throw new Error("Project document output schema is invalid");
     }
     const content = parseProjectDocumentContent(parsed.content);
-    const projectName = typeof job.payload.projectName === "string" ? job.payload.projectName : "游戏项目";
+    const responseLanguage = parseResponseLanguage(job.payload.responseLanguage);
+    const projectName = typeof job.payload.projectName === "string"
+      ? job.payload.projectName
+      : responseLanguage === "zh" ? "游戏项目" : "Game project";
     return Object.freeze({
       content,
-      markdown: projectDocumentMarkdown(projectName, content, parseResponseLanguage(job.payload.responseLanguage)),
+      markdown: projectDocumentMarkdown(projectName, content, responseLanguage),
     });
   }
 

@@ -60,7 +60,7 @@ test("project group chat invokes design, development, and test Agents with indep
       histories.push(JSON.stringify(body.messages));
       return new Response(JSON.stringify({
         content: [{ type: "text", text: JSON.stringify({
-          reply: `来自 ${String(body.model)} 的意见`,
+          reply: `Guidance from ${String(body.model)}`,
           options: [],
           applyToDraft: false,
           readyForDevelopment: true,
@@ -75,9 +75,9 @@ test("project group chat invokes design, development, and test Agents with indep
   assert.match(prompts[0], /Design Agent/);
   assert.match(prompts[1], /Development Agent/);
   assert.match(prompts[2], /Test Agent/);
-  assert.ok(prompts.every(prompt => !prompt.includes("请用中文回答")));
-  assert.match(histories[1], /design-model 的意见/);
-  assert.match(histories[2], /development-model 的意见/);
+  assert.ok(prompts.every(prompt => prompt.includes("All natural-language output must be in English")));
+  assert.match(histories[1], /Guidance from design-model/);
+  assert.match(histories[2], /Guidance from development-model/);
 });
 
 test("Claude design Agent receives project context and conversation history", async () => {
@@ -120,7 +120,7 @@ test("Claude design Agent receives project context and conversation history", as
   assert.match(String(requestedBody.system), /星港维修队/);
   assert.match(String(requestedBody.system), /十分钟一局/);
   assert.match(String(requestedBody.system), /projectDocumentPatch/);
-  assert.match(String(requestedBody.system), /请用中文回答/);
+  assert.match(String(requestedBody.system), /所有自然语言输出必须使用中文/);
   assert.deepEqual((requestedBody.messages as { role: string; content: string }[]).map(message => message.role), [
     "user", "assistant", "user",
   ]);
