@@ -86,8 +86,13 @@ test("local deployment keeps Core private by default and exposes it only for exp
   assert.match(claudeAgentImage, /install -y --no-install-recommends ca-certificates unzip/);
   assert.match(codexAgentImage, /install -y --no-install-recommends ca-certificates unzip/);
   const providerProxy = await readFile(new URL("../services/sandbox-executor/proxy-entrypoint.sh", import.meta.url), "utf8");
+  assert.match(providerProxy, /http_access allow local_provider allowed_provider/);
+  assert.match(providerProxy, /http_access deny all/);
   assert.match(providerProxy, /cache_peer %s parent %s 0 no-query default/);
+  assert.match(providerProxy, /always_direct allow local_provider/);
   assert.match(providerProxy, /never_direct allow all/);
+  assert.ok(providerProxy.indexOf("http_access allow local_provider allowed_provider") < providerProxy.indexOf("http_access deny all"));
+  assert.ok(providerProxy.indexOf("always_direct allow local_provider") < providerProxy.indexOf("never_direct allow all"));
   assert.match(localUp, /--reset-incompatible-baseline/);
   assert.match(localUp, /INCOMPATIBLE_BASELINE_RESET_REQUIRED/);
   assert.match(localUp, /"down", "--volumes", "--remove-orphans"/);

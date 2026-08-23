@@ -47,6 +47,7 @@ config=/tmp/deviludo-squid.conf
   printf 'http_access deny all\n'
   if [ -n "$upstream_host" ]; then
     printf 'cache_peer %s parent %s 0 no-query default\n' "$upstream_host" "$upstream_port"
+    printf 'always_direct allow local_provider\n'
     printf 'never_direct allow all\n'
   fi
   printf 'access_log none\n'
