@@ -1,4 +1,7 @@
 import type {
+  ConversationIntentDecision,
+  ConversationWorkflowAction,
+  ImplementationChangeRequest,
   ProductConversation,
   ProductConversationMessage,
   ProductProjectDetail,
@@ -10,6 +13,9 @@ export type ConversationStreamResult = Readonly<{
   workspace: WorkspaceSummary;
   project: ProductProjectDetail;
   conversation: ProductConversation;
+  intentDecision: ConversationIntentDecision;
+  changeRequest?: ImplementationChangeRequest;
+  workflowAction: ConversationWorkflowAction;
 }>;
 
 export class ConversationStreamError extends Error {
@@ -80,6 +86,9 @@ export async function sendConversationMessageStream(
         workspace: event.workspace as WorkspaceSummary,
         project: event.project as ProductProjectDetail,
         conversation: event.conversation as ProductConversation,
+        intentDecision: event.intentDecision as ConversationIntentDecision,
+        ...(event.changeRequest ? { changeRequest: event.changeRequest as ImplementationChangeRequest } : {}),
+        workflowAction: event.workflowAction as ConversationWorkflowAction,
       };
     }
   };

@@ -8,6 +8,9 @@ import {
   type AgentModelOverrides,
   type AgentRuntimeKind,
   type ArtifactRecord,
+  type E2eGoal,
+  type E2eGoalDelta,
+  type ImplementationChangeRequest,
   type ProductEvent,
   type ProductJob,
   type ProductWorkflowIterationDetail,
@@ -46,6 +49,7 @@ import {
   type ProjectDocumentContent,
 } from "@/lib/product/project-document";
 import { parseResponseLanguage, type ResponseLanguage } from "@/lib/product/response-language";
+import { e2eGoalsDigest, initialE2eGoals, mergeE2eGoals } from "./e2e-goals";
 
 function generatedAssetResourcePath(assetKey: string, objectKey: string | null): string | null {
   const extension = objectKey?.match(/\.(png|jpg|webp)$/i)?.[1]?.toLowerCase();
@@ -555,6 +559,7 @@ export class CoreRepository {
     workflowId: string;
     projectId: string;
     platform: ServerOperatingSystem;
+    goalRevision: number;
   }>): Promise<Readonly<Record<string, unknown>>> {
     return this.database.withWorkspace(input.workspaceId, async client => {
       const workflow = await client.query<{
@@ -576,6 +581,13 @@ export class CoreRepository {
       );
       const row = workflow.rows[0];
       if (!row) throw new Error("E2E planning workflow is unavailable");
+      const goalSnapshot = await client.query<E2eGoalRevisionRow>(
+        `SELECT revision::text, goals, goals_digest
+           FROM deviludo.workflow_e2e_goal_revisions
+          WHERE workflow_id = $1::uuid AND revision = $2::bigint`,
+        [input.workflowId, input.goalRevision],
+      );
+      if (!goalSnapshot.rows[0]) throw new Error("E2E goal revision is unavailable");
       const assets = await client.query<{
         asset_key: string; asset_type: string; description: string; status: string;
         source_path: string | null; object_key: string | null; sha256: string | null;
@@ -609,6 +621,9 @@ export class CoreRepository {
         approvedSpecification: state.specification ?? {},
         previousSpecification: previous.specification ?? null,
         revisionNotes: (state.specification as Record<string, unknown> | undefined)?.revisionNotes ?? [],
+        e2eGoalRevision: input.goalRevision,
+        e2eGoalDigest: goalSnapshot.rows[0].goals_digest,
+        e2eGoals: parseE2eGoals(goalSnapshot.rows[0].goals),
         regression: regression.rows[0] ? Object.freeze({
           available: true,
           inputProfile: regression.rows[0].input_profile,
@@ -636,6 +651,8 @@ export class CoreRepository {
     workflowId: string;
     projectId: string;
     platform: ServerOperatingSystem;
+    sourceRevision: number;
+    goalRevision: number;
   }>): Promise<Readonly<{ testManifest: Readonly<Record<string, unknown>>; testManifestDigest: string }> | null> {
     return this.database.withWorkspace(input.workspaceId, async client => {
       const result = await client.query<{
@@ -646,8 +663,9 @@ export class CoreRepository {
         `SELECT project_id::text, test_manifest, test_manifest_digest
            FROM deviludo.e2e_test_plans
           WHERE workspace_id = $1::uuid AND workflow_id = $2::uuid
-            AND target_platform = $3::deviludo.server_os`,
-        [input.workspaceId, input.workflowId, input.platform],
+            AND source_revision = $3::bigint AND goal_revision = $4::bigint
+            AND target_platform = $5::deviludo.server_os`,
+        [input.workspaceId, input.workflowId, input.sourceRevision, input.goalRevision, input.platform],
       );
       const row = result.rows[0];
       if (!row) return null;
@@ -664,16 +682,38 @@ export class CoreRepository {
     workflowId: string;
     projectId: string;
     platform: ServerOperatingSystem;
+    sourceRevision: number;
+    goalRevision: number;
+    goalDigest: string;
     testManifest: Readonly<Record<string, unknown>>;
     testManifestDigest: string;
   }>): Promise<Readonly<{ testManifest: Readonly<Record<string, unknown>>; testManifestDigest: string }>> {
     return this.database.withWorkspace(input.workspaceId, async client => {
+      const frozenInputs = await client.query<{ source_matches: boolean; goal_matches: boolean }>(
+        `SELECT
+           EXISTS (
+             SELECT 1 FROM deviludo.project_source_revisions source
+              WHERE source.project_id = $1::uuid AND source.revision = $2::bigint
+           ) AS source_matches,
+           EXISTS (
+             SELECT 1 FROM deviludo.workflow_e2e_goal_revisions goals
+              WHERE goals.workflow_id = $3::uuid AND goals.revision = $4::bigint
+                AND goals.goals_digest = $5
+           ) AS goal_matches`,
+        [input.projectId, input.sourceRevision, input.workflowId, input.goalRevision, input.goalDigest],
+      );
+      if (!frozenInputs.rows[0]?.source_matches || !frozenInputs.rows[0]?.goal_matches) {
+        throw new Error("E2E plan inputs do not match the frozen source and goal revisions");
+      }
       await client.query(
         `INSERT INTO deviludo.e2e_test_plans(
-           workspace_id, workflow_id, project_id, target_platform, test_manifest, test_manifest_digest
-         ) VALUES ($1::uuid, $2::uuid, $3::uuid, $4::deviludo.server_os, $5::jsonb, $6)
-         ON CONFLICT (workspace_id, workflow_id, target_platform) DO NOTHING`,
+           workspace_id, workflow_id, project_id, target_platform,
+           source_revision, goal_revision, goal_digest, test_manifest, test_manifest_digest
+         ) VALUES ($1::uuid, $2::uuid, $3::uuid, $4::deviludo.server_os,
+                   $5::bigint, $6::bigint, $7, $8::jsonb, $9)
+         ON CONFLICT (workspace_id, workflow_id, source_revision, goal_revision, target_platform) DO NOTHING`,
         [input.workspaceId, input.workflowId, input.projectId, input.platform,
+          input.sourceRevision, input.goalRevision, input.goalDigest,
           JSON.stringify(input.testManifest), input.testManifestDigest],
       );
       const frozen = await client.query<{
@@ -684,8 +724,9 @@ export class CoreRepository {
         `SELECT project_id::text, test_manifest, test_manifest_digest
            FROM deviludo.e2e_test_plans
           WHERE workspace_id = $1::uuid AND workflow_id = $2::uuid
-            AND target_platform = $3::deviludo.server_os`,
-        [input.workspaceId, input.workflowId, input.platform],
+            AND source_revision = $3::bigint AND goal_revision = $4::bigint
+            AND target_platform = $5::deviludo.server_os`,
+        [input.workspaceId, input.workflowId, input.sourceRevision, input.goalRevision, input.platform],
       );
       const row = frozen.rows[0];
       if (!row || row.project_id !== input.projectId) throw new Error("Frozen E2E test plan could not be read back");
@@ -910,6 +951,7 @@ export class CoreRepository {
           JSON.stringify({
             concept: input.concept,
             specification: input.specification,
+            e2eGoalRevision: 1,
             responseLanguage: parseResponseLanguage(input.responseLanguage),
             iteration: initialIterationState(),
           }),
@@ -921,6 +963,7 @@ export class CoreRepository {
          ) VALUES ($1::uuid, $2::uuid, 'PROJECT_CREATED', $3::jsonb, 'project-created')`,
         [input.workspaceId, input.workflowId, JSON.stringify({ concept: input.concept })],
       );
+      await insertInitialE2eGoalRevision(client, input.workspaceId, input.workflowId, input.specification);
       await client.query(
         `INSERT INTO deviludo.project_creation_receipts(
            idempotency_key, operation_kind, workspace_id, project_id
@@ -989,6 +1032,7 @@ export class CoreRepository {
         [input.workspaceId, input.workflowId, input.projectId, input.profile, input.targetPlatforms, JSON.stringify({
           concept,
           specification,
+          e2eGoalRevision: 1,
           responseLanguage,
           source: {
             ...input.source,
@@ -1014,6 +1058,7 @@ export class CoreRepository {
           gitBranch: input.source.gitBranch,
         })],
       );
+      await insertInitialE2eGoalRevision(client, input.workspaceId, input.workflowId, specification);
       await client.query(
         `INSERT INTO deviludo.project_creation_receipts(
            idempotency_key, operation_kind, workspace_id, project_id
@@ -1130,6 +1175,20 @@ export class CoreRepository {
           input.workflowId, input.actorId],
       );
 
+      const latestGoal = await client.query<{ revision: string }>(
+        `SELECT revision::text FROM deviludo.workflow_e2e_goal_revisions
+          WHERE workflow_id = $1::uuid ORDER BY revision DESC LIMIT 1 FOR UPDATE`,
+        [input.workflowId],
+      );
+      const e2eGoalRevision = Number(latestGoal.rows[0]?.revision ?? 0) + 1;
+      const goals = initialE2eGoals(input.specification);
+      await client.query(
+        `INSERT INTO deviludo.workflow_e2e_goal_revisions(
+           workspace_id, workflow_id, revision, goals, goals_digest
+         ) VALUES ($1::uuid, $2::uuid, $3::bigint, $4::jsonb, $5)`,
+        [input.workspaceId, input.workflowId, e2eGoalRevision, JSON.stringify(goals), e2eGoalsDigest(goals)],
+      );
+
       const currentState = row.state_data ?? {};
       const currentAnalysis = objectValue(currentState.importAnalysis);
       await client.query(
@@ -1140,6 +1199,7 @@ export class CoreRepository {
           ...currentState,
           concept: input.concept,
           specification: input.specification,
+          e2eGoalRevision,
           source: {
             kind: input.source.kind,
             repositoryUrl: input.source.repositoryUrl,
@@ -1336,6 +1396,7 @@ export class CoreRepository {
           JSON.stringify({
             concept: input.concept,
             specification: input.specification,
+            e2eGoalRevision: 1,
             responseLanguage: parseResponseLanguage(input.responseLanguage),
             iteration: initialIterationState(),
           }),
@@ -1347,15 +1408,34 @@ export class CoreRepository {
          ) VALUES ($1::uuid, $2::uuid, 'PROJECT_CREATED', $3::jsonb, 'project-created')`,
         [input.workspaceId, input.workflowId, JSON.stringify({ concept: input.concept, source: "HOME_CONVERSATION" })],
       );
+      await insertInitialE2eGoalRevision(client, input.workspaceId, input.workflowId, input.specification);
       await client.query(
         `INSERT INTO deviludo.project_conversations(workspace_id, id, project_id, mode, title)
          VALUES ($1::uuid, $2::uuid, $3::uuid, 'NEW_GAME', $4)`,
         [input.workspaceId, input.conversationId, input.projectId, input.name],
       );
-      await client.query(
+      const userMessage = await client.query<{ message_id: string }>(
         `INSERT INTO deviludo.conversation_messages(workspace_id, conversation_id, role, content)
-         VALUES ($1::uuid, $2::uuid, 'USER', $3)`,
+         VALUES ($1::uuid, $2::uuid, 'USER', $3)
+         RETURNING message_id::text`,
         [input.workspaceId, input.conversationId, input.userContent],
+      );
+      const intentDecision = input.assistantMessages
+        .map(message => message.metadata.intentDecision)
+        .find(value => value && typeof value === "object" && !Array.isArray(value)) as Record<string, unknown> | undefined;
+      if (!intentDecision) throw new Error("Initial project conversation is missing its Intent Agent decision");
+      await client.query(
+        `INSERT INTO deviludo.workflow_events(
+           workspace_id, workflow_id, event_kind, event_data, idempotency_key
+         ) VALUES ($1::uuid, $2::uuid, 'CONVERSATION_INTENT_DECIDED', $3::jsonb, $4)`,
+        [input.workspaceId, input.workflowId, JSON.stringify({
+          conversationId: input.conversationId,
+          sourceMessageId: userMessage.rows[0].message_id,
+          intent: intentDecision.intent,
+          explicitExecution: intentDecision.explicitExecution,
+          actionable: intentDecision.actionable,
+          responderRoles: intentDecision.responderRoles,
+        }), `intent:${input.conversationId}:${userMessage.rows[0].message_id}`],
       );
       for (const message of input.assistantMessages) {
         const design = message.metadata.agentRole === "DESIGN";
@@ -1487,7 +1567,7 @@ export class CoreRepository {
       );
       const row = project.rows[0];
       if (!row || !row.workflow_id) return null;
-      const [jobs, events, document, documentRevisions] = await Promise.all([
+      const [jobs, events, document, documentRevisions, pendingChange, goalRevision] = await Promise.all([
         client.query<ProductJobRow>(
           `SELECT id::text, kind::text, pool_kind::text, target_operating_system::text,
                   state::text, attempt, last_error, created_at::text, updated_at::text
@@ -1520,6 +1600,27 @@ export class CoreRepository {
             LIMIT 30`,
           [projectId],
         ),
+        client.query<ImplementationChangeRequestRow>(
+          `SELECT request.id::text, request.project_id::text, request.conversation_id::text,
+                  request.state, request.summary, request.implementation_brief,
+                  request.base_document_revision::text,
+                  request.project_document_patch, request.e2e_goal_delta, request.explicit_execution,
+                  request.created_at::text
+             FROM deviludo.implementation_change_requests request
+            WHERE request.project_id = $1::uuid
+              AND request.state IN ('PENDING', 'WAITING_FOR_ANALYSIS')
+            ORDER BY request.created_at DESC
+            LIMIT 1`,
+          [projectId],
+        ),
+        client.query<E2eGoalRevisionRow>(
+          `SELECT revision::text, goals, goals_digest
+             FROM deviludo.workflow_e2e_goal_revisions
+            WHERE workflow_id = $1::uuid
+            ORDER BY revision DESC
+            LIMIT 1`,
+          [row.workflow_id],
+        ),
       ]);
       const currentDocument = document.rows[0];
       if (!currentDocument) throw new Error("Project document is missing");
@@ -1544,6 +1645,10 @@ export class CoreRepository {
           data: Object.freeze({ ...event.event_data }),
           createdAt: event.created_at,
         }))),
+        pendingImplementationChange: pendingChange.rows[0]
+          ? implementationChangeFromRow(pendingChange.rows[0]) : null,
+        e2eGoalRevision: Number(goalRevision.rows[0]?.revision ?? 0),
+        e2eGoals: parseE2eGoals(goalRevision.rows[0]?.goals ?? []),
       });
     });
   }
@@ -1619,14 +1724,29 @@ export class CoreRepository {
           LIMIT 1`,
         [input.projectId],
       );
+      const previousState = current.state_data ?? {};
+      const inheritedGoalRevision = await client.query<E2eGoalRevisionRow>(
+        `SELECT revision::text, goals, goals_digest
+           FROM deviludo.workflow_e2e_goal_revisions
+          WHERE workflow_id = $1::uuid
+          ORDER BY revision DESC
+          LIMIT 1`,
+        [input.baseWorkflowId],
+      );
+      const inheritedGoals = parseE2eGoals(
+        inheritedGoalRevision.rows[0]?.goals
+          ?? initialE2eGoals(productSpecificationFromState(previousState)),
+      );
+      const inheritedGoalsDigest = inheritedGoalRevision.rows[0]?.goals_digest
+        ?? e2eGoalsDigest(inheritedGoals);
       const iterationNumber = current.iteration_number + 1;
       const workflowId = randomUUID();
-      const previousState = current.state_data ?? {};
       const analysis = objectValue(previousState.importAnalysis);
       const stateData = {
         concept: typeof previousState.concept === "string" ? previousState.concept : "",
         specification: productSpecificationFromState(previousState),
         responseLanguage: parseResponseLanguage(input.responseLanguage ?? previousState.responseLanguage),
+        e2eGoalRevision: 1,
         ...(previousState.source && typeof previousState.source === "object"
           ? { source: previousState.source }
           : {}),
@@ -1661,6 +1781,12 @@ export class CoreRepository {
           baseDocumentRevision: stateData.iteration.baseDocumentRevision,
           requestedByActorId: input.actorId,
         })],
+      );
+      await client.query(
+        `INSERT INTO deviludo.workflow_e2e_goal_revisions(
+           workspace_id, workflow_id, revision, goals, goals_digest
+         ) VALUES ($1::uuid, $2::uuid, 1, $3::jsonb, $4)`,
+        [input.workspaceId, workflowId, JSON.stringify(inheritedGoals), inheritedGoalsDigest],
       );
       await touchProjectActivity(client, input.workspaceId, input.projectId);
       return Object.freeze({ workflowId, created: true });
@@ -1951,13 +2077,11 @@ export class CoreRepository {
             )`,
         params,
       );
-      for (const table of ["job_guidance_messages", "job_progress_events"] as const) {
-        await client.query(
-          `DELETE FROM deviludo.${table}
-            WHERE workspace_id = $1::uuid AND project_id = $2::uuid`,
-          params,
-        );
-      }
+      await client.query(
+        `DELETE FROM deviludo.job_progress_events
+          WHERE workspace_id = $1::uuid AND project_id = $2::uuid`,
+        params,
+      );
       await client.query(
         `DELETE FROM deviludo.project_document_revisions
           WHERE workspace_id = $1::uuid AND project_id = $2::uuid`,
@@ -1966,6 +2090,15 @@ export class CoreRepository {
       await client.query(
         `DELETE FROM deviludo.project_documents
           WHERE workspace_id = $1::uuid AND project_id = $2::uuid`,
+        params,
+      );
+      await client.query(
+        `DELETE FROM deviludo.workflow_e2e_goal_revisions goal
+          WHERE goal.workspace_id = $1::uuid
+            AND goal.workflow_id IN (
+              SELECT id FROM deviludo.workflow_instances
+               WHERE workspace_id = $1::uuid AND project_id = $2::uuid
+            )`,
         params,
       );
       await client.query(
@@ -2062,99 +2195,6 @@ export class CoreRepository {
     });
   }
 
-  async appendAgentGuidance(input: Readonly<{
-    workspaceId: string;
-    projectId: string;
-    conversationId: string;
-    content: string;
-  }>): Promise<ProductConversation> {
-    return this.database.withWorkspace(input.workspaceId, async client => {
-      const project = await client.query<{ name: string }>(
-        "SELECT name FROM deviludo.projects WHERE id = $1::uuid",
-        [input.projectId],
-      );
-      const workflow = await client.query<{ id: string; state: string }>(
-        `SELECT id::text, state::text
-           FROM deviludo.workflow_instances
-          WHERE project_id = $1::uuid
-          ORDER BY iteration_number DESC
-          LIMIT 1
-          FOR UPDATE`,
-        [input.projectId],
-      );
-      if (!project.rows[0] || !workflow.rows[0]) throw new Error("Project not found");
-      if (workflow.rows[0].state !== "AGENT_RUNNING") {
-        throw Object.assign(new Error("Agent 生成已经结束，请刷新后继续对话"), {
-          statusCode: 409,
-          code: "AGENT_NOT_RUNNING",
-        });
-      }
-      const job = await client.query<{ id: string }>(
-        `SELECT id::text
-           FROM deviludo.jobs
-          WHERE workflow_id = $1::uuid
-            AND kind = 'AGENT_GENERATION'
-            AND state IN ('QUEUED', 'RETRY', 'RUNNING')
-          ORDER BY created_at DESC
-          LIMIT 1
-          FOR UPDATE`,
-        [workflow.rows[0].id],
-      );
-      if (!job.rows[0]) throw new Error("Active Agent generation job is unavailable");
-
-      const existing = await client.query<ProductConversationRow>(
-        `SELECT id::text, project_id::text, mode, title, created_at::text, updated_at::text
-           FROM deviludo.project_conversations
-          WHERE id = $1::uuid
-          FOR UPDATE`,
-        [input.conversationId],
-      );
-      let conversation = existing.rows[0];
-      if (conversation && conversation.project_id !== input.projectId) {
-        throw new Error("A conversation cannot switch projects");
-      }
-      if (!conversation) {
-        const created = await client.query<ProductConversationRow>(
-          `INSERT INTO deviludo.project_conversations(workspace_id, id, project_id, mode, title)
-           VALUES ($1::uuid, $2::uuid, $3::uuid, 'PROJECT_FEEDBACK', $4)
-           RETURNING id::text, project_id::text, mode, title, created_at::text, updated_at::text`,
-          [input.workspaceId, input.conversationId, input.projectId, project.rows[0].name],
-        );
-        conversation = created.rows[0];
-      }
-      await client.query(
-        `INSERT INTO deviludo.conversation_messages(
-           workspace_id, conversation_id, role, content, metadata
-         ) VALUES ($1::uuid, $2::uuid, 'USER', $3, $4::jsonb)`,
-        [input.workspaceId, input.conversationId, input.content, JSON.stringify({
-          source: "PLAYER_GUIDANCE",
-          jobId: job.rows[0].id,
-        })],
-      );
-      await client.query(
-        `INSERT INTO deviludo.job_guidance_messages(
-           workspace_id, project_id, workflow_id, job_id, conversation_id, content
-         ) VALUES ($1::uuid, $2::uuid, $3::uuid, $4::uuid, $5::uuid, $6)`,
-        [input.workspaceId, input.projectId, workflow.rows[0].id, job.rows[0].id, input.conversationId, input.content],
-      );
-      await client.query(
-        `INSERT INTO deviludo.job_progress_events(
-           workspace_id, project_id, workflow_id, job_id, event_kind, content
-         ) VALUES ($1::uuid, $2::uuid, $3::uuid, $4::uuid, 'GUIDANCE_ACCEPTED', $5)`,
-        [input.workspaceId, input.projectId, workflow.rows[0].id, job.rows[0].id, input.content],
-      );
-      const updated = await client.query<ProductConversationRow>(
-        `UPDATE deviludo.project_conversations
-            SET updated_at = clock_timestamp()
-          WHERE id = $1::uuid
-          RETURNING id::text, project_id::text, mode, title, created_at::text, updated_at::text`,
-        [input.conversationId],
-      );
-      await touchProjectActivity(client, input.workspaceId, input.projectId);
-      return this.readConversationMessages(client, updated.rows[0]);
-    });
-  }
-
   async appendJobProgress(
     job: JobProtocolV4,
     kind: AgentProgressEventKind,
@@ -2196,32 +2236,6 @@ export class CoreRepository {
         [projectId, afterSequence, Math.min(Math.max(limit, 1), 500)],
       );
       return Object.freeze(result.rows.map(agentProgressEventFromRow));
-    });
-  }
-
-  async readPendingAgentGuidance(job: JobProtocolV4): Promise<readonly Readonly<{ id: string; content: string }>[]> {
-    return this.database.withWorkspace(job.workspaceId, async client => {
-      const result = await client.query<{ id: string; content: string }>(
-        `SELECT id::text, content
-           FROM deviludo.job_guidance_messages
-          WHERE job_id = $1::uuid AND state = 'PENDING'
-          ORDER BY created_at
-          LIMIT 20`,
-        [job.jobId],
-      );
-      return Object.freeze(result.rows.map(row => Object.freeze(row)));
-    });
-  }
-
-  async markAgentGuidanceDelivered(job: JobProtocolV4, guidanceId: string): Promise<boolean> {
-    return this.database.withWorkspace(job.workspaceId, async client => {
-      const result = await client.query(
-        `UPDATE deviludo.job_guidance_messages
-            SET state = 'DELIVERED', delivered_at = clock_timestamp()
-          WHERE id = $1::uuid AND job_id = $2::uuid AND state = 'PENDING'`,
-        [guidanceId, job.jobId],
-      );
-      return result.rowCount === 1;
     });
   }
 
@@ -2405,6 +2419,26 @@ export class CoreRepository {
         );
       }
 
+      const intentDecision = input.assistantMessages
+        .map(message => message.metadata.intentDecision)
+        .find(value => value && typeof value === "object" && !Array.isArray(value)) as Record<string, unknown> | undefined;
+      if (intentDecision) {
+        await client.query(
+          `INSERT INTO deviludo.workflow_events(
+             workspace_id, workflow_id, event_kind, event_data, idempotency_key
+           ) VALUES ($1::uuid, $2::uuid, 'CONVERSATION_INTENT_DECIDED', $3::jsonb, $4)
+           ON CONFLICT (workspace_id, workflow_id, idempotency_key) DO NOTHING`,
+          [input.workspaceId, project.workflowId, JSON.stringify({
+            conversationId: input.conversationId,
+            sourceMessageId: userMessage.rows[0].message_id,
+            intent: intentDecision.intent,
+            explicitExecution: intentDecision.explicitExecution,
+            actionable: intentDecision.actionable,
+            responderRoles: intentDecision.responderRoles,
+          }), `intent:${input.conversationId}:${userMessage.rows[0].message_id}`],
+        );
+      }
+
       for (const message of input.assistantMessages) {
         const design = message.metadata.agentRole === "DESIGN";
         await client.query(
@@ -2430,6 +2464,435 @@ export class CoreRepository {
         [input.conversationId],
       );
       return this.readConversationMessages(client, updated.rows[0]);
+    });
+  }
+
+  async createImplementationChangeRequest(input: Readonly<{
+    workspaceId: string;
+    projectId: string;
+    workflowId: string;
+    conversationId: string;
+    summary: string;
+    implementationBrief: string;
+    projectDocumentPatch: Readonly<Record<string, unknown>>;
+    e2eGoalDelta: E2eGoalDelta;
+    explicitExecution: boolean;
+    idempotencyKey: string;
+    supersededChangeRequestId?: string;
+    supersededDecisionIdempotencyKey?: string;
+  }>): Promise<ImplementationChangeRequest> {
+    return this.database.withWorkspace(input.workspaceId, async client => {
+      const prior = await client.query<ImplementationChangeRequestRow>(
+        `SELECT id::text, project_id::text, conversation_id::text, state, summary,
+                implementation_brief, base_document_revision::text, project_document_patch, e2e_goal_delta,
+                explicit_execution, created_at::text
+           FROM deviludo.implementation_change_requests
+          WHERE idempotency_key = $1`,
+        [input.idempotencyKey],
+      );
+      if (prior.rows[0]) {
+        if (prior.rows[0].project_id !== input.projectId) {
+          throw Object.assign(new Error("Idempotency key was reused for another change"), { statusCode: 409, code: "IDEMPOTENCY_KEY_REUSED" });
+        }
+        return implementationChangeFromRow(prior.rows[0]);
+      }
+      const document = await client.query<{ revision: string }>(
+        `SELECT revision::text FROM deviludo.project_documents
+          WHERE project_id = $1::uuid FOR UPDATE`,
+        [input.projectId],
+      );
+      const sourceMessage = await client.query<{ message_id: string }>(
+        `SELECT message_id::text FROM deviludo.conversation_messages
+          WHERE conversation_id = $1::uuid AND role = 'USER'
+          ORDER BY message_id DESC LIMIT 1`,
+        [input.conversationId],
+      );
+      if (!document.rows[0] || !sourceMessage.rows[0]) throw new Error("Implementation change context is unavailable");
+      if ((input.supersededChangeRequestId === undefined)
+        !== (input.supersededDecisionIdempotencyKey === undefined)) {
+        throw new Error("A replanned change requires both supersession identifiers");
+      }
+      await client.query(
+        `UPDATE deviludo.implementation_change_requests
+            SET state = 'SUPERSEDED',
+                decision = CASE WHEN id = $2::uuid THEN 'CONFIRM' ELSE decision END,
+                decision_idempotency_key = CASE
+                  WHEN id = $2::uuid THEN $3 ELSE decision_idempotency_key
+                END,
+                updated_at = clock_timestamp()
+          WHERE project_id = $1::uuid AND state IN ('PENDING', 'WAITING_FOR_ANALYSIS')`,
+        [input.projectId, input.supersededChangeRequestId ?? null,
+          input.supersededDecisionIdempotencyKey ?? null],
+      );
+      const result = await client.query<ImplementationChangeRequestRow>(
+        `INSERT INTO deviludo.implementation_change_requests(
+           workspace_id, project_id, workflow_id, conversation_id, source_message_id,
+           state, summary, implementation_brief, base_document_revision,
+           project_document_patch, e2e_goal_delta, explicit_execution, idempotency_key
+         ) VALUES (
+           $1::uuid, $2::uuid, $3::uuid, $4::uuid, $5::bigint,
+           'PENDING', $6, $7, $8::bigint, $9::jsonb, $10::jsonb, $11, $12
+         )
+         RETURNING id::text, project_id::text, conversation_id::text, state, summary,
+                   implementation_brief, base_document_revision::text, project_document_patch, e2e_goal_delta,
+                   explicit_execution, created_at::text`,
+        [input.workspaceId, input.projectId, input.workflowId, input.conversationId,
+          sourceMessage.rows[0].message_id, input.summary, input.implementationBrief,
+          document.rows[0].revision, JSON.stringify(input.projectDocumentPatch),
+          JSON.stringify(input.e2eGoalDelta), input.explicitExecution, input.idempotencyKey],
+      );
+      return implementationChangeFromRow(result.rows[0]);
+    });
+  }
+
+  async rejectImplementationChange(
+    workspaceId: string,
+    projectId: string,
+    changeRequestId: string,
+    decisionIdempotencyKey?: string,
+  ): Promise<ImplementationChangeRequest | null> {
+    return this.database.withWorkspace(workspaceId, async client => {
+      const current = await client.query<ImplementationChangeRequestRow & {
+        decision: "CONFIRM" | "REJECT" | null;
+        decision_idempotency_key: string | null;
+      }>(
+        `SELECT id::text, project_id::text, conversation_id::text, state, summary,
+                implementation_brief, base_document_revision::text, project_document_patch, e2e_goal_delta,
+                explicit_execution, decision, decision_idempotency_key, created_at::text
+           FROM deviludo.implementation_change_requests
+          WHERE project_id = $1::uuid AND id = $2::uuid
+          FOR UPDATE`,
+        [projectId, changeRequestId],
+      );
+      const request = current.rows[0];
+      if (!request) return null;
+      if (request.state === "REJECTED" && request.decision === "REJECT"
+        && request.decision_idempotency_key === (decisionIdempotencyKey ?? null)) {
+        return implementationChangeFromRow(request);
+      }
+      if (request.decision !== null || request.decision_idempotency_key !== null) {
+        throw Object.assign(new Error("Implementation change already has a different decision"), { statusCode: 409, code: "CHANGE_DECISION_CONFLICT" });
+      }
+      if (!["PENDING", "WAITING_FOR_ANALYSIS"].includes(request.state)) {
+        throw Object.assign(new Error("Implementation change request is no longer actionable"), { statusCode: 409, code: "CHANGE_REQUEST_CLOSED" });
+      }
+      const result = await client.query<ImplementationChangeRequestRow>(
+        `UPDATE deviludo.implementation_change_requests
+            SET state = 'REJECTED', decision = 'REJECT',
+                decision_idempotency_key = coalesce(decision_idempotency_key, $3),
+                updated_at = clock_timestamp()
+          WHERE project_id = $1::uuid AND id = $2::uuid
+            AND state IN ('PENDING', 'WAITING_FOR_ANALYSIS')
+          RETURNING id::text, project_id::text, conversation_id::text, state, summary,
+                    implementation_brief, base_document_revision::text, project_document_patch, e2e_goal_delta,
+                    explicit_execution, created_at::text`,
+        [projectId, changeRequestId, decisionIdempotencyKey ?? null],
+      );
+      return result.rows[0] ? implementationChangeFromRow(result.rows[0]) : null;
+    });
+  }
+
+  async readImplementationChangeDecision(
+    workspaceId: string,
+    projectId: string,
+    changeRequestId: string,
+  ): Promise<Readonly<{
+    request: ImplementationChangeRequest;
+    decision: "CONFIRM" | "REJECT" | null;
+    decisionIdempotencyKey: string | null;
+    sourceWorkflowId: string;
+    appliedWorkflowId: string | null;
+  }> | null> {
+    return this.database.withWorkspace(workspaceId, async client => {
+      const result = await client.query<ImplementationChangeRequestRow & {
+        decision: "CONFIRM" | "REJECT" | null;
+        decision_idempotency_key: string | null;
+        workflow_id: string;
+        applied_workflow_id: string | null;
+      }>(
+        `SELECT id::text, project_id::text, conversation_id::text, workflow_id::text,
+                state, summary, implementation_brief, base_document_revision::text, project_document_patch,
+                e2e_goal_delta, explicit_execution, decision, decision_idempotency_key,
+                applied_workflow_id::text, created_at::text
+           FROM deviludo.implementation_change_requests
+          WHERE project_id = $1::uuid AND id = $2::uuid`,
+        [projectId, changeRequestId],
+      );
+      const row = result.rows[0];
+      return row ? Object.freeze({
+        request: implementationChangeFromRow(row),
+        decision: row.decision,
+        decisionIdempotencyKey: row.decision_idempotency_key,
+        sourceWorkflowId: row.workflow_id,
+        appliedWorkflowId: row.applied_workflow_id,
+      }) : null;
+    });
+  }
+
+  async applyImplementationChange(input: Readonly<{
+    workspaceId: string;
+    projectId: string;
+    changeRequestId: string;
+    actorId: string;
+    responseLanguage: ResponseLanguage;
+    specificationObject?: Readonly<{ bucket: string; key: string; sha256: string; sizeBytes: number }>;
+    decisionIdempotencyKey?: string;
+  }>): Promise<"WAITING_FOR_ANALYSIS" | "AGENT_STARTED" | "AGENT_RERUN_STARTED" | "NEW_ITERATION_STARTED"> {
+    return this.database.withWorkspace(input.workspaceId, async client => {
+      const request = await client.query<ImplementationChangeRequestRow & {
+        workflow_id: string; base_document_revision: string; applied_workflow_id: string | null;
+        decision: "CONFIRM" | "REJECT" | null; decision_idempotency_key: string | null;
+      }>(
+        `SELECT id::text, project_id::text, conversation_id::text, workflow_id::text,
+                state, summary, implementation_brief, base_document_revision::text,
+                project_document_patch, e2e_goal_delta, explicit_execution,
+                decision, decision_idempotency_key, applied_workflow_id::text, created_at::text
+           FROM deviludo.implementation_change_requests
+          WHERE project_id = $1::uuid AND id = $2::uuid
+          FOR UPDATE`,
+        [input.projectId, input.changeRequestId],
+      );
+      const change = request.rows[0];
+      if (!change) throw new Error("Implementation change request not found");
+      if ((change.decision !== null && change.decision !== "CONFIRM")
+        || (change.decision_idempotency_key !== null
+          && change.decision_idempotency_key !== (input.decisionIdempotencyKey ?? change.decision_idempotency_key))) {
+        throw Object.assign(new Error("Implementation change already has a different decision"), { statusCode: 409, code: "CHANGE_DECISION_CONFLICT" });
+      }
+      if (change.state === "APPLIED") {
+        if (change.decision !== "CONFIRM"
+          || change.decision_idempotency_key !== (input.decisionIdempotencyKey ?? change.decision_idempotency_key)) {
+          throw Object.assign(new Error("Implementation change decision does not match the completed request"), { statusCode: 409, code: "CHANGE_DECISION_CONFLICT" });
+        }
+        return change.applied_workflow_id === change.workflow_id ? "AGENT_RERUN_STARTED" : "NEW_ITERATION_STARTED";
+      }
+      if (!["PENDING", "WAITING_FOR_ANALYSIS"].includes(change.state)) {
+        throw Object.assign(new Error("Implementation change request is no longer actionable"), { statusCode: 409, code: "CHANGE_REQUEST_CLOSED" });
+      }
+      const workflow = await client.query<{
+        id: string; iteration_number: number; state: string; profile: "VALIDATE" | "RELEASE";
+        target_platforms: ServerOperatingSystem[]; state_data: Record<string, unknown>;
+      }>(
+        `SELECT id::text, iteration_number, state::text, profile::text,
+                target_platforms::text[], state_data
+           FROM deviludo.workflow_instances
+          WHERE project_id = $1::uuid
+          ORDER BY iteration_number DESC LIMIT 1
+          FOR UPDATE`,
+        [input.projectId],
+      );
+      const current = workflow.rows[0];
+      if (!current || current.id !== change.workflow_id) {
+        await client.query(`UPDATE deviludo.implementation_change_requests SET state = 'SUPERSEDED', updated_at = clock_timestamp() WHERE id = $1::uuid`, [change.id]);
+        throw Object.assign(new Error("Project changed while the proposal was awaiting a decision"), { statusCode: 409, code: "CHANGE_REQUEST_STALE" });
+      }
+      const analysisStatus = objectValue(current.state_data.importAnalysis).status;
+      if (["PENDING", "ANALYZING"].includes(String(analysisStatus))) {
+        if (change.decision_idempotency_key
+          && change.decision_idempotency_key !== (input.decisionIdempotencyKey ?? change.decision_idempotency_key)) {
+          throw Object.assign(new Error("Implementation change already has a different decision"), { statusCode: 409, code: "CHANGE_DECISION_CONFLICT" });
+        }
+        await client.query(
+          `UPDATE deviludo.implementation_change_requests
+              SET state = 'WAITING_FOR_ANALYSIS', decision = 'CONFIRM',
+                  decision_idempotency_key = coalesce(decision_idempotency_key, $2),
+                  updated_at = clock_timestamp()
+            WHERE id = $1::uuid`,
+          [change.id, input.decisionIdempotencyKey ?? null],
+        );
+        return "WAITING_FOR_ANALYSIS";
+      }
+      if (!input.specificationObject) throw new Error("Confirmed implementation change is missing its specification object");
+
+      const project = await client.query<{ name: string }>(
+        `SELECT name FROM deviludo.projects WHERE id = $1::uuid FOR UPDATE`, [input.projectId],
+      );
+      const documentRow = await client.query<{ revision: string; content: Record<string, unknown> }>(
+        `SELECT revision::text, content FROM deviludo.project_documents WHERE project_id = $1::uuid FOR UPDATE`, [input.projectId],
+      );
+      if (!project.rows[0] || !documentRow.rows[0]
+        || (change.state !== "WAITING_FOR_ANALYSIS"
+          && Number(documentRow.rows[0].revision) !== Number(change.base_document_revision))) {
+        await client.query(`UPDATE deviludo.implementation_change_requests SET state = 'SUPERSEDED', updated_at = clock_timestamp() WHERE id = $1::uuid`, [change.id]);
+        throw Object.assign(new Error("Project document changed while the proposal was awaiting a decision"), { statusCode: 409, code: "CHANGE_REQUEST_STALE" });
+      }
+      const document = parseProjectDocumentContent({ ...documentRow.rows[0].content, ...change.project_document_patch });
+      const specification = synchronizeSpecificationWithProjectDocument(
+        productSpecificationFromState(current.state_data), document,
+      );
+      const currentGoals = await client.query<E2eGoalRevisionRow>(
+        `SELECT revision::text, goals, goals_digest
+           FROM deviludo.workflow_e2e_goal_revisions
+          WHERE workflow_id = $1::uuid ORDER BY revision DESC LIMIT 1 FOR UPDATE`,
+        [current.id],
+      );
+      const goals = mergeE2eGoals(
+        parseE2eGoals(currentGoals.rows[0]?.goals ?? initialE2eGoals(productSpecificationFromState(current.state_data))),
+        parseStoredE2eGoalDelta(change.e2e_goal_delta),
+        specification,
+      );
+      const hasRelease = await client.query(
+        `SELECT 1 FROM deviludo.steam_releases WHERE project_id = $1::uuid AND workflow_id = $2::uuid LIMIT 1`,
+        [input.projectId, current.id],
+      );
+      const newIteration = current.state === "STEAM_PUBLISHING" || hasRelease.rowCount === 1;
+      const latestSource = newIteration ? await client.query<{ revision: string }>(
+        `SELECT revision::text FROM deviludo.project_source_revisions
+          WHERE project_id = $1::uuid ORDER BY revision DESC LIMIT 1`,
+        [input.projectId],
+      ) : null;
+      const targetWorkflowId = newIteration ? randomUUID() : current.id;
+      const goalRevision = newIteration ? 1 : Number(currentGoals.rows[0]?.revision ?? 0) + 1;
+      const nextDocumentRevision = Number(documentRow.rows[0].revision) + 1;
+      const markdown = projectDocumentMarkdown(project.rows[0].name, document, input.responseLanguage);
+
+      await client.query(
+        `UPDATE deviludo.project_documents
+            SET revision = $2::bigint, content = $3::jsonb, markdown = $4,
+                maintained_by = 'AGENT', updated_by_actor_id = NULL,
+                last_agent_maintained_at = clock_timestamp(), updated_at = clock_timestamp()
+          WHERE project_id = $1::uuid`,
+        [input.projectId, nextDocumentRevision, JSON.stringify(document), markdown],
+      );
+      await client.query(
+        `INSERT INTO deviludo.project_document_revisions(
+           workspace_id, project_id, revision, content, markdown, source
+         ) VALUES ($1::uuid, $2::uuid, $3::bigint, $4::jsonb, $5, 'AGENT_CONVERSATION')`,
+        [input.workspaceId, input.projectId, nextDocumentRevision, JSON.stringify(document), markdown],
+      );
+
+      if (newIteration) {
+        const stateData = {
+          ...current.state_data,
+          specification,
+          responseLanguage: input.responseLanguage,
+          e2eGoalRevision: goalRevision,
+          iteration: {
+            number: current.iteration_number + 1,
+            parentWorkflowId: current.id,
+            baseSourceRevision: latestSource?.rows[0] ? Number(latestSource.rows[0].revision) : null,
+            baseDocumentRevision: nextDocumentRevision,
+            approvedDocumentRevision: nextDocumentRevision,
+          },
+        };
+        await client.query(
+          `INSERT INTO deviludo.workflow_instances(
+             workspace_id, id, project_id, iteration_number, parent_workflow_id,
+             development_actor_id, profile, target_platforms, state, state_data
+           ) VALUES ($1::uuid, $2::uuid, $3::uuid, $4, $5::uuid, $6::uuid,
+                     $7::deviludo.workflow_profile, $8::deviludo.server_os[], 'AGENT_RUNNING', $9::jsonb)`,
+          [input.workspaceId, targetWorkflowId, input.projectId, current.iteration_number + 1,
+            current.id, input.actorId, current.profile, current.target_platforms, JSON.stringify(stateData)],
+        );
+      } else {
+        await client.query(
+          `INSERT INTO deviludo.job_progress_events(
+             workspace_id, project_id, workflow_id, job_id, event_kind, content
+           )
+           SELECT workspace_id, project_id, workflow_id, id, 'SUPERSEDED',
+                  'Superseded by a confirmed implementation change'
+             FROM deviludo.jobs
+            WHERE workflow_id = $1::uuid AND state IN ('QUEUED', 'RETRY', 'RUNNING')`,
+          [current.id],
+        );
+        await client.query(
+          `UPDATE deviludo.jobs
+              SET state = 'CANCELLED', lease_owner = NULL, lease_token = NULL,
+                  lease_expires_at = NULL, heartbeat_at = NULL,
+                  fencing_token = fencing_token + 1,
+                  last_error = 'superseded by confirmed implementation change',
+                  updated_at = clock_timestamp()
+            WHERE workflow_id = $1::uuid AND kind <> 'STEAM_PUBLISH' AND state <> 'CANCELLED'`,
+          [current.id],
+        );
+        await client.query(
+          `UPDATE deviludo.workflow_instances
+              SET state = 'AGENT_RUNNING', version = version + 1,
+                  development_actor_id = $2::uuid,
+                  state_data = state_data || jsonb_build_object(
+                    'specification', $3::jsonb, 'responseLanguage', $4::text,
+                    'e2eGoalRevision', $5::bigint
+                  ), updated_at = clock_timestamp()
+            WHERE id = $1::uuid`,
+          [current.id, input.actorId, JSON.stringify(specification), input.responseLanguage, goalRevision],
+        );
+        await client.query(
+          `UPDATE deviludo.asset_manifests SET auto_generate_enabled = false, updated_at = clock_timestamp()
+            WHERE project_id = $1::uuid`, [input.projectId],
+        );
+        await client.query(
+          `UPDATE deviludo.asset_items item
+              SET status = 'failed', generation_lease_expires_at = NULL,
+                  error_message = 'superseded by confirmed implementation change', updated_at = clock_timestamp()
+            FROM deviludo.asset_manifests manifest
+           WHERE manifest.workspace_id = item.workspace_id AND manifest.id = item.manifest_id
+             AND manifest.project_id = $1::uuid AND item.status = 'generating'`,
+          [input.projectId],
+        );
+      }
+      await client.query(
+        `INSERT INTO deviludo.workflow_e2e_goal_revisions(
+           workspace_id, workflow_id, revision, change_request_id, goals, goals_digest
+         ) VALUES ($1::uuid, $2::uuid, $3::bigint, $4::uuid, $5::jsonb, $6)`,
+        [input.workspaceId, targetWorkflowId, goalRevision, change.id, JSON.stringify(goals), e2eGoalsDigest(goals)],
+      );
+      await client.query(
+        `INSERT INTO deviludo.artifacts(
+           workspace_id, project_id, workflow_id, kind, bucket, object_key, sha256, size_bytes
+         ) VALUES ($1::uuid, $2::uuid, $3::uuid, 'SPECIFICATION', $4, $5, $6, $7::bigint)
+         ON CONFLICT (workspace_id, workflow_id, object_key, sha256) DO NOTHING`,
+        [input.workspaceId, input.projectId, targetWorkflowId, input.specificationObject.bucket,
+          input.specificationObject.key, input.specificationObject.sha256, input.specificationObject.sizeBytes],
+      );
+      const settings = await client.query<{
+        agent_runtime: string; base_url: string; primary_model: string;
+        model_overrides: Record<string, unknown>; credential_secret_ref: string; revision: string;
+      }>(
+        `SELECT agent_runtime::text, base_url, primary_model, model_overrides,
+                credential_secret_ref, revision::text
+           FROM deviludo.instance_agent_settings WHERE singleton = true`,
+      );
+      const agent = settings.rows[0];
+      const payload = agent ? {
+        changeRequestId: change.id,
+        implementationBrief: change.implementation_brief,
+        e2eGoalRevision: goalRevision,
+        e2eGoals: goals,
+        agentConfiguration: {
+          runtime: agent.agent_runtime,
+          baseUrl: agent.base_url,
+          model: typeof agent.model_overrides.development === "string"
+            ? agent.model_overrides.development : agent.primary_model,
+          credentialRef: agent.credential_secret_ref,
+          revision: Number(agent.revision),
+        },
+      } : {
+        changeRequestId: change.id,
+        implementationBrief: change.implementation_brief,
+        e2eGoalRevision: goalRevision,
+        e2eGoals: goals,
+      };
+      await client.query(
+        `SELECT deviludo.enqueue_job($1::uuid, $2::uuid, $3::uuid, 'AGENT_GENERATION', NULL, $4, $5::jsonb)`,
+        [input.workspaceId, targetWorkflowId, input.projectId,
+          `${targetWorkflowId}:agent:change:${change.id}`, JSON.stringify(payload)],
+      );
+      await client.query(
+        `INSERT INTO deviludo.workflow_events(workspace_id, workflow_id, event_kind, event_data, idempotency_key)
+         VALUES ($1::uuid, $2::uuid, 'IMPLEMENTATION_CHANGE_APPLIED', $3::jsonb, $4)`,
+        [input.workspaceId, targetWorkflowId, JSON.stringify({ changeRequestId: change.id, goalRevision }), `change-applied:${change.id}`],
+      );
+      await client.query(
+        `UPDATE deviludo.implementation_change_requests
+            SET state = 'APPLIED', applied_workflow_id = $2::uuid,
+                decision = 'CONFIRM', decision_idempotency_key = coalesce(decision_idempotency_key, $3),
+                updated_at = clock_timestamp()
+          WHERE id = $1::uuid`,
+        [change.id, targetWorkflowId, input.decisionIdempotencyKey ?? null],
+      );
+      await touchProjectActivity(client, input.workspaceId, input.projectId);
+      if (newIteration) return "NEW_ITERATION_STARTED";
+      return current.state === "DRAFT" ? "AGENT_STARTED" : "AGENT_RERUN_STARTED";
     });
   }
 
@@ -3022,7 +3485,7 @@ export class CoreRepository {
         `INSERT INTO deviludo.artifacts(
            workspace_id, project_id, workflow_id, kind, bucket, object_key, sha256, size_bytes
          ) VALUES ($1::uuid, $2::uuid, $3::uuid, 'SPECIFICATION', $4, $5, $6, $7::bigint)
-         ON CONFLICT (workspace_id, object_key, sha256) DO NOTHING`,
+         ON CONFLICT (workspace_id, workflow_id, object_key, sha256) DO NOTHING`,
         [input.workspaceId, input.projectId, input.workflowId, input.object.bucket, input.object.key, input.object.sha256, input.object.sizeBytes],
       );
     });
@@ -3475,6 +3938,9 @@ export type ProductProjectDetail = ProductProjectSummary & Readonly<{
     data: Readonly<Record<string, unknown>>;
     createdAt: string;
   }>[];
+  pendingImplementationChange: ImplementationChangeRequest | null;
+  e2eGoalRevision: number;
+  e2eGoals: readonly E2eGoal[];
 }>;
 
 export type ProductConversation = Readonly<{
@@ -3528,6 +3994,26 @@ type ProductConversationMessageRow = {
   content: string;
   metadata: Record<string, unknown>;
   created_at: string;
+};
+
+type ImplementationChangeRequestRow = {
+  id: string;
+  project_id: string;
+  conversation_id: string;
+  state: string;
+  summary: string;
+  implementation_brief: string;
+  base_document_revision: string;
+  project_document_patch: Record<string, unknown>;
+  e2e_goal_delta: Record<string, unknown>;
+  explicit_execution: boolean;
+  created_at: string;
+};
+
+type E2eGoalRevisionRow = {
+  revision: string;
+  goals: unknown;
+  goals_digest: string;
 };
 
 type AgentProgressEventRow = {
@@ -4038,6 +4524,79 @@ async function insertInitialProjectDocument(
      ) VALUES ($1::uuid, $2::uuid, 1, $3::jsonb, $4, 'PROJECT_CREATED')`,
     [input.workspaceId, input.projectId, JSON.stringify(content), markdown],
   );
+}
+
+async function insertInitialE2eGoalRevision(
+  client: PoolClient,
+  workspaceId: string,
+  workflowId: string,
+  specification: Readonly<Record<string, unknown>>,
+): Promise<void> {
+  const goals = initialE2eGoals(specification);
+  await client.query(
+    `INSERT INTO deviludo.workflow_e2e_goal_revisions(
+       workspace_id, workflow_id, revision, goals, goals_digest
+     ) VALUES ($1::uuid, $2::uuid, 1, $3::jsonb, $4)
+     ON CONFLICT (workspace_id, workflow_id, revision) DO NOTHING`,
+    [workspaceId, workflowId, JSON.stringify(goals), e2eGoalsDigest(goals)],
+  );
+}
+
+function parseE2eGoals(value: unknown): readonly E2eGoal[] {
+  if (!Array.isArray(value)) throw new Error("Stored E2E goals are invalid");
+  const ids = new Set<string>();
+  return Object.freeze(value.map(entry => {
+    if (!entry || typeof entry !== "object" || Array.isArray(entry)) throw new Error("Stored E2E goal is invalid");
+    const goal = entry as Record<string, unknown>;
+    if (typeof goal.id !== "string" || !/^[a-z0-9][a-z0-9-]{0,119}$/.test(goal.id)
+      || typeof goal.description !== "string" || !goal.description.trim()
+      || !["CORE_LOOP", "ACCEPTANCE"].includes(String(goal.source)) || ids.has(goal.id)) {
+      throw new Error("Stored E2E goal is invalid");
+    }
+    ids.add(goal.id);
+    return Object.freeze({ id: goal.id, description: goal.description.trim(), source: goal.source as E2eGoal["source"] });
+  }));
+}
+
+function parseStoredE2eGoalDelta(value: unknown): E2eGoalDelta {
+  if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error("Stored E2E goal delta is invalid");
+  const delta = value as Record<string, unknown>;
+  const add = Array.isArray(delta.add) ? delta.add : null;
+  const replace = Array.isArray(delta.replace) ? delta.replace : null;
+  const retire = Array.isArray(delta.retire) ? delta.retire : null;
+  if (!add || !replace || !retire) throw new Error("Stored E2E goal delta is invalid");
+  const parseGoal = (entry: unknown, withId: boolean) => {
+    if (!entry || typeof entry !== "object" || Array.isArray(entry)) throw new Error("Stored E2E goal delta is invalid");
+    const goal = entry as Record<string, unknown>;
+    if ((withId && (typeof goal.id !== "string" || !goal.id))
+      || typeof goal.description !== "string" || !goal.description.trim()
+      || !["CORE_LOOP", "ACCEPTANCE"].includes(String(goal.source))) {
+      throw new Error("Stored E2E goal delta is invalid");
+    }
+    return Object.freeze({ ...(withId ? { id: String(goal.id) } : {}), description: goal.description.trim(), source: goal.source as E2eGoal["source"] });
+  };
+  if (retire.some(id => typeof id !== "string" || !id)) throw new Error("Stored E2E goal delta is invalid");
+  return Object.freeze({
+    add: Object.freeze(add.map(entry => parseGoal(entry, false) as Omit<E2eGoal, "id">)),
+    replace: Object.freeze(replace.map(entry => parseGoal(entry, true) as E2eGoal)),
+    retire: Object.freeze(retire as string[]),
+  });
+}
+
+function implementationChangeFromRow(row: ImplementationChangeRequestRow): ImplementationChangeRequest {
+  return Object.freeze({
+    id: row.id,
+    projectId: row.project_id,
+    conversationId: row.conversation_id,
+    state: row.state as ImplementationChangeRequest["state"],
+    summary: row.summary,
+    implementationBrief: row.implementation_brief,
+    baseDocumentRevision: Number(row.base_document_revision),
+    documentPatch: Object.freeze({ ...row.project_document_patch }),
+    e2eGoalDelta: parseStoredE2eGoalDelta(row.e2e_goal_delta),
+    explicitExecution: row.explicit_execution,
+    createdAt: row.created_at,
+  });
 }
 
 async function touchProjectActivity(

@@ -77,7 +77,7 @@ CREATE TABLE deviludo.schema_metadata (
   applied_at timestamptz NOT NULL DEFAULT clock_timestamp()
 );
 INSERT INTO deviludo.schema_metadata(singleton, baseline, compatibility, current_version)
-VALUES (true, '001', 'deviludo-self-hosted-v1', '057_latest_agent_specification_input');
+VALUES (true, '001', 'deviludo-self-hosted-v1', '059_reset_repair_budget_after_intent_rerun');
 
 -- Every post-baseline change is immutable and checksummed. Fresh databases are
 -- created from this full snapshot and then stamp the migrations incorporated by
@@ -418,6 +418,52 @@ CREATE TABLE deviludo.workflow_instances (
     REFERENCES deviludo.workflow_instances(workspace_id, id)
 );
 
+CREATE TABLE deviludo.implementation_change_requests (
+  workspace_id uuid NOT NULL,
+  id uuid NOT NULL DEFAULT gen_random_uuid(),
+  project_id uuid NOT NULL,
+  workflow_id uuid NOT NULL,
+  conversation_id uuid NOT NULL,
+  source_message_id bigint NOT NULL,
+  state text NOT NULL CHECK (state IN ('PENDING', 'WAITING_FOR_ANALYSIS', 'APPLIED', 'REJECTED', 'SUPERSEDED')),
+  summary text NOT NULL CHECK (length(summary) BETWEEN 1 AND 2000),
+  implementation_brief text NOT NULL CHECK (length(implementation_brief) BETWEEN 1 AND 12000),
+  base_document_revision bigint NOT NULL CHECK (base_document_revision > 0),
+  project_document_patch jsonb NOT NULL CHECK (jsonb_typeof(project_document_patch) = 'object'),
+  e2e_goal_delta jsonb NOT NULL CHECK (jsonb_typeof(e2e_goal_delta) = 'object'),
+  explicit_execution boolean NOT NULL,
+  idempotency_key text NOT NULL CHECK (length(idempotency_key) BETWEEN 1 AND 300),
+  decision text CHECK (decision IS NULL OR decision IN ('CONFIRM', 'REJECT')),
+  decision_idempotency_key text CHECK (decision_idempotency_key IS NULL OR length(decision_idempotency_key) BETWEEN 8 AND 300),
+  applied_workflow_id uuid,
+  created_at timestamptz NOT NULL DEFAULT clock_timestamp(),
+  updated_at timestamptz NOT NULL DEFAULT clock_timestamp(),
+  PRIMARY KEY (workspace_id, id),
+  UNIQUE (workspace_id, idempotency_key),
+  UNIQUE (workspace_id, decision_idempotency_key),
+  FOREIGN KEY (workspace_id, project_id) REFERENCES deviludo.projects(workspace_id, id) ON DELETE CASCADE,
+  FOREIGN KEY (workspace_id, workflow_id) REFERENCES deviludo.workflow_instances(workspace_id, id),
+  FOREIGN KEY (workspace_id, conversation_id) REFERENCES deviludo.project_conversations(workspace_id, id) ON DELETE CASCADE,
+  FOREIGN KEY (workspace_id, source_message_id) REFERENCES deviludo.conversation_messages(workspace_id, message_id),
+  FOREIGN KEY (workspace_id, applied_workflow_id) REFERENCES deviludo.workflow_instances(workspace_id, id)
+);
+CREATE UNIQUE INDEX implementation_change_requests_one_pending
+  ON deviludo.implementation_change_requests(workspace_id, project_id)
+  WHERE state IN ('PENDING', 'WAITING_FOR_ANALYSIS');
+
+CREATE TABLE deviludo.workflow_e2e_goal_revisions (
+  workspace_id uuid NOT NULL,
+  workflow_id uuid NOT NULL,
+  revision bigint NOT NULL CHECK (revision > 0),
+  change_request_id uuid,
+  goals jsonb NOT NULL CHECK (jsonb_typeof(goals) = 'array'),
+  goals_digest text NOT NULL CHECK (goals_digest ~ '^sha256:[0-9a-f]{64}$'),
+  created_at timestamptz NOT NULL DEFAULT clock_timestamp(),
+  PRIMARY KEY (workspace_id, workflow_id, revision),
+  FOREIGN KEY (workspace_id, workflow_id) REFERENCES deviludo.workflow_instances(workspace_id, id) ON DELETE CASCADE,
+  FOREIGN KEY (workspace_id, change_request_id) REFERENCES deviludo.implementation_change_requests(workspace_id, id)
+);
+
 -- A release is immutable after upload succeeds and belongs to exactly one
 -- workflow iteration. Failed uploads reuse the same row and release number.
 CREATE TABLE deviludo.steam_releases (
@@ -584,7 +630,7 @@ CREATE TABLE deviludo.job_progress_events (
   project_id uuid NOT NULL,
   workflow_id uuid NOT NULL,
   job_id uuid NOT NULL,
-  event_kind text NOT NULL CHECK (event_kind IN ('PHASE', 'AGENT_OUTPUT', 'GUIDANCE_ACCEPTED', 'COMPLETED', 'FAILED')),
+  event_kind text NOT NULL CHECK (event_kind IN ('PHASE', 'AGENT_OUTPUT', 'SUPERSEDED', 'COMPLETED', 'FAILED')),
   content text NOT NULL CHECK (length(content) BETWEEN 1 AND 4000),
   created_at timestamptz NOT NULL DEFAULT clock_timestamp(),
   PRIMARY KEY (workspace_id, sequence),
@@ -594,27 +640,6 @@ CREATE TABLE deviludo.job_progress_events (
 );
 CREATE INDEX job_progress_events_project_sequence
   ON deviludo.job_progress_events(workspace_id, project_id, sequence);
-
-CREATE TABLE deviludo.job_guidance_messages (
-  workspace_id uuid NOT NULL,
-  id uuid NOT NULL DEFAULT gen_random_uuid(),
-  project_id uuid NOT NULL,
-  workflow_id uuid NOT NULL,
-  job_id uuid NOT NULL,
-  conversation_id uuid NOT NULL,
-  content text NOT NULL CHECK (length(content) BETWEEN 2 AND 4000),
-  state text NOT NULL DEFAULT 'PENDING' CHECK (state IN ('PENDING', 'DELIVERED', 'REJECTED')),
-  created_at timestamptz NOT NULL DEFAULT clock_timestamp(),
-  delivered_at timestamptz,
-  PRIMARY KEY (workspace_id, id),
-  FOREIGN KEY (workspace_id, project_id) REFERENCES deviludo.projects(workspace_id, id),
-  FOREIGN KEY (workspace_id, workflow_id) REFERENCES deviludo.workflow_instances(workspace_id, id),
-  FOREIGN KEY (workspace_id, job_id) REFERENCES deviludo.jobs(workspace_id, id),
-  FOREIGN KEY (workspace_id, conversation_id) REFERENCES deviludo.project_conversations(workspace_id, id)
-);
-CREATE INDEX job_guidance_messages_pending
-  ON deviludo.job_guidance_messages(workspace_id, job_id, created_at)
-  WHERE state = 'PENDING';
 
 CREATE TABLE deviludo.operation_receipts (
   workspace_id uuid NOT NULL,
@@ -652,7 +677,7 @@ CREATE TABLE deviludo.artifacts (
   metadata jsonb NOT NULL DEFAULT '{}'::jsonb CHECK (jsonb_typeof(metadata) = 'object'),
   created_at timestamptz NOT NULL DEFAULT clock_timestamp(),
   PRIMARY KEY (workspace_id, id),
-  UNIQUE (workspace_id, object_key, sha256),
+  UNIQUE (workspace_id, workflow_id, object_key, sha256),
   FOREIGN KEY (workspace_id) REFERENCES deviludo.workspaces(id),
   FOREIGN KEY (workspace_id, project_id) REFERENCES deviludo.projects(workspace_id, id),
   FOREIGN KEY (workspace_id, workflow_id) REFERENCES deviludo.workflow_instances(workspace_id, id),
@@ -772,13 +797,16 @@ CREATE TABLE deviludo.e2e_test_plans (
   workflow_id uuid NOT NULL,
   project_id uuid NOT NULL,
   target_platform deviludo.server_os NOT NULL,
+  source_revision bigint NOT NULL CHECK (source_revision > 0),
+  goal_revision bigint NOT NULL CHECK (goal_revision > 0),
+  goal_digest text NOT NULL CHECK (goal_digest ~ '^sha256:[0-9a-f]{64}$'),
   test_manifest jsonb NOT NULL CHECK (
     jsonb_typeof(test_manifest) = 'object'
     AND test_manifest->>'schema' = 'deviludo.test-manifest'
   ),
   test_manifest_digest text NOT NULL CHECK (test_manifest_digest ~ '^sha256:[0-9a-f]{64}$'),
   created_at timestamptz NOT NULL DEFAULT clock_timestamp(),
-  PRIMARY KEY (workspace_id, workflow_id, target_platform),
+  PRIMARY KEY (workspace_id, workflow_id, source_revision, goal_revision, target_platform),
   FOREIGN KEY (workspace_id, workflow_id)
     REFERENCES deviludo.workflow_instances(workspace_id, id) ON DELETE CASCADE,
   FOREIGN KEY (workspace_id, project_id)
@@ -942,8 +970,10 @@ ALTER TABLE deviludo.asset_items
   ADD COLUMN generation_attempt integer NOT NULL DEFAULT 0
     CHECK (generation_attempt BETWEEN 0 AND 3),
   ADD COLUMN generation_lease_expires_at timestamptz,
+  ADD COLUMN generation_lease_token uuid,
   ADD CONSTRAINT asset_items_lease_requires_generating CHECK (
     (generation_lease_expires_at IS NOT NULL) = (status = 'generating')
+    AND (status <> 'generating' OR generation_lease_token IS NOT NULL)
   );
 
 -- complete_job historically enabled the image gate only for Claude. Resolve the
@@ -1102,8 +1132,9 @@ BEGIN
     'project_source_revisions',
     'project_documents', 'project_document_revisions',
     'project_conversations', 'conversation_messages',
-    'agent_installations', 'workflow_instances', 'steam_releases', 'workflow_events',
-    'jobs', 'external_signals', 'job_progress_events', 'job_guidance_messages',
+    'agent_installations', 'workflow_instances', 'implementation_change_requests',
+    'workflow_e2e_goal_revisions', 'steam_releases', 'workflow_events',
+    'jobs', 'external_signals', 'job_progress_events',
     'operation_receipts', 'workspace_claim_fairness',
     'artifacts', 'artifact_inputs', 'object_cleanup_queue', 'e2e_policy_locks', 'e2e_policy_decisions', 'e2e_test_plans',
     'e2e_regression_traces', 'executor_receipts', 'project_creation_receipts',
@@ -1193,6 +1224,7 @@ DECLARE
   v_runtime_image text;
   v_input_count integer;
   v_source deviludo.project_source_revisions%ROWTYPE;
+  v_goal deviludo.workflow_e2e_goal_revisions%ROWTYPE;
 BEGIN
   v_pool := CASE
     WHEN p_kind IN ('AGENT_GENERATION', 'PROJECT_DOCUMENT_MAINTENANCE', 'ARTIFACT_BUILD', 'STEAM_PUBLISH') THEN 'CORE'
@@ -1234,6 +1266,17 @@ BEGIN
         'sourceRelativePath', v_source.relative_path,
         'sourceDigest', v_source.content_digest
       ) END;
+    IF p_kind = 'E2E_TEST' THEN
+      SELECT * INTO v_goal
+        FROM deviludo.workflow_e2e_goal_revisions
+       WHERE workspace_id = p_workspace_id AND workflow_id = p_workflow_id
+       ORDER BY revision DESC LIMIT 1;
+      IF v_goal.revision IS NULL THEN RAISE EXCEPTION 'E2E jobs require a frozen goal revision'; END IF;
+      p_payload := p_payload || jsonb_build_object(
+        'e2eGoalRevision', v_goal.revision,
+        'e2eGoalDigest', v_goal.goals_digest
+      );
+    END IF;
   END IF;
   INSERT INTO deviludo.jobs (
     workspace_id, workflow_id, project_id, kind, pool_kind, target_operating_system,
@@ -1814,7 +1857,8 @@ RETURNS TABLE (
   "generationPrompt" text,
   "dimensions" text,
   "frameCount" integer,
-  "attempt" integer
+  "attempt" integer,
+  "leaseToken" uuid
 )
 LANGUAGE plpgsql
 SECURITY DEFINER
@@ -1856,6 +1900,7 @@ BEGIN
      SET status = 'generating',
          generation_attempt = item.generation_attempt + 1,
          generation_lease_expires_at = clock_timestamp() + make_interval(secs => p_lease_seconds),
+         generation_lease_token = gen_random_uuid(),
          error_message = NULL,
          updated_at = clock_timestamp()
     FROM candidate
@@ -1864,7 +1909,8 @@ BEGIN
     SELECT manifest.project_id FROM deviludo.asset_manifests manifest
      WHERE manifest.workspace_id = item.workspace_id AND manifest.id = item.manifest_id
   ), item.id, item.asset_key, item.asset_type, item.description,
-     item.generation_prompt, item.dimensions, item.frame_count, item.generation_attempt;
+     item.generation_prompt, item.dimensions, item.frame_count, item.generation_attempt,
+     item.generation_lease_token;
 END
 $$;
 ALTER FUNCTION deviludo.claim_asset_generation(integer, integer)
@@ -1876,6 +1922,7 @@ ALTER FUNCTION deviludo.claim_asset_generation(integer, integer)
 CREATE OR REPLACE FUNCTION deviludo.complete_asset_generation(
   p_workspace_id uuid,
   p_item_id uuid,
+  p_lease_token uuid,
   p_bucket text,
   p_object_key text,
   p_sha256 text,
@@ -1898,12 +1945,12 @@ BEGIN
      -- A user upload that landed while generation was in flight wins: it is an
      -- explicit choice, and overwriting it with a generated image would silently
      -- discard their art.
-     AND status = 'generating';
+     AND status = 'generating' AND generation_lease_token = p_lease_token;
   GET DIAGNOSTICS updated = ROW_COUNT;
   RETURN updated = 1;
 END
 $$;
-ALTER FUNCTION deviludo.complete_asset_generation(uuid, uuid, text, text, text, bigint)
+ALTER FUNCTION deviludo.complete_asset_generation(uuid, uuid, uuid, text, text, text, bigint)
   OWNER TO deviludo_claim_executor;
 
 -- Release a leased item after a failed attempt. Items go back to 'planned' while
@@ -1913,6 +1960,7 @@ ALTER FUNCTION deviludo.complete_asset_generation(uuid, uuid, text, text, text, 
 CREATE OR REPLACE FUNCTION deviludo.fail_asset_generation(
   p_workspace_id uuid,
   p_item_id uuid,
+  p_lease_token uuid,
   p_error text
 )
 RETURNS boolean
@@ -1929,12 +1977,13 @@ BEGIN
          error_message = left(coalesce(nullif(btrim(p_error), ''), 'generation failed'), 2000),
          generation_lease_expires_at = NULL,
          updated_at = clock_timestamp()
-   WHERE workspace_id = p_workspace_id AND id = p_item_id AND status = 'generating';
+   WHERE workspace_id = p_workspace_id AND id = p_item_id
+     AND status = 'generating' AND generation_lease_token = p_lease_token;
   GET DIAGNOSTICS updated = ROW_COUNT;
   RETURN updated = 1;
 END
 $$;
-ALTER FUNCTION deviludo.fail_asset_generation(uuid, uuid, text)
+ALTER FUNCTION deviludo.fail_asset_generation(uuid, uuid, uuid, text)
   OWNER TO deviludo_claim_executor;
 
 -- Re-open the delivery gate when the user retries unresolved art after a build,
@@ -2962,7 +3011,10 @@ BEGIN
           WHERE manual_agent.workspace_id = job.workspace_id
             AND manual_agent.workflow_id = job.workflow_id
             AND manual_agent.kind = 'AGENT_GENERATION'
-            AND manual_agent.payload->>'manualRerun' = 'true'
+            AND (
+              manual_agent.payload->>'manualRerun' = 'true'
+              OR NOT (manual_agent.payload ? 'repairFromE2eJobId')
+            )
        ), '-infinity'::timestamptz);
     SELECT * INTO agent_settings
       FROM deviludo.instance_agent_settings
@@ -3141,13 +3193,6 @@ BEGIN
          lease_owner = NULL, lease_token = NULL, lease_expires_at = NULL, heartbeat_at = NULL,
          last_error = left(p_reason, 2000), updated_at = clock_timestamp()
    WHERE workspace_id = job.workspace_id AND id = job.id;
-  IF NOT terminal AND job.kind = 'AGENT_GENERATION' THEN
-    UPDATE deviludo.job_guidance_messages
-       SET state = 'PENDING', delivered_at = NULL
-     WHERE workspace_id = job.workspace_id
-       AND job_id = job.id
-       AND state = 'DELIVERED';
-  END IF;
   INSERT INTO deviludo.workflow_events(workspace_id, workflow_id, event_kind, event_data, idempotency_key)
   VALUES (
     job.workspace_id, job.workflow_id,
@@ -3170,7 +3215,13 @@ BEGIN
             WHERE manual_agent.workspace_id = job.workspace_id
               AND manual_agent.workflow_id = job.workflow_id
               AND manual_agent.kind = 'AGENT_GENERATION'
-              AND manual_agent.payload->>'manualRerun' = 'true'
+              AND (
+                manual_agent.payload->>'manualRerun' = 'true'
+                OR (
+                  NOT (manual_agent.payload ? 'repairFromE2eJobId')
+                  AND NOT (manual_agent.payload ? 'repairFailureKind')
+                )
+              )
          ), '-infinity'::timestamptz);
       SELECT * INTO agent_settings
         FROM deviludo.instance_agent_settings
@@ -3240,15 +3291,6 @@ BEGIN
            last_error = 'lease expired', updated_at = clock_timestamp()
      WHERE state = 'RUNNING' AND lease_expires_at < clock_timestamp()
      RETURNING workspace_id, workflow_id, id, kind, attempt, state
-  ), replay_guidance AS (
-    UPDATE deviludo.job_guidance_messages guidance
-       SET state = 'PENDING', delivered_at = NULL
-      FROM expired
-     WHERE expired.state = 'RETRY'
-       AND guidance.workspace_id = expired.workspace_id
-       AND guidance.job_id = expired.id
-       AND guidance.state = 'DELIVERED'
-    RETURNING guidance.id
   ), events AS (
     INSERT INTO deviludo.workflow_events(
       workspace_id, workflow_id, event_kind, event_data, idempotency_key
@@ -3420,8 +3462,9 @@ GRANT SELECT, INSERT, UPDATE, DELETE ON
   deviludo.project_source_revisions, deviludo.project_documents,
   deviludo.project_document_revisions, deviludo.project_conversations,
   deviludo.conversation_messages, deviludo.agent_installations,
+  deviludo.implementation_change_requests, deviludo.workflow_e2e_goal_revisions,
   deviludo.workflow_instances, deviludo.workflow_events, deviludo.jobs,
-  deviludo.external_signals, deviludo.job_progress_events, deviludo.job_guidance_messages,
+  deviludo.external_signals, deviludo.job_progress_events,
   deviludo.operation_receipts,
   deviludo.artifacts, deviludo.artifact_inputs, deviludo.executor_receipts,
   deviludo.asset_manifests, deviludo.asset_items,
@@ -3433,6 +3476,9 @@ GRANT SELECT, INSERT, UPDATE ON deviludo.instance_agent_settings TO deviludo_api
 -- connection has an image model before it decides between asset preparation and
 -- the Builder, so the sandbox role needs this narrow read as part of its commit.
 GRANT SELECT ON deviludo.instance_agent_settings TO deviludo_scheduler, deviludo_sandbox;
+-- enqueue_job freezes the active E2E goal revision while a sandbox-completed
+-- build fans out the platform jobs.
+GRANT SELECT ON deviludo.workflow_e2e_goal_revisions TO deviludo_scheduler, deviludo_sandbox;
 -- complete_job queues replaced regression objects with ON CONFLICT DO NOTHING.
 -- PostgreSQL requires SELECT on the conflict-key columns in addition to INSERT;
 -- keep that read capability column-scoped instead of exposing cleanup details.
@@ -3443,7 +3489,7 @@ GRANT SELECT, INSERT, UPDATE ON
   deviludo.projects, deviludo.project_source_revisions,
   deviludo.project_documents, deviludo.project_document_revisions,
   deviludo.workflow_instances, deviludo.workflow_events, deviludo.jobs,
-  deviludo.external_signals, deviludo.job_progress_events, deviludo.job_guidance_messages,
+  deviludo.external_signals, deviludo.job_progress_events,
   deviludo.operation_receipts,
   deviludo.artifacts, deviludo.artifact_inputs, deviludo.executor_receipts
   TO deviludo_scheduler;
@@ -3459,7 +3505,7 @@ GRANT SELECT, INSERT, UPDATE ON
   deviludo.projects, deviludo.project_source_revisions,
   deviludo.project_documents, deviludo.project_document_revisions,
   deviludo.workflow_instances, deviludo.jobs, deviludo.workflow_events, deviludo.operation_receipts,
-  deviludo.job_progress_events, deviludo.job_guidance_messages,
+  deviludo.job_progress_events,
   deviludo.artifacts, deviludo.artifact_inputs, deviludo.executor_receipts,
   deviludo.asset_manifests, deviludo.asset_items
   TO deviludo_sandbox;
@@ -3502,9 +3548,9 @@ GRANT EXECUTE ON FUNCTION deviludo.recover_expired_jobs(), deviludo.reconcile_p0
 -- Asset generation is driven by the scheduler role: it is periodic background work
 -- like the other scheduler tasks, not something an executor leases.
 GRANT EXECUTE ON FUNCTION deviludo.claim_asset_generation(integer, integer) TO deviludo_scheduler;
-GRANT EXECUTE ON FUNCTION deviludo.complete_asset_generation(uuid, uuid, text, text, text, bigint)
+GRANT EXECUTE ON FUNCTION deviludo.complete_asset_generation(uuid, uuid, uuid, text, text, text, bigint)
   TO deviludo_scheduler;
-GRANT EXECUTE ON FUNCTION deviludo.fail_asset_generation(uuid, uuid, text) TO deviludo_scheduler;
+GRANT EXECUTE ON FUNCTION deviludo.fail_asset_generation(uuid, uuid, uuid, text) TO deviludo_scheduler;
 GRANT EXECUTE ON FUNCTION deviludo.advance_asset_workflows(integer) TO deviludo_scheduler;
 GRANT EXECUTE ON FUNCTION deviludo.request_asset_rerun(uuid, uuid, text, jsonb) TO deviludo_api;
 GRANT EXECUTE ON FUNCTION deviludo.schedule_idle_project_document_maintenance(integer, integer)
@@ -3521,7 +3567,6 @@ GRANT EXECUTE ON FUNCTION deviludo.claim_object_cleanup(integer),
 GRANT EXECUTE ON FUNCTION deviludo.cleanup_expired_executor_state() TO deviludo_scheduler;
 
 GRANT SELECT, UPDATE ON deviludo.jobs TO deviludo_claim_executor;
-GRANT SELECT, UPDATE ON deviludo.job_guidance_messages TO deviludo_claim_executor;
 GRANT INSERT ON deviludo.jobs, deviludo.artifact_inputs, deviludo.external_signals
   TO deviludo_claim_executor;
 GRANT SELECT, UPDATE ON deviludo.projects TO deviludo_claim_executor;

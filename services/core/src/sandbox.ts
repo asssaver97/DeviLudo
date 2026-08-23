@@ -58,7 +58,6 @@ export interface SandboxBackend {
     signal: AbortSignal,
     onProgress?: (kind: "PHASE" | "AGENT_OUTPUT", content: string) => void,
   ): Promise<SandboxReceipt>;
-  guide?(jobId: string, content: string, signal: AbortSignal): Promise<void>;
 }
 
 export class ProcessSandboxBackend implements SandboxBackend {
@@ -100,10 +99,6 @@ export class ProcessSandboxBackend implements SandboxBackend {
     return await executeBackend(this.executable, plan, signal, onProgress);
   }
 
-  async guide(jobId: string, content: string, signal: AbortSignal): Promise<void> {
-    if (!this.executable || !isAbsolute(this.executable)) throw new Error("Sandbox executor path must be absolute");
-    await guideBackend(this.executable, jobId, content, signal);
-  }
 }
 
 export async function runSandbox(
@@ -152,31 +147,8 @@ export async function runSandbox(
         void repository.heartbeat(job as JobProtocolV4)
           .then(accepted => { if (!accepted) jobController.abort(); })
           .catch(() => jobController.abort());
-      }, 20_000);
+      }, 2_000);
       let progressWrites = Promise.resolve();
-      let deliveringGuidance = false;
-      const guidance = backend.guide && job.jobKind === "AGENT_GENERATION"
-        ? setInterval(() => {
-          if (deliveringGuidance || jobController.signal.aborted) return;
-          deliveringGuidance = true;
-          void repository.readPendingAgentGuidance(job as JobProtocolV4)
-            .then(async messages => {
-              for (const message of messages) {
-                await backend.guide?.((job as JobProtocolV4).jobId, message.content, jobController.signal);
-                await repository.markAgentGuidanceDelivered(job as JobProtocolV4, message.id);
-              }
-            })
-            .catch(error => {
-              console.error(JSON.stringify({
-                level: "error",
-                event: "sandbox_guidance_delivery_failed",
-                jobId: (job as JobProtocolV4).jobId,
-                message: error instanceof Error ? error.message : String(error),
-              }));
-            })
-            .finally(() => { deliveringGuidance = false; });
-        }, 500)
-        : null;
       try {
         if (job.jobKind === "AGENT_GENERATION") {
           const discarded = await discardOrphanedAgentSource(repository, projectSources, job);
@@ -234,7 +206,6 @@ export async function runSandbox(
         }
       } finally {
         clearInterval(heartbeat);
-        if (guidance) clearInterval(guidance);
         signal.removeEventListener("abort", abortJob);
         jobController.abort();
       }
@@ -486,34 +457,6 @@ export function parseExecutorStderrLine(line: string): ExecutorStderrRecord {
 
 function boundedDiagnosticTail(current: string, line: string): string {
   return `${current}${line}\n`.slice(-65_536);
-}
-
-async function guideBackend(
-  executable: string,
-  jobId: string,
-  content: string,
-  signal: AbortSignal,
-): Promise<void> {
-  const child = spawn(executable, ["guidance"], {
-    stdio: ["pipe", "ignore", "pipe"],
-    shell: false,
-    signal,
-    env: {
-      PATH: "/usr/local/bin:/usr/bin:/bin",
-      LANG: "C.UTF-8",
-      NODE_ENV: process.env.NODE_ENV ?? "production",
-    },
-  });
-  child.stdin.end(JSON.stringify({ jobId, content }));
-  const stderr: Buffer[] = [];
-  child.stderr.on("data", (chunk: Buffer) => stderr.push(chunk));
-  const code = await new Promise<number | null>((resolve, reject) => {
-    child.once("error", reject);
-    child.once("close", resolve);
-  });
-  if (code !== 0) {
-    throw new Error(`Sandbox guidance failed: ${Buffer.concat(stderr).toString("utf8").slice(0, 2_000)}`);
-  }
 }
 
 function delay(milliseconds: number, signal: AbortSignal): Promise<void> {

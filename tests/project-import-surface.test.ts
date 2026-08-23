@@ -52,7 +52,7 @@ test("project linking is reachable from Home and separates local and GitHub sour
   assert.match(projectImport, /enters an in-progress match, late-game state, test\/debug state/);
   assert.match(repository, /status: input\.discovery\.questions\.length \? "NEEDS_INPUT" : "READY"/);
   assert.match(repository, /state_data #>> '\{importAnalysis,status\}' = 'NEEDS_INPUT'/);
-  assert.match(core, /project\.analysisStatus === "NEEDS_INPUT"[\s\S]*agentReplies\.every\(reply => reply\.readyForDevelopment\)/);
+  assert.match(core, /pending\?\.state === "WAITING_FOR_ANALYSIS"[\s\S]*applyConfirmedConversationChange/);
   assert.match(analysisMigration, /SECURITY DEFINER[\s\S]*SET row_security = off/);
   assert.match(analysisMigration, /FOR UPDATE OF workflow SKIP LOCKED/);
   assert.match(analysisMigration, /GRANT EXECUTE ON FUNCTION deviludo\.claim_project_import_analysis\(integer\) TO deviludo_api/);

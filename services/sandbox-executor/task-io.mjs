@@ -43,7 +43,6 @@ function resolveTarget(value) {
   if (value === "github") return { path: "/run/deviludo/github.key", maxBytes: 64 * 1024 };
   if (value === "ready") return { path: "/run/deviludo/ready", maxBytes: 32 };
   if (value === "collected") return { path: "/run/deviludo/collected", maxBytes: 32 };
-  if (value === "guidance") return { path: "/run/deviludo/guidance.ndjson", maxBytes: 8 * 1024, flags: "a" };
   const input = value.match(/^input:([A-Za-z0-9._-]{1,200})$/);
   if (!input) return null;
   return {

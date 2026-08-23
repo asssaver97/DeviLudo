@@ -81,6 +81,7 @@ export function ProjectStudio({ projectId }: { projectId: string }) {
   const [conversationInput, setConversationInput] = useState("");
   const [busy, setBusy] = useState(false);
   const [sendingMessage, setSendingMessage] = useState(false);
+  const [decidingChange, setDecidingChange] = useState(false);
   const [streamingReplies, setStreamingReplies] = useState<Partial<Record<ProjectAgentRole, string>>>({});
   const [agentProgress, setAgentProgress] = useState<readonly AgentProgressEvent[]>([]);
   const [artifacts, setArtifacts] = useState<readonly ArtifactRecord[]>(initialArtifacts ?? []);
@@ -504,6 +505,37 @@ export function ProjectStudio({ projectId }: { projectId: string }) {
     }
   }
 
+  async function decidePendingChange(decision: "CONFIRM" | "REJECT") {
+    const change = project?.pendingImplementationChange;
+    if (!change || decidingChange) return;
+    setDecidingChange(true);
+    setError(null);
+    try {
+      const response = await fetch(
+        `/api/projects/${encodeURIComponent(projectId)}/change-requests/${encodeURIComponent(change.id)}/decision`,
+        {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({
+            decision,
+            idempotencyKey: `change-decision:${crypto.randomUUID()}`,
+            responseLanguage: locale,
+          }),
+        },
+      );
+      const payload = await response.json() as { project?: ProductProjectDetail; message?: string };
+      if (!response.ok || !payload.project) {
+        throw new Error(errorText(payload.message, "变更决策失败", "Unable to apply the change decision"));
+      }
+      setProject(payload.project);
+      storeCached(clientCacheKeys.project(projectId), payload.project, 5_000);
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : text("变更决策失败", "Unable to apply the change decision"));
+    } finally {
+      setDecidingChange(false);
+    }
+  }
+
   async function mutate(path: string, body?: Record<string, unknown>) {
     if (selectedWorkflowId !== null) return;
     setBusy(true);
@@ -761,6 +793,7 @@ export function ProjectStudio({ projectId }: { projectId: string }) {
             <div><span className="eyebrow">DELIVERY PIPELINE</span><h2>{text(`交付流程 · 第 ${viewedIterationNumber} 轮`, `DELIVERY PIPELINE · ITERATION ${viewedIterationNumber}`)}</h2></div>
           </div>
           <div className="product-delivery-pipeline-actions">
+            {!viewingHistoricalIteration ? <span className="revision-badge">E2E G{project.e2eGoalRevision}</span> : null}
             <label className="product-iteration-selector">
               <span>{text("查看轮次", "ITERATION")}</span>
               <select
@@ -1082,12 +1115,25 @@ export function ProjectStudio({ projectId }: { projectId: string }) {
                 disabled={viewingHistoricalIteration}
                 focusKey={conversationFocusKey}
                 messages={orderedMessages}
+                intro={project.pendingImplementationChange ? (
+                  <section className="conversation-change-confirmation" aria-label={text("待确认实现变更", "Pending implementation change")}>
+                    <span>{text("Intent Agent · 等待确认", "INTENT AGENT · CONFIRMATION REQUIRED")}</span>
+                    <b>{project.pendingImplementationChange.summary}</b>
+                    <p>{project.pendingImplementationChange.implementationBrief}</p>
+                    <div>
+                      <button className="button button-primary" disabled={decidingChange || sendingMessage} onClick={() => void decidePendingChange("CONFIRM")} type="button">
+                        {text("确认修改并重跑", "CONFIRM CHANGE AND RE-RUN")}
+                      </button>
+                      <button className="button button-secondary" disabled={decidingChange || sendingMessage} onClick={() => void decidePendingChange("REJECT")} type="button">
+                        {text("保持当前实现", "KEEP CURRENT IMPLEMENTATION")}
+                      </button>
+                    </div>
+                  </section>
+                ) : null}
                 onOptionSelect={option => void sendConversationMessage(undefined, option)}
                 onSubmit={sendConversationMessage}
                 onValueChange={setConversationInput}
-                placeholder={agentRunning
-                  ? text("向正在生成的 Agent 发送引导…", "Guide the Agent while it is generating…")
-                  : activeConversation ? text("继续这段会话…", "Continue this conversation…") : text("开始一个新的项目会话…", "Start a new project conversation…")}
+                placeholder={text("提问，或提出实现调整…", "Ask a question or request an implementation change…")}
                 primaryAction={!viewingHistoricalIteration && requirementsReady && !sendingMessage ? (
                   <button
                     className="button button-secondary conversation-box-develop"
@@ -1098,7 +1144,7 @@ export function ProjectStudio({ projectId }: { projectId: string }) {
                 ) : null}
                 sendButtonLabel={text("发送项目消息", "Send project message")}
                 sending={sendingMessage}
-                showSendingReply={!agentRunning}
+                showSendingReply
                 streamingReplies={streamingReplies}
                 textareaLabel={text("继续项目会话", "Continue project conversation")}
                 value={conversationInput}

@@ -31,7 +31,6 @@ const fixtureAgentImage = developmentContainersAllowed
   && allowlistedImages.has(process.env.DEVILUDO_EXECUTOR_FIXTURE_AGENT_IMAGE ?? "")
   ? process.env.DEVILUDO_EXECUTOR_FIXTURE_AGENT_IMAGE ?? ""
   : "";
-const activeTasks = new Map<string, string>();
 /**
  * In-flight executions, so a shutdown can abort them deliberately instead of
  * being killed with their task containers still running.
@@ -68,19 +67,6 @@ const server = createServer(async (request, response) => {
       const smoke = await executorSmoke();
       response.writeHead(200, { "content-type": "application/json", "cache-control": "no-store" });
       response.end(JSON.stringify(smoke));
-      return;
-    }
-    if (request.method === "POST" && request.url === "/v2/guidance") {
-      const body = JSON.parse((await readRequestBody(request, 16 * 1024)).toString("utf8")) as Record<string, unknown>;
-      const jobId = typeof body.jobId === "string" && /^[0-9a-f-]{36}$/i.test(body.jobId) ? body.jobId : "";
-      const content = typeof body.content === "string" ? body.content.replaceAll(/\u0000/g, "").trim() : "";
-      const taskName = activeTasks.get(jobId);
-      if (!jobId || content.length < 2 || content.length > 4_000 || !taskName) {
-        throw new Error("Active Agent task guidance is invalid");
-      }
-      await inject(taskName, "guidance", Buffer.from(`${JSON.stringify({ content, receivedAt: new Date().toISOString() })}\n`));
-      response.writeHead(200, { "content-type": "application/json", "cache-control": "no-store" });
-      response.end(JSON.stringify({ accepted: true }));
       return;
     }
     if (request.method !== "POST" || request.url !== "/v2/execute") {
@@ -334,7 +320,6 @@ async function execute(
     }
     await docker(createArguments, 60_000);
     containerCreated = true;
-    activeTasks.set(plan.job.jobId, taskName);
     if (signal.aborted) throw new Error("Task execution was cancelled");
     for (const input of plan.job.inputObjects) {
       const destination = join(inputDirectory, inputFilename(input));
@@ -544,7 +529,6 @@ async function execute(
     const message = error instanceof Error ? error.message : "Executor task failed";
     throw new Error(redactSensitive(message, sensitiveValues));
   } finally {
-    activeTasks.delete(plan.job.jobId);
     signal.removeEventListener("abort", abortTask);
     if (containerCreated) await docker(["rm", "-f", taskName], 30_000).catch(() => undefined);
     await rm(temporary, { recursive: true, force: true });

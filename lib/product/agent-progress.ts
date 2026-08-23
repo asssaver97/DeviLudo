@@ -66,7 +66,6 @@ export function localizedAgentProgressContent(
     [/已恢复本任务完成的 Agent 检查点/, "Restored the completed Agent checkpoint; skipping a duplicate model call"],
     [/Agent 正在编写并验证游戏项目/, "Agent is implementing and checking the game project"],
     [/Agent 已完成代码修改/, "Agent finished the code changes; publishing the source revision"],
-    [/执行期间收到新的实时指导/, "New guidance arrived during execution; continuing in the same session with the latest scope"],
     [/Agent 输出未通过完成门禁/, "Agent output did not pass the completion gate; correcting it in the same session"],
     [/Agent CLI 暂时中断/, "Agent CLI was interrupted; resuming the same session"],
     [/正在展开并校验 Agent 生成的 Godot 项目/, "Expanding and validating the Agent-generated Godot project"],

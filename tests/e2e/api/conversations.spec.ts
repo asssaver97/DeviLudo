@@ -30,21 +30,21 @@ test("conversation stream emits reply deltas before the persisted result", async
   const documentAt = events.findIndex(event => event.type === "project_document");
   expect(deltas.length).toBeGreaterThan(1);
   expect(events.findIndex(event => event.type === "agent_delta")).toBeLessThan(completedAt);
-  expect(documentAt).toBeGreaterThan(events.findIndex(event => event.type === "agent_delta"));
-  expect(documentAt).toBeLessThan(completedAt);
+  expect(documentAt).toBe(-1);
   expect(deltas.map(event => event.delta).join("")).toContain("测试设计 Agent");
-  expect(new Set(deltas.map(event => event.agentRole))).toEqual(new Set(["DESIGN", "DEVELOPMENT", "TEST"]));
+  expect(new Set(deltas.map(event => event.agentRole))).toEqual(new Set(["DESIGN"]));
   const complete = events[completedAt] as {
     conversation: Conversation;
-    project: { document: { content: { introduction: string } } };
+    project: { document: { revision: number; content: { introduction: string } } };
+    intentDecision: { intent: string };
+    workflowAction: string;
   };
-  expect(complete.conversation.messages.map(message => message.role)).toEqual([
-    "USER", "ASSISTANT", "ASSISTANT", "ASSISTANT",
-  ]);
-  expect(complete.conversation.messages.slice(1).map(message => message.metadata.agentRole)).toEqual([
-    "DESIGN", "DEVELOPMENT", "TEST",
-  ]);
-  expect(complete.project.document.content.introduction).toBe("测试设计 Agent 已整理当前游戏需求。");
+  expect(complete.conversation.messages.map(message => message.role)).toEqual(["USER", "ASSISTANT"]);
+  expect(complete.conversation.messages[1].metadata.agentRole).toBe("DESIGN");
+  expect(complete.intentDecision.intent).toBe("QUESTION");
+  expect(complete.workflowAction).toBe("NONE");
+  expect(complete.project.document.revision).toBe(1);
+  expect(complete.project.document.content.introduction).not.toBe("测试设计 Agent 已整理当前游戏需求。");
 });
 
 test("new-game conversations validate, persist and keep their context locked", async ({ stack }) => {
@@ -127,7 +127,7 @@ test("new-game conversations validate, persist and keep their context locked", a
   expect(switched.status()).toBe(409);
 });
 
-test("project conversations apply draft feedback and preserve locked deliveries", async ({ stack }) => {
+test("project conversations apply explicit feedback and defer tentative delivery changes", async ({ stack }) => {
   await stack.configureAgent();
   const project = await stack.createProject({
     name: "星港维修队",
@@ -142,15 +142,17 @@ test("project conversations apply draft feedback and preserve locked deliveries"
   const draftedBody = await drafted.json() as {
     conversation: Conversation;
     project: { document: { revision: number; content: { introduction: string; gameplay: string } } };
+    changeRequest: { state: string };
+    workflowAction: string;
   };
   const draftConversation = draftedBody.conversation;
   expect(draftConversation.mode).toBe("PROJECT_FEEDBACK");
   expect(draftConversation.projectId).toBe(project.id);
   expect(draftConversation.messages[1].metadata).toMatchObject({
     source: "AI_AGENT",
-    appliedToDraft: true,
+    appliedToDraft: false,
     readyForDevelopment: true,
-    projectDocumentUpdated: true,
+    projectDocumentUpdated: false,
     options: ["强化资源管理", "增加随机事件"],
   });
   expect(draftConversation.messages[1].content).toContain("测试设计 Agent");
@@ -161,25 +163,38 @@ test("project conversations apply draft feedback and preserve locked deliveries"
       gameplay: "围绕玩家确认的核心循环进行操作、反馈与结算。",
     },
   });
-  expect((await stack.readProject(project.id)).specification.revisionNotes).toContain(draftFeedback);
+  expect(draftedBody.changeRequest.state).toBe("APPLIED");
+  expect(draftedBody.workflowAction).toBe("AGENT_STARTED");
+  expect((await stack.readProject(project.id)).specification.revisionNotes).not.toContain(draftFeedback);
 
+  const lockedProject = await stack.createProject({
+    name: "运行中含糊变更",
+    concept: "验证运行中的假设性调整先等待用户确认。",
+  });
   await stack.executeSql(`
     UPDATE deviludo.workflow_instances
        SET state = 'E2E_TESTING', updated_at = clock_timestamp()
-     WHERE id = '${project.workflowId}'::uuid;
+     WHERE id = '${lockedProject.workflowId}'::uuid;
   `);
-  const beforeLockedFeedback = await stack.readProject(project.id);
+  const beforeLockedFeedback = await stack.readProject(lockedProject.id);
   const notesBefore = beforeLockedFeedback.specification.revisionNotes;
-  const lockedFeedback = "把所有关卡长度缩短一半，但不要影响当前正在执行的交付。";
+  const lockedFeedback = "如果把所有关卡长度缩短一半，会有什么影响？";
   const locked = await stack.web("/api/conversations/messages", {
     method: "POST",
-    data: { projectId: project.id, content: lockedFeedback },
+    data: { projectId: lockedProject.id, content: lockedFeedback },
   });
   expect(locked.status()).toBe(201);
-  const lockedConversation = (await locked.json() as { conversation: Conversation }).conversation;
+  const lockedBody = await locked.json() as {
+    conversation: Conversation;
+    workflowAction: string;
+    changeRequest: { state: string };
+  };
+  const lockedConversation = lockedBody.conversation;
   expect(lockedConversation.messages[1].metadata).toMatchObject({ source: "AI_AGENT", appliedToDraft: false });
   expect(lockedConversation.messages[1].content).toContain("测试设计 Agent");
-  expect((await stack.readProject(project.id)).specification.revisionNotes).toEqual(notesBefore);
+  expect(lockedBody.workflowAction).toBe("AWAITING_CONFIRMATION");
+  expect(lockedBody.changeRequest.state).toBe("PENDING");
+  expect((await stack.readProject(lockedProject.id)).specification.revisionNotes).toEqual(notesBefore);
 });
 
 test("an explicit development command in a draft conversation automatically approves the workflow", async ({ stack }) => {
@@ -207,18 +222,12 @@ test("an explicit development command in a draft conversation automatically appr
   expect((await discussed.json() as { project: { workflowState: string } }).project.workflowState).toBe("DRAFT");
 });
 
-test("messages sent during Agent generation become durable live guidance", async ({ stack }) => {
+test("messages during Agent generation are intent-routed and confirmed changes safely rerun it", async ({ stack }) => {
   await stack.configureAgent();
   const project = await stack.createProject({
-    name: "实时引导验证",
-    concept: "验证开发 Agent 生成期间的进度和玩家引导不会丢失。",
+    name: "运行中意图验证",
+    concept: "验证 Agent 生成期间的问题只回复，实现调整则安全重跑。",
   });
-  const drafted = await stack.web("/api/conversations/messages", {
-    method: "POST",
-    data: { projectId: project.id, content: "先确认核心循环，再开始生成项目。" },
-  });
-  expect(drafted.status()).toBe(201);
-  const conversation = (await drafted.json() as { conversation: Conversation }).conversation;
   const jobId = randomUUID();
   const leaseToken = randomUUID();
   await stack.executeSql(`
@@ -233,46 +242,187 @@ test("messages sent during Agent generation become durable live guidance", async
       '${project.workspaceId}'::uuid, '${jobId}'::uuid, '${project.workflowId}'::uuid, '${project.id}'::uuid,
       'AGENT_GENERATION', 'CORE', ARRAY['MICROVM','NETWORK_POLICY'], false,
       'sha256:${"a".repeat(64)}', '{"kinds":["SPECIFICATION"],"maxBytes":1073741824}'::jsonb,
-      'RUNNING', 'agent-guidance-e2e', 'e2e-held-agent', '${leaseToken}'::uuid,
+      'RUNNING', 'intent-routing-e2e', 'e2e-held-agent', '${leaseToken}'::uuid,
       clock_timestamp() + interval '1 hour', 1
     );
   `);
 
-  const guidance = "优先实现键盘操作，并让时间循环提示始终可见。";
-  const guided = await stack.web("/api/conversations/messages/stream", {
+  const documentBefore = (await stack.readProject(project.id)).document.revision;
+  const asked = await stack.web("/api/conversations/messages/stream", {
     method: "POST",
-    data: { conversationId: conversation.id, content: guidance },
+    data: { projectId: project.id, content: "当前 Agent 正在做什么？" },
   });
-  expect(guided.status()).toBe(200);
-  const completed = (await guided.text()).trim().split("\n")
+  expect(asked.status()).toBe(200);
+  const questionResult = (await asked.text()).trim().split("\n")
     .map(line => JSON.parse(line) as Record<string, unknown>)
-    .find(event => event.type === "complete") as { conversation: Conversation };
-  expect(completed.conversation.messages).toHaveLength(5);
-  expect(completed.conversation.messages[4]).toMatchObject({
-    role: "USER",
-    content: guidance,
-    metadata: { source: "PLAYER_GUIDANCE", jobId },
-  });
-  expect(await stack.queryRows<{ content: string; state: string }>(`
-    SELECT content, state FROM deviludo.job_guidance_messages WHERE job_id = '${jobId}'::uuid
-  `)).toEqual([{ content: guidance, state: "PENDING" }]);
+    .find(event => event.type === "complete") as {
+      conversation: Conversation;
+      intentDecision: { intent: string; responderRoles: string[] };
+      workflowAction: string;
+    };
+  expect(questionResult.intentDecision).toMatchObject({ intent: "QUESTION", responderRoles: ["DESIGN"] });
+  expect(questionResult.workflowAction).toBe("NONE");
+  expect(questionResult.conversation.messages).toHaveLength(2);
+  expect((await stack.readProject(project.id)).document.revision).toBe(documentBefore);
+  expect(await stack.queryRows<{ state: string; fencing_token: string }>(`
+    SELECT state::text, fencing_token::text FROM deviludo.jobs WHERE id = '${jobId}'::uuid
+  `)).toEqual([{ state: "RUNNING", fencing_token: "1" }]);
 
-  const cookies = (await stack.apiRequest.storageState()).cookies
-    .map(cookie => `${cookie.name}=${cookie.value}`).join("; ");
-  const controller = new AbortController();
-  const progressResponse = await fetch(
-    new URL(`/api/projects/${project.id}/agent-progress/stream`, stack.webUrl),
-    { headers: { cookie: cookies }, signal: controller.signal },
+  const proposed = await stack.web("/api/conversations/messages", {
+    method: "POST",
+    data: {
+      conversationId: questionResult.conversation.id,
+      content: "能不能增加键盘和手柄都能完成核心循环的能力？",
+    },
+  });
+  expect(proposed.status()).toBe(200);
+  const proposedBody = await proposed.json() as {
+    changeRequest: { id: string; state: string };
+    workflowAction: string;
+    intentDecision: { intent: string; explicitExecution: boolean };
+  };
+  expect(proposedBody.intentDecision).toMatchObject({ intent: "CHANGE_REQUEST", explicitExecution: false });
+  expect(proposedBody.workflowAction).toBe("AWAITING_CONFIRMATION");
+  expect(proposedBody.changeRequest.state).toBe("PENDING");
+  expect((await stack.readProject(project.id)).document.revision).toBe(documentBefore);
+
+  const confirmKey = `confirm:${randomUUID()}`;
+  const decisionUrl = `/api/projects/${project.id}/change-requests/${proposedBody.changeRequest.id}/decision`;
+  const confirmed = await stack.web(
+    decisionUrl,
+    {
+      method: "POST",
+      data: { decision: "CONFIRM", idempotencyKey: confirmKey, responseLanguage: "zh" },
+    },
   );
-  expect(progressResponse.ok).toBeTruthy();
-  expect(progressResponse.headers.get("content-type")).toContain("text/event-stream");
-  const reader = progressResponse.body?.getReader();
-  expect(reader).toBeTruthy();
-  const chunk = await reader!.read();
-  controller.abort();
-  const progressText = new TextDecoder().decode(chunk.value);
-  expect(progressText).toContain("GUIDANCE_ACCEPTED");
-  expect(progressText).toContain(guidance);
+  expect(confirmed.status()).toBe(200);
+  expect((await confirmed.json() as { workflowAction: string }).workflowAction).toBe("AGENT_RERUN_STARTED");
+  expect(await stack.queryRows<{ state: string; fencing_token: string; lease_token: string | null }>(`
+    SELECT state::text, fencing_token::text, lease_token::text
+      FROM deviludo.jobs WHERE id = '${jobId}'::uuid
+  `)).toEqual([{ state: "CANCELLED", fencing_token: "2", lease_token: null }]);
+  expect(await stack.queryRows<{ event_kind: string }>(`
+    SELECT event_kind FROM deviludo.job_progress_events
+     WHERE job_id = '${jobId}'::uuid AND event_kind = 'SUPERSEDED'
+  `)).toEqual([{ event_kind: "SUPERSEDED" }]);
+  expect((await stack.readProject(project.id)).e2eGoalRevision).toBe(2);
+  expect((await stack.readProject(project.id)).jobs.filter(job => (
+    job.kind === "AGENT_GENERATION" && job.id !== jobId
+  ))).toHaveLength(1);
+  const replay = await stack.web(decisionUrl, {
+    method: "POST",
+    data: { decision: "CONFIRM", idempotencyKey: confirmKey, responseLanguage: "zh" },
+  });
+  expect(replay.status()).toBe(200);
+  expect((await replay.json() as { workflowAction: string }).workflowAction).toBe("AGENT_RERUN_STARTED");
+  expect((await stack.web(decisionUrl, {
+    method: "POST",
+    data: { decision: "CONFIRM", idempotencyKey: `confirm:${randomUUID()}`, responseLanguage: "zh" },
+  })).status()).toBe(409);
+});
+
+test("a stale pending change is replanned once and confirmation retries remain idempotent", async ({ stack }) => {
+  await stack.configureAgent();
+  const project = await stack.createProject({
+    name: "过期提案验证",
+    concept: "验证协作者更新项目说明后，旧提案会基于新版本重新规划。",
+  });
+  const proposed = await stack.web("/api/conversations/messages", {
+    method: "POST",
+    data: { projectId: project.id, content: "能不能增加一个可配置的辅助瞄准模式？" },
+  });
+  const proposal = (await proposed.json() as {
+    changeRequest: { id: string };
+    project: { document: { revision: number; content: Record<string, unknown> } };
+  });
+  expect(proposed.status()).toBe(201);
+
+  const edited = await stack.web(`/api/projects/${project.id}/document`, {
+    method: "PUT",
+    data: {
+      expectedRevision: proposal.project.document.revision,
+      content: { ...proposal.project.document.content, introduction: "另一位协作者刚刚更新了项目说明。" },
+      responseLanguage: "zh",
+    },
+  });
+  expect(edited.status()).toBe(200);
+
+  const decisionUrl = `/api/projects/${project.id}/change-requests/${proposal.changeRequest.id}/decision`;
+  const idempotencyKey = `confirm:${randomUUID()}`;
+  const replanned = await stack.web(decisionUrl, {
+    method: "POST",
+    data: { decision: "CONFIRM", idempotencyKey, responseLanguage: "zh" },
+  });
+  expect(replanned.status()).toBe(200);
+  const replannedBody = await replanned.json() as {
+    workflowAction: string;
+    changeRequest: { id: string; state: string };
+  };
+  expect(replannedBody.workflowAction).toBe("AWAITING_CONFIRMATION");
+  expect(replannedBody.changeRequest).toMatchObject({ state: "PENDING" });
+  expect(replannedBody.changeRequest.id).not.toBe(proposal.changeRequest.id);
+
+  const replay = await stack.web(decisionUrl, {
+    method: "POST",
+    data: { decision: "CONFIRM", idempotencyKey, responseLanguage: "zh" },
+  });
+  expect(replay.status()).toBe(200);
+  expect(await replay.json()).toMatchObject({
+    workflowAction: "AWAITING_CONFIRMATION",
+    changeRequest: { id: replannedBody.changeRequest.id, state: "PENDING" },
+  });
+  expect((await stack.web(decisionUrl, {
+    method: "POST",
+    data: { decision: "CONFIRM", idempotencyKey: `confirm:${randomUUID()}`, responseLanguage: "zh" },
+  })).status()).toBe(409);
+});
+
+test("a change during Steam upload starts a child iteration without touching the upload", async ({ stack }) => {
+  await stack.configureAgent();
+  const project = await stack.createProject({
+    name: "发布中迭代验证",
+    concept: "验证发布上传期间的新需求进入独立迭代。",
+  });
+  const steamJobId = randomUUID();
+  const steamLease = randomUUID();
+  await stack.executeSql(`
+    UPDATE deviludo.workflow_instances
+       SET state = 'STEAM_PUBLISHING', updated_at = clock_timestamp()
+     WHERE id = '${project.workflowId}'::uuid;
+    INSERT INTO deviludo.jobs(
+      workspace_id, id, workflow_id, project_id, kind, pool_kind,
+      required_capabilities, exclusive, runtime_image, output_contract,
+      state, idempotency_key, lease_owner, lease_token, lease_expires_at, fencing_token
+    ) VALUES (
+      '${project.workspaceId}'::uuid, '${steamJobId}'::uuid, '${project.workflowId}'::uuid, '${project.id}'::uuid,
+      'STEAM_PUBLISH', 'CORE', ARRAY['RESTRICTED_CONTAINER','STEAMCMD'], false,
+      'sha256:${"d".repeat(64)}', '{"kinds":["PUBLISH_RECEIPT"],"maxBytes":1073741824}'::jsonb,
+      'RUNNING', 'steam-upload-in-progress', 'held-steam-upload', '${steamLease}'::uuid,
+      clock_timestamp() + interval '1 hour', 1
+    );
+  `);
+
+  const changed = await stack.web("/api/conversations/messages", {
+    method: "POST",
+    data: { projectId: project.id, content: "增加一个发布后可配置的高对比度模式。" },
+  });
+  expect(changed.status()).toBe(201);
+  expect((await changed.json() as { workflowAction: string }).workflowAction).toBe("NEW_ITERATION_STARTED");
+  const latest = await stack.readProject(project.id);
+  expect(latest.iterationNumber).toBe(2);
+  expect(latest.workflowId).not.toBe(project.workflowId);
+  expect(await stack.queryRows<{ workflow_state: string; job_state: string; fencing_token: string; lease_token: string }>(`
+    SELECT workflow.state::text AS workflow_state, job.state::text AS job_state,
+           job.fencing_token::text, job.lease_token::text
+      FROM deviludo.workflow_instances workflow
+      JOIN deviludo.jobs job ON job.workflow_id = workflow.id
+     WHERE workflow.id = '${project.workflowId}'::uuid AND job.id = '${steamJobId}'::uuid
+  `)).toEqual([{
+    workflow_state: "STEAM_PUBLISHING",
+    job_state: "RUNNING",
+    fencing_token: "1",
+    lease_token: steamLease,
+  }]);
 });
 
 test("project conversations are listed by recency and project deletion removes the whole project boundary", async ({ stack }) => {

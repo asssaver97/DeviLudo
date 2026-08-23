@@ -165,13 +165,14 @@ test("confirmed requirements update the project document before the streamed tur
 
   await expect(page.getByText("测试设计 Agent 已整理当前游戏需求。", { exact: true })).toBeVisible();
   await expect(page.locator(".product-document-sidebar .revision-badge")).toContainText("R2");
-  await expect(page.getByText("已同步项目", { exact: true })).toBeVisible();
+  await expect(page.getByText("E2E G2", { exact: true })).toBeVisible();
 });
 
-test("the project chat streams Agent generation progress and accepts live player guidance", async ({ page, stack }) => {
+test("the project chat streams Agent progress, answers questions, and confirms implementation reruns", async ({ page, stack }) => {
+  await stack.configureAgent();
   const project = await stack.createProject({
     name: "生成进度控制台",
-    concept: "验证玩家可以在开发 Agent 工作时查看输出并继续引导。",
+    concept: "验证玩家可以在开发 Agent 工作时查看输出、提问并确认实现调整。",
   });
   const jobId = randomUUID();
   await stack.executeSql(`
@@ -249,15 +250,29 @@ test("the project chat streams Agent generation progress and accepts live player
     element.scrollHeight - element.scrollTop - element.clientHeight <= 2
   ))).toBe(true);
   const input = page.getByLabel("继续项目会话");
-  await expect(input).toHaveAttribute("placeholder", "向正在生成的 Agent 发送引导…");
-  const guidance = "请优先保证键盘和手柄都能完成核心循环。";
-  await input.fill(guidance);
+  await expect(input).toHaveAttribute("placeholder", "提问，或提出实现调整…");
+  const question = "当前 Agent 正在做什么？";
+  await input.fill(question);
   await page.getByRole("button", { name: "发送项目消息" }).click();
-  await expect(page.locator(".project-conversation-box .conversation-box-message", { hasText: guidance })).toBeVisible();
+  await expect(page.locator(".project-conversation-box .conversation-box-message", { hasText: question })).toBeVisible();
   await expect(page.locator(".project-conversation-box .conversation-box-message.is-thinking")).toHaveCount(0);
-  await expect.poll(async () => await stack.queryRows<{ content: string; state: string }>(`
-    SELECT content, state FROM deviludo.job_guidance_messages WHERE job_id = '${jobId}'::uuid
-  `)).toEqual([{ content: guidance, state: "PENDING" }]);
+  expect(await stack.queryRows<{ state: string }>(`
+    SELECT state::text FROM deviludo.jobs WHERE id = '${jobId}'::uuid
+  `)).toEqual([{ state: "RUNNING" }]);
+
+  await input.fill("能不能增加键盘和手柄都能完成核心循环的能力？");
+  await page.getByRole("button", { name: "发送项目消息" }).click();
+  const confirmation = page.locator(".conversation-change-confirmation");
+  await expect(confirmation).toBeVisible();
+  await expect(confirmation.getByRole("button", { name: "确认修改并重跑" })).toBeVisible();
+  await page.reload();
+  await expect(confirmation).toBeVisible();
+  await confirmation.getByRole("button", { name: "确认修改并重跑" }).click();
+  await expect(confirmation).toHaveCount(0);
+  await expect.poll(async () => await stack.queryRows<{ state: string }>(`
+    SELECT state::text FROM deviludo.jobs WHERE id = '${jobId}'::uuid
+  `)).toEqual([{ state: "CANCELLED" }]);
+  await expect(page.getByText("E2E G2", { exact: true })).toBeVisible();
 });
 
 test("an Agent reply follows the conversation without moving the whole page", async ({ page, stack }) => {
@@ -334,7 +349,8 @@ test("a creator can refine and deliver a game through every Core and platform st
   await page.getByLabel("继续项目会话").fill("玩法目标、操作方式和胜负条件已经确认，请判断是否可以开始开发。");
   await page.getByRole("button", { name: "发送项目消息" }).click();
   await expect(page.getByRole("button", { name: "按照当前需求开发" })).toBeVisible();
-  await expect(page.getByText("测试设计 Agent 已整理当前游戏需求。", { exact: true })).toBeVisible();
+  await expect(page.getByText("测试设计 Agent 已结合项目上下文生成回复。", { exact: true })).toBeVisible();
+  await expect(page.getByText("QUESTION", { exact: true })).toBeVisible();
   await page.getByRole("button", { name: "按照当前需求开发" }).click();
   // Three isolated platform nodes run concurrently but can spend close to a
   // minute preparing their deterministic guest evidence on a cold CI host.
@@ -440,23 +456,18 @@ test("the home chat supports both project feedback and a fresh game conversation
   await page.goto("/");
   await expect(page.getByRole("heading", { name: "今天想做什么游戏？" })).toBeVisible();
   await page.getByLabel("关联项目").selectOption(project.id);
-  const feedback = "增加一个低视野模式，并让车灯成为需要管理的资源。";
-  await page.getByLabel("游戏想法或修改意见").fill(feedback);
+  const feedbackQuestion = "当前玩法如果增加低视野模式，会对资源管理产生什么影响？";
+  await page.getByLabel("游戏想法或修改意见").fill(feedbackQuestion);
   await page.getByRole("button", { name: "发送消息" }).click();
-  await expect(page.getByText(feedback, { exact: true })).toBeVisible();
+  await expect(page.getByText(feedbackQuestion, { exact: true })).toBeVisible();
   await expect(page.getByText(/测试设计 Agent 已结合项目上下文生成回复/).first()).toBeVisible();
   await expect(page.locator(".home-conversation-box .conversation-box-message > div > p")).toHaveText([
-    feedback,
-    "测试设计 Agent 已结合项目上下文生成回复。",
-    "测试设计 Agent 已结合项目上下文生成回复。",
+    feedbackQuestion,
     "测试设计 Agent 已结合项目上下文生成回复。",
   ]);
   const suggestedReplies = page.getByRole("group", { name: "可选回复" });
   await expect(suggestedReplies).toBeVisible();
   await expect(suggestedReplies.getByRole("button")).toHaveText(["强化资源管理", "增加随机事件"]);
-  await suggestedReplies.getByRole("button", { name: "强化资源管理" }).click();
-  await expect(page.locator(".home-conversation-box .conversation-box-message.user p").last()).toHaveText("强化资源管理");
-  await expect(suggestedReplies).toBeVisible();
 
   let releaseManualReply: () => void = () => {};
   const manualReplyGate = new Promise<void>(resolve => { releaseManualReply = resolve; });
@@ -464,12 +475,14 @@ test("the home chat supports both project feedback and a fresh game conversation
     await manualReplyGate;
     await route.continue();
   }, { times: 1 });
-  await page.getByLabel("游戏想法或修改意见").fill("我想改成由车灯亮度影响幽灵出现频率。");
+  const followUpQuestion = "请说明车灯亮度会如何影响幽灵出现频率。";
+  await page.getByLabel("游戏想法或修改意见").fill(followUpQuestion);
   await page.getByRole("button", { name: "发送消息" }).click();
   await expect(page.locator(".home-conversation-box .conversation-box-message.is-thinking")).toBeVisible();
   await expect(suggestedReplies).toHaveCount(0);
   releaseManualReply();
   await expect(suggestedReplies).toBeVisible();
+  await expect(page.getByText(followUpQuestion, { exact: true })).toBeVisible();
 
   const homeMessageViewport = await page.locator(".home-conversation-box .conversation-box-messages").evaluate(element => ({
     height: element.clientHeight,
@@ -483,26 +496,21 @@ test("the home chat supports both project feedback and a fresh game conversation
   expect(homeConversationBounds).not.toBeNull();
   expect(viewport).not.toBeNull();
   expect(homeConversationBounds!.y + homeConversationBounds!.height).toBeLessThanOrEqual(viewport!.height);
-  await expect(page.getByText("已同步项目", { exact: true }).last()).toBeVisible();
+  await expect(page.getByText("QUESTION", { exact: true })).toHaveCount(2);
   await expect(page.getByRole("button", { name: "按照当前需求开发" })).toBeVisible();
   await expect(page.getByRole("link", { name: "打开项目" })).toHaveAttribute("href", `/projects/${project.id}`);
-  expect((await stack.readProject(project.id)).specification.revisionNotes).toContain(feedback);
+  expect((await stack.readProject(project.id)).workflowState).toBe("DRAFT");
 
-  await page.getByRole("link", { name: "打开项目" }).click();
+  await suggestedReplies.getByRole("button", { name: "强化资源管理" }).click();
+  await expect(page).toHaveURL(`/projects/${project.id}`);
   await expect(page.getByRole("heading", { name: "会话记录" })).toBeVisible();
   await expect(page.getByRole("navigation", { name: "历史会话" })).toBeVisible();
-  await expect(page.getByText(feedback, { exact: true }).first()).toBeVisible();
+  await expect(page.getByText(feedbackQuestion, { exact: true }).first()).toBeVisible();
+  await expect(page.getByText("强化资源管理", { exact: true }).first()).toBeVisible();
   await expect(page.getByText("测试设计 Agent 已整理当前游戏需求。", { exact: true })).toBeVisible();
-  await expect(page.getByRole("button", { name: "按照当前需求开发" })).toBeVisible();
+  await expect(page.getByText("E2E G2", { exact: true })).toBeVisible();
   await expect(page.getByRole("button", { name: "删除项目" })).toBeVisible();
   await expect(page.getByRole("region", { name: "项目说明内容" })).toBeVisible();
-  const continuedFeedback = "保留这项改动，并补充失败后的重试提示。";
-  await page.getByLabel("继续项目会话").fill(continuedFeedback);
-  await page.getByRole("button", { name: "发送项目消息" }).click();
-  await expect(page.getByText(continuedFeedback, { exact: true })).toBeVisible();
-  await expect(page.locator(".project-conversation-box .conversation-box-message.is-thinking")).toHaveCount(0);
-  await expect(page.getByText("测试设计 Agent 已整理当前游戏需求。", { exact: true })).toBeVisible();
-  await expect(page.getByRole("button", { name: "按照当前需求开发" })).toBeVisible();
 
   await page.getByRole("link", { name: "首页", exact: true }).click();
 

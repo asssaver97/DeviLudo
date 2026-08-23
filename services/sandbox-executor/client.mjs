@@ -3,21 +3,19 @@ import { request } from "node:http";
 import { StringDecoder } from "node:string_decoder";
 
 const action = process.argv[2];
-if (!["execute", "health", "live", "guidance"].includes(action)) throw new Error("Only execute, guidance, live, and health commands are supported");
+if (!["execute", "health", "live"].includes(action)) throw new Error("Only execute, live, and health commands are supported");
 const socketPath = process.env.DEVILUDO_EXECUTOR_SOCKET ?? "/run/deviludo-executor/executor.sock";
 const chunks = [];
 if (action !== "health") for await (const chunk of process.stdin) chunks.push(chunk);
 const body = Buffer.concat(chunks);
 if (action === "execute" && (body.length < 2 || body.length > 2 * 1024 * 1024)) throw new Error("Sandbox plan size is invalid");
-if (action === "guidance" && (body.length < 2 || body.length > 16 * 1024)) throw new Error("Guidance size is invalid");
 
 const response = await new Promise((resolve, reject) => {
   const execution = { error: false };
   const streamDecoder = new StringDecoder("utf8");
   const path = action === "execute"
     ? "/v2/execute"
-    : action === "guidance" ? "/v2/guidance"
-      : action === "live" ? "/v2/live" : "/v2/health";
+    : action === "live" ? "/v2/live" : "/v2/health";
   const call = request({ socketPath, path, method: "POST", headers: {
     "content-type": "application/json",
     "content-length": String(body.length),

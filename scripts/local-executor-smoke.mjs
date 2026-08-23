@@ -84,22 +84,11 @@ try {
     }),
   };
   const agentProgress = [];
-  const agentStarted = deferred();
   const agentReceiptPromise = runClient(agentPlan, event => {
     agentProgress.push(event);
-    if (event.content === "Agent 已开始生成项目") agentStarted.resolve();
   });
-  await Promise.race([
-    agentStarted.promise,
-    new Promise((_, reject) => setTimeout(() => reject(new Error("Fixture Agent did not start in time")), 30_000)),
-  ]);
-  const guidance = "保留键盘操作，并优先完成清晰的时间循环提示。";
-  await sendGuidance(agentJobId, guidance);
   const agentReceipt = await agentReceiptPromise;
   assertReceipt(agentReceipt, ["SPECIFICATION"]);
-  if (!agentProgress.some(event => event.kind === "AGENT_OUTPUT" && event.content === `已收到玩家引导：${guidance}`)) {
-    throw new Error("Fixture Agent did not receive player guidance through the executor stream");
-  }
   createdKeys.push(...agentReceipt.outputObjects.map(object => object.key));
   const source = agentReceipt.details?.sourceRevision;
   if (!source?.relativePath || !source?.digest) throw new Error("Fixture Agent did not publish a persistent source revision");
@@ -300,14 +289,6 @@ async function runClient(plan, onProgress) {
   ], plan, 10 * 60_000, onProgress);
 }
 
-async function sendGuidance(jobId, content) {
-  const result = await runJson("docker", [
-    "compose", "-f", "infra/docker-compose.yml", "exec", "-T", "core-sandbox",
-    "/usr/local/bin/sandbox-executor-client", "guidance",
-  ], { jobId, content }, 30_000);
-  if (result?.accepted !== true) throw new Error("Executor rejected player guidance");
-}
-
 function runJson(executable, arguments_, input, timeout = 5 * 60_000, onProgress, extraEnvironment = {}) {
   return new Promise((resolve, reject) => {
     const child = spawn(executable, arguments_, { cwd: root, shell: false, stdio: ["pipe", "pipe", "pipe"], env: { ...process.env, ...extraEnvironment } });
@@ -340,12 +321,6 @@ function consumeProgress(line, onProgress) {
   if (!line.startsWith("DEVILUDO_PROGRESS:")) return;
   const event = JSON.parse(line.slice("DEVILUDO_PROGRESS:".length));
   if (["PHASE", "AGENT_OUTPUT"].includes(event?.kind) && typeof event.content === "string") onProgress(event);
-}
-
-function deferred() {
-  let resolve;
-  const promise = new Promise(done => { resolve = done; });
-  return { promise, resolve };
 }
 
 async function dockerCompose(arguments_) {

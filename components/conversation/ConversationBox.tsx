@@ -163,6 +163,9 @@ export function ConversationBox({
                   {message.role === "ASSISTANT" && message.metadata.appliedToDraft === true
                     ? <span className="conversation-box-applied">{text("已同步项目", "PROJECT SYNCED")}</span>
                     : null}
+                  {message.role === "ASSISTANT" && conversationIntent(message.metadata)
+                    ? <span className="conversation-box-applied">{conversationIntent(message.metadata)}</span>
+                    : null}
                   {failed ? (
                     <span
                       className="conversation-box-failed"
@@ -269,6 +272,14 @@ export function ConversationBox({
       </form>
     </div>
   );
+}
+
+function conversationIntent(metadata: Readonly<Record<string, unknown>>): string | null {
+  const decision = metadata.intentDecision;
+  if (!decision || typeof decision !== "object" || Array.isArray(decision)) return null;
+  const intent = (decision as Record<string, unknown>).intent;
+  return ["QUESTION", "CHANGE_REQUEST", "CONFIRM_CHANGE", "REJECT_CHANGE"].includes(String(intent))
+    ? String(intent) : null;
 }
 
 function messageAgentRole(message: ProductConversationMessage): ProjectAgentRole {

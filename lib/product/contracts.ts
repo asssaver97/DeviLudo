@@ -88,6 +88,49 @@ export type AgentRuntimeAvailability = Readonly<{
 export const PROJECT_AGENT_ROLES = ["DESIGN", "DEVELOPMENT", "TEST"] as const;
 export type ProjectAgentRole = typeof PROJECT_AGENT_ROLES[number];
 
+export const CONVERSATION_INTENTS = ["QUESTION", "CHANGE_REQUEST", "CONFIRM_CHANGE", "REJECT_CHANGE"] as const;
+export type ConversationIntent = typeof CONVERSATION_INTENTS[number];
+
+export type ConversationIntentDecision = Readonly<{
+  intent: ConversationIntent;
+  explicitExecution: boolean;
+  actionable: boolean;
+  responderRoles: readonly ProjectAgentRole[];
+  summary: string;
+}>;
+
+export type E2eGoal = Readonly<{
+  id: string;
+  description: string;
+  source: "CORE_LOOP" | "ACCEPTANCE";
+}>;
+
+export type E2eGoalDelta = Readonly<{
+  add: readonly Omit<E2eGoal, "id">[];
+  replace: readonly Readonly<{ id: string; description: string; source: E2eGoal["source"] }>[];
+  retire: readonly string[];
+}>;
+
+export const IMPLEMENTATION_CHANGE_STATES = ["PENDING", "WAITING_FOR_ANALYSIS", "APPLIED", "REJECTED", "SUPERSEDED"] as const;
+export type ImplementationChangeState = typeof IMPLEMENTATION_CHANGE_STATES[number];
+
+export type ImplementationChangeRequest = Readonly<{
+  id: string;
+  projectId: string;
+  conversationId: string;
+  state: ImplementationChangeState;
+  summary: string;
+  implementationBrief: string;
+  baseDocumentRevision: number;
+  documentPatch: Readonly<Record<string, unknown>>;
+  e2eGoalDelta: E2eGoalDelta;
+  explicitExecution: boolean;
+  createdAt: string;
+}>;
+
+export type ConversationWorkflowAction = "NONE" | "AWAITING_CONFIRMATION" | "AGENT_STARTED"
+  | "AGENT_RERUN_STARTED" | "NEW_ITERATION_STARTED" | "WAITING_FOR_ANALYSIS";
+
 export const AGENT_MODEL_OVERRIDE_ROLES = ["design", "development", "test"] as const;
 export type AgentModelOverrideRole = typeof AGENT_MODEL_OVERRIDE_ROLES[number];
 
@@ -214,6 +257,9 @@ export type ProductProjectDetail = ProductProjectSummary & Readonly<{
   document: ProjectDocument;
   jobs: readonly ProductJob[];
   events: readonly ProductEvent[];
+  pendingImplementationChange: ImplementationChangeRequest | null;
+  e2eGoalRevision: number;
+  e2eGoals: readonly E2eGoal[];
 }>;
 
 export type ProjectDocumentContent = Readonly<{
@@ -305,7 +351,7 @@ export type SteamRelease = Readonly<{
 export const AGENT_PROGRESS_EVENT_KINDS = [
   "PHASE",
   "AGENT_OUTPUT",
-  "GUIDANCE_ACCEPTED",
+  "SUPERSEDED",
   "COMPLETED",
   "FAILED",
 ] as const;

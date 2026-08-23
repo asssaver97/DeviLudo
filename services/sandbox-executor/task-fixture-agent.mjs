@@ -84,7 +84,6 @@ try {
     }));
   } else {
     await progress("AGENT_OUTPUT", "正在生成 Godot 项目结构、主场景和自动化测试。");
-    await observeGuidance();
     await cp("/opt/deviludo-fixture", "/workspace/project", { recursive: true, force: false });
     const generatedManifest = JSON.parse(await readFile("/workspace/project/agent.json", "utf8"));
     delete generatedManifest.testManifest;
@@ -141,26 +140,4 @@ async function command(executable, arguments_) {
 
 async function progress(kind, content) {
   await appendFile("/run/deviludo/progress.ndjson", `${JSON.stringify({ kind, content })}\n`, { mode: 0o600 });
-}
-
-async function observeGuidance() {
-  let observed = "";
-  // The guidance request crosses Core, a Unix socket, and docker exec. Eight
-  // 100ms polls made this deterministic fixture flaky on a busy local builder.
-  for (let attempt = 0; attempt < 50; attempt += 1) {
-    await new Promise(resolve => setTimeout(resolve, 100));
-    try {
-      const current = await readFile("/run/deviludo/guidance.ndjson", "utf8");
-      if (current !== observed) {
-        observed = current;
-        const latest = current.trim().split(/\r?\n/).at(-1);
-        const guidance = latest ? JSON.parse(latest) : null;
-        if (typeof guidance?.content === "string") {
-          await progress("AGENT_OUTPUT", `已收到玩家引导：${guidance.content}`);
-        }
-      }
-    } catch {
-      // Guidance is optional.
-    }
-  }
 }

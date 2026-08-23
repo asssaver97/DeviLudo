@@ -454,6 +454,7 @@ describe("Asset generation leasing", () => {
         dimensions: "32x32",
         frameCount: "4",
         attempt: "1",
+        leaseToken: "30000000-0000-4000-8000-000000000001",
       }, {
         workspaceId,
         projectId,
@@ -465,6 +466,7 @@ describe("Asset generation leasing", () => {
         dimensions: null,
         frameCount: null,
         attempt: "3",
+        leaseToken: "30000000-0000-4000-8000-000000000002",
       }],
     }));
     const leases = await new AssetManifestStore(database).claimGeneration(300, 4);
@@ -475,6 +477,7 @@ describe("Asset generation leasing", () => {
     assert.deepEqual(workspaces, []);
     assert.equal(leases[0].frameCount, 4);
     assert.equal(leases[0].attempt, 1);
+    assert.equal(leases[0].leaseToken, "30000000-0000-4000-8000-000000000001");
     // An absent frame count stays null rather than becoming 0, which would be a
     // request for zero animation frames.
     assert.equal(leases[1].frameCount, null);
@@ -484,7 +487,7 @@ describe("Asset generation leasing", () => {
   it("reports whether settling still held the lease", async () => {
     const settled = poolDatabase(() => ({ rows: [{ settled: true }] }));
     assert.equal(await new AssetManifestStore(settled.database).completeGeneration({
-      workspaceId, itemId: "item-1", bucket: "deviludo",
+      workspaceId, itemId: "item-1", leaseToken: "30000000-0000-4000-8000-000000000001", bucket: "deviludo",
       objectKey: "assets/sprites/player_idle.png",
       sha256: `sha256:${"c".repeat(64)}`, sizeBytes: 4096,
     }), true);
@@ -495,7 +498,7 @@ describe("Asset generation leasing", () => {
     // flight, so the generated image is dropped rather than replacing their art.
     const lost = poolDatabase(() => ({ rows: [{ settled: false }] }));
     assert.equal(await new AssetManifestStore(lost.database).completeGeneration({
-      workspaceId, itemId: "item-1", bucket: "deviludo",
+      workspaceId, itemId: "item-1", leaseToken: "30000000-0000-4000-8000-000000000001", bucket: "deviludo",
       objectKey: "assets/sprites/player_idle.png",
       sha256: `sha256:${"c".repeat(64)}`, sizeBytes: 4096,
     }), false);
@@ -504,11 +507,15 @@ describe("Asset generation leasing", () => {
   it("releases a lease with the failure reason", async () => {
     const { database, calls } = poolDatabase(() => ({ rows: [{ released: true }] }));
     assert.equal(
-      await new AssetManifestStore(database).failGeneration(workspaceId, "item-1", "Provider 429"),
+      await new AssetManifestStore(database).failGeneration(
+        workspaceId, "item-1", "30000000-0000-4000-8000-000000000001", "Provider 429",
+      ),
       true,
     );
     assert.match(calls[0].text, /deviludo\.fail_asset_generation/);
-    assert.deepEqual(calls[0].values, [workspaceId, "item-1", "Provider 429"]);
+    assert.deepEqual(calls[0].values, [
+      workspaceId, "item-1", "30000000-0000-4000-8000-000000000001", "Provider 429",
+    ]);
   });
 
   it("advances asset-ready workflows through the cross-workspace scheduler primitive", async () => {

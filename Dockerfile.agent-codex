@@ -9,7 +9,6 @@ RUN --mount=type=cache,target=/root/.npm apt-get update && DEBIAN_FRONTEND=nonin
 COPY services/sandbox-executor/task-runner.mjs /usr/local/bin/deviludo-task
 COPY services/sandbox-executor/task-io.mjs /usr/local/bin/deviludo-task-io
 COPY services/sandbox-executor/build-asset-usage.mjs /usr/local/bin/build-asset-usage.mjs
-COPY services/sandbox-executor/agent-guidance-contract.mjs /usr/local/lib/deviludo/agent-guidance-contract.mjs
 COPY scripts/e2e-evidence.mjs /usr/local/lib/deviludo/e2e-evidence.mjs
 RUN chmod 0555 /usr/local/bin/deviludo-task /usr/local/bin/deviludo-task-io
 USER 10001:10001

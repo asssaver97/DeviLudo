@@ -3645,8 +3645,35 @@ textarea {
   position: absolute;
 }
 
-.conversation-box-message .agent-generation-progress-events .progress-guidance_accepted {
+.conversation-box-message .agent-generation-progress-events .progress-superseded {
   color: var(--yellow);
+}
+
+.conversation-change-confirmation {
+  background: color-mix(in srgb, var(--yellow) 8%, var(--panel));
+  border: 1px solid color-mix(in srgb, var(--yellow) 55%, var(--line));
+  border-radius: 10px;
+  display: grid;
+  gap: 8px;
+  margin: 12px;
+  padding: 14px;
+}
+
+.conversation-change-confirmation > span {
+  color: var(--yellow);
+  font: 700 11px/1.2 var(--font-mono);
+  letter-spacing: .08em;
+}
+
+.conversation-change-confirmation > p {
+  margin: 0;
+  white-space: pre-wrap;
+}
+
+.conversation-change-confirmation > div {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
 }
 
 .conversation-box-message .agent-generation-progress-events .progress-completed {

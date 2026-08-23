@@ -4,7 +4,6 @@ import type { AgentModelOverrides } from "../lib/product/contracts";
 import {
   generateProductConversationReply,
   generateProductConversationGroupReply,
-  isDevelopmentApprovalRequest,
   streamProductConversationReply,
 } from "../services/core/src/product-conversation";
 
@@ -37,34 +36,6 @@ function claudeSettings(revision = 1, overrides: AgentModelOverrides = Object.fr
     revision,
   });
 }
-
-test("explicit development commands approve while discussions and negative commands do not", () => {
-  for (const command of [
-    "执行",
-    "开始开发",
-    "继续开发",
-    "按照当前需求开发",
-    "帮我实现这个需求",
-    "让 Agent 按照当前需求执行",
-    "先做新手引导与前 10 回合反馈层次",
-    "需求没问题，就按这个方案开始开发",
-    "增加 H 键隐藏提示并补回归测试。按照当前需求开发。",
-    "同步更新项目说明，删除过时状态，并立即按照当前需求开始开发。",
-    "Go ahead and implement it",
-    "Let's start building",
-    "Have the agent implement the current requirements",
-  ]) assert.equal(isDevelopmentApprovalRequest(command), true, command);
-
-  for (const discussion of [
-    "我想做一款合作游戏",
-    "不要开始开发",
-    "先别执行，继续讨论",
-    "如果现在开始开发，会发生什么？",
-    "可以开始执行吗？",
-    "What happens if we start building?",
-    "Do not implement this yet",
-  ]) assert.equal(isDevelopmentApprovalRequest(discussion), false, discussion);
-});
 
 test("project group chat invokes design, development, and test Agents with independent models", async () => {
   const models: string[] = [];
@@ -165,9 +136,14 @@ test("Claude design Agent receives project context and conversation history", as
       categories: ["合作", "动作"],
       features: ["十分钟一局", "实时分工"],
     },
+    projectDocumentPatch: {
+      gameplay: "两名玩家分工处理故障，每局十分钟。",
+      features: ["十分钟一局", "实时分工"],
+    },
     runtime: "CLAUDE_CODE",
     model: "claude-sonnet",
     settingsRevision: 7,
+    e2eGoalDelta: { add: [], replace: [], retire: [] },
   });
 });
 

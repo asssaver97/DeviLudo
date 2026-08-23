@@ -138,6 +138,12 @@ async function runAgent(plan) {
   const specificationInstructions = [
     `Specification: ${JSON.stringify(specification)}`,
     `Current revision notes: ${JSON.stringify(specification.revisionNotes ?? [])}`,
+    ...(typeof plan.job.payload.implementationBrief === "string"
+      ? [`Confirmed implementation change: ${plan.job.payload.implementationBrief}`]
+      : []),
+    ...(Array.isArray(plan.job.payload.e2eGoals)
+      ? [`Complete E2E goal snapshot G${plan.job.payload.e2eGoalRevision}: ${JSON.stringify(plan.job.payload.e2eGoals)}`]
+      : []),
   ];
   const e2eRepairInstructions = e2eRepairContext ? [
     "",
@@ -187,7 +193,7 @@ async function runAgent(plan) {
     ...e2eRepairInstructions,
     ...upstreamRepairInstructions,
     ...outputContractInstructions,
-    "Do not access paths outside /workspace/project except to read /run/deviludo/guidance.ndjson, the optional read-only /workspace/baseline, and, on an E2E repair pass, /workspace/inputs/e2e-repair. Include project.godot, main scene, source, tests, Linux/Windows/macOS export presets, and LICENSES.json.",
+    "Do not access paths outside /workspace/project except the optional read-only /workspace/baseline and, on an E2E repair pass, /workspace/inputs/e2e-repair. Include project.godot, main scene, source, tests, Linux/Windows/macOS export presets, and LICENSES.json.",
     ...(baselineSourceAvailable ? [
       "A read-only snapshot of the workflow-start source is available at /workspace/baseline. The current /workspace/project remains authoritative for approved work. Use the baseline only to compare behavior and restore accidentally deleted or structurally damaged existing declarations; never copy it wholesale, revert unrelated approved changes, or edit files under /workspace/baseline.",
     ] : []),
@@ -208,7 +214,6 @@ async function runAgent(plan) {
       "A source checkpoint from an interrupted attempt is already restored. Continue only the interrupted implementation; do not start a general project audit, add unrelated improvements, invent new validators, or rewrite documentation outside the current requirement.",
       "Treat completed checkpoint files as authoritative. Inspect only the files needed to finish the interrupted requirement, run one existing bounded static check, update the required manifests, and finish immediately.",
     ] : []),
-    "During development, repeatedly check /run/deviludo/guidance.ndjson. It is an append-only stream of live player guidance. Incorporate every new entry before the next major change and never overwrite it. The latest live guidance is the highest-priority scope constraint: stop broader analysis immediately when it narrows the requested change.",
     "Briefly report what you are inspecting, changing, and validating while you work; these updates are shown live to the player.",
     ...(languageInstruction ? [languageInstruction] : []),
     ...specificationInstructions,
@@ -614,72 +619,32 @@ async function runGenerationAgent(configuration, environment, prompt, onOutput, 
     try {
       const remaining = deadline - Date.now();
       if (remaining <= 0) throw new Error("Agent deadline exceeded after 80 minutes");
-      const {
-        agentGuidanceArrivedDuringRun,
-        discardAgentProjectTurnSnapshot,
-        readAgentGuidanceSnapshot,
-        restoreAgentProjectTurn,
-        snapshotAgentProjectTurn,
-        waitForAgentGuidanceQuiescence,
-      } = await import("/usr/local/lib/deviludo/agent-guidance-contract.mjs");
-      const guidanceBefore = await readAgentGuidanceSnapshot();
-      const turnSnapshot = `/workspace/.agent-turn-snapshot-${attempt}`;
-      await snapshotAgentProjectTurn("/workspace/project", turnSnapshot);
-      try {
-        let result;
-        let commandError;
+      const result = await command(
+        executable,
+        arguments_,
+        environment,
+        configuration.runtime === "CODEX_CLI" ? continuation : undefined,
+        onOutput,
+        {
+          idleTimeoutMs: 8 * 60_000,
+          overallTimeoutMs: remaining,
+          initialProgressDeadlineMs: verifyCompletion ? initialProgressDeadlineMs : undefined,
+          verifyInitialProgress: verifyCompletion,
+          completionQuiescenceMs: verifyCompletion ? completionQuiescenceMs : undefined,
+          killProcessGroup: true,
+        },
+      );
+      if (verifyCompletion) await verifyCompletion();
+      if (validateOutput) {
         try {
-          result = await command(
-            executable,
-            arguments_,
-            environment,
-            configuration.runtime === "CODEX_CLI" ? continuation : undefined,
-            onOutput,
-            {
-              idleTimeoutMs: 8 * 60_000,
-              overallTimeoutMs: remaining,
-              initialProgressDeadlineMs: verifyCompletion ? initialProgressDeadlineMs : undefined,
-              verifyInitialProgress: verifyCompletion,
-              completionQuiescenceMs: verifyCompletion ? completionQuiescenceMs : undefined,
-              killProcessGroup: true,
-            },
-          );
+          await validateOutput();
         } catch (error) {
-          commandError = error;
-        }
-        const guidanceAfter = await readAgentGuidanceSnapshot();
-        const newGuidance = agentGuidanceArrivedDuringRun(guidanceBefore, guidanceAfter);
-        if (newGuidance.length > 0) {
-          await restoreAgentProjectTurn("/workspace/project", turnSnapshot);
-          throw Object.assign(new Error(`Live player guidance arrived during the model run:\n${newGuidance.map((content, index) => `${index + 1}. ${content}`).join("\n")}`), {
-            code: "GUIDANCE_PENDING",
-            guidance: newGuidance,
+          throw Object.assign(error instanceof Error ? error : new Error("Agent output contract validation failed"), {
+            code: "OUTPUT_CONTRACT",
           });
         }
-        if (commandError) throw commandError;
-        if (verifyCompletion) await verifyCompletion();
-        if (validateOutput) {
-          try {
-            await validateOutput();
-          } catch (error) {
-            throw Object.assign(error instanceof Error ? error : new Error("Agent output contract validation failed"), {
-              code: "OUTPUT_CONTRACT",
-            });
-          }
-        }
-        const settledGuidance = await waitForAgentGuidanceQuiescence(guidanceAfter);
-        const completionGuidance = agentGuidanceArrivedDuringRun(guidanceBefore, settledGuidance);
-        if (completionGuidance.length > 0) {
-          await restoreAgentProjectTurn("/workspace/project", turnSnapshot);
-          throw Object.assign(new Error(`Live player guidance arrived before completion was committed:\n${completionGuidance.map((content, index) => `${index + 1}. ${content}`).join("\n")}`), {
-            code: "GUIDANCE_PENDING",
-            guidance: completionGuidance,
-          });
-        }
-        return result;
-      } finally {
-        await discardAgentProjectTurnSnapshot(turnSnapshot);
       }
+      return result;
     } catch (error) {
       flushAgentOutput();
       lastError = error instanceof Error ? error : new Error("Agent CLI failed");
@@ -687,35 +652,21 @@ async function runGenerationAgent(configuration, environment, prompt, onOutput, 
       const maxAttemptsForFailure = failure.code === "INCOMPLETE_OUTPUT"
         ? 4
         : failure.code === "OUTPUT_CONTRACT" ? 3
-        : failure.code === "GUIDANCE_PENDING" ? 3
         : failure.code === "PROVIDER_ERROR" ? maxProviderAttempts : 2;
       if (attempt >= maxAttemptsForFailure || !failure.recoverable) {
         throw new Error(`Agent generation failed [${failure.code}]: ${failure.detail}`);
       }
-      if (failure.code === "GUIDANCE_PENDING") {
-        const guidance = Array.isArray(lastError.guidance) ? lastError.guidance : [];
-        resumeInstruction = [
-          "Live player guidance arrived while your previous tool call was still running. That previous result cannot be accepted as complete.",
-          "The following entries are the highest-priority current scope, in arrival order:",
-          ...guidance.map((content, index) => `${index + 1}. ${content}`),
-          "The project worktree was restored automatically to the exact snapshot taken before that model call. Do not guess at or manually revert earlier files.",
-          "Resume the same session, inspect the restored files, implement only the current guidance, and run one bounded validation pass.",
-        ].join("\n");
-      } else if (failure.code === "INCOMPLETE_OUTPUT") {
-        resumeInstruction = "Resume from the current session and files now. Your previous response stopped before changing any source files. Make the smallest concrete source change required by the latest player guidance or reported E2E failure. For normal development, update only the directly affected automated tests and manifest mapping; for an E2E repair, preserve valid tests and manifests unless the report proves they are wrong. Run one bounded validation pass, then finish. Do not repeat the project audit or merely describe the next step.";
+      if (failure.code === "INCOMPLETE_OUTPUT") {
+        resumeInstruction = "Resume from the current session and files now. Your previous response stopped before changing any source files. Make the smallest concrete source change required by the frozen implementation brief or reported E2E failure. For normal development, update only the directly affected automated tests and manifest mapping; for an E2E repair, preserve valid tests and manifests unless the report proves they are wrong. Run one bounded validation pass, then finish. Do not repeat the project audit or merely describe the next step.";
       } else if (failure.code === "OUTPUT_CONTRACT") {
         resumeInstruction = `Your previous result failed the executor output contract: ${failure.detail}. Fix every named agent.json entry, preserve completed game changes, run one bounded validation, and finish.`;
       }
-      const delaySeconds = failure.code === "GUIDANCE_PENDING"
-        ? 0
-        : agentRetryDelaySeconds(failure, attempt);
+      const delaySeconds = agentRetryDelaySeconds(failure, attempt);
       if (Date.now() + delaySeconds * 1_000 >= deadline) {
         throw new Error(`Agent generation failed [DEADLINE_EXCEEDED]: Provider did not recover before the shared 80-minute deadline; last failure: ${failure.detail}`);
       }
       const nextAttempt = attempt + 1;
-      emitProgress("PHASE", failure.code === "GUIDANCE_PENDING"
-        ? "执行期间收到新的实时指导；旧范围结果已拒绝，正在同一会话按最新范围继续"
-        : `Agent CLI 暂时中断 [${failure.code}]：${failure.detail}；${delaySeconds} 秒后恢复同一会话（${nextAttempt}/${maxAttemptsForFailure}）`);
+      emitProgress("PHASE", `Agent CLI 暂时中断 [${failure.code}]：${failure.detail}；${delaySeconds} 秒后恢复同一会话（${nextAttempt}/${maxAttemptsForFailure}）`);
       if (delaySeconds > 0) await new Promise(resolve => setTimeout(resolve, delaySeconds * 1000));
     }
   }
@@ -742,7 +693,6 @@ function claudeGenerationArguments(configuration, prompt, sessionId, resume) {
 function classifyAgentFailure(error) {
   const message = error instanceof Error ? error.message : String(error);
   const detail = sanitizeError(message.replace(/^claude exited [^:]+:\s*/i, "").replace(/^codex exited [^:]+:\s*/i, ""));
-  if (error?.code === "GUIDANCE_PENDING") return { code: "GUIDANCE_PENDING", detail, recoverable: true };
   if (error?.code === "OUTPUT_CONTRACT") return { code: "OUTPUT_CONTRACT", detail, recoverable: true };
   // Codex refreshes its account model catalogue independently from the
   // Responses request. A CDN/proxy can reject that refresh while the official

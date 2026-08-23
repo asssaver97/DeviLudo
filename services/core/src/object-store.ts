@@ -68,7 +68,7 @@ export class CoreObjectStore {
   }>) {
     const content = Buffer.from(JSON.stringify(input.specification));
     const sha256 = `sha256:${createHash("sha256").update(content).digest("hex")}`;
-    const key = `workspaces/${input.workspaceId}/projects/${input.projectId}/workflows/${input.workflowId}/specification.json`;
+    const key = `workspaces/${input.workspaceId}/projects/${input.projectId}/specifications/${sha256.slice(7, 23)}/specification.json`;
     await this.client.send(new PutObjectCommand({ Bucket: this.bucket, Key: key, Body: content, ContentType: "application/json", Metadata: { sha256 } }));
     return Object.freeze({ bucket: this.bucket, key, sha256, sizeBytes: content.length });
   }

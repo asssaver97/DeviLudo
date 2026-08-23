@@ -38,6 +38,7 @@ function lease(overrides: Partial<AssetGenerationLease> = {}): AssetGenerationLe
     dimensions: "32x32",
     frameCount: 4,
     attempt: 1,
+    leaseToken: "30000000-0000-4000-8000-000000000004",
     ...overrides,
   });
 }
@@ -84,7 +85,7 @@ function harness(options: Readonly<{
           completed.push({ itemId: input.itemId, objectKey: input.objectKey });
           return true;
         },
-        failGeneration: async (_workspace: string, id: string, error: string) => {
+        failGeneration: async (_workspace: string, id: string, _leaseToken: string, error: string) => {
           failures.push({ itemId: id, error });
           return true;
         },

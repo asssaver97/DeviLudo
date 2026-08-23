@@ -71,6 +71,7 @@ export type AssetGenerationLease = Readonly<{
   dimensions: string | null;
   frameCount: number | null;
   attempt: number;
+  leaseToken: string;
 }>;
 
 export type AssetRerunResult = Readonly<{
@@ -90,6 +91,7 @@ type AssetGenerationLeaseRow = Readonly<{
   dimensions: string | null;
   frameCount: string | null;
   attempt: string;
+  leaseToken: string;
 }>;
 
 function itemFromRow(row: AssetItemRow): AssetItem {
@@ -315,7 +317,7 @@ export class AssetManifestStore {
     const result = await this.database.pool.query<AssetGenerationLeaseRow>(
       `SELECT "workspaceId"::text, "projectId"::text, "itemId"::text, "assetKey",
               "assetType", "description", "generationPrompt", "dimensions",
-              "frameCount"::text, "attempt"::text
+              "frameCount"::text, "attempt"::text, "leaseToken"::text
          FROM deviludo.claim_asset_generation($1::integer, $2::integer)`,
       [leaseSeconds, batchSize],
     );
@@ -330,6 +332,7 @@ export class AssetManifestStore {
       dimensions: row.dimensions,
       frameCount: row.frameCount === null ? null : Number(row.frameCount),
       attempt: Number(row.attempt),
+      leaseToken: row.leaseToken,
     })));
   }
 
@@ -337,6 +340,7 @@ export class AssetManifestStore {
   async completeGeneration(input: Readonly<{
     workspaceId: string;
     itemId: string;
+    leaseToken: string;
     bucket: string;
     objectKey: string;
     sha256: string;
@@ -344,18 +348,18 @@ export class AssetManifestStore {
   }>): Promise<boolean> {
     const result = await this.database.pool.query<{ settled: boolean }>(
       `SELECT deviludo.complete_asset_generation(
-         $1::uuid, $2::uuid, $3::text, $4::text, $5::text, $6::bigint
+         $1::uuid, $2::uuid, $3::uuid, $4::text, $5::text, $6::text, $7::bigint
        ) AS settled`,
-      [input.workspaceId, input.itemId, input.bucket, input.objectKey, input.sha256, String(input.sizeBytes)],
+      [input.workspaceId, input.itemId, input.leaseToken, input.bucket, input.objectKey, input.sha256, String(input.sizeBytes)],
     );
     return result.rows[0]?.settled === true;
   }
 
   /** Release a leased item after a failed attempt. */
-  async failGeneration(workspaceId: string, itemId: string, error: string): Promise<boolean> {
+  async failGeneration(workspaceId: string, itemId: string, leaseToken: string, error: string): Promise<boolean> {
     const result = await this.database.pool.query<{ released: boolean }>(
-      "SELECT deviludo.fail_asset_generation($1::uuid, $2::uuid, $3::text) AS released",
-      [workspaceId, itemId, error],
+      "SELECT deviludo.fail_asset_generation($1::uuid, $2::uuid, $3::uuid, $4::text) AS released",
+      [workspaceId, itemId, leaseToken, error],
     );
     return result.rows[0]?.released === true;
   }

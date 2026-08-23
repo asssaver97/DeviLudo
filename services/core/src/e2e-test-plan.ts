@@ -161,7 +161,7 @@ export async function generateE2eTestPlan(input: Readonly<{
   testFixture?: boolean;
 }>): Promise<GeneratedE2eTestPlan> {
   const specification = record(input.context.approvedSpecification);
-  const requirements = specificationRequirementCatalog(specification);
+  const requirements = planningRequirements(input.context.e2eGoals, specification);
   if (requirements.length < 1) throw new Error("Approved specification has no testable requirements");
   const assetPlacementPlan = buildAssetPlacementPlan(input.context);
   const materializedAssetKeys = assetPlacementPlan.plannedAssetKeys;
@@ -260,6 +260,33 @@ export async function generateE2eTestPlan(input: Readonly<{
     const reason = error instanceof Error ? error.message : "invalid structured plan";
     throw new Error(`Test Agent returned an invalid project plan: ${reason}`, { cause: error });
   }
+}
+
+function planningRequirements(
+  value: unknown,
+  specification: Readonly<Record<string, unknown>>,
+): ReturnType<typeof specificationRequirementCatalog> {
+  if (value === undefined) return specificationRequirementCatalog(specification);
+  if (!Array.isArray(value) || value.length < 1) throw new Error("Current E2E goal snapshot is invalid");
+  const ids = new Set<string>();
+  return Object.freeze(value.map(entry => {
+    if (!entry || typeof entry !== "object" || Array.isArray(entry)) {
+      throw new Error("Current E2E goal snapshot is invalid");
+    }
+    const goal = entry as Record<string, unknown>;
+    if (typeof goal.id !== "string" || !/^[a-z0-9][a-z0-9-]{0,119}$/.test(goal.id)
+      || typeof goal.description !== "string" || !goal.description.trim()
+      || !["CORE_LOOP", "ACCEPTANCE"].includes(String(goal.source)) || ids.has(goal.id)) {
+      throw new Error("Current E2E goal snapshot is invalid");
+    }
+    ids.add(goal.id);
+    return Object.freeze({
+      requirementId: goal.id,
+      description: goal.description.trim(),
+      source: goal.source as "CORE_LOOP" | "ACCEPTANCE",
+      verificationClass: "PLAYER_INTERACTION" as const,
+    });
+  }));
 }
 
 function assertConcreteProjectPlan(manifest: TestManifest): void {

@@ -15,7 +15,7 @@ test("the fresh baseline fixes pool kinds and contains the durable workflow prim
     "conversation_messages", "project_documents", "project_document_revisions",
     "instance_agent_settings", "project_creation_receipts", "workflow_instances",
     "workflow_events", "jobs", "external_signals", "job_progress_events",
-    "job_guidance_messages", "operation_receipts",
+    "implementation_change_requests", "workflow_e2e_goal_revisions", "operation_receipts",
     "project_source_revisions",
     "artifacts", "artifact_inputs", "object_cleanup_queue", "executor_receipts",
     "asset_manifests", "asset_items", "e2e_test_plans",
@@ -32,7 +32,8 @@ test("every workspace-owned table fails closed with forced row isolation", async
     "projects", "project_source_revisions", "project_documents", "project_document_revisions",
     "project_conversations", "conversation_messages", "agent_installations",
     "workflow_instances", "workflow_events",
-    "jobs", "external_signals", "job_progress_events", "job_guidance_messages",
+    "jobs", "external_signals", "job_progress_events", "implementation_change_requests",
+    "workflow_e2e_goal_revisions",
     "operation_receipts", "workspace_claim_fairness",
     "artifacts", "artifact_inputs", "object_cleanup_queue", "e2e_policy_locks", "e2e_policy_decisions", "e2e_test_plans", "e2e_regression_traces",
     "executor_receipts", "project_creation_receipts",
@@ -57,16 +58,16 @@ test("every workspace-owned table fails closed with forced row isolation", async
   assert.doesNotMatch(sql, /users|sessions|membership|invitation|github|repository_connection|password_hash|argon2/i);
   assert.doesNotMatch(sql, /'GITHUB_SYNC'|'REPOSITORY_SYNC_RECEIPT'|'SOURCE'/);
   assert.match(sql, /CREATE TABLE deviludo\.executor_receipts[\s\S]*receipt->>'simulated' = 'false'/);
-  assert.match(sql, /CREATE TABLE deviludo\.job_progress_events[\s\S]*event_kind IN \('PHASE', 'AGENT_OUTPUT', 'GUIDANCE_ACCEPTED', 'COMPLETED', 'FAILED'\)/);
-  assert.match(sql, /CREATE TABLE deviludo\.job_guidance_messages[\s\S]*state IN \('PENDING', 'DELIVERED', 'REJECTED'\)/);
-  assert.match(sql, /FUNCTION deviludo\.fail_job[\s\S]*job\.kind = 'AGENT_GENERATION'[\s\S]*job_guidance_messages[\s\S]*state = 'PENDING'/);
+  assert.match(sql, /CREATE TABLE deviludo\.job_progress_events[\s\S]*event_kind IN \('PHASE', 'AGENT_OUTPUT', 'SUPERSEDED', 'COMPLETED', 'FAILED'\)/);
+  assert.doesNotMatch(sql, /job_guidance_messages|GUIDANCE_ACCEPTED/);
+  assert.match(sql, /CREATE TABLE deviludo\.implementation_change_requests[\s\S]*decision_idempotency_key text/);
+  assert.match(sql, /CREATE UNIQUE INDEX implementation_change_requests_one_pending/);
+  assert.match(sql, /CREATE TABLE deviludo\.workflow_e2e_goal_revisions[\s\S]*goals_digest text NOT NULL/);
   assert.match(sql, /automatic_build_repair := job\.kind = 'ARTIFACT_BUILD'[\s\S]*position\('BUILD_PRODUCT:' IN p_reason\) > 0/);
   assert.match(sql, /terminal := automatic_build_repair OR job\.attempt >= job\.max_attempts/);
   assert.match(sql, /automatic_build_repair[\s\S]*'repairFailureJobId', job\.id[\s\S]*'repairFailureKind', 'ARTIFACT_BUILD'[\s\S]*'repairFailureSummary', left\(p_reason, 1800\)/);
   assert.match(sql, /snapshot_artifact_build_assets[\s\S]*source_job\.receipt #> '\{assetManifest,items\}'[\s\S]*latest_agent\.state = 'SUCCEEDED'/);
-  assert.match(sql, /FUNCTION deviludo\.recover_expired_jobs[\s\S]*replay_guidance AS[\s\S]*job_guidance_messages/);
   assert.match(sql, /FUNCTION deviludo\.recover_expired_jobs[\s\S]*failed_workflows AS[\s\S]*UPDATE deviludo\.workflow_instances[\s\S]*terminal\.workflow_id/);
-  assert.match(sql, /GRANT SELECT, UPDATE ON deviludo\.job_guidance_messages TO deviludo_claim_executor/);
   assert.match(sql, /credential_secret_ref text NOT NULL/);
   assert.match(sql, /api_key_mask text NOT NULL/);
   assert.match(sql, /primary_model text NOT NULL CHECK/);
@@ -125,7 +126,7 @@ test("every workspace-owned table fails closed with forced row isolation", async
   assert.match(sql, /fail_local_git_commit[\s\S]*attempts >= 3[\s\S]*GIT_COMMIT_FAILED/);
   assert.doesNotMatch(sql, /schedule_e2e_protocol_revalidation|e2eProtocolRevalidation/);
   assert.match(sql, /E2E_REGRESSION/);
-  assert.match(sql, /CREATE TABLE deviludo\.e2e_test_plans[\s\S]*PRIMARY KEY \(workspace_id, workflow_id, target_platform\)/);
+  assert.match(sql, /CREATE TABLE deviludo\.e2e_test_plans[\s\S]*PRIMARY KEY \(workspace_id, workflow_id, source_revision, goal_revision, target_platform\)/);
   assert.match(sql, /GRANT SELECT, INSERT ON deviludo\.e2e_test_plans TO deviludo_api/);
   assert.match(sql, /e2e_policy_decisions/);
   assert.match(sql, /current E2E output set is invalid/);
@@ -148,6 +149,28 @@ test("Agent reruns select only the latest historical draft specification", async
   assert.match(migration, /latest_specification\.producing_job_id IS NULL/);
   assert.match(migration, /ORDER BY latest_specification\.created_at DESC, latest_specification\.id DESC/);
   assert.match(migration, /replace\(definition, old_condition, latest_condition\)/);
+});
+
+test("conversation intent migration removes legacy guidance progress before tightening its constraint", async () => {
+  const migration = await readFile(
+    new URL("../infra/postgres/migrations/058_conversation_intent_rerun.sql", import.meta.url),
+    "utf8",
+  );
+  const dropConstraint = migration.indexOf("DROP CONSTRAINT job_progress_events_event_kind_check");
+  const deleteLegacyRows = migration.indexOf("DELETE FROM deviludo.job_progress_events WHERE event_kind = 'GUIDANCE_ACCEPTED'");
+  const addConstraint = migration.indexOf("event_kind IN ('PHASE', 'AGENT_OUTPUT', 'SUPERSEDED', 'COMPLETED', 'FAILED')");
+  assert.ok(dropConstraint >= 0 && deleteLegacyRows > dropConstraint && addConstraint > deleteLegacyRows);
+});
+
+test("confirmed conversation reruns reset automatic repair budgets", async () => {
+  const migration = await readFile(
+    new URL("../infra/postgres/migrations/059_reset_repair_budget_after_intent_rerun.sql", import.meta.url),
+    "utf8",
+  );
+  assert.match(migration, /OR NOT \(manual_agent\.payload \? 'repairFromE2eJobId'\)/);
+  assert.match(migration, /NOT \(manual_agent\.payload \? 'repairFailureKind'\)/);
+  assert.match(migration, /pg_get_functiondef\(complete_target\)/);
+  assert.match(migration, /pg_get_functiondef\(fail_target\)/);
 });
 
 test("manual Agent reruns retain product-failure evidence and reset the bounded repair cycle", async () => {
@@ -508,6 +531,7 @@ test("asset generation is leased, attempt-bounded, and never overwrites a user u
   assert.match(claim, /item\.generation_prompt IS NOT NULL/);
   assert.match(claim, /item\.generation_attempt < 3/);
   assert.match(claim, /generation_attempt = item\.generation_attempt \+ 1/);
+  assert.match(claim, /generation_lease_token = gen_random_uuid\(\)/);
   // Without configured settings there is no credential to call with, so claiming
   // would only burn attempts.
   assert.match(claim, /IF NOT EXISTS \([\s\S]*SELECT 1 FROM deviludo\.instance_agent_settings[\s\S]*agent_runtime = 'CODEX_CLI'[\s\S]*agent_runtime = 'CLAUDE_CODE' AND image_model IS NOT NULL[\s\S]*\) THEN RETURN; END IF;/);
@@ -519,6 +543,7 @@ test("asset generation is leased, attempt-bounded, and never overwrites a user u
   // A user upload that lands mid-generation wins: settlement only applies to items
   // still leased, so a generated image cannot replace the art they chose.
   assert.match(complete, /AND status = 'generating'/);
+  assert.match(complete, /generation_lease_token = p_lease_token/);
   assert.match(complete, /SET status = 'generated', bucket = p_bucket/);
   assert.match(complete, /generation_lease_expires_at = NULL/);
   // A transient provider error retries; the last attempt settles as failed so the
@@ -526,6 +551,7 @@ test("asset generation is leased, attempt-bounded, and never overwrites a user u
   assert.match(fail, /CASE WHEN generation_attempt >= 3 THEN 'failed' ELSE 'planned' END/);
   assert.match(fail, /generation_lease_expires_at = NULL/);
   assert.match(fail, /AND status = 'generating'/);
+  assert.match(fail, /generation_lease_token = p_lease_token/);
 
   // The lease columns are bounded and tied to the status they describe.
   assert.match(sql, /ADD COLUMN generation_attempt integer NOT NULL DEFAULT 0\s*\n\s*CHECK \(generation_attempt BETWEEN 0 AND 3\)/);
@@ -533,7 +559,7 @@ test("asset generation is leased, attempt-bounded, and never overwrites a user u
 
   // Generation is driven by the scheduler role, not an executor lease.
   assert.match(sql, /GRANT EXECUTE ON FUNCTION deviludo\.claim_asset_generation\(integer, integer\) TO deviludo_scheduler/);
-  assert.match(sql, /GRANT EXECUTE ON FUNCTION deviludo\.fail_asset_generation\(uuid, uuid, text\) TO deviludo_scheduler/);
+  assert.match(sql, /GRANT EXECUTE ON FUNCTION deviludo\.fail_asset_generation\(uuid, uuid, uuid, text\) TO deviludo_scheduler/);
   assert.match(sql, /GRANT SELECT, INSERT, UPDATE ON deviludo\.instance_agent_settings TO deviludo_api/);
   assert.match(sql, /GRANT SELECT ON deviludo\.instance_agent_settings TO deviludo_scheduler, deviludo_sandbox/);
   assert.match(sql, /GRANT SELECT ON deviludo\.e2e_regression_traces\s+TO deviludo_scheduler, deviludo_sandbox, deviludo_claim_executor/);

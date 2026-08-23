@@ -9,6 +9,7 @@ services:
       DEVILUDO_DEFAULT_WORKFLOW_PROFILE: RELEASE
       DEVILUDO_REQUIRED_READY_POOLS: WEB,CORE,E2E_LINUX,E2E_WINDOWS,E2E_MACOS
       DEVILUDO_PROJECT_NAMING_TEST_RESPONSE: 时间回廊
+      DEVILUDO_INTENT_AGENT_TEST_MODE: "1"
       DEVILUDO_CONVERSATION_AGENT_TEST_RESPONSE: '{"reply":"测试设计 Agent 已结合项目上下文生成回复。","options":["强化资源管理","增加随机事件"],"applyToDraft":false,"readyForDevelopment":true,"projectDocument":{"introduction":"测试设计 Agent 已整理当前游戏需求。","gameplay":"围绕玩家确认的核心循环进行操作、反馈与结算。","categories":["自动化测试","游戏设计"],"features":["需求对话实时同步","可执行的核心循环"]}}'
       DEVILUDO_PROJECT_IMPORT_TEST_RESPONSE: '{"name":"时序回廊","introduction":"一款围绕时间循环展开的像素解谜游戏。","gameplay":"探索场景、记录线索并重置时间线来改变事件结果。","categories":["解谜","冒险"],"features":["时间循环","状态持久化"],"coreLoop":["探索","推理","重置"],"playerExperience":"在重复中逐步掌握因果关系。","acceptanceCriteria":["可以完成一次时间循环"],"gameContent":"玩家探索时间回廊，通过循环改变事件结果。","currentDevelopmentState":"核心探索与时间重置逻辑已存在，仍需补齐完整关卡流程。","completedWork":["基础探索","时间重置"],"remainingWork":["完整关卡流程"],"startupFlow":"从项目主场景进入标题界面，再开始新循环。","startupIssues":[],"risks":["状态持久化需要回归验证"],"recommendedPlan":["验证核心循环","补齐关卡流程","增加真实操作 E2E"],"questions":[]}'
       DEVILUDO_E2E_TEST_PLAN_FIXTURE: "1"

@@ -256,9 +256,8 @@ test("Agent generation preserves partial work and retries transient Provider fai
   const checkpointRestore = await readFile(new URL("../services/sandbox-executor/src/checkpoint-restore.ts", import.meta.url), "utf8");
   assert.match(runner, /const maxProviderAttempts = 16/);
   assert.match(runner, /attempt <= maxProviderAttempts/);
-  assert.match(runner, /failure\.code === "INCOMPLETE_OUTPUT"[\s\S]*\? 4[\s\S]*failure\.code === "GUIDANCE_PENDING" \? 3[\s\S]*failure\.code === "PROVIDER_ERROR" \? maxProviderAttempts : 2/);
-  assert.match(runner, /readAgentGuidanceSnapshot/);
-  assert.match(runner, /agentGuidanceArrivedDuringRun/);
+  assert.match(runner, /failure\.code === "INCOMPLETE_OUTPUT"[\s\S]*\? 4[\s\S]*failure\.code === "OUTPUT_CONTRACT" \? 3[\s\S]*failure\.code === "PROVIDER_ERROR" \? maxProviderAttempts : 2/);
+  assert.doesNotMatch(runner, /readAgentGuidanceSnapshot|agentGuidanceArrivedDuringRun|GUIDANCE_PENDING/);
   assert.doesNotMatch(runner, /TEST_MANIFEST_INVALID|testManifestValidationIssues|requirementCatalog/);
   assert.match(runner, /cross-platform E2E node owns test-plan generation/);
   assert.match(runner, /Object\.hasOwn\(value, "testManifest"\)/);
@@ -267,8 +266,8 @@ test("Agent generation preserves partial work and retries transient Provider fai
   assert.match(runner, /isRepairPass \? 8 \* 60_000 : undefined/);
   assert.doesNotMatch(claudeImage, /e2e-repair-contract/);
   assert.doesNotMatch(codexImage, /e2e-repair-contract/);
-  assert.match(claudeImage, /COPY services\/sandbox-executor\/agent-guidance-contract\.mjs \/usr\/local\/lib\/deviludo\/agent-guidance-contract\.mjs/);
-  assert.match(codexImage, /COPY services\/sandbox-executor\/agent-guidance-contract\.mjs \/usr\/local\/lib\/deviludo\/agent-guidance-contract\.mjs/);
+  assert.doesNotMatch(claudeImage, /agent-guidance-contract/);
+  assert.doesNotMatch(codexImage, /agent-guidance-contract/);
   assert.match(runner, /idleTimeoutMs: 8 \* 60_000/);
   assert.match(runner, /classifyAgentFailure/);
   assert.match(runner, /codex_models_manager\|failed to refresh available models/);
@@ -296,8 +295,7 @@ test("Agent generation preserves partial work and retries transient Provider fai
   assert.match(runner, /A node detached from the scene tree or without a live root viewport must never be published as visible or enabled/);
   assert.match(runner, /Never invent a fallback viewport size to make a detached node appear actionable/);
   assert.match(runner, /If real dialog content exceeds the root client, fix the production UI with a bounded window and scrollable content/);
-  assert.match(runner, /waitForAgentGuidanceQuiescence\(guidanceAfter\)/);
-  assert.match(runner, /Live player guidance arrived before completion was committed/);
+  assert.doesNotMatch(runner, /waitForAgentGuidanceQuiescence|Live player guidance|guidance\.ndjson/);
   assert.match(runner, /Every control reported visible and enabled for an action must be connected to its production input handler/);
   assert.match(runner, /successful, rejected, and asynchronously completed actions must all converge on a final UI refresh/);
   assert.match(runner, /Math\.min\(80 \* 60_000/);
@@ -499,10 +497,9 @@ test("Core keeps Docker authority in executord and isolates Agent and Steam egre
   assert.match(taskRunner, /if \(acceptedAfterProgress\)/);
   assert.match(taskRunner, /detached: options\.killProcessGroup === true/);
   assert.match(taskRunner, /process\.kill\(-child\.pid, signal\)/);
-  assert.match(taskRunner, /The latest live guidance is the highest-priority scope constraint/);
+  assert.doesNotMatch(taskRunner, /live guidance|guidance\.ndjson/);
   assert.match(taskRunner, /The next controlled builder stage performs real Godot validation/);
   assert.match(taskRunner, /prepareGodotProject\("\/workspace\/project", plan\.job\.payload\.targetPlatforms\)/);
-  assert.match(taskRunner, /read \/run\/deviludo\/guidance\.ndjson/);
   assert.match(taskRunner, /event\.event\?\.delta\?\.text/);
   assert.match(taskRunner, /kind === "AGENT_OUTPUT" \? sanitized : sanitized\.trim\(\)/);
   assert.doesNotMatch(taskRunner, /String\(content\).*\.trim\(\)\.slice\(0, 4000\)/);
@@ -857,7 +854,7 @@ test("a validated Test Agent manifest is frozen across product repair and E2E re
   assert.match(api, /readFrozenE2eTestPlan/);
   assert.match(api, /freezeE2eTestPlan/);
   assert.match(api, /projectTestContract: frozen\.testManifest/);
-  assert.match(repository, /ON CONFLICT \(workspace_id, workflow_id, target_platform\) DO NOTHING/);
+  assert.match(repository, /ON CONFLICT \(workspace_id, workflow_id, source_revision, goal_revision, target_platform\) DO NOTHING/);
   assert.match(repository, /Frozen E2E test plan belongs to another project/);
 });
 

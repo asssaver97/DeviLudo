@@ -167,6 +167,7 @@ async function generateOne(
     return await repository.assets.completeGeneration({
       workspaceId: lease.workspaceId,
       itemId: lease.itemId,
+      leaseToken: lease.leaseToken,
       bucket: stored.bucket,
       objectKey: stored.key,
       sha256: stored.sha256,
@@ -176,7 +177,7 @@ async function generateOne(
     const message = error instanceof Error ? error.message : "图片生成失败";
     // Releasing the lease is what allows a retry, so a failure here would strand
     // the item until the lease expires. Log it and let expiry recover.
-    await repository.assets.failGeneration(lease.workspaceId, lease.itemId, message)
+    await repository.assets.failGeneration(lease.workspaceId, lease.itemId, lease.leaseToken, message)
       .catch(reason => console.error(JSON.stringify({
         level: "error",
         event: "asset_generation_release_failed",

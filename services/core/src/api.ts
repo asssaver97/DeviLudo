@@ -2,7 +2,16 @@ import { createHash, createPublicKey, randomBytes, randomUUID, timingSafeEqual }
 import type { Socket } from "node:net";
 import { readFileSync } from "node:fs";
 import Fastify, { type FastifyRequest } from "fastify";
-import type { ProductConversation, ProductProjectDetail, ProjectAgentRole, WorkspaceSummary } from "@/lib/product/contracts";
+import type {
+  ConversationIntentDecision,
+  ConversationWorkflowAction,
+  E2eGoalDelta,
+  ImplementationChangeRequest,
+  ProductConversation,
+  ProductProjectDetail,
+  ProjectAgentRole,
+  WorkspaceSummary,
+} from "@/lib/product/contracts";
 import {
   assertPoolOperatingSystem,
   isServerPoolKind,
@@ -45,11 +54,11 @@ import {
 } from "./project-import";
 import {
   generateProductConversationGroupReply,
-  isDevelopmentApprovalRequest,
   streamProductConversationGroupReply,
   type ConversationAgentProjectContext,
   type ProductConversationGroupReply,
 } from "./product-conversation";
+import { classifyConversationIntent } from "./conversation-intent";
 import {
   generateE2ePlayerDecision,
   MAX_PLAYER_POLICY_REQUEST_BYTES,
@@ -65,7 +74,11 @@ import type {
 } from "./repository";
 import { E2ePkiIssuer } from "./e2e-pki";
 import { E2E_INFRASTRUCTURE_DOMAINS } from "@/lib/runtime/e2e-failure";
-import { createInitialProjectDocument, parseProjectDocumentContent } from "@/lib/product/project-document";
+import {
+  createInitialProjectDocument,
+  parseProjectDocumentContent,
+  synchronizeSpecificationWithProjectDocument,
+} from "@/lib/product/project-document";
 import { parseResponseLanguage, type ResponseLanguage } from "@/lib/product/response-language";
 import { ProjectSourceStore } from "./project-sources";
 import {
@@ -854,7 +867,7 @@ export async function runApi(
         onStage: phase => write({ type: "status", phase }),
         onDelta: (agentRole, delta) => write({ type: "agent_delta", agentRole, delta }),
       });
-      if (result.payload.conversation.messages.slice(-3).some(
+      if (result.payload.changeRequest?.state === "APPLIED" || result.payload.conversation.messages.slice(-3).some(
         message => message.metadata.projectDocumentUpdated === true,
       )) {
         write({ type: "project_document", project: result.payload.project });
@@ -871,6 +884,94 @@ export async function runApi(
       if (!reply.raw.destroyed && !reply.raw.writableEnded) reply.raw.end();
     }
   });
+
+  app.post<{ Params: { projectId: string; changeRequestId: string } }>(
+    "/v1/projects/:projectId/change-requests/:changeRequestId/decision",
+    async (request, reply) => {
+      const principal = productAccess(request, config);
+      const workspace = await requireSelectedWorkspace(request, repository, principal);
+      const body = objectBody(request.body);
+      const decision = body.decision;
+      const idempotencyKey = body.idempotencyKey;
+      const responseLanguage = parseResponseLanguage(body.responseLanguage);
+      if (!UUID.test(request.params.projectId) || !UUID.test(request.params.changeRequestId)
+        || !["CONFIRM", "REJECT"].includes(String(decision))
+        || typeof idempotencyKey !== "string" || idempotencyKey.length < 8 || idempotencyKey.length > 300) {
+        return reply.code(400).send({ code: "INVALID_CHANGE_DECISION" });
+      }
+      const project = await repository.readProject(workspace.id, request.params.projectId);
+      const decisionState = project ? await repository.readImplementationChangeDecision(
+        workspace.id, project.id, request.params.changeRequestId,
+      ) : null;
+      if (!project || !decisionState) {
+        return reply.code(404).send({ code: "CHANGE_REQUEST_NOT_FOUND" });
+      }
+      const changeRequest = decisionState.request;
+      if (!["PENDING", "WAITING_FOR_ANALYSIS"].includes(changeRequest.state)) {
+        if (decisionState.decision !== decision
+          || decisionState.decisionIdempotencyKey !== idempotencyKey) {
+          return reply.code(409).send({ code: "CHANGE_DECISION_CONFLICT" });
+        }
+        if (changeRequest.state === "SUPERSEDED") {
+          return reply.send({
+            project,
+            ...(project.pendingImplementationChange
+              ? { changeRequest: project.pendingImplementationChange }
+              : { changeRequestId: changeRequest.id }),
+            decision,
+            workflowAction: project.pendingImplementationChange
+              ? "AWAITING_CONFIRMATION" as const : "NONE" as const,
+          });
+        }
+        const workflowAction: ConversationWorkflowAction = decision === "REJECT" ? "NONE"
+          : decisionState.appliedWorkflowId === decisionState.sourceWorkflowId
+            ? "AGENT_RERUN_STARTED" : "NEW_ITERATION_STARTED";
+        return reply.send({ project, changeRequestId: changeRequest.id, decision, workflowAction });
+      }
+      if (decision === "CONFIRM" && changeRequest.state === "PENDING"
+        && changeRequest.baseDocumentRevision !== project.document.revision) {
+        const plan = await replanImplementationChange({
+          repository, agentSecrets, workspaceId: workspace.id, project, changeRequest, responseLanguage,
+        });
+        const replacement = await repository.createImplementationChangeRequest({
+          workspaceId: workspace.id,
+          projectId: project.id,
+          workflowId: project.workflowId,
+          conversationId: changeRequest.conversationId,
+          summary: changeRequest.summary,
+          implementationBrief: plan.implementationBrief,
+          projectDocumentPatch: plan.projectDocumentPatch,
+          e2eGoalDelta: plan.e2eGoalDelta,
+          explicitExecution: false,
+          idempotencyKey: `replan:${changeRequest.id}:${project.document.revision}`,
+          supersededChangeRequestId: changeRequest.id,
+          supersededDecisionIdempotencyKey: idempotencyKey,
+        });
+        return reply.send({
+          project: await repository.readProject(workspace.id, project.id),
+          changeRequest: replacement,
+          decision,
+          workflowAction: "AWAITING_CONFIRMATION" as const,
+        });
+      }
+      let workflowAction: ConversationWorkflowAction = "NONE";
+      if (decision === "REJECT") {
+        await repository.rejectImplementationChange(workspace.id, project.id, changeRequest.id, idempotencyKey);
+      } else {
+        workflowAction = await applyConfirmedConversationChange({
+          repository, objectStore, workspaceId: workspace.id, project, changeRequest,
+          actorId: principal.actorId, responseLanguage,
+          decisionIdempotencyKey: idempotencyKey,
+        });
+      }
+      return reply.send({
+        project: await repository.readProject(workspace.id, project.id),
+        changeRequestId: changeRequest.id,
+        decision,
+        workflowAction,
+      });
+    },
+  );
 
   app.post<{ Params: { projectId: string } }>(
     "/v1/projects/:projectId/specification",
@@ -1391,6 +1492,14 @@ export async function runApi(
     if (job.jobKind !== "E2E_TEST" || !job.targetOperatingSystem) {
       return reply.code(409).send({ code: "E2E_TEST_PLAN_JOB_INVALID" });
     }
+    const sourceRevision = Number(job.payload.sourceRevision);
+    const goalRevision = Number(job.payload.e2eGoalRevision);
+    const goalDigest = job.payload.e2eGoalDigest;
+    if (!Number.isSafeInteger(sourceRevision) || sourceRevision < 1
+      || !Number.isSafeInteger(goalRevision) || goalRevision < 1
+      || typeof goalDigest !== "string" || !/^sha256:[0-9a-f]{64}$/.test(goalDigest)) {
+      return reply.code(409).send({ code: "E2E_TEST_PLAN_REVISION_INVALID" });
+    }
     const settings = await repository.readAgentSettings();
     if (!settings) return reply.code(503).send({ code: "PLAYER_POLICY_NOT_CONFIGURED" });
     const model = resolveAgentModel(settings.primaryModel, settings.modelOverrides, "test");
@@ -1411,12 +1520,15 @@ export async function runApi(
         workflowId: job.workflowId,
         projectId: job.projectId,
         platform: job.targetOperatingSystem,
+        goalRevision,
       }),
       repository.readFrozenE2eTestPlan({
         workspaceId: job.workspaceId,
         workflowId: job.workflowId,
         projectId: job.projectId,
         platform: job.targetOperatingSystem,
+        sourceRevision,
+        goalRevision,
       }),
       repository.readProjectAgentManifestObject({
         workspaceId: job.workspaceId,
@@ -1475,6 +1587,9 @@ export async function runApi(
         workflowId: job.workflowId,
         projectId: job.projectId,
         platform: job.targetOperatingSystem,
+        sourceRevision,
+        goalRevision,
+        goalDigest,
         testManifest: plan.testManifest,
         testManifestDigest: plan.testManifestDigest,
       });
@@ -1605,6 +1720,7 @@ export async function runApi(
   const importAnalysisWorker = runProjectImportAnalysisWorker({
     repository,
     agentSecrets,
+    objectStore,
     projectSources,
     config,
     signal,
@@ -1630,6 +1746,9 @@ type ConversationMessageResult = Readonly<{
     workspace: WorkspaceSummary;
     project: ProductProjectDetail;
     conversation: ProductConversation;
+    intentDecision: ConversationIntentDecision;
+    changeRequest?: ImplementationChangeRequest;
+    workflowAction: ConversationWorkflowAction;
   }>;
 }>;
 
@@ -1697,8 +1816,39 @@ async function processConversationMessage(input: Readonly<{
       return Object.freeze({
         statusCode: 200,
         setWorkspaceCookie: true,
-        payload: Object.freeze({ workspace: priorWorkspace, project, conversation }),
+        payload: Object.freeze({
+          workspace: priorWorkspace, project, conversation,
+          intentDecision: conversationIntentDecision(conversation),
+          workflowAction: "NONE" as const,
+        }),
       });
+    }
+    const initialSettings = await repository.readAgentSettings();
+    if (!initialSettings) throw httpError(424, "AGENT_CONFIG_REQUIRED", "请先配置全局 Agent 连接");
+    const initialApiKey = await agentSecrets.readApiKey(initialSettings.credentialSecretRef);
+    if (!initialApiKey) throw httpError(424, "AGENT_CONFIG_REQUIRED", "无法读取全局 Agent 凭据，请重新保存配置");
+    const seedSpecification = specificationFromConcept("Untitled", command.content);
+    let intentDecision: ConversationIntentDecision;
+    try {
+      intentDecision = await classifyConversationIntent({
+        content: command.content,
+        history: Object.freeze([]),
+        project: Object.freeze({
+          name: "Untitled",
+          concept: command.content,
+          workflowState: "DRAFT",
+          specification: seedSpecification,
+          document: createInitialProjectDocument("Untitled", command.content, seedSpecification, command.responseLanguage),
+          analysisStatus: "READY",
+          discovery: null,
+        }),
+        pendingChange: null,
+        settings: initialSettings,
+        apiKey: initialApiKey,
+        responseLanguage: command.responseLanguage,
+      });
+    } catch (error) {
+      throw httpError(424, "INTENT_AGENT_FAILED", error instanceof Error ? error.message : "Intent Agent 调用失败");
     }
     input.onStage?.("NAMING");
     const name = await agentProjectName(command.content, repository, agentSecrets, command.responseLanguage);
@@ -1716,8 +1866,10 @@ async function processConversationMessage(input: Readonly<{
         analysisStatus: "READY",
         discovery: null,
       }),
-      allowDraftMutation: true,
+      allowDraftMutation: intentDecision.intent === "CHANGE_REQUEST" && intentDecision.actionable,
       responseLanguage: command.responseLanguage,
+      responderRoles: intentDecision.intent === "QUESTION" || !intentDecision.actionable
+        ? intentDecision.responderRoles : undefined,
     }, repository, agentSecrets, { signal: input.signal, onDelta: input.onDelta });
     input.onStage?.("SAVING");
     const targetWorkspace = workspace ?? Object.freeze({ id: randomUUID(), name, createdAt: "" });
@@ -1739,7 +1891,7 @@ async function processConversationMessage(input: Readonly<{
       userContent: command.content,
       assistantMessages: agentReplies.map(reply => Object.freeze({
         content: reply.content,
-        metadata: conversationAgentMetadata(reply),
+        metadata: Object.freeze({ ...conversationAgentMetadata(reply), intentDecision }),
       })),
       ...defaultWorkflowConfiguration(),
     });
@@ -1747,7 +1899,8 @@ async function processConversationMessage(input: Readonly<{
     if (!selectedWorkspace) throw new Error("Created workspace could not be read");
     let createdProject = createdBundle.project;
     if (createdProject.workflowState === "DRAFT" && createdProject.analysisStatus === "READY"
-      && isDevelopmentApprovalRequest(command.content)) {
+      && intentDecision.intent === "CHANGE_REQUEST" && intentDecision.explicitExecution
+      && intentDecision.actionable && agentReplies.every(reply => reply.readyForDevelopment)) {
       await approveProjectDevelopment({
         repository,
         objectStore,
@@ -1761,7 +1914,11 @@ async function processConversationMessage(input: Readonly<{
     return Object.freeze({
       statusCode: 201,
       setWorkspaceCookie: true,
-      payload: Object.freeze({ workspace: selectedWorkspace, ...createdBundle, project: createdProject }),
+      payload: Object.freeze({
+        workspace: selectedWorkspace, ...createdBundle, project: createdProject,
+        intentDecision,
+        workflowAction: createdProject.workflowState === "AGENT_RUNNING" ? "AGENT_STARTED" as const : "NONE" as const,
+      }),
     });
   }
 
@@ -1769,63 +1926,256 @@ async function processConversationMessage(input: Readonly<{
   if (!projectId) throw new Error("Conversation project is required");
   const project = await repository.readProject(workspace.id, projectId);
   if (!project) throw httpError(404, "PROJECT_NOT_FOUND", "项目已不存在");
-  if (project.workflowState === "AGENT_RUNNING") {
-    input.onStage?.("SAVING");
-    const conversation = await repository.appendAgentGuidance({
-      workspaceId: workspace.id,
-      projectId,
-      conversationId: command.conversationId ?? randomUUID(),
+  const settings = await repository.readAgentSettings();
+  if (!settings) throw httpError(424, "AGENT_CONFIG_REQUIRED", "请先配置全局 Agent 连接");
+  const apiKey = await agentSecrets.readApiKey(settings.credentialSecretRef);
+  if (!apiKey) throw httpError(424, "AGENT_CONFIG_REQUIRED", "无法读取全局 Agent 凭据，请重新保存配置");
+  input.onStage?.("RESPONDING");
+  let intentDecision: ConversationIntentDecision;
+  try {
+    intentDecision = await classifyConversationIntent({
       content: command.content,
+      history: existingConversation?.messages ?? Object.freeze([]),
+      project: conversationProjectContext(project),
+      pendingChange: project.pendingImplementationChange,
+      settings,
+      apiKey,
+      responseLanguage: command.responseLanguage,
     });
+  } catch (error) {
+    throw httpError(424, "INTENT_AGENT_FAILED", error instanceof Error ? error.message : "Intent Agent 调用失败");
+  }
+  const conversationId = command.conversationId ?? randomUUID();
+  const pending = project.pendingImplementationChange;
+  if (intentDecision.intent === "CONFIRM_CHANGE" || intentDecision.intent === "REJECT_CHANGE") {
+    if (!pending) throw httpError(409, "CHANGE_REQUEST_NOT_FOUND", "当前没有等待确认的实现变更");
+    const rejected = intentDecision.intent === "REJECT_CHANGE";
+    if (!rejected && pending.state === "PENDING"
+      && pending.baseDocumentRevision !== project.document.revision) {
+      const plan = await replanImplementationChange({
+        repository, agentSecrets, workspaceId: workspace.id, project, changeRequest: pending,
+        responseLanguage: command.responseLanguage,
+      });
+      input.onStage?.("SAVING");
+      const conversation = await repository.appendConversationTurn({
+        workspaceId: workspace.id,
+        conversationId,
+        projectId,
+        userContent: command.content,
+        expectedWorkflowState: project.workflowState,
+        assistantMessages: plan.replies.map(reply => Object.freeze({
+          content: reply.content,
+          metadata: Object.freeze({ ...conversationAgentMetadata(reply), intentDecision }),
+        })),
+        assistantApplyToDraft: false,
+        assistantProjectDocument: null,
+        resolveImportAnalysis: false,
+        responseLanguage: command.responseLanguage,
+      });
+      const replacement = await repository.createImplementationChangeRequest({
+        workspaceId: workspace.id,
+        projectId,
+        workflowId: project.workflowId,
+        conversationId,
+        summary: pending.summary,
+        implementationBrief: plan.implementationBrief,
+        projectDocumentPatch: plan.projectDocumentPatch,
+        e2eGoalDelta: plan.e2eGoalDelta,
+        explicitExecution: false,
+        idempotencyKey: `replan:${pending.id}:${project.document.revision}`,
+        supersededChangeRequestId: pending.id,
+        supersededDecisionIdempotencyKey: requestIdempotencyKey(request, "change-decision"),
+      });
+      const updatedProject = await repository.readProject(workspace.id, projectId) ?? project;
+      return Object.freeze({
+        statusCode: created ? 201 : 200, setWorkspaceCookie: false,
+        payload: Object.freeze({
+          workspace, project: updatedProject, conversation, intentDecision,
+          changeRequest: replacement, workflowAction: "AWAITING_CONFIRMATION" as const,
+        }),
+      });
+    }
+    input.onStage?.("SAVING");
+    const conversation = await repository.appendConversationTurn({
+      workspaceId: workspace.id,
+      conversationId,
+      projectId,
+      userContent: command.content,
+      expectedWorkflowState: project.workflowState,
+      assistantMessages: [Object.freeze({
+        content: rejected
+          ? (command.responseLanguage === "zh" ? "已保持当前实现，本次变更不会执行。" : "The current implementation is unchanged; the proposed change was rejected.")
+          : (command.responseLanguage === "zh" ? "已确认变更，正在切换到新的 Agent 生成轮次。" : "Change confirmed. A new Agent generation round is starting."),
+        metadata: Object.freeze({ source: "INTENT_AGENT", intentDecision }),
+      })],
+      assistantApplyToDraft: false,
+      assistantProjectDocument: null,
+      resolveImportAnalysis: false,
+      responseLanguage: command.responseLanguage,
+    });
+    if (rejected) {
+      await repository.rejectImplementationChange(
+        workspace.id, projectId, pending.id, requestIdempotencyKey(request, "change-decision"),
+      );
+      const updatedProject = await repository.readProject(workspace.id, projectId) ?? project;
+      return Object.freeze({
+        statusCode: created ? 201 : 200, setWorkspaceCookie: false,
+        payload: Object.freeze({ workspace, project: updatedProject, conversation, intentDecision, workflowAction: "NONE" as const }),
+      });
+    }
+    const workflowAction = await applyConfirmedConversationChange({
+      repository, objectStore, workspaceId: workspace.id, project,
+      changeRequest: pending, actorId: principal.actorId, responseLanguage: command.responseLanguage,
+      decisionIdempotencyKey: requestIdempotencyKey(request, "change-decision"),
+    });
+    const updatedProject = await repository.readProject(workspace.id, projectId) ?? project;
     return Object.freeze({
-      statusCode: created ? 201 : 200,
-      setWorkspaceCookie: false,
-      payload: Object.freeze({ workspace, project, conversation }),
+      statusCode: created ? 201 : 200, setWorkspaceCookie: false,
+      payload: Object.freeze({ workspace, project: updatedProject, conversation, intentDecision, workflowAction }),
     });
   }
-  input.onStage?.("RESPONDING");
+
+  const responderRoles = intentDecision.intent === "QUESTION" || !intentDecision.actionable
+    ? intentDecision.responderRoles : undefined;
   const agentReplies = await conversationAgentReplies({
     userContent: command.content,
     history: existingConversation?.messages ?? Object.freeze([]),
     project: conversationProjectContext(project),
-    allowDraftMutation: project.workflowState === "DRAFT",
+    allowDraftMutation: intentDecision.intent === "CHANGE_REQUEST" && intentDecision.actionable,
     responseLanguage: command.responseLanguage,
+    responderRoles,
   }, repository, agentSecrets, { signal: input.signal, onDelta: input.onDelta });
   input.onStage?.("SAVING");
   const conversation = await repository.appendConversationTurn({
     workspaceId: workspace.id,
-    conversationId: command.conversationId ?? randomUUID(),
+    conversationId,
     projectId,
     userContent: command.content,
     expectedWorkflowState: project.workflowState,
     assistantMessages: agentReplies.map(reply => Object.freeze({
       content: reply.content,
-      metadata: conversationAgentMetadata(reply),
+      metadata: Object.freeze({ ...conversationAgentMetadata(reply), intentDecision }),
     })),
-    assistantApplyToDraft: agentReplies.some(reply => reply.agentRole === "DESIGN" && reply.applyToDraft),
-    assistantProjectDocument: agentReplies.find(reply => reply.agentRole === "DESIGN")?.projectDocument ?? null,
-    resolveImportAnalysis: project.analysisStatus === "NEEDS_INPUT"
-      && agentReplies.every(reply => reply.readyForDevelopment),
+    assistantApplyToDraft: false,
+    assistantProjectDocument: null,
+    resolveImportAnalysis: false,
     responseLanguage: command.responseLanguage,
   });
-  let updatedProject = await repository.readProject(workspace.id, projectId);
-  if (!updatedProject) throw httpError(404, "PROJECT_NOT_FOUND", "项目已不存在");
-  if (updatedProject.workflowState === "DRAFT" && updatedProject.analysisStatus === "READY"
-    && isDevelopmentApprovalRequest(command.content)) {
-    await approveProjectDevelopment({
-      repository,
-      objectStore,
-      workspaceId: workspace.id,
-      project: updatedProject,
-      requestedByActorId: principal.actorId,
-      responseLanguage: command.responseLanguage,
+  if (intentDecision.intent !== "CHANGE_REQUEST" || !intentDecision.actionable) {
+    const updatedProject = await repository.readProject(workspace.id, projectId) ?? project;
+    return Object.freeze({
+      statusCode: created ? 201 : 200, setWorkspaceCookie: false,
+      payload: Object.freeze({ workspace, project: updatedProject, conversation, intentDecision, workflowAction: "NONE" as const }),
     });
-    updatedProject = await repository.readProject(workspace.id, projectId) ?? updatedProject;
   }
+
+  const design = agentReplies.find(reply => reply.agentRole === "DESIGN");
+  if (!design?.projectDocumentPatch) {
+    if (project.workflowState === "DRAFT" && project.analysisStatus === "READY"
+      && intentDecision.explicitExecution && agentReplies.every(reply => reply.readyForDevelopment)) {
+      await approveProjectDevelopment({
+        repository,
+        objectStore,
+        workspaceId: workspace.id,
+        project,
+        requestedByActorId: principal.actorId,
+        responseLanguage: command.responseLanguage,
+      });
+      const updatedProject = await repository.readProject(workspace.id, projectId) ?? project;
+      return Object.freeze({
+        statusCode: created ? 201 : 200, setWorkspaceCookie: false,
+        payload: Object.freeze({ workspace, project: updatedProject, conversation, intentDecision, workflowAction: "AGENT_STARTED" as const }),
+      });
+    }
+    const updatedProject = await repository.readProject(workspace.id, projectId) ?? project;
+    return Object.freeze({
+      statusCode: created ? 201 : 200, setWorkspaceCookie: false,
+      payload: Object.freeze({ workspace, project: updatedProject, conversation, intentDecision, workflowAction: "NONE" as const }),
+    });
+  }
+
+  const test = agentReplies.find(reply => reply.agentRole === "TEST");
+  const development = agentReplies.find(reply => reply.agentRole === "DEVELOPMENT");
+  const changeRequest = await repository.createImplementationChangeRequest({
+    workspaceId: workspace.id,
+    projectId,
+    workflowId: project.workflowId,
+    conversationId,
+    summary: intentDecision.summary,
+    implementationBrief: development?.content ?? intentDecision.summary,
+    projectDocumentPatch: design.projectDocumentPatch,
+    e2eGoalDelta: test?.e2eGoalDelta ?? Object.freeze({ add: [], replace: [], retire: [] }),
+    explicitExecution: intentDecision.explicitExecution,
+    idempotencyKey: requestIdempotencyKey(request, "implementation-change"),
+  });
+  if (!intentDecision.explicitExecution) {
+    const updatedProject = await repository.readProject(workspace.id, projectId) ?? project;
+    return Object.freeze({
+      statusCode: created ? 201 : 200, setWorkspaceCookie: false,
+      payload: Object.freeze({
+        workspace, project: updatedProject, conversation, intentDecision,
+        changeRequest, workflowAction: "AWAITING_CONFIRMATION" as const,
+      }),
+    });
+  }
+  const workflowAction = await applyConfirmedConversationChange({
+    repository, objectStore, workspaceId: workspace.id, project,
+    changeRequest, actorId: principal.actorId, responseLanguage: command.responseLanguage,
+    decisionIdempotencyKey: requestIdempotencyKey(request, "change-decision"),
+  });
+  const appliedChangeRequest = (await repository.readImplementationChangeDecision(
+    workspace.id, projectId, changeRequest.id,
+  ))?.request ?? changeRequest;
+  const updatedProject = await repository.readProject(workspace.id, projectId) ?? project;
   return Object.freeze({
     statusCode: created ? 201 : 200,
     setWorkspaceCookie: false,
-    payload: Object.freeze({ workspace, project: updatedProject, conversation }),
+    payload: Object.freeze({
+      workspace, project: updatedProject, conversation, intentDecision,
+      changeRequest: appliedChangeRequest, workflowAction,
+    }),
+  });
+}
+
+async function applyConfirmedConversationChange(input: Readonly<{
+  repository: CoreRepository;
+  objectStore: CoreObjectStore;
+  workspaceId: string;
+  project: ProductProjectDetail;
+  changeRequest: ImplementationChangeRequest;
+  actorId: string;
+  responseLanguage: ResponseLanguage;
+  decisionIdempotencyKey?: string;
+}>): Promise<Exclude<ConversationWorkflowAction, "NONE" | "AWAITING_CONFIRMATION">> {
+  if (["PENDING", "ANALYZING"].includes(input.project.analysisStatus)) {
+    return input.repository.applyImplementationChange({
+      workspaceId: input.workspaceId,
+      projectId: input.project.id,
+      changeRequestId: input.changeRequest.id,
+      actorId: input.actorId,
+      responseLanguage: input.responseLanguage,
+      decisionIdempotencyKey: input.decisionIdempotencyKey,
+    });
+  }
+  const document = parseProjectDocumentContent({
+    ...input.project.document.content,
+    ...input.changeRequest.documentPatch,
+  });
+  const specification = synchronizeSpecificationWithProjectDocument(input.project.specification, document);
+  const specificationObject = await input.objectStore.putSpecification({
+    workspaceId: input.workspaceId,
+    projectId: input.project.id,
+    workflowId: input.project.workflowId,
+    specification,
+  });
+  return input.repository.applyImplementationChange({
+    workspaceId: input.workspaceId,
+    projectId: input.project.id,
+    changeRequestId: input.changeRequest.id,
+    actorId: input.actorId,
+    responseLanguage: input.responseLanguage,
+    specificationObject,
+    decisionIdempotencyKey: input.decisionIdempotencyKey,
   });
 }
 
@@ -2171,6 +2521,7 @@ async function queueBoundProjectImport(input: Readonly<{
 async function runProjectImportAnalysisWorker(input: Readonly<{
   repository: CoreRepository;
   agentSecrets: AgentSecretStore;
+  objectStore: CoreObjectStore;
   projectSources: ProjectSourceStore;
   config: CoreConfig;
   signal: AbortSignal;
@@ -2249,6 +2600,20 @@ async function runProjectImportAnalysisWorker(input: Readonly<{
       });
       if (!completed) {
         input.logFailure("Project analysis lease expired before completion", new Error(claimed.projectId));
+      } else {
+        const project = await input.repository.readProject(claimed.workspaceId, claimed.projectId);
+        const pending = project?.pendingImplementationChange;
+        if (project && pending?.state === "WAITING_FOR_ANALYSIS") {
+          await applyConfirmedConversationChange({
+            repository: input.repository,
+            objectStore: input.objectStore,
+            workspaceId: claimed.workspaceId,
+            project,
+            changeRequest: pending,
+            actorId: claimed.actorId,
+            responseLanguage: claimed.responseLanguage,
+          });
+        }
       }
     } catch (error) {
       const message = projectAnalysisFailureMessage(error);
@@ -2289,6 +2654,7 @@ async function conversationAgentReplies(
     project: ConversationAgentProjectContext;
     allowDraftMutation: boolean;
     responseLanguage: ResponseLanguage;
+    responderRoles?: readonly ProjectAgentRole[];
   }>,
   repository: CoreRepository,
   agentSecrets: AgentSecretStore,
@@ -2312,6 +2678,50 @@ async function conversationAgentReplies(
   }
 }
 
+async function replanImplementationChange(input: Readonly<{
+  repository: CoreRepository;
+  agentSecrets: AgentSecretStore;
+  workspaceId: string;
+  project: ProductProjectDetail;
+  changeRequest: ImplementationChangeRequest;
+  responseLanguage: ResponseLanguage;
+}>): Promise<Readonly<{
+  replies: readonly ProductConversationGroupReply[];
+  implementationBrief: string;
+  projectDocumentPatch: Readonly<Record<string, unknown>>;
+  e2eGoalDelta: E2eGoalDelta;
+}>> {
+  const conversation = await input.repository.readConversation(
+    input.workspaceId, input.changeRequest.conversationId,
+  );
+  if (!conversation) throw httpError(409, "CHANGE_REQUEST_STALE", "变更所属会话已不存在");
+  const originalRequest = [...conversation.messages].reverse().find(message => message.role === "USER")?.content
+    ?? input.changeRequest.summary;
+  const replies = await conversationAgentReplies({
+    userContent: [
+      "Re-plan this implementation change against the current project document.",
+      `Original request: ${originalRequest}`,
+      `Previous implementation brief: ${input.changeRequest.implementationBrief}`,
+    ].join("\n"),
+    history: conversation.messages,
+    project: conversationProjectContext(input.project),
+    allowDraftMutation: true,
+    responseLanguage: input.responseLanguage,
+  }, input.repository, input.agentSecrets);
+  const design = replies.find(reply => reply.agentRole === "DESIGN");
+  if (!design?.projectDocumentPatch) {
+    throw httpError(409, "CHANGE_REPLAN_INCOMPLETE", "项目说明已变化，Design Agent 未能生成新的变更提案");
+  }
+  const development = replies.find(reply => reply.agentRole === "DEVELOPMENT");
+  const test = replies.find(reply => reply.agentRole === "TEST");
+  return Object.freeze({
+    replies,
+    implementationBrief: development?.content ?? input.changeRequest.implementationBrief,
+    projectDocumentPatch: design.projectDocumentPatch,
+    e2eGoalDelta: test?.e2eGoalDelta ?? Object.freeze({ add: [], replace: [], retire: [] }),
+  });
+}
+
 function conversationProjectContext(project: ProductProjectDetail): ConversationAgentProjectContext {
   return Object.freeze({
     name: project.name,
@@ -2321,6 +2731,48 @@ function conversationProjectContext(project: ProductProjectDetail): Conversation
     document: project.document.content,
     analysisStatus: project.analysisStatus,
     discovery: project.discovery,
+    e2eGoals: project.e2eGoals,
+    workflowStatus: Object.freeze({
+      workflowId: project.workflowId,
+      iterationNumber: project.iterationNumber,
+      state: project.workflowState,
+      targetPlatforms: project.targetPlatforms,
+      jobs: project.jobs.map(job => Object.freeze({
+        kind: job.kind,
+        platform: job.targetOperatingSystem,
+        state: job.state,
+        attempt: job.attempt,
+        failure: job.lastError?.slice(0, 1_800) ?? null,
+      })),
+      recentEvents: project.events.slice(0, 12).map(event => Object.freeze({
+        kind: event.kind,
+        data: event.data,
+      })),
+    }),
+  });
+}
+
+function conversationIntentDecision(conversation: ProductConversation): ConversationIntentDecision {
+  const value = conversation.messages.find(message => (
+    message.role === "ASSISTANT" && message.metadata.intentDecision !== undefined
+  ))?.metadata.intentDecision;
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    throw new Error("Persisted conversation is missing its Intent Agent decision");
+  }
+  const decision = value as Record<string, unknown>;
+  if (!["QUESTION", "CHANGE_REQUEST", "CONFIRM_CHANGE", "REJECT_CHANGE"].includes(String(decision.intent))
+    || typeof decision.explicitExecution !== "boolean" || typeof decision.actionable !== "boolean"
+    || !Array.isArray(decision.responderRoles)
+    || decision.responderRoles.some(role => !["DESIGN", "DEVELOPMENT", "TEST"].includes(String(role)))
+    || typeof decision.summary !== "string" || !decision.summary.trim()) {
+    throw new Error("Persisted Intent Agent decision is invalid");
+  }
+  return Object.freeze({
+    intent: decision.intent as ConversationIntentDecision["intent"],
+    explicitExecution: decision.explicitExecution,
+    actionable: decision.actionable,
+    responderRoles: Object.freeze(decision.responderRoles as ProjectAgentRole[]),
+    summary: decision.summary,
   });
 }
 

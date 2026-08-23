@@ -1,7 +1,7 @@
 openapi: 3.1.0
 info:
   title: DeviLudo Core API
-  version: 8.0.0
+  version: 9.0.0
 components:
   securitySchemes:
     e2eMtls:
@@ -341,6 +341,34 @@ paths:
       responses:
         "200": { description: Most recently active project conversations with previews, total and user-message counts, and a system-generated import-analysis marker }
         "404": { description: Project is not visible in the selected workspace }
+  /v1/projects/{projectId}/change-requests/{changeRequestId}/decision:
+    parameters:
+      - in: path
+        name: projectId
+        required: true
+        schema: { type: string, format: uuid }
+      - in: path
+        name: changeRequestId
+        required: true
+        schema: { type: string, format: uuid }
+    post:
+      operationId: decideImplementationChange
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [decision, idempotencyKey]
+              properties:
+                decision: { type: string, enum: [CONFIRM, REJECT] }
+                idempotencyKey: { type: string, minLength: 8, maxLength: 300 }
+                responseLanguage: { type: string, enum: [zh, en], default: zh }
+      responses:
+        "200": { description: Decision applied idempotently; the response identifies whether Agent generation reran, a new iteration started, or the implementation stayed unchanged }
+        "404": { description: Project or implementation change is not visible in the selected workspace }
+        "409": { description: The proposal is stale, closed by another decision, or the idempotency key conflicts }
   /v1/projects/{projectId}/agent-progress/stream:
     parameters:
       - in: path
@@ -354,7 +382,7 @@ paths:
       operationId: streamAgentGenerationProgress
       responses:
         "200":
-          description: Newline-delimited Agent phases, visible output, accepted player guidance, and completion state
+          description: Newline-delimited Agent phases, visible output, supersession, and completion state
           content:
             application/x-ndjson:
               schema: { type: string }
@@ -393,7 +421,7 @@ paths:
       operationId: streamConversationMessage
       responses:
         "200":
-          description: Newline-delimited agent_delta events for design, development, and test replies followed by the atomically persisted group-chat result; during Agent generation the user message is stored as live task guidance
+          description: Newline-delimited Intent Agent routing, specialist replies, change confirmation state, and the atomically persisted result
           content:
             application/x-ndjson:
               schema: { type: string }
