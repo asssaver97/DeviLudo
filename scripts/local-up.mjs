@@ -1247,16 +1247,32 @@ async function retainActiveJobRuntimeImages(environment) {
     ], { cwd: root, env: environment, maxBuffer: 256 * 1024 });
     const references = result.stdout.split(/\r?\n/).map(value => value.trim()).filter(Boolean);
     const retained = [];
+    const activeTags = new Set();
     for (const reference of references) {
       const digest = reference.match(/sha256:([0-9a-f]{64})$/i)?.[1];
       if (!digest) continue;
+      const tag = `deviludo-retained-job-runtime:${digest.slice(0, 16)}`;
       try {
         await execute("docker", ["image", "inspect", reference], { maxBuffer: 64 * 1024 });
-        await execute("docker", ["image", "tag", reference, `deviludo-retained-job-runtime:${digest.slice(0, 16)}`], { maxBuffer: 64 * 1024 });
+        await execute("docker", ["image", "tag", reference, tag], { maxBuffer: 64 * 1024 });
+        activeTags.add(tag);
         retained.push(reference);
       } catch {
         console.warn(`An image referenced by an active job no longer exists; the UI will offer a safe retry: ${reference}`);
       }
+    }
+    try {
+      const { stdout } = await execute("docker", [
+        "image", "ls", "--filter", "reference=deviludo-retained-job-runtime:*", "--format", "{{.Repository}}:{{.Tag}}",
+      ], { maxBuffer: 256 * 1024 });
+      const staleTags = [...new Set(stdout.split(/\r?\n/).map(value => value.trim()).filter(Boolean))]
+        .filter(tag => !activeTags.has(tag));
+      if (staleTags.length > 0) {
+        await execute("docker", ["image", "rm", ...staleTags], { maxBuffer: 2 * 1024 * 1024 });
+        startupProgress(`Removed ${staleTags.length} stale retained runtime image tag${staleTags.length === 1 ? "" : "s"}`);
+      }
+    } catch (error) {
+      console.warn(`Stale retained runtime image cleanup was skipped: ${error instanceof Error ? error.message : String(error)}`);
     }
     return retained;
   } catch {

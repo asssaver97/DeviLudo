@@ -58,6 +58,7 @@ test("local deployment keeps Core private by default and exposes it only for exp
   assert.match(localUp, /retainActiveJobRuntimeImages\(baseEnvironment\)/);
   assert.match(localUp, /state IN \('QUEUED', 'RETRY', 'RUNNING'\)/);
   assert.match(localUp, /deviludo-retained-job-runtime/);
+  assert.match(localUp, /Removed \$\{staleTags\.length\} stale retained runtime image tag/);
   assert.match(localUp, /DEVILUDO_EXECUTOR_ALLOWED_IMAGES: \[\.\.\.new Set\(\[\s*\.\.\.Object\.values\(JSON\.parse\(runtimeImages\)\), imageIds\["deviludo-agent-fixture:local"\], \.\.\.retainedJobRuntimeImages/);
   assert.match(localUp, /persistLocalComposeEnvironment\(environment\)/);
   assert.match(localUp, /resolveMachineInstallationId\(\)/);
