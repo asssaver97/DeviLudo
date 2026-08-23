@@ -357,7 +357,7 @@ test("a creator can refine and deliver a game through every Core and platform st
   await expect(page.getByText("等待发布决策", { exact: true })).toBeVisible({ timeout: 120_000 });
   await page.getByLabel("展开项目交付配置").click();
   await expect(page.getByRole("button", { name: "完成本轮，不发布" })).toBeVisible();
-  for (const stage of ["Agent 生成", "制品构建", "跨平台 E2E", "Steam 上传"]) {
+  for (const stage of ["游戏生成", "制品构建", "跨平台 E2E", "Steam 上传"]) {
     await expect(page.getByText(stage, { exact: true })).toBeVisible();
   }
   for (const stage of ["AGENT_GENERATION", "ARTIFACT_BUILD", "E2E_TEST"]) {

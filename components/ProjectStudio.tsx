@@ -41,7 +41,7 @@ import { localeTag, useLanguage } from "./i18n/LanguageProvider";
 // second-row branch at the Agent → build boundary because it is a build gate,
 // not a job kind in the serial workflow state machine.
 const PIPELINE = [
-  ["AGENT_GENERATION", "Agent 生成", "Agent Generation"],
+  ["AGENT_GENERATION", "游戏生成", "Game Generation"],
   ["ARTIFACT_BUILD", "制品构建", "Artifact Build"],
   ["E2E_TEST", "跨平台 E2E", "Cross-platform E2E"],
   ["STEAM_PUBLISH", "Steam 上传", "Steam Upload"],
