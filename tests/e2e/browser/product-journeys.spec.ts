@@ -43,7 +43,7 @@ test("display typography, readable body copy and English locale persist across t
   await expect(page.locator("html")).toHaveAttribute("lang", "en");
   await expect(page.getByRole("heading", { name: "WHAT WILL YOU BUILD TODAY?" })).toBeVisible();
   await expect(page.getByRole("link", { name: "Home", exact: true })).toBeVisible();
-  await expect(page.getByLabel("Related project")).toBeVisible();
+  await expect(page.getByLabel("Import existing project")).toBeVisible();
 
   await page.reload();
   await expect(page.locator("html")).toHaveAttribute("lang", "en");
@@ -521,7 +521,7 @@ test("the home chat supports both project feedback and a fresh game conversation
     borderColor: "rgb(141, 184, 200)",
     color: "rgb(8, 127, 167)",
   });
-  await page.getByLabel("关联项目").selectOption(project.id);
+  await page.getByLabel("导入已有项目").selectOption(project.id);
   const feedbackQuestion = "当前玩法如果增加低视野模式，会对资源管理产生什么影响？";
   await page.getByLabel("游戏想法或修改意见").fill(feedbackQuestion);
   const imageTransfer = await page.evaluateHandle(() => {
@@ -624,8 +624,8 @@ test("the home chat supports both project feedback and a fresh game conversation
   await page.getByRole("link", { name: "首页", exact: true }).click();
 
   await expect(page.getByRole("heading", { name: "今天想做什么游戏？" })).toBeVisible();
-  await expect(page.getByLabel("关联项目")).toHaveValue("");
-  await expect(page.getByLabel("关联项目").locator('option[value="__import_existing_project__"]')).toHaveText("关联已有项目…");
+  await expect(page.getByLabel("导入已有项目")).toHaveValue("");
+  await expect(page.getByLabel("导入已有项目").locator('option[value="__import_existing_project__"]')).toHaveText("导入已有项目…");
   const concept = "我想做一款以时间循环为核心的像素冒险游戏。";
   await page.getByLabel("游戏想法或修改意见").fill(concept);
   await page.getByLabel("游戏想法或修改意见").press("Control+Enter");
@@ -668,10 +668,10 @@ test("home chat enters the thread immediately and shows animated waiting dots", 
 test("a creator can link a local project without uploading it and continue its Agent analysis conversation", async ({ page, stack }) => {
   await stack.configureAgent();
   await page.goto("/projects");
-  await expect(page.locator(".project-catalog-heading").getByRole("link", { name: "关联项目" })).toBeVisible();
-  await page.locator(".project-catalog-heading").getByRole("link", { name: "关联项目" }).click();
+  await expect(page.locator(".project-catalog-heading").getByRole("link", { name: "导入已有项目" })).toBeVisible();
+  await page.locator(".project-catalog-heading").getByRole("link", { name: "导入已有项目" }).click();
   await expect(page).toHaveURL(/\/projects\/import$/);
-  await expect(page.getByRole("heading", { name: "关联已有项目" })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "导入已有项目" })).toBeVisible();
   await expect(page.getByRole("button", { name: "新构想" })).toHaveCount(0);
   await expect(page.getByRole("button", { name: "导入项目" })).toHaveCount(0);
   await expect(page.getByRole("tab", { name: "本地项目" })).toHaveAttribute("aria-selected", "true");

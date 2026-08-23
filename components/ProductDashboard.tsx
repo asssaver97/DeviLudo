@@ -209,9 +209,9 @@ export function ProductDashboard({
       <>
         <section className="project-page-header">
           <div>
-            <div className="breadcrumb"><Link href="/projects">{text("游戏项目", "GAME PROJECTS")}</Link><span>/</span><b>{initialMode === "IDEA" ? text("开始新构想", "NEW CONCEPT") : text("关联已有项目", "LINK PROJECT")}</b></div>
+            <div className="breadcrumb"><Link href="/projects">{text("游戏项目", "GAME PROJECTS")}</Link><span>/</span><b>{initialMode === "IDEA" ? text("开始新构想", "NEW CONCEPT") : text("导入已有项目", "IMPORT EXISTING PROJECT")}</b></div>
             <span className="eyebrow">{initialMode === "IDEA" ? "IDEA TO PLAYABLE" : "SOURCE TO PLAYABLE"}</span>
-            <h1>{initialMode === "IDEA" ? text("描述你的新游戏", "DESCRIBE YOUR GAME") : text("关联已有项目", "LINK AN EXISTING PROJECT")}</h1>
+            <h1>{initialMode === "IDEA" ? text("描述你的新游戏", "DESCRIBE YOUR GAME") : text("导入已有项目", "IMPORT AN EXISTING PROJECT")}</h1>
           </div>
         </section>
         <section className="repository-onboarding idea-onboarding">
@@ -253,12 +253,12 @@ export function ProductDashboard({
     <>
       <section className="page-heading project-catalog-heading">
         <div><span className="eyebrow">PROJECTS</span><h1>{text("游戏项目", "GAME PROJECTS")}</h1></div>
-        <div className="project-catalog-actions"><Link className="button button-secondary" href="/projects/import"><FileIcon /> {text("关联项目", "LINK PROJECT")}</Link><Link className="button button-primary" href="/projects/new"><PlusIcon /> {text("开始新构想", "NEW CONCEPT")}</Link></div>
+        <div className="project-catalog-actions"><Link className="button button-secondary" href="/projects/import"><FileIcon /> {text("导入已有项目", "IMPORT EXISTING PROJECT")}</Link><Link className="button button-primary" href="/projects/new"><PlusIcon /> {text("开始新构想", "NEW CONCEPT")}</Link></div>
       </section>
       {error ? <div className="inline-notice danger" role="alert">{error}</div> : null}
       {loading ? <section className="project-catalog-empty">{text("正在加载项目…", "LOADING PROJECTS…")}</section> : null}
       {!loading && !error && projects.length === 0 ? (
-        <section className="project-catalog-empty"><span><SparkIcon /></span><h2>{text("还没有游戏项目", "NO GAME PROJECTS YET")}</h2><div className="project-catalog-actions"><Link className="button button-secondary" href="/projects/import">{text("关联已有项目", "LINK PROJECT")}</Link><Link className="button button-acid" href="/projects/new">{text("创建第一个项目", "CREATE FIRST PROJECT")}</Link></div></section>
+        <section className="project-catalog-empty"><span><SparkIcon /></span><h2>{text("还没有游戏项目", "NO GAME PROJECTS YET")}</h2><div className="project-catalog-actions"><Link className="button button-secondary" href="/projects/import">{text("导入已有项目", "IMPORT EXISTING PROJECT")}</Link><Link className="button button-acid" href="/projects/new">{text("创建第一个项目", "CREATE FIRST PROJECT")}</Link></div></section>
       ) : null}
       {projects.length > 0 ? (
         <section className="project-catalog-grid" aria-label={text("可访问项目", "Accessible projects")}>

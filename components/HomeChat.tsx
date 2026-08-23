@@ -175,9 +175,9 @@ export function HomeChat() {
     <div className="homeChat-contextRow">
       <label>
         <GamepadIcon />
-        <span>{text("关联项目", "PROJECT")}</span>
+        <span>{text("导入已有项目", "IMPORT EXISTING PROJECT")}</span>
         <select
-          aria-label={text("关联项目", "Related project")}
+          aria-label={text("导入已有项目", "Import existing project")}
           disabled={Boolean(conversation) || loadingProjects}
           onChange={event => {
             if (event.target.value === IMPORT_PROJECT_VALUE) {
@@ -189,7 +189,7 @@ export function HomeChat() {
           value={activeProjectId}
         >
           <option value="">{text("创建新项目", "Create new project")}</option>
-          <option value={IMPORT_PROJECT_VALUE}>{text("关联已有项目…", "Link existing project…")}</option>
+          <option value={IMPORT_PROJECT_VALUE}>{text("导入已有项目…", "Import existing project…")}</option>
           {projects.map(project => (
             <option disabled={project.analysisStatus !== "READY" && project.analysisStatus !== "NEEDS_INPUT"} key={project.id} value={project.id}>
               {project.name} · {project.analysisStatus === "PENDING" || project.analysisStatus === "ANALYZING"

@@ -3,7 +3,7 @@ import { ProductDashboard } from "@/components/ProductDashboard";
 import { localizedMetadata } from "@/lib/web/localized-metadata";
 
 export async function generateMetadata(): Promise<Metadata> {
-  return localizedMetadata("关联项目 · DeviLudo", "Link Project · DeviLudo");
+  return localizedMetadata("导入已有项目 · DeviLudo", "Import Existing Project · DeviLudo");
 }
 
 export default function ImportProjectPage() {
