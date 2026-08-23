@@ -1327,18 +1327,24 @@ test("the rerun control overlays the stage marker and stays reachable without ho
   assert.doesNotMatch(overlay, /border-radius/);
   // Above the marker (z-index 1), so the two never blend into each other.
   assert.match(overlay, /z-index: 3/);
-  // Hidden until the stage is hovered, and non-interactive while hidden so a click
-  // on an invisible control cannot fire a rerun.
+  // Hidden until the marker, stage name, or status is hovered, and non-interactive
+  // while hidden so artifact/report cards cannot expose or fire a rerun.
   assert.match(overlay, /opacity: 0/);
   assert.match(overlay, /pointer-events: none/);
-  assert.match(styles, /\.product-delivery-stage:hover \.product-delivery-stage-rerun-icon \{\s*opacity: 1;\s*pointer-events: auto;/);
+  assert.match(studio, /product-delivery-stage-marker product-delivery-stage-rerun-target/);
+  assert.match(studio, /<b className="product-delivery-stage-rerun-target">\{text\(chineseLabel, englishLabel\)\}<\/b>/);
+  assert.match(studio, /<strong className="product-delivery-stage-rerun-target">\{view\.label\}<\/strong>/);
+  assert.match(styles, /\.product-delivery-stage:has\(\.product-delivery-stage-rerun-target:hover\) > \.product-delivery-stage-rerun-icon,\s*\.product-delivery-stage > \.product-delivery-stage-rerun-icon:hover \{\s*opacity: 1;\s*pointer-events: auto;/);
+  assert.doesNotMatch(styles, /\.product-delivery-stage:hover \.product-delivery-stage-rerun-icon/);
   // Keyboard users never hover, so focus has to reveal it too.
   assert.match(styles, /\.product-delivery-stage-rerun-icon:focus-visible \{[^}]*opacity: 1/);
   assert.match(styles, /\.product-delivery-stage-rerun-icon:focus-visible \{[^}]*pointer-events: auto/);
   // Neither does a touch screen: there the overlay is a persistent corner badge.
   assert.match(styles, /@media \(hover: none\) \{\s*\.product-delivery-stage-rerun-icon \{[^}]*opacity: 1/);
-  // A dimmed not-started stage has to become legible once it is the hover target.
-  assert.match(styles, /\.product-delivery-stage\.status-pending:hover \{\s*opacity: 1;/);
+  // A dimmed not-started stage has to become legible once an explicit rerun target
+  // is hovered, without brightening the whole stage for an artifact hover.
+  assert.match(styles, /\.product-delivery-stage\.status-pending:has\(\.product-delivery-stage-rerun-target:hover\)/);
+  assert.doesNotMatch(styles, /\.product-delivery-stage\.status-pending:hover \{/);
   // The click acknowledgement is motion, so it has to be dropped under reduce.
   assert.match(styles, /@media \(prefers-reduced-motion: reduce\) \{[\s\S]*?\.product-delivery-stage-rerun-icon:active svg \{ animation: none; \}/);
   // The old text button is gone from both the markup and the stylesheet.

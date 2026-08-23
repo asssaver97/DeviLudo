@@ -926,10 +926,10 @@ export function ProjectStudio({ projectId }: { projectId: string }) {
               const finishedAt = inProfile && !waitingForPredecessor ? pipelineStageFinishedAt(jobs) : null;
               return (
                 <li className={`product-delivery-stage status-${view.kind}`} data-stage-kind={kind} data-stage-status={view.kind} key={kind}>
-                  <div className="product-delivery-stage-marker" aria-hidden="true">{view.symbol}</div>
+                  <div className="product-delivery-stage-marker product-delivery-stage-rerun-target" aria-hidden="true">{view.symbol}</div>
                   {kind === "AGENT_GENERATION" ? <span aria-hidden="true" className="product-delivery-material-junction" /> : null}
-                  <b>{text(chineseLabel, englishLabel)}</b>
-                  <strong>{view.label}</strong>
+                  <b className="product-delivery-stage-rerun-target">{text(chineseLabel, englishLabel)}</b>
+                  <strong className="product-delivery-stage-rerun-target">{view.label}</strong>
                   <small>{inProfile
                     ? waitingForPredecessor
                       ? text("等待上一步完成", "Waiting for previous stage")
@@ -990,9 +990,9 @@ export function ProjectStudio({ projectId }: { projectId: string }) {
                     onClick={() => setAssetPanelExpanded(value => !value)}
                     type="button"
                   >
-                    <span aria-hidden="true" className="product-delivery-stage-marker">{viewingHistoricalIteration ? "—" : assetNodeSymbol}</span>
-                    <b>{text("美术", "ART")}</b>
-                    <strong>{viewingHistoricalIteration ? text("历史只读", "READ ONLY") : assetNodeLabel}</strong>
+                    <span aria-hidden="true" className="product-delivery-stage-marker product-delivery-stage-rerun-target">{viewingHistoricalIteration ? "—" : assetNodeSymbol}</span>
+                    <b className="product-delivery-stage-rerun-target">{text("美术", "ART")}</b>
+                    <strong className="product-delivery-stage-rerun-target">{viewingHistoricalIteration ? text("历史只读", "READ ONLY") : assetNodeLabel}</strong>
                     <small>{viewingHistoricalIteration
                       ? text("历史轮不展示当前素材规划", "Current assets are hidden for historical iterations")
                       : `${assetCompletion?.uploaded ?? 0}/${assetCompletion?.total ?? 0} · ${assetPanelExpanded ? text("收起素材列表", "HIDE ASSET LIST") : text("展开素材列表", "VIEW ASSET LIST")}`}</small>

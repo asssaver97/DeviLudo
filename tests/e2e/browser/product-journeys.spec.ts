@@ -368,6 +368,31 @@ test("a creator can refine and deliver a game through every Core and platform st
   await expect(page.getByText(/windows · 完成/).first()).toBeVisible();
   await expect(page.getByText(/macos · 完成/).first()).toBeVisible();
 
+  const generationStage = page.locator('[data-stage-kind="AGENT_GENERATION"]');
+  const generationRerun = generationStage.getByRole("button", { name: /从「游戏生成」重新执行/ });
+  await generationStage.getByRole("button", { name: "打开需求快照" }).hover();
+  await expect(generationRerun).toHaveCSS("opacity", "0");
+  await expect(generationRerun).toHaveCSS("pointer-events", "none");
+  await generationStage.locator(":scope > b").hover();
+  await expect(generationRerun).toHaveCSS("opacity", "1");
+  await expect(generationRerun).toHaveCSS("pointer-events", "auto");
+  await generationStage.locator(":scope > strong").hover();
+  await expect(generationRerun).toHaveCSS("opacity", "1");
+  await generationStage.getByRole("button", { name: "打开需求快照" }).hover();
+  const generationMarker = await generationStage.locator(":scope > .product-delivery-stage-marker").boundingBox();
+  expect(generationMarker).not.toBeNull();
+  await page.mouse.move(
+    generationMarker!.x + generationMarker!.width / 2,
+    generationMarker!.y + generationMarker!.height / 2,
+  );
+  await expect(generationRerun).toHaveCSS("opacity", "1");
+
+  const e2eStage = page.locator('[data-stage-kind="E2E_TEST"]');
+  const e2eRerun = e2eStage.getByRole("button", { name: /从「跨平台 E2E」重新执行/ });
+  await e2eStage.getByRole("button", { name: "打开E2E 报告" }).first().hover();
+  await expect(e2eRerun).toHaveCSS("opacity", "0");
+  await expect(e2eRerun).toHaveCSS("pointer-events", "none");
+
   await page.getByRole("button", { name: "完成本轮，不发布" }).click();
   await expect(page.getByText("交付完成", { exact: true })).toBeVisible({ timeout: 45_000 });
   await expect(page.getByRole("button", { name: "按照当前需求开发" })).toHaveCount(0);

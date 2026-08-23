@@ -2127,14 +2127,16 @@ textarea {
 }
 
 
-.product-delivery-stage:hover .product-delivery-stage-rerun-icon {
+.product-delivery-stage:has(.product-delivery-stage-rerun-target:hover) > .product-delivery-stage-rerun-icon,
+.product-delivery-stage > .product-delivery-stage-rerun-icon:hover {
   opacity: 1;
   pointer-events: auto;
 }
 
-/* A not-started stage is dimmed, but its rerun overlay has to stay legible once
-   you are pointing at it. */
-.product-delivery-stage.status-pending:hover {
+/* A not-started stage is dimmed, but its rerun target has to stay legible while
+   the marker, stage name, or status is being inspected. */
+.product-delivery-stage.status-pending:has(.product-delivery-stage-rerun-target:hover),
+.product-delivery-stage.status-pending:has(> .product-delivery-stage-rerun-icon:hover) {
   opacity: 1;
 }
 
