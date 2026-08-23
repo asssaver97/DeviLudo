@@ -133,7 +133,6 @@ export function HomeChat() {
         : text("消息发送失败，请稍后重试", "Message failed. Please try again.");
       setConversation(failedOptimisticConversation(pendingConversation, failureMessage));
       setContent(message);
-      setAttachments(messageAttachments);
       setError(failureMessage);
       if (cause instanceof ConversationStreamError && cause.code === "AGENT_CONFIG_REQUIRED") {
         router.push("/settings?required=conversation");

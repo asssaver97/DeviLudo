@@ -1,6 +1,8 @@
 import { randomUUID } from "node:crypto";
 import { test, expect } from "../fixtures/stack";
 
+const ONE_PIXEL_PNG = Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAACXBIWXMAAAPoAAAD6AG1e1JrAAAADUlEQVR4nGNg2PL/PwAFHgKz57crZQAAAABJRU5ErkJggg==", "base64");
+
 test("product navigation preserves the shell and reuses project data without reconnecting",async({page,stack})=>{
   expect(stack.webUrl.protocol).toBe("http:");
   let instanceRequests=0;
@@ -291,6 +293,11 @@ test("an Agent reply follows the conversation without moving the whole page", as
     const input = page.getByLabel("继续项目会话");
     await input.scrollIntoViewIfNeeded();
     await input.fill("请给这个玩法增加一个新的循环机制。");
+    await page.getByLabel("选择会话图片").setInputFiles({
+      name: "project-feedback.png",
+      mimeType: "image/png",
+      buffer: ONE_PIXEL_PNG,
+    });
     const sendButton = page.getByRole("button", { name: "发送项目消息" });
     // Establish the user's viewport after the actionable control is visible.
     // Otherwise Playwright's WebKit driver may scroll the page merely to click
@@ -298,6 +305,8 @@ test("an Agent reply follows the conversation without moving the whole page", as
     await sendButton.scrollIntoViewIfNeeded();
     const pageScrollBefore = await page.evaluate(() => window.scrollY);
     await sendButton.click();
+    await expect(page.locator(".project-conversation-box .conversation-composer-images")).toHaveCount(0);
+    await expect(page.locator('.project-conversation-box .conversation-message-images img[alt="project-feedback.png"]')).toBeVisible();
     await expect(page.locator(".project-conversation-box .conversation-box-message.is-thinking")).toBeVisible();
     await expect(page.getByText("正在思考", { exact: true })).toBeVisible();
     await page.waitForTimeout(250);
@@ -308,6 +317,7 @@ test("an Agent reply follows the conversation without moving the whole page", as
   } finally {
     releaseRequest();
   }
+  await expect(page.locator(".project-conversation-box .conversation-composer-images")).toHaveCount(0);
 });
 
 test("a creator can refine and deliver a game through every Core and platform stage", async ({ page, stack }) => {
@@ -635,7 +645,14 @@ test("home chat enters the thread immediately and shows animated waiting dots", 
     await page.goto("/");
     const concept = "先进入会话，再等待设计搭档的流式回复。";
     await page.getByLabel("游戏想法或修改意见").fill(concept);
+    await page.getByLabel("选择会话图片").setInputFiles({
+      name: "new-game-reference.png",
+      mimeType: "image/png",
+      buffer: ONE_PIXEL_PNG,
+    });
     await page.getByRole("button", { name: "发送消息" }).click();
+    await expect(page.locator(".home-conversation-box .conversation-composer-images")).toHaveCount(0);
+    await expect(page.locator('.home-conversation-box .conversation-message-images img[alt="new-game-reference.png"]')).toBeVisible();
     await expect(page.getByText(concept, { exact: true })).toBeVisible();
     const waiting = page.locator(".home-conversation-box .conversation-box-message.is-thinking [aria-label='等待回复']");
     await expect(waiting).toBeVisible();
@@ -645,6 +662,7 @@ test("home chat enters the thread immediately and shows animated waiting dots", 
     releaseRequest();
   }
   await expect(page.locator(".homeChat-error")).toContainText("消息发送失败");
+  await expect(page.locator(".home-conversation-box .conversation-composer-images")).toHaveCount(0);
 });
 
 test("a creator can link a local project without uploading it and continue its Agent analysis conversation", async ({ page, stack }) => {

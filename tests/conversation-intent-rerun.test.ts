@@ -3,7 +3,7 @@ import test from "node:test";
 import { classifyConversationIntent, parseConversationIntent } from "../services/core/src/conversation-intent";
 import { e2eGoalsDigest, mergeE2eGoals } from "../services/core/src/e2e-goals";
 
-test("Intent Agent accepts only internally consistent structured decisions", () => {
+test("Intent Agent validates structure and safely normalizes inconsistent action flags", () => {
   const question = parseConversationIntent(JSON.stringify({
     intent: "QUESTION",
     explicitExecution: false,
@@ -14,20 +14,32 @@ test("Intent Agent accepts only internally consistent structured decisions", () 
   assert.equal(question.intent, "QUESTION");
   assert.deepEqual(question.responderRoles, ["DEVELOPMENT", "TEST"]);
 
-  assert.throws(() => parseConversationIntent(JSON.stringify({
+  assert.deepEqual(parseConversationIntent(JSON.stringify({
     intent: "QUESTION",
     explicitExecution: true,
     actionable: true,
     responderRoles: ["DEVELOPMENT"],
     summary: "Invalid question mutation",
-  })), /inconsistent action flags/);
-  assert.throws(() => parseConversationIntent(JSON.stringify({
+  })), {
+    intent: "QUESTION",
+    explicitExecution: false,
+    actionable: false,
+    responderRoles: ["DEVELOPMENT"],
+    summary: "Invalid question mutation",
+  });
+  assert.deepEqual(parseConversationIntent(JSON.stringify({
     intent: "CHANGE_REQUEST",
     explicitExecution: true,
     actionable: false,
     responderRoles: ["DEVELOPMENT"],
     summary: "Cannot execute an unactionable request",
-  })), /inconsistent action flags/);
+  })), {
+    intent: "CHANGE_REQUEST",
+    explicitExecution: false,
+    actionable: false,
+    responderRoles: ["DEVELOPMENT"],
+    summary: "Cannot execute an unactionable request",
+  });
   assert.throws(() => parseConversationIntent("{\"intent\":\"QUESTION\"}"), /invalid decision/);
 });
 

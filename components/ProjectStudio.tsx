@@ -505,7 +505,6 @@ export function ProjectStudio({ projectId }: { projectId: string }) {
       setConversation(failedConversation);
       setSelectedConversationId(failedConversation.id);
       setConversationInput(content);
-      setConversationImages(images);
       setError(failureMessage);
       if (reason instanceof ConversationStreamError && reason.code === "AGENT_CONFIG_REQUIRED") {
         router.push("/settings?required=conversation");
