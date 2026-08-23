@@ -23,6 +23,7 @@ import {
   MAX_CONVERSATION_IMAGE_BYTES,
   MAX_CONVERSATION_IMAGE_TOTAL_BYTES,
   type ConversationImageDraft,
+  type StreamingConversationReplies,
 } from "@/lib/product/conversation-stream";
 import { agentProgressDisplayRows, localizedAgentProgressContent } from "@/lib/product/agent-progress";
 import { CloseIcon, PlusIcon, SendIcon } from "../console/Icons";
@@ -33,7 +34,7 @@ type ConversationBoxProps = Readonly<{
   conversationKey: string | null;
   messages: readonly ProductConversationMessage[];
   sending: boolean;
-  streamingReplies: Readonly<Partial<Record<ProjectAgentRole, string>>>;
+  streamingReplies: StreamingConversationReplies;
   agentProgress?: Readonly<{ running: boolean; events: readonly AgentProgressEvent[] }>;
   showSendingReply?: boolean;
   value: string;
@@ -315,16 +316,21 @@ export function ConversationBox({
             </article>
           ) : null}
           {sending && showSendingReply ? (
-            (PROJECT_AGENT_ROLES.filter(role => Boolean(streamingReplies[role])).length
-              ? PROJECT_AGENT_ROLES.filter(role => Boolean(streamingReplies[role]))
-              : ["DESIGN" as const]).map(role => {
+            PROJECT_AGENT_ROLES.filter(role => Boolean(streamingReplies[role])).map(role => {
                 const identity = agentIdentity(role, text);
+                const reply = streamingReplies[role];
+                if (!reply) return null;
+                const status = reply.phase === "THINKING"
+                  ? text("正在思考", "Thinking")
+                  : reply.phase === "TYPING"
+                    ? text("对方正在输入中", "The other person is typing")
+                    : null;
                 return (
-                  <article className={`conversation-box-message assistant is-thinking role-${role.toLowerCase()}`} key={`stream-${role}`}>
+                  <article className={`conversation-box-message assistant is-${reply.phase.toLowerCase()} role-${role.toLowerCase()}`} key={`stream-${role}`}>
                     <span className="message-avatar">{identity.avatar}</span>
                     <div>
-                      <header><b>{identity.name}</b><span className="conversation-agent-working">{text("正在回复", "RESPONDING")}</span></header>
-                      <p>{streamingReplies[role] || <TypingDots />}</p>
+                      <header><b>{identity.name}</b>{status ? <span className="conversation-agent-working">{status}</span> : null}</header>
+                      <p>{reply.content || <TypingDots />}</p>
                     </div>
                   </article>
                 );

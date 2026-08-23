@@ -299,9 +299,12 @@ test("an Agent reply follows the conversation without moving the whole page", as
     const pageScrollBefore = await page.evaluate(() => window.scrollY);
     await sendButton.click();
     await expect(page.locator(".project-conversation-box .conversation-box-message.is-thinking")).toBeVisible();
+    await expect(page.getByText("正在思考", { exact: true })).toBeVisible();
     await page.waitForTimeout(250);
     const pageScrollAfter = await page.evaluate(() => window.scrollY);
     expect(Math.abs(pageScrollAfter - pageScrollBefore)).toBeLessThanOrEqual(1);
+    await page.getByRole("button", { name: "English" }).click();
+    await expect(page.getByText("Thinking", { exact: true })).toBeVisible();
   } finally {
     releaseRequest();
   }
@@ -555,6 +558,8 @@ test("the home chat supports both project feedback and a fresh game conversation
   await expect(sentImage).toBeVisible();
   await expect.poll(() => sentImage.evaluate(image => (image as HTMLImageElement).naturalWidth)).toBe(1);
   await expect(page.getByText(/测试设计 Agent 已结合项目上下文生成回复/).first()).toBeVisible();
+  await expect(page.getByText("正在思考", { exact: true })).toHaveCount(0);
+  await expect(page.getByText("对方正在输入中", { exact: true })).toHaveCount(0);
   await expect(page.locator(".home-conversation-box .conversation-box-message > div > p")).toHaveText([
     feedbackQuestion,
     "测试设计 Agent 已结合项目上下文生成回复。",
@@ -634,6 +639,7 @@ test("home chat enters the thread immediately and shows animated waiting dots", 
     await expect(page.getByText(concept, { exact: true })).toBeVisible();
     const waiting = page.locator(".home-conversation-box .conversation-box-message.is-thinking [aria-label='等待回复']");
     await expect(waiting).toBeVisible();
+    await expect(page.getByText("正在思考", { exact: true })).toBeVisible();
     await expect(waiting.locator("i")).toHaveCount(3);
   } finally {
     releaseRequest();

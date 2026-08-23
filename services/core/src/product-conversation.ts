@@ -45,6 +45,12 @@ export type ProductConversationGroupReply = ProductConversationAgentReply & Read
   agentRole: ProjectAgentRole;
 }>;
 
+export type ProductConversationStreamCallbacks = Readonly<{
+  onStart: (role: ProjectAgentRole) => void;
+  onDelta: (role: ProjectAgentRole, delta: string) => void;
+  onComplete: (role: ProjectAgentRole) => void;
+}>;
+
 export type ProductConversationAgentReply = Readonly<{
   content: string;
   options: readonly string[];
@@ -163,14 +169,14 @@ export async function generateProductConversationGroupReply(
 
 export async function streamProductConversationGroupReply(
   input: ConversationReplyInput,
-  onDelta: (role: ProjectAgentRole, delta: string) => void,
+  callbacks: ProductConversationStreamCallbacks,
 ): Promise<readonly ProductConversationGroupReply[]> {
-  return groupReply(input, onDelta);
+  return groupReply(input, callbacks);
 }
 
 async function groupReply(
   input: ConversationReplyInput,
-  onDelta?: (role: ProjectAgentRole, delta: string) => void,
+  stream?: ProductConversationStreamCallbacks,
 ): Promise<readonly ProductConversationGroupReply[]> {
   const roles = input.responderRoles?.length ? input.responderRoles : ["DESIGN", "DEVELOPMENT", "TEST"] as const;
   const replies: ProductConversationGroupReply[] = [];
@@ -184,9 +190,11 @@ async function groupReply(
     });
     let generated: ProductConversationAgentReply;
     try {
-      generated = onDelta
-        ? await streamProductConversationReply(roleInput, delta => onDelta(agentRole, delta))
+      stream?.onStart(agentRole);
+      generated = stream
+        ? await streamProductConversationReply(roleInput, delta => stream.onDelta(agentRole, delta))
         : await generateProductConversationReply(roleInput);
+      stream?.onComplete(agentRole);
     } catch (error) {
       const message = error instanceof Error ? error.message : "调用失败";
       throw new Error(`${agentRoleLabel(agentRole)}：${message}`, { cause: error });

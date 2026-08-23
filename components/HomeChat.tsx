@@ -4,14 +4,19 @@ import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { useEffect, useMemo, useState, type FormEvent } from "react";
 import { cachedValue, clientCacheKeys, loadCached, storeCached } from "@/lib/product/client-cache";
-import type { ProductConversation, ProductProjectSummary, ProjectAgentRole } from "@/lib/product/contracts";
+import type { ProductConversation, ProductProjectSummary } from "@/lib/product/contracts";
 import {
+  appendStreamingConversationReply,
   chronologicalMessages,
+  completeStreamingConversationReply,
   ConversationStreamError,
   failedOptimisticConversation,
+  initialStreamingConversationReplies,
   optimisticConversation,
   sendConversationMessageStream,
+  startStreamingConversationReply,
   type ConversationImageDraft,
+  type StreamingConversationReplies,
 } from "@/lib/product/conversation-stream";
 import { ConversationBox } from "./conversation/ConversationBox";
 import { GamepadIcon, PlusIcon, SparkIcon } from "./console/Icons";
@@ -41,7 +46,7 @@ export function HomeChat() {
   const [loadingProjects, setLoadingProjects] = useState(!initialProjects);
   const [sending, setSending] = useState(false);
   const [startingDevelopment, setStartingDevelopment] = useState(false);
-  const [streamingReplies, setStreamingReplies] = useState<Partial<Record<ProjectAgentRole, string>>>({});
+  const [streamingReplies, setStreamingReplies] = useState<StreamingConversationReplies>({});
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
@@ -93,7 +98,7 @@ export function HomeChat() {
     );
     setSending(true);
     setError(null);
-    setStreamingReplies({});
+    setStreamingReplies(initialStreamingConversationReplies());
     setConversation(pendingConversation);
     setContent("");
     setAttachments(Object.freeze([]));
@@ -104,10 +109,11 @@ export function HomeChat() {
       const result = await sendConversationMessageStream(
         body,
         `conversation:${crypto.randomUUID()}`,
-        (agentRole, delta) => setStreamingReplies(current => ({
-          ...current,
-          [agentRole]: `${current[agentRole] ?? ""}${delta}`,
-        })),
+        {
+          onAgentStart: agentRole => setStreamingReplies(current => startStreamingConversationReply(current, agentRole)),
+          onAgentDelta: (agentRole, delta) => setStreamingReplies(current => appendStreamingConversationReply(current, agentRole, delta)),
+          onAgentComplete: agentRole => setStreamingReplies(current => completeStreamingConversationReply(current, agentRole)),
+        },
       );
       setProjects(current => {
         const next = current.some(project => project.id === result.project.id)

@@ -27,6 +27,20 @@ export type ConversationImageDraft = Readonly<{
   previewUrl: string;
 }>;
 
+export type StreamingConversationReply = Readonly<{
+  content: string;
+  phase: "THINKING" | "TYPING" | "COMPLETE";
+}>;
+
+export type StreamingConversationReplies = Readonly<Partial<Record<ProjectAgentRole, StreamingConversationReply>>>;
+
+export type ConversationStreamCallbacks = Readonly<{
+  onAgentStart: (agentRole: ProjectAgentRole) => void;
+  onAgentDelta: (agentRole: ProjectAgentRole, delta: string) => void;
+  onAgentComplete: (agentRole: ProjectAgentRole) => void;
+  onProjectDocument?: (project: ProductProjectDetail) => void;
+}>;
+
 export const MAX_CONVERSATION_IMAGES = 4;
 export const MAX_CONVERSATION_IMAGE_BYTES = 5 * 1024 * 1024;
 export const MAX_CONVERSATION_IMAGE_TOTAL_BYTES = 12 * 1024 * 1024;
@@ -50,8 +64,7 @@ export async function sendConversationMessageStream(
     attachments?: readonly Pick<ConversationImageDraft, "filename" | "contentType" | "dataBase64">[];
   }>,
   idempotencyKey: string,
-  onDelta: (agentRole: ProjectAgentRole, delta: string) => void,
-  onProjectDocument?: (project: ProductProjectDetail) => void,
+  callbacks: ConversationStreamCallbacks,
 ): Promise<ConversationStreamResult> {
   const response = await fetch("/api/conversations/messages/stream", {
     method: "POST",
@@ -81,17 +94,21 @@ export async function sendConversationMessageStream(
     } catch {
       throw new ConversationStreamError("INVALID_STREAM", "对话服务返回了无效数据");
     }
-    if (event.type === "agent_delta" && typeof event.delta === "string"
-      && isProjectAgentRole(event.agentRole)) {
-      onDelta(event.agentRole, event.delta);
+    if (event.type === "agent_start" && isProjectAgentRole(event.agentRole)) {
+      callbacks.onAgentStart(event.agentRole);
       return;
     }
-    if (event.type === "delta" && typeof event.delta === "string") {
-      onDelta("DESIGN", event.delta);
+    if (event.type === "agent_delta" && typeof event.delta === "string"
+      && isProjectAgentRole(event.agentRole)) {
+      callbacks.onAgentDelta(event.agentRole, event.delta);
+      return;
+    }
+    if (event.type === "agent_complete" && isProjectAgentRole(event.agentRole)) {
+      callbacks.onAgentComplete(event.agentRole);
       return;
     }
     if (event.type === "project_document" && event.project) {
-      onProjectDocument?.(event.project as ProductProjectDetail);
+      callbacks.onProjectDocument?.(event.project as ProductProjectDetail);
       return;
     }
     if (event.type === "error") {
@@ -123,6 +140,45 @@ export async function sendConversationMessageStream(
   if (buffer.trim()) consume(buffer);
   if (!result) throw new ConversationStreamError("INCOMPLETE_STREAM", "对话尚未完成，请重试");
   return result;
+}
+
+export function initialStreamingConversationReplies(): StreamingConversationReplies {
+  return Object.freeze({ DESIGN: Object.freeze({ content: "", phase: "THINKING" }) });
+}
+
+export function startStreamingConversationReply(
+  current: StreamingConversationReplies,
+  agentRole: ProjectAgentRole,
+): StreamingConversationReplies {
+  const next: Partial<Record<ProjectAgentRole, StreamingConversationReply>> = { ...current };
+  const placeholder = next.DESIGN;
+  if (agentRole !== "DESIGN" && placeholder?.phase === "THINKING" && !placeholder.content) delete next.DESIGN;
+  next[agentRole] = Object.freeze({ content: next[agentRole]?.content ?? "", phase: "THINKING" });
+  return Object.freeze(next);
+}
+
+export function appendStreamingConversationReply(
+  current: StreamingConversationReplies,
+  agentRole: ProjectAgentRole,
+  delta: string,
+): StreamingConversationReplies {
+  const reply = current[agentRole];
+  return Object.freeze({
+    ...current,
+    [agentRole]: Object.freeze({ content: `${reply?.content ?? ""}${delta}`, phase: "TYPING" }),
+  });
+}
+
+export function completeStreamingConversationReply(
+  current: StreamingConversationReplies,
+  agentRole: ProjectAgentRole,
+): StreamingConversationReplies {
+  const reply = current[agentRole];
+  if (!reply) return current;
+  return Object.freeze({
+    ...current,
+    [agentRole]: Object.freeze({ ...reply, phase: "COMPLETE" }),
+  });
 }
 
 function isProjectAgentRole(value: unknown): value is ProjectAgentRole {

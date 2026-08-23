@@ -20,16 +20,20 @@ import type {
   ProductProjectSummary,
   ProductWorkflowIterationDetail,
   ProductWorkflowIterationSummary,
-  ProjectAgentRole,
 } from "@/lib/product/contracts";
 import { readAgentProgressStream } from "@/lib/product/agent-progress-stream";
 import {
+  appendStreamingConversationReply,
   chronologicalMessages,
+  completeStreamingConversationReply,
   ConversationStreamError,
   failedOptimisticConversation,
+  initialStreamingConversationReplies,
   optimisticConversation,
   sendConversationMessageStream,
+  startStreamingConversationReply,
   type ConversationImageDraft,
+  type StreamingConversationReplies,
 } from "@/lib/product/conversation-stream";
 import { ConversationBox } from "./conversation/ConversationBox";
 import { AssetAutoGenerationSetting } from "./AssetAutoGenerationSetting";
@@ -84,7 +88,7 @@ export function ProjectStudio({ projectId }: { projectId: string }) {
   const [busy, setBusy] = useState(false);
   const [sendingMessage, setSendingMessage] = useState(false);
   const [decidingChange, setDecidingChange] = useState(false);
-  const [streamingReplies, setStreamingReplies] = useState<Partial<Record<ProjectAgentRole, string>>>({});
+  const [streamingReplies, setStreamingReplies] = useState<StreamingConversationReplies>({});
   const [agentProgress, setAgentProgress] = useState<readonly AgentProgressEvent[]>([]);
   const [artifacts, setArtifacts] = useState<readonly ArtifactRecord[]>(initialArtifacts ?? []);
   const [iterations, setIterations] = useState<readonly ProductWorkflowIterationSummary[]>([]);
@@ -456,7 +460,7 @@ export function ProjectStudio({ projectId }: { projectId: string }) {
     const pendingConversation = optimisticConversation(previousConversation, projectId, displayedContent, project?.name ?? text("项目会话", "Project conversation"), images);
     setSendingMessage(true);
     setError(null);
-    setStreamingReplies({});
+    setStreamingReplies(initialStreamingConversationReplies());
     setConversation(pendingConversation);
     setSelectedConversationId(pendingConversation.id);
     setConversationInput("");
@@ -467,15 +471,16 @@ export function ProjectStudio({ projectId }: { projectId: string }) {
           ? { conversationId: previousConversation.id, content, responseLanguage: locale, attachments: conversationImagePayload(images) }
           : { projectId, content, responseLanguage: locale, attachments: conversationImagePayload(images) },
         `conversation:${crypto.randomUUID()}`,
-        (agentRole, delta) => setStreamingReplies(current => ({
-          ...current,
-          [agentRole]: `${current[agentRole] ?? ""}${delta}`,
-        })),
-        updatedProject => setProject(current => {
-          const next = newestProjectSnapshot(current, updatedProject);
-          storeCached(clientCacheKeys.project(projectId), next, 5_000);
-          return next;
-        }),
+        {
+          onAgentStart: agentRole => setStreamingReplies(current => startStreamingConversationReply(current, agentRole)),
+          onAgentDelta: (agentRole, delta) => setStreamingReplies(current => appendStreamingConversationReply(current, agentRole, delta)),
+          onAgentComplete: agentRole => setStreamingReplies(current => completeStreamingConversationReply(current, agentRole)),
+          onProjectDocument: updatedProject => setProject(current => {
+            const next = newestProjectSnapshot(current, updatedProject);
+            storeCached(clientCacheKeys.project(projectId), next, 5_000);
+            return next;
+          }),
+        },
       );
       const nextConversation = payload.conversation;
       setConversation(nextConversation);

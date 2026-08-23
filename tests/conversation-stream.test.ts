@@ -1,10 +1,39 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import {
+  appendStreamingConversationReply,
   chronologicalMessages,
+  completeStreamingConversationReply,
   failedOptimisticConversation,
+  initialStreamingConversationReplies,
   optimisticConversation,
+  startStreamingConversationReply,
 } from "../lib/product/conversation-stream";
+
+test("streaming reply activity moves from thinking to typing and then clears its status", () => {
+  const initial = initialStreamingConversationReplies();
+  assert.deepEqual(initial, { DESIGN: { content: "", phase: "THINKING" } });
+
+  const developmentStarted = startStreamingConversationReply(initial, "DEVELOPMENT");
+  assert.deepEqual(developmentStarted, { DEVELOPMENT: { content: "", phase: "THINKING" } });
+
+  const typing = appendStreamingConversationReply(developmentStarted, "DEVELOPMENT", "先检查控制器。");
+  assert.deepEqual(typing, { DEVELOPMENT: { content: "先检查控制器。", phase: "TYPING" } });
+
+  const complete = completeStreamingConversationReply(typing, "DEVELOPMENT");
+  assert.deepEqual(complete, { DEVELOPMENT: { content: "先检查控制器。", phase: "COMPLETE" } });
+});
+
+test("completed Agent replies remain visible without a status while the next Agent thinks", () => {
+  const designComplete = completeStreamingConversationReply(
+    appendStreamingConversationReply(initialStreamingConversationReplies(), "DESIGN", "设计结论"),
+    "DESIGN",
+  );
+  assert.deepEqual(startStreamingConversationReply(designComplete, "TEST"), {
+    DESIGN: { content: "设计结论", phase: "COMPLETE" },
+    TEST: { content: "", phase: "THINKING" },
+  });
+});
 
 test("conversation messages are ordered oldest first even when timestamps are equal", () => {
   const messages = [

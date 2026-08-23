@@ -34,10 +34,17 @@ test("conversation stream emits reply deltas before the persisted result", async
   });
   expect(response.status()).toBe(200);
   const events = (await response.text()).trim().split("\n").map(line => JSON.parse(line) as Record<string, unknown>);
+  const starts = events.filter(event => event.type === "agent_start");
   const deltas = events.filter(event => event.type === "agent_delta");
+  const agentCompleted = events.filter(event => event.type === "agent_complete");
   const completedAt = events.findIndex(event => event.type === "complete");
   const documentAt = events.findIndex(event => event.type === "project_document");
   expect(deltas.length).toBeGreaterThan(1);
+  expect(starts).toEqual([{ type: "agent_start", agentRole: "DESIGN" }]);
+  expect(agentCompleted).toEqual([{ type: "agent_complete", agentRole: "DESIGN" }]);
+  expect(events.findIndex(event => event.type === "agent_start")).toBeLessThan(events.findIndex(event => event.type === "agent_delta"));
+  expect(events.findIndex(event => event.type === "agent_delta")).toBeLessThan(events.findIndex(event => event.type === "agent_complete"));
+  expect(events.findIndex(event => event.type === "agent_complete")).toBeLessThan(completedAt);
   expect(events.findIndex(event => event.type === "agent_delta")).toBeLessThan(completedAt);
   expect(documentAt).toBe(-1);
   expect(deltas.map(event => event.delta).join("")).toContain("测试设计 Agent");

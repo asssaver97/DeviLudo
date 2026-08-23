@@ -58,6 +58,7 @@ import {
   type ConversationAgentProjectContext,
   type ConversationImageInput,
   type ProductConversationGroupReply,
+  type ProductConversationStreamCallbacks,
 } from "./product-conversation";
 import { generatedImageExtension, sniffContentType } from "./image-generation";
 import { classifyConversationIntent } from "./conversation-intent";
@@ -897,7 +898,11 @@ export async function runApi(
         command,
         signal: abortController.signal,
         onStage: phase => write({ type: "status", phase }),
-        onDelta: (agentRole, delta) => write({ type: "agent_delta", agentRole, delta }),
+        stream: {
+          onStart: agentRole => write({ type: "agent_start", agentRole }),
+          onDelta: (agentRole, delta) => write({ type: "agent_delta", agentRole, delta }),
+          onComplete: agentRole => write({ type: "agent_complete", agentRole }),
+        },
       });
       if (result.payload.changeRequest?.state === "APPLIED" || result.payload.conversation.messages.slice(-3).some(
         message => message.metadata.projectDocumentUpdated === true,
@@ -1886,7 +1891,7 @@ async function processConversationMessage(input: Readonly<{
   command: ConversationMessageCommand;
   signal?: AbortSignal;
   onStage?: (phase: "NAMING" | "RESPONDING" | "SAVING") => void;
-  onDelta?: (agentRole: ProjectAgentRole, delta: string) => void;
+  stream?: ProductConversationStreamCallbacks;
 }>): Promise<ConversationMessageResult> {
   const { request, principal, repository, objectStore, agentSecrets, command } = input;
   let workspace = await selectedWorkspaceFromRequest(request, repository, principal);
@@ -1978,7 +1983,7 @@ async function processConversationMessage(input: Readonly<{
       responseLanguage: command.responseLanguage,
       responderRoles: intentDecision.intent === "QUESTION" || !intentDecision.actionable
         ? intentDecision.responderRoles : undefined,
-    }, repository, agentSecrets, { signal: input.signal, onDelta: input.onDelta });
+    }, repository, agentSecrets, input.stream ? { signal: input.signal, callbacks: input.stream } : undefined);
     input.onStage?.("SAVING");
     const targetWorkspace = workspace ?? Object.freeze({ id: randomUUID(), name, createdAt: "" });
     const projectId = deterministicProjectId(principal.actorId, idempotencyKey);
@@ -2172,7 +2177,7 @@ async function processConversationMessage(input: Readonly<{
     allowDraftMutation: intentDecision.intent === "CHANGE_REQUEST" && intentDecision.actionable,
     responseLanguage: command.responseLanguage,
     responderRoles,
-  }, repository, agentSecrets, { signal: input.signal, onDelta: input.onDelta });
+  }, repository, agentSecrets, input.stream ? { signal: input.signal, callbacks: input.stream } : undefined);
   input.onStage?.("SAVING");
   const conversation = await repository.appendConversationTurn({
     workspaceId: workspace.id,
@@ -2795,7 +2800,7 @@ async function conversationAgentReplies(
   agentSecrets: AgentSecretStore,
   stream?: Readonly<{
     signal?: AbortSignal;
-    onDelta?: (agentRole: ProjectAgentRole, delta: string) => void;
+    callbacks: ProductConversationStreamCallbacks;
   }>,
 ): Promise<readonly ProductConversationGroupReply[]> {
   const settings = await repository.readAgentSettings();
@@ -2803,8 +2808,11 @@ async function conversationAgentReplies(
   const apiKey = await agentSecrets.readApiKey(settings.credentialSecretRef);
   if (!apiKey) throw httpError(424, "AGENT_CONFIG_REQUIRED", "无法读取全局 Agent 凭据，请重新保存配置");
   try {
-    if (stream?.onDelta) {
-      return await streamProductConversationGroupReply({ ...input, settings, apiKey, signal: stream.signal }, stream.onDelta);
+    if (stream) {
+      return await streamProductConversationGroupReply(
+        { ...input, settings, apiKey, signal: stream.signal },
+        stream.callbacks,
+      );
     }
     return await generateProductConversationGroupReply({ ...input, settings, apiKey });
   } catch (error) {
