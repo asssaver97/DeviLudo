@@ -10,9 +10,22 @@ import {
 import { getSignedUrl } from "@aws-sdk/s3-request-presigner";
 import type { JobProtocolV4, ObjectReference } from "./contracts";
 import type { ArtifactRecord } from "@/lib/product/contracts";
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { parseProjectDocumentContent, projectDocumentMarkdown } from "@/lib/product/project-document";
 import { parseResponseLanguage } from "@/lib/product/response-language";
+
+export type StoredConversationImage = Readonly<{
+  id: string;
+  filename: string;
+  contentType: "image/png" | "image/jpeg" | "image/webp";
+  sizeBytes: number;
+  bucket: string;
+  key: string;
+  sha256: string;
+}>;
+
+const MAX_CONVERSATION_IMAGE_BYTES = 5 * 1024 * 1024;
+const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 
 export class CoreObjectStore {
   private readonly client: S3Client;
@@ -89,8 +102,7 @@ export class CoreObjectStore {
     if (!isSafeAssetKey(input.assetKey)) throw new Error("Asset key is invalid");
     if (!/^(?:png|jpg|webp)$/.test(input.extension)) throw new Error("Asset extension is invalid");
     const sha256 = `sha256:${createHash("sha256").update(input.content).digest("hex")}`;
-    const key = `workspaces/${input.workspaceId}/projects/${input.projectId}`
-      + `/assets/${input.assetKey}-${sha256.slice(7, 23)}.${input.extension}`;
+    const key = newProjectAssetObjectKey({ ...input, sha256 });
     await this.client.send(new PutObjectCommand({
       Bucket: this.bucket,
       Key: key,
@@ -99,6 +111,67 @@ export class CoreObjectStore {
       Metadata: { sha256 },
     }));
     return Object.freeze({ bucket: this.bucket, key, sha256, sizeBytes: input.content.length });
+  }
+
+  async putConversationImage(input: Readonly<{
+    workspaceId: string;
+    projectId: string;
+    conversationId: string;
+    id: string;
+    filename: string;
+    extension: "png" | "jpg" | "webp";
+    contentType: "image/png" | "image/jpeg" | "image/webp";
+    content: Buffer;
+  }>): Promise<StoredConversationImage> {
+    if (![input.workspaceId, input.projectId, input.conversationId, input.id].every(value => UUID.test(value))) {
+      throw new Error("Conversation image boundary is invalid");
+    }
+    if (input.content.length < 1 || input.content.length > MAX_CONVERSATION_IMAGE_BYTES) {
+      throw new Error("Conversation image size is invalid");
+    }
+    const sha256 = `sha256:${createHash("sha256").update(input.content).digest("hex")}`;
+    const key = `workspaces/${input.workspaceId}/projects/${input.projectId}`
+      + `/conversations/${input.conversationId}/${input.id}-${sha256.slice(7, 23)}.${input.extension}`;
+    await this.client.send(new PutObjectCommand({
+      Bucket: this.bucket,
+      Key: key,
+      Body: input.content,
+      ContentType: input.contentType,
+      Metadata: { sha256 },
+    }));
+    return Object.freeze({
+      id: input.id,
+      filename: input.filename,
+      contentType: input.contentType,
+      sizeBytes: input.content.length,
+      bucket: this.bucket,
+      key,
+      sha256,
+    });
+  }
+
+  async readConversationImage(input: Readonly<{
+    workspaceId: string;
+    projectId: string;
+    conversationId: string;
+    image: StoredConversationImage;
+  }>): Promise<Readonly<{ content: Buffer; contentType: StoredConversationImage["contentType"] }>> {
+    const prefix = `workspaces/${input.workspaceId}/projects/${input.projectId}/conversations/${input.conversationId}/`;
+    const image = input.image;
+    if (image.bucket !== this.bucket || !image.key.startsWith(prefix)
+      || !/^sha256:[0-9a-f]{64}$/.test(image.sha256)
+      || !Number.isSafeInteger(image.sizeBytes) || image.sizeBytes < 1
+      || image.sizeBytes > MAX_CONVERSATION_IMAGE_BYTES) {
+      throw new Error("Conversation image boundary is invalid");
+    }
+    const result = await this.client.send(new GetObjectCommand({ Bucket: image.bucket, Key: image.key }));
+    if (!result.Body) throw new Error("Conversation image body is missing");
+    const content = Buffer.from(await result.Body.transformToByteArray());
+    if (content.length !== image.sizeBytes
+      || `sha256:${createHash("sha256").update(content).digest("hex")}` !== image.sha256) {
+      throw new Error("Conversation image digest or size is invalid");
+    }
+    return Object.freeze({ content, contentType: image.contentType });
   }
 
   async deleteProjectObjects(workspaceId: string, projectId: string): Promise<void> {
@@ -273,6 +346,17 @@ export class CoreObjectStore {
     return parsed as Record<string, unknown>;
   }
 
+}
+
+export function newProjectAssetObjectKey(input: Readonly<{
+  workspaceId: string;
+  projectId: string;
+  assetKey: string;
+  extension: string;
+  sha256: string;
+}>): string {
+  return `workspaces/${input.workspaceId}/projects/${input.projectId}`
+    + `/assets/${input.assetKey}-${input.sha256.slice(7, 23)}-${randomUUID()}.${input.extension}`;
 }
 
 function isSafeAssetKey(value: string): boolean {

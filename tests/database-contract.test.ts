@@ -474,7 +474,9 @@ test("Agent generation lands its planned asset manifest, validated and whole", a
   assert.match(sql, /BEFORE INSERT ON deviludo\.asset_manifests/);
   assert.match(complete, /RETURNING id, auto_generate_enabled INTO asset_manifest_id, asset_auto_generate/);
   assert.match(complete, /ON CONFLICT \(workspace_id, manifest_id, asset_key\) DO UPDATE/);
-  assert.match(complete, /DELETE FROM deviludo\.asset_items[\s\S]*status NOT IN \('generated', 'uploaded'\)[\s\S]*asset_key NOT IN/);
+  assert.match(complete, /INSERT INTO deviludo\.object_cleanup_queue[\s\S]*retired generated asset after Agent manifest re-plan[\s\S]*old\.status = 'generated'/);
+  assert.match(complete, /UPDATE deviludo\.asset_items old[\s\S]*old\.status = 'generated'[\s\S]*generation_prompt IS DISTINCT FROM/);
+  assert.match(complete, /DELETE FROM deviludo\.asset_items[\s\S]*status <> 'uploaded'[\s\S]*asset_key NOT IN/);
   // complete_job is SECURITY INVOKER and the Agent stage is completed by the
   // sandbox role, so that role must hold the DELETE the re-plan performs.
   assert.doesNotMatch(complete, /SECURITY DEFINER/);
@@ -571,12 +573,26 @@ test("asset generation is leased, attempt-bounded, and never overwrites a user u
     assert.match(definer, /SET row_security = off/);
   }
 
-  // A re-plan replaces the prompt, so previous attempts no longer apply and an
-  // exhausted item becomes generatable again — but a settled asset is untouched.
+  // A re-plan replaces unresolved attempts, preserves user uploads, reuses an
+  // unchanged generated contract, and retires a changed generated contract.
   const completeJob = sql.match(/CREATE OR REPLACE FUNCTION deviludo\.complete_job\([\s\S]*?(?=CREATE OR REPLACE FUNCTION deviludo\.fail_job\()/)?.[0] ?? "";
+  assert.match(completeJob, /INSERT INTO deviludo\.object_cleanup_queue[\s\S]*old\.status = 'generated'/);
+  assert.match(completeJob, /old\.generation_prompt IS DISTINCT FROM item->>'generationPrompt'/);
+  assert.match(completeJob, /SET status = 'planned', bucket = NULL, object_key = NULL,[\s\S]*generation_lease_token = NULL/);
   assert.match(completeJob, /generation_attempt = CASE\s*\n\s*WHEN deviludo\.asset_items\.status IN \('generated', 'uploaded'\) THEN deviludo\.asset_items\.generation_attempt\s*\n\s*ELSE 0 END/);
   assert.match(completeJob, /status = CASE\s*\n\s*WHEN deviludo\.asset_items\.status IN \('generated', 'uploaded'\) THEN deviludo\.asset_items\.status\s*\n\s*ELSE 'planned' END/);
   assert.match(completeJob, /source_path = CASE\s*\n\s*WHEN deviludo\.asset_items\.status IN \('generated', 'uploaded'\) THEN deviludo\.asset_items\.source_path\s*\n\s*ELSE NULL END/);
+});
+
+test("asset Manifest garbage collection migration upgrades existing databases atomically", async () => {
+  const migration = await readFile(
+    new URL("../infra/postgres/migrations/060_asset_manifest_garbage_collection.sql", import.meta.url),
+    "utf8",
+  );
+  assert.match(migration, /pg_get_functiondef\(target\)/);
+  assert.match(migration, /INSERT INTO deviludo\.object_cleanup_queue[\s\S]*old\.status = 'generated'/);
+  assert.match(migration, /old\.generation_prompt IS DISTINCT FROM item->>'generationPrompt'/);
+  assert.match(migration, /status <> 'uploaded'/);
 });
 
 test("asset re-plan migration atomically clears stale existing-source paths", async () => {

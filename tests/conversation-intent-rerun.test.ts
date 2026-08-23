@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { parseConversationIntent } from "../services/core/src/conversation-intent";
+import { classifyConversationIntent, parseConversationIntent } from "../services/core/src/conversation-intent";
 import { e2eGoalsDigest, mergeE2eGoals } from "../services/core/src/e2e-goals";
 
 test("Intent Agent accepts only internally consistent structured decisions", () => {
@@ -29,6 +29,47 @@ test("Intent Agent accepts only internally consistent structured decisions", () 
     summary: "Cannot execute an unactionable request",
   })), /inconsistent action flags/);
   assert.throws(() => parseConversationIntent("{\"intent\":\"QUESTION\"}"), /invalid decision/);
+});
+
+test("Intent Agent inspects conversation images before routing the message", async () => {
+  let latestContent: unknown;
+  const decision = await classifyConversationIntent({
+    content: "请判断截图是在提问还是要求修改。",
+    images: Object.freeze([{ contentType: "image/webp" as const, dataBase64: "UklGRg==" }]),
+    history: Object.freeze([]),
+    project: Object.freeze({
+      name: "视觉意图",
+      concept: "验证图片意图路由",
+      workflowState: "DRAFT",
+      specification: Object.freeze({}),
+      document: Object.freeze({ introduction: "视觉意图", gameplay: "检查截图", categories: [], features: [] }),
+      analysisStatus: "READY" as const,
+      discovery: null,
+    }),
+    pendingChange: null,
+    settings: Object.freeze({
+      agentRuntime: "CLAUDE_CODE" as const,
+      baseUrl: "https://provider.example/v1",
+      primaryModel: "claude-primary",
+      modelOverrides: Object.freeze({ design: null, development: null, test: null, image: null }),
+      revision: 1,
+    }),
+    apiKey: "sk-test-secret",
+    responseLanguage: "zh",
+    fetchImpl: async (_url, init) => {
+      const body = JSON.parse(String(init?.body)) as { messages: readonly { content: unknown }[] };
+      latestContent = body.messages[0]?.content;
+      return new Response(JSON.stringify({ content: [{ type: "text", text: JSON.stringify({
+        intent: "QUESTION",
+        explicitExecution: false,
+        actionable: false,
+        responderRoles: ["DESIGN"],
+        summary: "Answer without changing the project.",
+      }) }] }), { status: 200, headers: { "content-type": "application/json" } });
+    },
+  });
+  assert.equal(decision.intent, "QUESTION");
+  assert.deepEqual((latestContent as readonly Record<string, unknown>[]).map(item => item.type), ["text", "image"]);
 });
 
 test("E2E goal revisions retain non-conflicting goals and explicitly replace or retire IDs", () => {

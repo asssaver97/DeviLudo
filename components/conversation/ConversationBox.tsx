@@ -1,9 +1,13 @@
 "use client";
 
+import Image from "next/image";
 import {
   useLayoutEffect,
   useMemo,
   useRef,
+  useState,
+  type ChangeEvent,
+  type DragEvent,
   type FormEvent,
   type KeyboardEvent,
   type ReactNode,
@@ -14,8 +18,14 @@ import {
   type ProductConversationMessage,
   type ProjectAgentRole,
 } from "@/lib/product/contracts";
+import {
+  MAX_CONVERSATION_IMAGES,
+  MAX_CONVERSATION_IMAGE_BYTES,
+  MAX_CONVERSATION_IMAGE_TOTAL_BYTES,
+  type ConversationImageDraft,
+} from "@/lib/product/conversation-stream";
 import { agentProgressDisplayRows, localizedAgentProgressContent } from "@/lib/product/agent-progress";
-import { PlusIcon, SendIcon } from "../console/Icons";
+import { CloseIcon, PlusIcon, SendIcon } from "../console/Icons";
 import { TypingDots } from "../console/TypingDots";
 import { useLanguage } from "../i18n/LanguageProvider";
 
@@ -27,6 +37,8 @@ type ConversationBoxProps = Readonly<{
   agentProgress?: Readonly<{ running: boolean; events: readonly AgentProgressEvent[] }>;
   showSendingReply?: boolean;
   value: string;
+  attachments: readonly ConversationImageDraft[];
+  onAttachmentsChange: (attachments: readonly ConversationImageDraft[]) => void;
   onValueChange: (value: string) => void;
   onSubmit: (event: FormEvent<HTMLFormElement>) => void;
   onOptionSelect?: (option: string) => void;
@@ -53,6 +65,8 @@ export function ConversationBox({
   agentProgress,
   showSendingReply = true,
   value,
+  attachments,
+  onAttachmentsChange,
   onValueChange,
   onSubmit,
   onOptionSelect,
@@ -74,6 +88,10 @@ export function ConversationBox({
   const messageViewport = useRef<HTMLDivElement | null>(null);
   const progressViewport = useRef<HTMLDivElement | null>(null);
   const textarea = useRef<HTMLTextAreaElement | null>(null);
+  const imageInput = useRef<HTMLInputElement | null>(null);
+  const imageDragDepth = useRef(0);
+  const [imageError, setImageError] = useState<string | null>(null);
+  const [imageDropActive, setImageDropActive] = useState(false);
   const followLatestMessage = useRef(true);
   const followLatestProgress = useRef(true);
   const progressRows = useMemo(
@@ -124,6 +142,65 @@ export function ConversationBox({
       event.preventDefault();
       event.currentTarget.form?.requestSubmit();
     }
+  }
+
+  async function addImages(files: readonly File[]) {
+    if (!files.length) return;
+    if (attachments.length + files.length > MAX_CONVERSATION_IMAGES) {
+      setImageError(text(`最多发送 ${MAX_CONVERSATION_IMAGES} 张图片`, `Attach up to ${MAX_CONVERSATION_IMAGES} images`));
+      return;
+    }
+    if (files.some(file => !isConversationImageType(file.type) || file.size < 1 || file.size > MAX_CONVERSATION_IMAGE_BYTES)) {
+      setImageError(text("仅支持 5 MB 以内的 PNG、JPEG 或 WebP 图片", "Use PNG, JPEG, or WebP images up to 5 MB each"));
+      return;
+    }
+    if (attachments.reduce((total, item) => total + item.sizeBytes, 0)
+      + files.reduce((total, item) => total + item.size, 0) > MAX_CONVERSATION_IMAGE_TOTAL_BYTES) {
+      setImageError(text("图片总大小不能超过 12 MB", "Images may total up to 12 MB"));
+      return;
+    }
+    try {
+      const drafts = await Promise.all(files.map(readConversationImage));
+      onAttachmentsChange(Object.freeze([...attachments, ...drafts]));
+      setImageError(null);
+    } catch {
+      setImageError(text("图片读取失败，请重新选择", "Unable to read the image. Select it again."));
+    }
+  }
+
+  function handleImages(event: ChangeEvent<HTMLInputElement>) {
+    const files = [...(event.target.files ?? [])];
+    event.target.value = "";
+    void addImages(files);
+  }
+
+  function handleImageDragEnter(event: DragEvent<HTMLFormElement>) {
+    if (!hasDraggedFiles(event) || sending || disabled) return;
+    event.preventDefault();
+    imageDragDepth.current += 1;
+    setImageDropActive(true);
+  }
+
+  function handleImageDragOver(event: DragEvent<HTMLFormElement>) {
+    if (!hasDraggedFiles(event)) return;
+    event.preventDefault();
+    event.dataTransfer.dropEffect = "copy";
+  }
+
+  function handleImageDragLeave(event: DragEvent<HTMLFormElement>) {
+    if (!hasDraggedFiles(event)) return;
+    event.preventDefault();
+    imageDragDepth.current = Math.max(0, imageDragDepth.current - 1);
+    if (imageDragDepth.current === 0) setImageDropActive(false);
+  }
+
+  function handleImageDrop(event: DragEvent<HTMLFormElement>) {
+    if (!hasDraggedFiles(event)) return;
+    event.preventDefault();
+    imageDragDepth.current = 0;
+    setImageDropActive(false);
+    if (sending || disabled) return;
+    void addImages([...event.dataTransfer.files]);
   }
 
   return (
@@ -177,6 +254,21 @@ export function ConversationBox({
                     </span>
                   ) : null}
                 </header>
+                {(message.attachments ?? []).length ? (
+                  <div className="conversation-message-images">
+                    {(message.attachments ?? []).map(image => (
+                      <a href={conversationImageUrl(conversationKey, message.id, image.id, image.previewUrl)} key={image.id} rel="noreferrer" target="_blank">
+                        <Image
+                          alt={image.filename}
+                          height={360}
+                          src={conversationImageUrl(conversationKey, message.id, image.id, image.previewUrl)}
+                          unoptimized
+                          width={480}
+                        />
+                      </a>
+                    ))}
+                  </div>
+                ) : null}
                 <p>{message.content}</p>
                 {failed && typeof message.metadata.failureMessage === "string" ? (
                   <small className="conversation-box-failure-detail">{errorText(message.metadata.failureMessage, "消息未保存，请重试", "Message was not saved. Please retry.")}</small>
@@ -242,12 +334,19 @@ export function ConversationBox({
       ) : null}
 
       <form
-        className="conversation-box-composer"
+        className={`conversation-box-composer${imageDropActive ? " is-image-dragover" : ""}`}
+        onDragEnter={handleImageDragEnter}
+        onDragLeave={handleImageDragLeave}
+        onDragOver={handleImageDragOver}
+        onDrop={handleImageDrop}
         onSubmit={event => {
           followLatestMessage.current = true;
           onSubmit(event);
         }}
       >
+        <span aria-hidden={!imageDropActive} className="conversation-image-drop-hint">
+          {text("松开以添加图片", "Drop to attach images")}
+        </span>
         {composerPrefix}
         <textarea
           aria-label={textareaLabel}
@@ -261,17 +360,86 @@ export function ConversationBox({
           ref={textarea}
           value={value}
         />
+        {attachments.length ? (
+          <div className="conversation-composer-images" aria-label={text("待发送图片", "Images to send")}>
+            {attachments.map(image => (
+              <figure key={image.id}>
+                <Image alt={image.filename} height={144} src={image.previewUrl} unoptimized width={192} />
+                <figcaption>{image.filename}</figcaption>
+                <button
+                  aria-label={text(`移除 ${image.filename}`, `Remove ${image.filename}`)}
+                  disabled={sending || disabled}
+                  onClick={() => onAttachmentsChange(Object.freeze(attachments.filter(candidate => candidate.id !== image.id)))}
+                  type="button"
+                ><CloseIcon /></button>
+              </figure>
+            ))}
+          </div>
+        ) : null}
+        {imageError ? <p className="conversation-image-error" role="alert">{imageError}</p> : null}
         <footer>
-          <span><kbd>⌘</kbd><kbd>↵</kbd> {text("发送 · Enter 换行", "SEND · ENTER FOR NEW LINE")}</span>
+          <input
+            accept="image/png,image/jpeg,image/webp"
+            aria-label={text("选择会话图片", "Choose conversation images")}
+            disabled={sending || disabled}
+            hidden
+            multiple
+            onChange={handleImages}
+            ref={imageInput}
+            type="file"
+          />
+          <button
+            aria-label={text("添加图片", "Attach images")}
+            className="conversation-image-button"
+            disabled={sending || disabled || attachments.length >= MAX_CONVERSATION_IMAGES}
+            onClick={() => imageInput.current?.click()}
+            type="button"
+          ><PlusIcon /></button>
+          <span className="conversation-box-shortcut"><kbd>⌘</kbd><kbd>↵</kbd> {text("发送 · Enter 换行", "SEND · ENTER FOR NEW LINE")}</span>
           <span className="conversation-box-count">{value.length}/4000</span>
           {disabled ? null : primaryAction}
-          <button aria-label={sendButtonLabel} className="button button-acid" disabled={value.trim().length < 2 || sending || disabled} type="submit">
+          <button aria-label={sendButtonLabel} className="button button-acid" disabled={(value.trim().length < 2 && attachments.length === 0) || sending || disabled} type="submit">
             {sending ? <TypingDots /> : <>{text("发送", "SEND")}<SendIcon /></>}
           </button>
         </footer>
       </form>
     </div>
   );
+}
+
+function isConversationImageType(value: string): value is ConversationImageDraft["contentType"] {
+  return value === "image/png" || value === "image/jpeg" || value === "image/webp";
+}
+
+function hasDraggedFiles(event: DragEvent<HTMLElement>): boolean {
+  return [...event.dataTransfer.types].includes("Files");
+}
+
+function readConversationImage(file: File): Promise<ConversationImageDraft> {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onerror = () => reject(reader.error ?? new Error("Image read failed"));
+    reader.onload = () => {
+      if (typeof reader.result !== "string" || !isConversationImageType(file.type)) return reject(new Error("Image read failed"));
+      const marker = reader.result.indexOf(",");
+      if (marker < 0) return reject(new Error("Image read failed"));
+      resolve(Object.freeze({
+        id: crypto.randomUUID(),
+        filename: file.name,
+        contentType: file.type,
+        sizeBytes: file.size,
+        dataBase64: reader.result.slice(marker + 1),
+        previewUrl: reader.result,
+      }));
+    };
+    reader.readAsDataURL(file);
+  });
+}
+
+function conversationImageUrl(conversationId: string | null, messageId: string, imageId: string, previewUrl?: string): string {
+  if (previewUrl) return previewUrl;
+  if (!conversationId) return "";
+  return `/api/conversations/${encodeURIComponent(conversationId)}/messages/${encodeURIComponent(messageId)}/images/${encodeURIComponent(imageId)}`;
 }
 
 function conversationIntent(metadata: Readonly<Record<string, unknown>>): string | null {

@@ -6,11 +6,20 @@ type Conversation = Readonly<{
   projectId: string;
   mode: "NEW_GAME" | "PROJECT_FEEDBACK";
   messages: readonly Readonly<{
+    id: string;
     role: "USER" | "ASSISTANT";
     content: string;
+    attachments: readonly Readonly<{
+      id: string;
+      filename: string;
+      contentType: string;
+      sizeBytes: number;
+    }>[];
     metadata: Readonly<Record<string, unknown>>;
   }>[];
 }>;
+
+const ONE_PIXEL_PNG = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAusB9Y9Zl1sAAAAASUVORK5CYII=";
 
 test("conversation stream emits reply deltas before the persisted result", async ({ stack }) => {
   await stack.configureAgent();
@@ -45,6 +54,58 @@ test("conversation stream emits reply deltas before the persisted result", async
   expect(complete.workflowAction).toBe("NONE");
   expect(complete.project.document.revision).toBe(1);
   expect(complete.project.document.content.introduction).not.toBe("测试设计 Agent 已整理当前游戏需求。");
+});
+
+test("conversation images are validated, persisted, displayed through an authenticated boundary, and exposed to the reply Agent", async ({ stack }) => {
+  await stack.configureAgent();
+  const project = await stack.createProject({
+    name: "会话图片验证",
+    concept: "验证用户可以把截图作为项目会话上下文发送。",
+  });
+  const sent = await stack.web("/api/conversations/messages", {
+    method: "POST",
+    data: {
+      projectId: project.id,
+      content: "请分析这张界面截图，不要修改实现。",
+      attachments: [{
+        filename: "game-ui.png",
+        contentType: "image/png",
+        dataBase64: ONE_PIXEL_PNG,
+      }],
+    },
+  });
+  expect(sent.status()).toBe(201);
+  const conversation = (await sent.json() as { conversation: Conversation }).conversation;
+  const userMessage = conversation.messages[0];
+  expect(userMessage.attachments).toHaveLength(1);
+  expect(userMessage.attachments[0]).toMatchObject({
+    filename: "game-ui.png",
+    contentType: "image/png",
+    sizeBytes: Buffer.from(ONE_PIXEL_PNG, "base64").length,
+  });
+  expect(JSON.stringify(userMessage.metadata)).not.toContain("workspaces/");
+
+  const image = await stack.web(
+    `/api/conversations/${conversation.id}/messages/${userMessage.id}/images/${userMessage.attachments[0].id}`,
+  );
+  expect(image.status()).toBe(200);
+  expect(image.headers()["content-type"]).toContain("image/png");
+  expect(Buffer.from(await image.body())).toEqual(Buffer.from(ONE_PIXEL_PNG, "base64"));
+
+  const reloaded = await stack.web(`/api/conversations/${conversation.id}`);
+  expect(reloaded.status()).toBe(200);
+  expect((await reloaded.json() as { conversation: Conversation }).conversation.messages[0].attachments)
+    .toEqual(userMessage.attachments);
+
+  const disguised = await stack.web("/api/conversations/messages", {
+    method: "POST",
+    data: {
+      projectId: project.id,
+      content: "这不是 JPEG。",
+      attachments: [{ filename: "fake.jpg", contentType: "image/jpeg", dataBase64: ONE_PIXEL_PNG }],
+    },
+  });
+  expect(disguised.status()).toBe(400);
 });
 
 test("new-game conversations validate, persist and keep their context locked", async ({ stack }) => {
@@ -319,6 +380,89 @@ test("messages during Agent generation are intent-routed and confirmed changes s
     method: "POST",
     data: { decision: "CONFIRM", idempotencyKey: `confirm:${randomUUID()}`, responseLanguage: "zh" },
   })).status()).toBe(409);
+});
+
+test("a successful replacement Manifest retires generated objects but preserves user uploads", async ({ stack }) => {
+  test.setTimeout(90_000);
+  await stack.configureAgent();
+  const project = await stack.createProject({
+    name: "素材回收验证",
+    concept: "验证游戏界面改版后只回收废弃生成素材，并保留用户上传的美术。",
+  });
+  const started = await stack.web("/api/conversations/messages", {
+    method: "POST",
+    data: { projectId: project.id, content: "按照当前需求开始开发。" },
+  });
+  expect(started.status()).toBe(201);
+  await expect.poll(async () => (await stack.queryRows<{ count: number }>(`
+    SELECT count(*)::int AS count
+      FROM deviludo.jobs
+     WHERE project_id = '${project.id}'::uuid
+       AND kind = 'AGENT_GENERATION' AND state = 'SUCCEEDED'
+  `))[0]?.count ?? 0, { timeout: 30_000 }).toBe(1);
+
+  const digest = `sha256:${"b".repeat(64)}`;
+  await stack.executeSql(`
+    INSERT INTO deviludo.asset_items(
+      workspace_id, manifest_id, asset_key, asset_type, description,
+      generation_prompt, status, bucket, object_key, sha256, size_bytes
+    )
+    SELECT '${project.workspaceId}'::uuid, manifest.id, asset.asset_key, 'ui', asset.description,
+           'A prior UI asset', asset.status, 'retired-bucket',
+           'workspaces/${project.workspaceId}/projects/${project.id}/assets/' || asset.filename,
+           '${digest}', 16
+      FROM deviludo.asset_manifests manifest
+      CROSS JOIN (VALUES
+        ('ui/obsolete-panel', 'Obsolete generated panel', 'generated', 'obsolete-panel.png'),
+        ('ui/user-banner', 'User supplied banner', 'uploaded', 'user-banner.png')
+      ) AS asset(asset_key, description, status, filename)
+     WHERE manifest.workspace_id = '${project.workspaceId}'::uuid
+       AND manifest.project_id = '${project.id}'::uuid;
+  `);
+  const current = await stack.readProject(project.id);
+  const revised = await stack.web(`/api/projects/${project.id}/document`, {
+    method: "PUT",
+    data: {
+      expectedRevision: current.document.revision,
+      content: { ...current.document.content, introduction: "旧面板仍在项目说明中，等待本轮删除。" },
+      responseLanguage: "zh",
+    },
+  });
+  expect(revised.status()).toBe(200);
+
+  const changed = await stack.web("/api/conversations/messages", {
+    method: "POST",
+    data: { projectId: project.id, content: "删除废弃的旧面板并重新生成游戏实现。" },
+  });
+  expect(changed.status()).toBe(201);
+  expect((await changed.json() as { workflowAction: string }).workflowAction).toBe("AGENT_RERUN_STARTED");
+  await expect.poll(async () => (await stack.queryRows<{ total: number; succeeded: number }>(`
+    SELECT count(*)::int AS total,
+           count(*) FILTER (WHERE state = 'SUCCEEDED')::int AS succeeded
+      FROM deviludo.jobs
+     WHERE project_id = '${project.id}'::uuid
+       AND kind = 'AGENT_GENERATION'
+  `))[0] ?? null, { timeout: 30_000 }).toEqual({ total: 2, succeeded: 1 });
+
+  expect(await stack.queryRows<{ asset_key: string; status: string }>(`
+    SELECT asset_key, status
+      FROM deviludo.asset_items item
+      JOIN deviludo.asset_manifests manifest
+        ON manifest.workspace_id = item.workspace_id AND manifest.id = item.manifest_id
+     WHERE manifest.project_id = '${project.id}'::uuid
+       AND item.asset_key IN ('ui/obsolete-panel', 'ui/user-banner')
+     ORDER BY item.asset_key
+  `)).toEqual([{ asset_key: "ui/user-banner", status: "uploaded" }]);
+  await expect.poll(async () => (await stack.queryRows<{ reason: string }>(`
+    SELECT reason FROM deviludo.object_cleanup_queue
+     WHERE workspace_id = '${project.workspaceId}'::uuid
+       AND object_key LIKE '%/obsolete-panel.png'
+  `))[0]?.reason ?? null).toBe("retired generated asset after Agent manifest re-plan");
+  expect(await stack.queryRows<{ count: number }>(`
+    SELECT count(*)::int AS count FROM deviludo.object_cleanup_queue
+     WHERE workspace_id = '${project.workspaceId}'::uuid
+       AND object_key LIKE '%/user-banner.png'
+  `)).toEqual([{ count: 0 }]);
 });
 
 test("a stale pending change is replanned once and confirmation retries remain idempotent", async ({ stack }) => {

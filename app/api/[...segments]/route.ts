@@ -43,9 +43,12 @@ const CONVERSATION_STREAM_TIMEOUT_MS = 12 * 60 * 1_000;
  */
 const MAX_ASSET_UPLOAD_BYTES = 12 * 1024 * 1024;
 const ASSET_UPLOAD_PATH = /^projects\/[^/]+\/asset-manifest\/uploads$/;
+const MAX_CONVERSATION_MESSAGE_BYTES = 18 * 1024 * 1024;
+const CONVERSATION_MESSAGE_PATH = /^conversations\/messages(?:\/stream)?$/;
 
 function bodyLimitFor(routePath: string): number {
   if (ASSET_UPLOAD_PATH.test(routePath)) return MAX_ASSET_UPLOAD_BYTES;
+  if (CONVERSATION_MESSAGE_PATH.test(routePath)) return MAX_CONVERSATION_MESSAGE_BYTES;
   return MAX_BODY_BYTES;
 }
 

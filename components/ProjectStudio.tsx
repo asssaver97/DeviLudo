@@ -29,6 +29,7 @@ import {
   failedOptimisticConversation,
   optimisticConversation,
   sendConversationMessageStream,
+  type ConversationImageDraft,
 } from "@/lib/product/conversation-stream";
 import { ConversationBox } from "./conversation/ConversationBox";
 import { AssetAutoGenerationSetting } from "./AssetAutoGenerationSetting";
@@ -79,6 +80,7 @@ export function ProjectStudio({ projectId }: { projectId: string }) {
   const [selectedConversationId, setSelectedConversationId] = useState<string | null>(initialConversationId);
   const [conversation, setConversation] = useState<ProductConversation | null>(initialConversation ?? null);
   const [conversationInput, setConversationInput] = useState("");
+  const [conversationImages, setConversationImages] = useState<readonly ConversationImageDraft[]>(Object.freeze([]));
   const [busy, setBusy] = useState(false);
   const [sendingMessage, setSendingMessage] = useState(false);
   const [decidingChange, setDecidingChange] = useState(false);
@@ -366,6 +368,7 @@ export function ProjectStudio({ projectId }: { projectId: string }) {
     setSelectedConversationId(null);
     setConversation(null);
     setConversationInput("");
+    setConversationImages(Object.freeze([]));
     setError(null);
   }
 
@@ -446,20 +449,23 @@ export function ProjectStudio({ projectId }: { projectId: string }) {
   async function sendConversationMessage(event?: FormEvent<HTMLFormElement>, selectedOption?: string) {
     event?.preventDefault();
     const content = (selectedOption ?? conversationInput).trim();
-    if (content.length < 2 || sendingMessage || selectedWorkflowId !== null) return;
+    const images = conversationImages;
+    if ((content.length < 2 && images.length === 0) || sendingMessage || selectedWorkflowId !== null) return;
+    const displayedContent = content || text("请查看随附图片。", "Please review the attached image.");
     const previousConversation = conversation;
-    const pendingConversation = optimisticConversation(previousConversation, projectId, content, project?.name ?? text("项目会话", "Project conversation"));
+    const pendingConversation = optimisticConversation(previousConversation, projectId, displayedContent, project?.name ?? text("项目会话", "Project conversation"), images);
     setSendingMessage(true);
     setError(null);
     setStreamingReplies({});
     setConversation(pendingConversation);
     setSelectedConversationId(pendingConversation.id);
     setConversationInput("");
+    setConversationImages(Object.freeze([]));
     try {
       const payload = await sendConversationMessageStream(
         previousConversation && !previousConversation.id.startsWith("pending-")
-          ? { conversationId: previousConversation.id, content, responseLanguage: locale }
-          : { projectId, content, responseLanguage: locale },
+          ? { conversationId: previousConversation.id, content, responseLanguage: locale, attachments: conversationImagePayload(images) }
+          : { projectId, content, responseLanguage: locale, attachments: conversationImagePayload(images) },
         `conversation:${crypto.randomUUID()}`,
         (agentRole, delta) => setStreamingReplies(current => ({
           ...current,
@@ -494,6 +500,7 @@ export function ProjectStudio({ projectId }: { projectId: string }) {
       setConversation(failedConversation);
       setSelectedConversationId(failedConversation.id);
       setConversationInput(content);
+      setConversationImages(images);
       setError(failureMessage);
       if (reason instanceof ConversationStreamError && reason.code === "AGENT_CONFIG_REQUIRED") {
         router.push("/settings?required=conversation");
@@ -1115,6 +1122,7 @@ export function ProjectStudio({ projectId }: { projectId: string }) {
                 disabled={viewingHistoricalIteration}
                 focusKey={conversationFocusKey}
                 messages={orderedMessages}
+                attachments={conversationImages}
                 intro={project.pendingImplementationChange ? (
                   <section className="conversation-change-confirmation" aria-label={text("待确认实现变更", "Pending implementation change")}>
                     <span>{text("Intent Agent · 等待确认", "INTENT AGENT · CONFIRMATION REQUIRED")}</span>
@@ -1131,6 +1139,7 @@ export function ProjectStudio({ projectId }: { projectId: string }) {
                   </section>
                 ) : null}
                 onOptionSelect={option => void sendConversationMessage(undefined, option)}
+                onAttachmentsChange={setConversationImages}
                 onSubmit={sendConversationMessage}
                 onValueChange={setConversationInput}
                 placeholder={text("提问，或提出实现调整…", "Ask a question or request an implementation change…")}
@@ -1647,6 +1656,14 @@ function conversationSummary(conversation: ProductConversation): ProductConversa
     createdAt: conversation.createdAt,
     updatedAt: conversation.updatedAt,
   });
+}
+
+function conversationImagePayload(images: readonly ConversationImageDraft[]) {
+  return images.map(image => Object.freeze({
+    filename: image.filename,
+    contentType: image.contentType,
+    dataBase64: image.dataBase64,
+  }));
 }
 
 function conversationActivityLabel(

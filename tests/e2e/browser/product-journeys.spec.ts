@@ -455,11 +455,80 @@ test("the home chat supports both project feedback and a fresh game conversation
   });
   await page.goto("/");
   await expect(page.getByRole("heading", { name: "今天想做什么游戏？" })).toBeVisible();
+  await page.getByRole("button", { name: "浅色" }).click();
+  await expect(page.locator("html")).toHaveAttribute("data-theme", "light");
+  const attachButton = page.getByRole("button", { name: "添加图片" });
+  await expect(attachButton).toBeVisible();
+  await expect(attachButton).toHaveText("");
+  await expect(attachButton).not.toHaveAttribute("title", /.+/);
+  const [composerBounds, attachBounds] = await Promise.all([
+    page.locator(".home-conversation-box .conversation-box-composer").boundingBox(),
+    attachButton.boundingBox(),
+  ]);
+  expect(composerBounds).not.toBeNull();
+  expect(attachBounds).not.toBeNull();
+  expect(attachBounds!.x - composerBounds!.x).toBeLessThan(30);
+  expect(attachBounds!.y).toBeGreaterThan(composerBounds!.y + composerBounds!.height / 2);
+  expect(attachBounds!.width).toBe(36);
+  await attachButton.hover();
+  expect(await attachButton.evaluate(element => {
+    const style = getComputedStyle(element);
+    return {
+      backgroundColor: style.backgroundColor,
+      borderColor: style.borderTopColor,
+      color: style.color,
+    };
+  })).toEqual({
+    backgroundColor: "rgb(226, 242, 247)",
+    borderColor: "rgb(141, 184, 200)",
+    color: "rgb(8, 127, 167)",
+  });
   await page.getByLabel("关联项目").selectOption(project.id);
   const feedbackQuestion = "当前玩法如果增加低视野模式，会对资源管理产生什么影响？";
   await page.getByLabel("游戏想法或修改意见").fill(feedbackQuestion);
+  const imageTransfer = await page.evaluateHandle(() => {
+    const transfer = new DataTransfer();
+    transfer.items.add(new File(
+      [Uint8Array.from(atob("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAACXBIWXMAAAPoAAAD6AG1e1JrAAAADUlEQVR4nGNg2PL/PwAFHgKz57crZQAAAABJRU5ErkJggg=="), character => character.charCodeAt(0))],
+      "fog-mode.png",
+      { type: "image/png" },
+    ));
+    transfer.items.add(new File(
+      [Uint8Array.from(atob("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAACXBIWXMAAAPoAAAD6AG1e1JrAAAADUlEQVR4nGNg2PL/PwAFHgKz57crZQAAAABJRU5ErkJggg=="), character => character.charCodeAt(0))],
+      "unused-ui.png",
+      { type: "image/png" },
+    ));
+    return transfer;
+  });
+  const composer = page.locator(".home-conversation-box .conversation-box-composer");
+  await composer.dispatchEvent("dragenter", { dataTransfer: imageTransfer });
+  await expect(composer).toHaveClass(/is-image-dragover/);
+  await expect(page.getByText("松开以添加图片", { exact: true })).toBeVisible();
+  await composer.dispatchEvent("drop", { dataTransfer: imageTransfer });
+  await expect(composer).not.toHaveClass(/is-image-dragover/);
+  await expect(page.locator(".conversation-composer-images figcaption")).toHaveText(["fog-mode.png", "unused-ui.png"]);
+  const removeUnusedImage = page.getByRole("button", { name: "移除 unused-ui.png" });
+  await expect(removeUnusedImage).toBeVisible();
+  expect(await removeUnusedImage.evaluate(element => {
+    const style = getComputedStyle(element);
+    return {
+      backgroundColor: style.backgroundColor,
+      borderColor: style.borderTopColor,
+      color: style.color,
+    };
+  })).toEqual({
+    backgroundColor: "rgb(255, 255, 255)",
+    borderColor: "rgb(141, 156, 175)",
+    color: "rgb(38, 54, 72)",
+  });
+  await removeUnusedImage.click();
+  await expect(page.getByText("unused-ui.png", { exact: true })).toHaveCount(0);
+  await expect(page.locator(".conversation-composer-images figcaption")).toHaveText("fog-mode.png");
   await page.getByRole("button", { name: "发送消息" }).click();
   await expect(page.getByText(feedbackQuestion, { exact: true })).toBeVisible();
+  const sentImage = page.locator('.home-conversation-box .conversation-message-images img[alt="fog-mode.png"]');
+  await expect(sentImage).toBeVisible();
+  await expect.poll(() => sentImage.evaluate(image => (image as HTMLImageElement).naturalWidth)).toBe(1);
   await expect(page.getByText(/测试设计 Agent 已结合项目上下文生成回复/).first()).toBeVisible();
   await expect(page.locator(".home-conversation-box .conversation-box-message > div > p")).toHaveText([
     feedbackQuestion,

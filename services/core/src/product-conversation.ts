@@ -58,8 +58,14 @@ export type ProductConversationAgentReply = Readonly<{
   e2eGoalDelta: E2eGoalDelta;
 }>;
 
+export type ConversationImageInput = Readonly<{
+  contentType: "image/png" | "image/jpeg" | "image/webp";
+  dataBase64: string;
+}>;
+
 type ConversationReplyInput = Readonly<{
   userContent: string;
+  images?: readonly ConversationImageInput[];
   history: readonly Pick<ProductConversationMessage, "role" | "content">[];
   project: ConversationAgentProjectContext;
   allowDraftMutation: boolean;
@@ -88,8 +94,8 @@ export async function generateProductConversationReply(input: ConversationReplyI
   const history = compactHistory(input.history);
   const fetchImpl = input.fetchImpl ?? fetch;
   const raw = input.settings.agentRuntime === "CLAUDE_CODE"
-    ? await requestClaudeReply(fetchImpl, input.settings.baseUrl, input.apiKey, model, system, history, input.userContent, input.providerIdleTimeoutMs)
-    : await requestCodexReply(input.codexRunner ?? runCodexPrompt, input.settings.baseUrl, input.apiKey, model, system, history, input.userContent, input.providerIdleTimeoutMs);
+    ? await requestClaudeReply(fetchImpl, input.settings.baseUrl, input.apiKey, model, system, history, input.userContent, input.images, input.providerIdleTimeoutMs)
+    : await requestCodexReply(input.codexRunner ?? runCodexPrompt, input.settings.baseUrl, input.apiKey, model, system, history, input.userContent, input.images, input.providerIdleTimeoutMs);
   const parsed = parseAgentReply(raw);
   return reply(input, model, parsed, input.allowDraftMutation);
 }
@@ -121,6 +127,7 @@ export async function streamProductConversationReply(
       system,
       history,
       input.userContent,
+      input.images,
       input.signal,
       nextRaw => { emitted = emitParsedReplyProgress(nextRaw, emitted, onDelta); },
       input.providerIdleTimeoutMs,
@@ -133,6 +140,7 @@ export async function streamProductConversationReply(
       system,
       history,
       input.userContent,
+      input.images,
       input.signal,
       nextRaw => { emitted = emitParsedReplyProgress(nextRaw, emitted, onDelta); },
       input.providerIdleTimeoutMs,
@@ -261,6 +269,7 @@ async function requestClaudeReply(
   system: string,
   history: readonly Readonly<{ role: "user" | "assistant"; content: string }>[],
   userContent: string,
+  images?: readonly ConversationImageInput[],
   idleTimeoutMs?: number,
 ): Promise<string> {
   const deadline = providerDeadline(undefined, idleTimeoutMs);
@@ -278,7 +287,7 @@ async function requestClaudeReply(
         system,
         max_tokens: 4_000,
         temperature: 0.45,
-        messages: [...history, { role: "user", content: userContent }],
+        messages: [...history, { role: "user", content: claudeUserContent(userContent, images) }],
       }),
       signal: deadline.signal,
     });
@@ -301,6 +310,7 @@ async function requestCodexReply(
   system: string,
   history: readonly Readonly<{ role: "user" | "assistant"; content: string }>[],
   userContent: string,
+  images?: readonly ConversationImageInput[],
   idleTimeoutMs?: number,
 ): Promise<string> {
   return codexRunner({
@@ -308,6 +318,10 @@ async function requestCodexReply(
     credential,
     model,
     prompt: codexConversationPrompt(system, history, userContent),
+    images: images?.map(image => Object.freeze({
+      dataBase64: image.dataBase64,
+      extension: image.contentType === "image/jpeg" ? "jpg" : image.contentType.slice("image/".length) as "png" | "webp",
+    })),
     timeoutMs: idleTimeoutMs,
   });
 }
@@ -320,6 +334,7 @@ async function requestClaudeReplyStream(
   system: string,
   history: readonly Readonly<{ role: "user" | "assistant"; content: string }>[],
   userContent: string,
+  images: readonly ConversationImageInput[] | undefined,
   signal: AbortSignal | undefined,
   onRawText: (raw: string) => void,
   idleTimeoutMs?: number,
@@ -340,7 +355,7 @@ async function requestClaudeReplyStream(
         max_tokens: 4_000,
         temperature: 0.45,
         stream: true,
-        messages: [...history, { role: "user", content: userContent }],
+        messages: [...history, { role: "user", content: claudeUserContent(userContent, images) }],
       }),
       signal: deadline.signal,
     });
@@ -373,14 +388,26 @@ async function requestCodexReplyStream(
   system: string,
   history: readonly Readonly<{ role: "user" | "assistant"; content: string }>[],
   userContent: string,
+  images: readonly ConversationImageInput[] | undefined,
   signal: AbortSignal | undefined,
   onRawText: (raw: string) => void,
   idleTimeoutMs?: number,
 ): Promise<string> {
   if (signal?.aborted) throw new DOMException("Aborted", "AbortError");
-  const result = await requestCodexReply(codexRunner, baseUrl, credential, model, system, history, userContent, idleTimeoutMs);
+  const result = await requestCodexReply(codexRunner, baseUrl, credential, model, system, history, userContent, images, idleTimeoutMs);
   onRawText(result);
   return result;
+}
+
+function claudeUserContent(userContent: string, images: readonly ConversationImageInput[] | undefined): string | readonly Readonly<Record<string, unknown>>[] {
+  if (!images?.length) return userContent;
+  return Object.freeze([
+    Object.freeze({ type: "text", text: userContent }),
+    ...images.map(image => Object.freeze({
+      type: "image",
+      source: Object.freeze({ type: "base64", media_type: image.contentType, data: image.dataBase64 }),
+    })),
+  ]);
 }
 
 function codexConversationPrompt(

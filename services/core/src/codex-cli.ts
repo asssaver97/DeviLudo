@@ -11,6 +11,10 @@ export type CodexPromptInput = Readonly<{
   model: string;
   prompt: string;
   imageBase64?: string;
+  images?: readonly Readonly<{
+    dataBase64: string;
+    extension: "png" | "jpg" | "webp";
+  }>[];
   outputSchema?: Readonly<Record<string, unknown>>;
   reasoningEffort?: "low" | "medium" | "high" | "xhigh";
   timeoutMs?: number;
@@ -76,6 +80,11 @@ export async function runCodexPrompt(input: CodexPromptInput): Promise<string> {
     if (input.imageBase64) {
       const image = join(root, "frame.png");
       await writeFile(image, Buffer.from(input.imageBase64, "base64"), { mode: 0o600 });
+      args.push("--image", image);
+    }
+    for (const [index, reference] of (input.images ?? []).entries()) {
+      const image = join(root, `reference-${index + 1}.${reference.extension}`);
+      await writeFile(image, Buffer.from(reference.dataBase64, "base64"), { mode: 0o600 });
       args.push("--image", image);
     }
     if (input.outputSchema) {

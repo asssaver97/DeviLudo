@@ -288,8 +288,18 @@ export type ProductConversationMessage = Readonly<{
   id: string;
   role: "USER" | "ASSISTANT";
   content: string;
+  attachments: readonly ConversationImageAttachment[];
   metadata: Readonly<Record<string, unknown>>;
   createdAt: string;
+}>;
+
+export type ConversationImageAttachment = Readonly<{
+  id: string;
+  filename: string;
+  contentType: "image/png" | "image/jpeg" | "image/webp";
+  sizeBytes: number;
+  /** Present only while an unsaved message is rendered optimistically. */
+  previewUrl?: string;
 }>;
 
 export type ProductConversation = Readonly<{

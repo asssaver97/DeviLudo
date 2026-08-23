@@ -3557,6 +3557,29 @@ textarea {
   border-color: #4a4a32;
 }
 
+.conversation-message-images {
+  display: grid;
+  gap: 8px;
+  grid-template-columns: repeat(2, minmax(0, 240px));
+  justify-content: end;
+  margin-bottom: 8px;
+}
+
+.conversation-message-images a {
+  background: #080f19;
+  border: 1px solid var(--line-strong);
+  display: block;
+  overflow: hidden;
+}
+
+.conversation-message-images img {
+  display: block;
+  height: auto;
+  max-height: 260px;
+  object-fit: contain;
+  width: 100%;
+}
+
 .conversation-box-message.role-design .message-avatar { background: #172437; color: var(--blue); }
 .conversation-box-message.role-development .message-avatar { background: #17241f; color: var(--green); }
 .conversation-box-message.role-test .message-avatar { background: #271d31; color: #cba7ff; }
@@ -3752,6 +3775,31 @@ textarea {
   background: #0d1520;
   border-top: 1px solid var(--line);
   overflow: hidden;
+  position: relative;
+}
+
+.conversation-box-composer.is-image-dragover {
+  box-shadow: inset 0 0 0 2px rgba(45, 199, 235, .6);
+}
+
+.conversation-image-drop-hint {
+  align-items: center;
+  background: rgba(8, 15, 25, .94);
+  border: 1px dashed rgba(45, 199, 235, .75);
+  color: var(--blue);
+  display: flex;
+  font: 700 13px var(--font-geist-mono), monospace;
+  inset: 8px;
+  justify-content: center;
+  opacity: 0;
+  pointer-events: none;
+  position: absolute;
+  transition: opacity 100ms ease;
+  z-index: 4;
+}
+
+.conversation-box-composer.is-image-dragover .conversation-image-drop-hint {
+  opacity: 1;
 }
 
 .conversation-box-composer > textarea {
@@ -3776,6 +3824,89 @@ textarea {
   color: #718198;
 }
 
+.conversation-composer-images {
+  display: flex;
+  gap: 9px;
+  overflow-x: auto;
+  padding: 10px 14px 0;
+}
+
+.conversation-composer-images figure {
+  background: #080f19;
+  border: 1px solid var(--line-strong);
+  flex: 0 0 132px;
+  margin: 0;
+  padding: 5px;
+  position: relative;
+}
+
+.conversation-composer-images img {
+  display: block;
+  height: 82px;
+  object-fit: cover;
+  width: 100%;
+}
+
+.conversation-composer-images figcaption {
+  color: var(--muted);
+  font: 9px/1.4 var(--font-geist-mono), monospace;
+  overflow: hidden;
+  padding: 5px 2px 1px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.conversation-composer-images button {
+  align-items: center;
+  background: #f4f7fb;
+  border: 2px solid #8ea0b7;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, .45);
+  color: #17212d;
+  cursor: pointer;
+  display: flex;
+  height: 28px;
+  justify-content: center;
+  padding: 0;
+  position: absolute;
+  right: 7px;
+  top: 7px;
+  transition: background-color .15s ease, border-color .15s ease, color .15s ease, transform .15s ease;
+  width: 28px;
+}
+
+.conversation-composer-images button svg {
+  height: 16px;
+  stroke-width: 2.4;
+  width: 16px;
+}
+
+.conversation-composer-images button:hover,
+.conversation-composer-images button:focus-visible {
+  background: #c33f52;
+  border-color: #ff9eac;
+  color: #ffffff;
+}
+
+.conversation-composer-images button:focus-visible {
+  outline: 2px solid var(--acid);
+  outline-offset: 2px;
+}
+
+.conversation-composer-images button:active {
+  transform: scale(.92);
+}
+
+.conversation-composer-images button:disabled {
+  cursor: default;
+  opacity: .55;
+}
+
+.conversation-image-error {
+  color: #ff8da4;
+  font: 10px/1.5 var(--font-geist-mono), monospace;
+  margin: 8px 14px 0;
+}
+
 .conversation-box-composer > footer {
   align-items: center;
   color: #8492a6;
@@ -3797,6 +3928,48 @@ textarea {
   justify-content: center;
   margin-right: 3px;
   min-width: 22px;
+}
+
+.conversation-image-button {
+  align-items: center;
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: 999px;
+  color: #94a3b8;
+  cursor: pointer;
+  display: inline-flex;
+  flex: 0 0 36px;
+  height: 36px;
+  justify-content: center;
+  padding: 0;
+  width: 36px;
+}
+
+.conversation-image-button:hover,
+.conversation-image-button:focus-visible {
+  background: rgba(45, 199, 235, .1);
+  border-color: rgba(45, 199, 235, .5);
+  color: var(--blue);
+  outline: none;
+}
+
+.conversation-image-button:focus-visible {
+  box-shadow: 0 0 0 2px rgba(45, 199, 235, .2);
+}
+
+.conversation-image-button:active:not(:disabled) {
+  background: rgba(45, 199, 235, .16);
+  transform: scale(.96);
+}
+
+.conversation-image-button:disabled {
+  cursor: default;
+  opacity: .45;
+}
+
+.conversation-image-button svg {
+  height: 20px;
+  width: 20px;
 }
 
 .conversation-box-count {
@@ -3976,7 +4149,7 @@ textarea {
     flex-wrap: wrap;
   }
 
-  .conversation-box-composer > footer > span:first-child {
+  .conversation-box-shortcut {
     display: none;
   }
 

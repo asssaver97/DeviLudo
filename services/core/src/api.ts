@@ -56,8 +56,10 @@ import {
   generateProductConversationGroupReply,
   streamProductConversationGroupReply,
   type ConversationAgentProjectContext,
+  type ConversationImageInput,
   type ProductConversationGroupReply,
 } from "./product-conversation";
+import { generatedImageExtension, sniffContentType } from "./image-generation";
 import { classifyConversationIntent } from "./conversation-intent";
 import {
   generateE2ePlayerDecision,
@@ -833,14 +835,44 @@ export async function runApi(
     },
   );
 
-  app.post("/v1/conversations/messages", async (request, reply) => {
+  app.get<{ Params: { conversationId: string; messageId: string; imageId: string } }>(
+    "/v1/conversations/:conversationId/messages/:messageId/images/:imageId",
+    async (request, reply) => {
+      const principal = productAccess(request, config);
+      const workspace = await requireSelectedWorkspace(request, repository, principal);
+      if (!UUID.test(request.params.conversationId) || !isConversationMessageId(request.params.messageId)
+        || !UUID.test(request.params.imageId)) {
+        return reply.code(404).send({ code: "CONVERSATION_IMAGE_NOT_FOUND" });
+      }
+      const found = await repository.readConversationImage(
+        workspace.id,
+        request.params.conversationId,
+        request.params.messageId,
+        request.params.imageId,
+      );
+      if (!found) return reply.code(404).send({ code: "CONVERSATION_IMAGE_NOT_FOUND" });
+      const image = await objectStore.readConversationImage({
+        workspaceId: workspace.id,
+        projectId: found.projectId,
+        conversationId: request.params.conversationId,
+        image: found.image,
+      });
+      return reply
+        .header("cache-control", "private, max-age=3600, immutable")
+        .header("content-type", image.contentType)
+        .header("x-content-type-options", "nosniff")
+        .send(image.content);
+    },
+  );
+
+  app.post("/v1/conversations/messages", { bodyLimit: 18 * 1024 * 1024 }, async (request, reply) => {
     const principal = productAccess(request, config);
     const command = conversationMessageCommand(request.body);
     const result = await processConversationMessage({ request, principal, repository, objectStore, agentSecrets, command });
     return reply.code(result.statusCode).send(result.payload);
   });
 
-  app.post("/v1/conversations/messages/stream", async (request, reply) => {
+  app.post("/v1/conversations/messages/stream", { bodyLimit: 18 * 1024 * 1024 }, async (request, reply) => {
     const principal = productAccess(request, config);
     const command = conversationMessageCommand(request.body);
     const abortController = new AbortController();
@@ -1733,11 +1765,23 @@ export async function runApi(
 
 type ConversationMessageCommand = Readonly<{
   content: string;
+  images: readonly ConversationImageCommand[];
   conversationId: string | null;
   projectId: string | null;
   projectIdSupplied: boolean;
   responseLanguage: ResponseLanguage;
 }>;
+
+type ConversationImageCommand = ConversationImageInput & Readonly<{
+  id: string;
+  filename: string;
+  extension: "png" | "jpg" | "webp";
+  content: Buffer;
+}>;
+
+const MAX_CONVERSATION_IMAGES = 4;
+const MAX_CONVERSATION_IMAGE_BYTES = 5 * 1024 * 1024;
+const MAX_CONVERSATION_IMAGE_TOTAL_BYTES = 12 * 1024 * 1024;
 
 type ConversationMessageResult = Readonly<{
   statusCode: 200 | 201;
@@ -1754,21 +1798,83 @@ type ConversationMessageResult = Readonly<{
 
 function conversationMessageCommand(value: unknown): ConversationMessageCommand {
   const body = objectBody(value);
-  const content = typeof body.content === "string" ? body.content.trim() : "";
+  const rawContent = typeof body.content === "string" ? body.content.trim() : "";
+  const responseLanguage = parseResponseLanguage(body.responseLanguage);
+  const images = conversationImageCommands(body.attachments);
+  const content = rawContent || (images.length ? (responseLanguage === "zh" ? "请查看随附图片。" : "Please review the attached image.") : "");
   const conversationId = body.conversationId === undefined ? null : body.conversationId;
   const projectId = body.projectId === undefined ? null : body.projectId;
-  if (content.length < 2 || content.length > 4_000
+  if ((!images.length && content.length < 2) || content.length > 4_000
     || (conversationId !== null && (typeof conversationId !== "string" || !UUID.test(conversationId)))
     || (projectId !== null && (typeof projectId !== "string" || !UUID.test(projectId)))) {
     throw httpError(400, "INVALID_CONVERSATION_MESSAGE", "对话消息格式无效");
   }
   return Object.freeze({
     content,
+    images,
     conversationId: conversationId as string | null,
     projectId: projectId as string | null,
     projectIdSupplied: body.projectId !== undefined,
-    responseLanguage: parseResponseLanguage(body.responseLanguage),
+    responseLanguage,
   });
+}
+
+function conversationImageCommands(value: unknown): readonly ConversationImageCommand[] {
+  if (value === undefined) return Object.freeze([]);
+  if (!Array.isArray(value) || value.length > MAX_CONVERSATION_IMAGES) {
+    throw httpError(400, "INVALID_CONVERSATION_IMAGE", "会话图片格式无效");
+  }
+  if (value.length === 0) return Object.freeze([]);
+  let totalBytes = 0;
+  return Object.freeze(value.map(candidate => {
+    const image = objectBody(candidate);
+    const filename = typeof image.filename === "string" ? image.filename.trim() : "";
+    const declaredContentType = image.contentType;
+    const dataBase64 = image.dataBase64;
+    if (!filename || filename.length > 180 || /[\/\\\u0000-\u001f\u007f]/u.test(filename)
+      || typeof dataBase64 !== "string" || dataBase64.length < 4
+      || dataBase64.length > Math.ceil(MAX_CONVERSATION_IMAGE_BYTES / 3) * 4 + 4
+      || dataBase64.length % 4 !== 0 || !/^[A-Za-z0-9+/]+={0,2}$/.test(dataBase64)) {
+      throw httpError(400, "INVALID_CONVERSATION_IMAGE", "会话图片格式无效");
+    }
+    const content = Buffer.from(dataBase64, "base64");
+    if (content.length < 1 || content.length > MAX_CONVERSATION_IMAGE_BYTES
+      || content.toString("base64") !== dataBase64) {
+      throw httpError(400, "INVALID_CONVERSATION_IMAGE", "会话图片格式无效");
+    }
+    totalBytes += content.length;
+    if (totalBytes > MAX_CONVERSATION_IMAGE_TOTAL_BYTES) {
+      throw httpError(413, "CONVERSATION_IMAGES_TOO_LARGE", "会话图片总大小超过限制");
+    }
+    const contentType = sniffContentType(content);
+    const extension = contentType ? generatedImageExtension(contentType) : null;
+    if (!contentType || !extension || contentType !== declaredContentType) {
+      throw httpError(400, "INVALID_CONVERSATION_IMAGE", "会话图片格式无效");
+    }
+    return Object.freeze({
+      id: randomUUID(),
+      filename,
+      contentType: contentType as ConversationImageInput["contentType"],
+      extension: extension as "png" | "jpg" | "webp",
+      content,
+      dataBase64,
+    });
+  }));
+}
+
+function storeConversationImages(
+  objectStore: CoreObjectStore,
+  boundary: Readonly<{ workspaceId: string; projectId: string; conversationId: string }>,
+  images: readonly ConversationImageCommand[],
+) {
+  return Promise.all(images.map(image => objectStore.putConversationImage({
+    ...boundary,
+    id: image.id,
+    filename: image.filename,
+    extension: image.extension,
+    contentType: image.contentType,
+    content: image.content,
+  })));
 }
 
 async function processConversationMessage(input: Readonly<{
@@ -1832,6 +1938,7 @@ async function processConversationMessage(input: Readonly<{
     try {
       intentDecision = await classifyConversationIntent({
         content: command.content,
+        images: command.images,
         history: Object.freeze([]),
         project: Object.freeze({
           name: "Untitled",
@@ -1856,6 +1963,7 @@ async function processConversationMessage(input: Readonly<{
     input.onStage?.("RESPONDING");
     const agentReplies = await conversationAgentReplies({
       userContent: command.content,
+      images: command.images,
       history: Object.freeze([]),
       project: Object.freeze({
         name,
@@ -1874,13 +1982,19 @@ async function processConversationMessage(input: Readonly<{
     input.onStage?.("SAVING");
     const targetWorkspace = workspace ?? Object.freeze({ id: randomUUID(), name, createdAt: "" });
     const projectId = deterministicProjectId(principal.actorId, idempotencyKey);
+    const conversationId = randomUUID();
+    const userAttachments = await storeConversationImages(objectStore, {
+      workspaceId: targetWorkspace.id,
+      projectId,
+      conversationId,
+    }, command.images);
     const createdBundle = await repository.createProjectConversation({
       actorId: principal.actorId,
       workspaceId: targetWorkspace.id,
       workspaceName: targetWorkspace.name,
       projectId,
       workflowId: randomUUID(),
-      conversationId: randomUUID(),
+      conversationId,
       idempotencyKey,
       name,
       concept: command.content,
@@ -1889,6 +2003,7 @@ async function processConversationMessage(input: Readonly<{
         ?? createInitialProjectDocument(name, command.content, specification, command.responseLanguage),
       responseLanguage: command.responseLanguage,
       userContent: command.content,
+      userAttachments,
       assistantMessages: agentReplies.map(reply => Object.freeze({
         content: reply.content,
         metadata: Object.freeze({ ...conversationAgentMetadata(reply), intentDecision }),
@@ -1935,6 +2050,7 @@ async function processConversationMessage(input: Readonly<{
   try {
     intentDecision = await classifyConversationIntent({
       content: command.content,
+      images: command.images,
       history: existingConversation?.messages ?? Object.freeze([]),
       project: conversationProjectContext(project),
       pendingChange: project.pendingImplementationChange,
@@ -1946,6 +2062,15 @@ async function processConversationMessage(input: Readonly<{
     throw httpError(424, "INTENT_AGENT_FAILED", error instanceof Error ? error.message : "Intent Agent 调用失败");
   }
   const conversationId = command.conversationId ?? randomUUID();
+  let userAttachments: ReturnType<typeof storeConversationImages> | null = null;
+  const storedUserAttachments = () => {
+    userAttachments ??= storeConversationImages(objectStore, {
+      workspaceId: workspace.id,
+      projectId,
+      conversationId,
+    }, command.images);
+    return userAttachments;
+  };
   const pending = project.pendingImplementationChange;
   if (intentDecision.intent === "CONFIRM_CHANGE" || intentDecision.intent === "REJECT_CHANGE") {
     if (!pending) throw httpError(409, "CHANGE_REQUEST_NOT_FOUND", "当前没有等待确认的实现变更");
@@ -1962,6 +2087,7 @@ async function processConversationMessage(input: Readonly<{
         conversationId,
         projectId,
         userContent: command.content,
+        userAttachments: await storedUserAttachments(),
         expectedWorkflowState: project.workflowState,
         assistantMessages: plan.replies.map(reply => Object.freeze({
           content: reply.content,
@@ -2001,6 +2127,7 @@ async function processConversationMessage(input: Readonly<{
       conversationId,
       projectId,
       userContent: command.content,
+      userAttachments: await storedUserAttachments(),
       expectedWorkflowState: project.workflowState,
       assistantMessages: [Object.freeze({
         content: rejected
@@ -2039,6 +2166,7 @@ async function processConversationMessage(input: Readonly<{
     ? intentDecision.responderRoles : undefined;
   const agentReplies = await conversationAgentReplies({
     userContent: command.content,
+    images: command.images,
     history: existingConversation?.messages ?? Object.freeze([]),
     project: conversationProjectContext(project),
     allowDraftMutation: intentDecision.intent === "CHANGE_REQUEST" && intentDecision.actionable,
@@ -2051,6 +2179,7 @@ async function processConversationMessage(input: Readonly<{
     conversationId,
     projectId,
     userContent: command.content,
+    userAttachments: await storedUserAttachments(),
     expectedWorkflowState: project.workflowState,
     assistantMessages: agentReplies.map(reply => Object.freeze({
       content: reply.content,
@@ -2292,6 +2421,11 @@ function unauthorized(message: string): Error & { statusCode: number } {
 }
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+const MAX_POSTGRES_BIGINT = 9_223_372_036_854_775_807n;
+
+function isConversationMessageId(value: string): boolean {
+  return /^[1-9]\d{0,18}$/.test(value) && BigInt(value) <= MAX_POSTGRES_BIGINT;
+}
 // Raster formats only, and the extension is derived here rather than taken from
 // the client filename so an upload cannot choose its own key suffix.
 const ASSET_CONTENT_TYPES: Readonly<Record<string, string>> = Object.freeze({
@@ -2650,6 +2784,7 @@ async function abortableDelay(milliseconds: number, signal: AbortSignal): Promis
 async function conversationAgentReplies(
   input: Readonly<{
     userContent: string;
+    images?: readonly ConversationImageInput[];
     history: readonly Pick<ProductConversation["messages"][number], "role" | "content">[];
     project: ConversationAgentProjectContext;
     allowDraftMutation: boolean;

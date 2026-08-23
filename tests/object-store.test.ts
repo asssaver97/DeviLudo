@@ -1,6 +1,10 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { isValidOutputAuthorizationInput, outputUploadRequiredHeaders } from "@/services/core/src/object-store";
+import {
+  isValidOutputAuthorizationInput,
+  newProjectAssetObjectKey,
+  outputUploadRequiredHeaders,
+} from "@/services/core/src/object-store";
 
 const digest = `sha256:${"a".repeat(64)}`;
 
@@ -20,4 +24,19 @@ test("output authorization rejects malformed artifact metadata", () => {
 
 test("pre-signed output uploads do not repeat hoisted S3 metadata as unsigned headers", () => {
   assert.deepEqual(outputUploadRequiredHeaders(1_024), { "content-length": "1024" });
+});
+
+test("project assets use unique object keys so retired objects cannot alias replacements", () => {
+  const input = {
+    workspaceId: "11111111-1111-4111-8111-111111111111",
+    projectId: "22222222-2222-4222-8222-222222222222",
+    assetKey: "ui/start-panel",
+    extension: "png",
+    sha256: digest,
+  } as const;
+  const first = newProjectAssetObjectKey(input);
+  const second = newProjectAssetObjectKey(input);
+
+  assert.notEqual(first, second);
+  assert.match(first, /\/assets\/ui\/start-panel-a{16}-[0-9a-f-]{36}\.png$/);
 });

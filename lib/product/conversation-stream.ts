@@ -18,6 +18,19 @@ export type ConversationStreamResult = Readonly<{
   workflowAction: ConversationWorkflowAction;
 }>;
 
+export type ConversationImageDraft = Readonly<{
+  id: string;
+  filename: string;
+  contentType: "image/png" | "image/jpeg" | "image/webp";
+  sizeBytes: number;
+  dataBase64: string;
+  previewUrl: string;
+}>;
+
+export const MAX_CONVERSATION_IMAGES = 4;
+export const MAX_CONVERSATION_IMAGE_BYTES = 5 * 1024 * 1024;
+export const MAX_CONVERSATION_IMAGE_TOTAL_BYTES = 12 * 1024 * 1024;
+
 export class ConversationStreamError extends Error {
   readonly code: string;
 
@@ -29,7 +42,13 @@ export class ConversationStreamError extends Error {
 }
 
 export async function sendConversationMessageStream(
-  body: Readonly<{ content: string; conversationId?: string; projectId?: string | null; responseLanguage?: "en" | "zh" }>,
+  body: Readonly<{
+    content: string;
+    conversationId?: string;
+    projectId?: string | null;
+    responseLanguage?: "en" | "zh";
+    attachments?: readonly Pick<ConversationImageDraft, "filename" | "contentType" | "dataBase64">[];
+  }>,
   idempotencyKey: string,
   onDelta: (agentRole: ProjectAgentRole, delta: string) => void,
   onProjectDocument?: (project: ProductProjectDetail) => void,
@@ -115,6 +134,7 @@ export function optimisticConversation(
   projectId: string,
   content: string,
   title = "新游戏构想",
+  attachments: readonly ConversationImageDraft[] = Object.freeze([]),
 ): ProductConversation {
   const now = new Date().toISOString();
   const currentMessages = current?.messages ?? Object.freeze([]);
@@ -128,6 +148,13 @@ export function optimisticConversation(
     id: `pending-${crypto.randomUUID()}`,
     role: "USER",
     content,
+    attachments: Object.freeze(attachments.map(attachment => Object.freeze({
+      id: attachment.id,
+      filename: attachment.filename,
+      contentType: attachment.contentType,
+      sizeBytes: attachment.sizeBytes,
+      previewUrl: attachment.previewUrl,
+    }))),
     metadata: Object.freeze({ pending: true }),
     createdAt: now,
   });

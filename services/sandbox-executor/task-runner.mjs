@@ -5,6 +5,7 @@ import { access, appendFile, copyFile, lstat, mkdir, readFile, readdir, rm, syml
 import { dirname, relative, resolve, sep } from "node:path";
 import { StringDecoder } from "node:string_decoder";
 import { assertBuildAssetsReferenced } from "./build-asset-usage.mjs";
+import { removeRetiredSourceImages } from "./asset-garbage-collection.mjs";
 
 let progressWrites = Promise.resolve();
 let agentOutputBuffer = "";
@@ -78,6 +79,7 @@ async function runAgent(plan) {
     await command("tar", ["-xzf", "/workspace/inputs/source.tar.gz", "-C", "/workspace/project"], safeEnvironment());
     emitProgress("PHASE", "现有项目源码已展开，Agent 正在分析工程结构");
   }
+  const previousAgentManifest = importedSource ? await readExistingAgentManifest() : null;
   const baselineSourceAvailable = await exists("/workspace/inputs/baseline-source.tar.gz");
   if (baselineSourceAvailable) {
     await mkdir("/workspace/baseline", { recursive: true });
@@ -131,6 +133,7 @@ async function runAgent(plan) {
     "usageTargets is a non-empty list of {targetId, checkpointRole}. targetId is the stable production Probe control that must render this asset; checkpointRole is START, READY, ACTION, PROGRESS, or COMPLETION and declares when it must be visible. Each targetId/checkpointRole pair belongs to exactly one asset; give independently visible child controls distinct IDs. Add multiple targets when one asset is deliberately used by multiple controls or stages. Never map mutually exclusive or conditional variants as if they were simultaneously visible. Leave existing optional variants to the executor's discovered-source inventory instead of inventing a placement. Do not map an asset to a parent/root control unless that exact control renders it.",
     "Plan every image required by the complete player-facing gameplay and UI. The game must load controlled assets from res://assets/generated/<assetKey>.png, .jpg, or .webp and use a deliberate placeholder only when none exists.",
     "Every planned generated asset key must be referenced by executable runtime source and visibly connected to the actual scene or control that uses it. Remove a genuinely unnecessary plan item instead of leaving generated art on disk; the controlled Builder rejects materialized generated assets that only appear in agent.json, tests, tools, comments, or documentation and automatically returns the failure to this Agent for repair.",
+    "When an existing source image becomes obsolete, remove its asset key from agent.json and remove every runtime reference. After the new manifest passes validation, the executor deletes only source image files inventoried by the previous manifest. Never delete or replace user-uploaded object assets.",
     "Build a composed production UI, not an engineering dashboard: the current objective and next action must be clear, required art cannot be replaced by blank/dash slots or raw state dumps, textures must be cropped/aspected for their real controls, and secondary diagnostics must not dominate gameplay.",
     "Make layout and input resolution-independent across window sizes and display scales. Use containers/anchors and root-viewport coordinate conversion; do not tie hit testing or UI placement to one fixed pixel resolution.",
     "Make every Agent-planned asset visibly connected to the actual scene or control that uses it; the E2E node will verify texture placement, visibility, aspect, and gameplay/UI context.",
@@ -273,10 +276,16 @@ async function runAgent(plan) {
   // the agent.json contract. Upload the file the Agent wrote into the generated
   // source so Core can ingest its test and asset manifests from the trusted,
   // digest-checked output object.
-  const agentManifest = await mergeDiscoveredSourceImages(
-    await readGeneratedAgentManifest(),
+  const generatedAgentManifest = await readGeneratedAgentManifest();
+  const retiredSourceImages = await removeRetiredSourceImages(
     "/workspace/project",
+    previousAgentManifest,
+    generatedAgentManifest,
   );
+  if (retiredSourceImages.length > 0) {
+    emitProgress("PHASE", `新 Manifest 已生效，已回收 ${retiredSourceImages.length} 个废弃源码素材`);
+  }
+  const agentManifest = await mergeDiscoveredSourceImages(generatedAgentManifest, "/workspace/project");
   // Keep the deterministic inventory in both the published source and the
   // completion object. Core can then list existing art without asking the model
   // to notice binary files, and a later Agent pass starts from the same truth.
@@ -313,6 +322,14 @@ async function readGeneratedAgentManifest() {
   const issue = agentManifestValidationError(value);
   if (issue) throw new Error(`Agent did not produce a valid assetManifest: ${issue}`);
   return value;
+}
+
+async function readExistingAgentManifest() {
+  try {
+    return JSON.parse(await readFile("/workspace/project/agent.json", "utf8"));
+  } catch {
+    return null;
+  }
 }
 
 async function currentAgentManifestValidationError() {

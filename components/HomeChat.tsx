@@ -11,6 +11,7 @@ import {
   failedOptimisticConversation,
   optimisticConversation,
   sendConversationMessageStream,
+  type ConversationImageDraft,
 } from "@/lib/product/conversation-stream";
 import { ConversationBox } from "./conversation/ConversationBox";
 import { GamepadIcon, PlusIcon, SparkIcon } from "./console/Icons";
@@ -36,6 +37,7 @@ export function HomeChat() {
   const [selectedProjectId, setSelectedProjectId] = useState("");
   const [conversation, setConversation] = useState<ProductConversation | null>(null);
   const [content, setContent] = useState("");
+  const [attachments, setAttachments] = useState<readonly ConversationImageDraft[]>(Object.freeze([]));
   const [loadingProjects, setLoadingProjects] = useState(!initialProjects);
   const [sending, setSending] = useState(false);
   const [startingDevelopment, setStartingDevelopment] = useState(false);
@@ -77,24 +79,28 @@ export function HomeChat() {
   async function sendMessage(event?: FormEvent<HTMLFormElement>, selectedOption?: string) {
     event?.preventDefault();
     const message = (selectedOption ?? content).trim();
-    if (message.length < 2 || sending) return;
+    const messageAttachments = attachments;
+    if ((message.length < 2 && messageAttachments.length === 0) || sending) return;
+    const displayedMessage = message || text("请查看随附图片。", "Please review the attached image.");
     const previousConversation = conversation;
     const projectId = previousConversation?.projectId || selectedProjectId;
     const pendingConversation = optimisticConversation(
       previousConversation,
       projectId,
-      message,
+      displayedMessage,
       activeProject?.name ?? text("新游戏构想", "New game concept"),
+      messageAttachments,
     );
     setSending(true);
     setError(null);
     setStreamingReplies({});
     setConversation(pendingConversation);
     setContent("");
+    setAttachments(Object.freeze([]));
     try {
       const body = previousConversation && !previousConversation.id.startsWith("pending-")
-        ? { conversationId: previousConversation.id, content: message, responseLanguage: locale }
-        : { projectId: selectedProjectId || null, content: message, responseLanguage: locale };
+        ? { conversationId: previousConversation.id, content: message, responseLanguage: locale, attachments: conversationImagePayload(messageAttachments) }
+        : { projectId: selectedProjectId || null, content: message, responseLanguage: locale, attachments: conversationImagePayload(messageAttachments) };
       const result = await sendConversationMessageStream(
         body,
         `conversation:${crypto.randomUUID()}`,
@@ -121,6 +127,7 @@ export function HomeChat() {
         : text("消息发送失败，请稍后重试", "Message failed. Please try again.");
       setConversation(failedOptimisticConversation(pendingConversation, failureMessage));
       setContent(message);
+      setAttachments(messageAttachments);
       setError(failureMessage);
       if (cause instanceof ConversationStreamError && cause.code === "AGENT_CONFIG_REQUIRED") {
         router.push("/settings?required=conversation");
@@ -136,6 +143,7 @@ export function HomeChat() {
     setConversation(null);
     setSelectedProjectId("");
     setContent("");
+    setAttachments(Object.freeze([]));
     setError(null);
   }
 
@@ -207,6 +215,8 @@ export function HomeChat() {
       conversationKey={conversation?.id ?? null}
       intro={conversation ? <div className="conversation-date"><span>{text("项目群聊", "PROJECT GROUP CHAT")}</span></div> : null}
       messages={orderedMessages}
+      attachments={attachments}
+      onAttachmentsChange={setAttachments}
       onOptionSelect={option => void sendMessage(undefined, option)}
       onSubmit={sendMessage}
       onValueChange={setContent}
@@ -257,6 +267,14 @@ export function HomeChat() {
         {error ? <p className="homeChat-error" role="alert">{error}</p> : null}
       </section>
   );
+}
+
+function conversationImagePayload(images: readonly ConversationImageDraft[]) {
+  return images.map(image => Object.freeze({
+    filename: image.filename,
+    contentType: image.contentType,
+    dataBase64: image.dataBase64,
+  }));
 }
 
 function workflowLabel(state: string, text: (chinese: string, english: string) => string): string {

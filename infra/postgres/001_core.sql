@@ -77,7 +77,7 @@ CREATE TABLE deviludo.schema_metadata (
   applied_at timestamptz NOT NULL DEFAULT clock_timestamp()
 );
 INSERT INTO deviludo.schema_metadata(singleton, baseline, compatibility, current_version)
-VALUES (true, '001', 'deviludo-self-hosted-v1', '059_reset_repair_budget_after_intent_rerun');
+VALUES (true, '001', 'deviludo-self-hosted-v1', '060_asset_manifest_garbage_collection');
 
 -- Every post-baseline change is immutable and checksummed. Fresh databases are
 -- created from this full snapshot and then stamp the migrations incorporated by
@@ -2799,8 +2799,8 @@ BEGIN
       THEN RAISE EXCEPTION 'asset manifest keys must be unique'; END IF;
 
       -- One manifest per project. Every new Agent plan starts its image branch;
-      -- generated/uploaded assets still survive the re-plan below, and the user
-      -- can pause new claims from the asset panel after planning completes.
+      -- reusable generated assets and all user uploads survive, and the user can
+      -- pause new claims from the asset panel after planning completes.
       INSERT INTO deviludo.asset_manifests(
         workspace_id, project_id, workflow_id, auto_generate_enabled
       )
@@ -2815,9 +2815,55 @@ BEGIN
             updated_at = clock_timestamp()
       RETURNING id, auto_generate_enabled INTO asset_manifest_id, asset_auto_generate;
 
-      -- Assets the user already supplied keep their object; only the planning
-      -- fields are refreshed. Re-planned keys that no longer appear are dropped
-      -- unless an upload is already attached to them.
+      -- The accepted Manifest is now authoritative. Generated objects that are
+      -- absent or whose generation contract changed are retired durably before
+      -- their rows are reset/deleted. Uploaded objects are explicit user input
+      -- and never enter this automatic cleanup path.
+      INSERT INTO deviludo.object_cleanup_queue(workspace_id, bucket, object_key, reason)
+      SELECT old.workspace_id, old.bucket, old.object_key,
+             'retired generated asset after Agent manifest re-plan'
+        FROM deviludo.asset_items old
+       WHERE old.workspace_id = job.workspace_id
+         AND old.manifest_id = asset_manifest_id
+         AND old.status = 'generated'
+         AND (
+           NOT EXISTS (
+             SELECT 1
+               FROM jsonb_array_elements(p_receipt #> '{assetManifest,items}') item
+              WHERE item->>'assetKey' = old.asset_key
+           )
+           OR EXISTS (
+             SELECT 1
+               FROM jsonb_array_elements(p_receipt #> '{assetManifest,items}') item
+              WHERE item->>'assetKey' = old.asset_key
+                AND (
+                  old.asset_type IS DISTINCT FROM item->>'assetType'
+                  OR old.generation_prompt IS DISTINCT FROM item->>'generationPrompt'
+                  OR old.frame_count IS DISTINCT FROM (item->>'frameCount')::integer
+                  OR old.dimensions IS DISTINCT FROM item->>'dimensions'
+                )
+           )
+         )
+      ON CONFLICT (workspace_id, bucket, object_key) DO NOTHING;
+
+      UPDATE deviludo.asset_items old
+         SET status = 'planned', bucket = NULL, object_key = NULL,
+             sha256 = NULL, size_bytes = NULL, source_path = NULL,
+             generation_attempt = 0, generation_lease_expires_at = NULL,
+             generation_lease_token = NULL, error_message = NULL,
+             updated_at = clock_timestamp()
+        FROM jsonb_array_elements(p_receipt #> '{assetManifest,items}') item
+       WHERE old.workspace_id = job.workspace_id
+         AND old.manifest_id = asset_manifest_id
+         AND old.status = 'generated'
+         AND item->>'assetKey' = old.asset_key
+         AND (
+           old.asset_type IS DISTINCT FROM item->>'assetType'
+           OR old.generation_prompt IS DISTINCT FROM item->>'generationPrompt'
+           OR old.frame_count IS DISTINCT FROM (item->>'frameCount')::integer
+           OR old.dimensions IS DISTINCT FROM item->>'dimensions'
+         );
+
       INSERT INTO deviludo.asset_items(
         workspace_id, manifest_id, asset_key, asset_type, description,
         generation_prompt, frame_count, dimensions
@@ -2855,7 +2901,7 @@ BEGIN
       DELETE FROM deviludo.asset_items
        WHERE workspace_id = job.workspace_id
          AND manifest_id = asset_manifest_id
-         AND status NOT IN ('generated', 'uploaded')
+         AND status <> 'uploaded'
          AND asset_key NOT IN (
            SELECT item->>'assetKey'
              FROM jsonb_array_elements(p_receipt #> '{assetManifest,items}') item

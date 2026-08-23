@@ -147,6 +147,30 @@ test("Claude design Agent receives project context and conversation history", as
   });
 });
 
+test("conversation images are sent to Claude as vision content", async () => {
+  let latestContent: unknown;
+  await generateProductConversationReply({
+    userContent: "检查这个界面截图",
+    images: Object.freeze([{ contentType: "image/png" as const, dataBase64: "iVBORw0KGgo=" }]),
+    history: Object.freeze([]),
+    project,
+    allowDraftMutation: false,
+    settings: claudeSettings(),
+    apiKey: "sk-test-secret",
+    fetchImpl: async (_url, init) => {
+      const body = JSON.parse(String(init?.body)) as { messages: readonly { content: unknown }[] };
+      latestContent = body.messages.at(-1)?.content;
+      return new Response(JSON.stringify({
+        content: [{ type: "text", text: JSON.stringify({ reply: "界面截图已收到。", projectDocumentPatch: null }) }],
+      }), { status: 200, headers: { "content-type": "application/json" } });
+    },
+  });
+  assert.deepEqual(latestContent, [
+    { type: "text", text: "检查这个界面截图" },
+    { type: "image", source: { type: "base64", media_type: "image/png", data: "iVBORw0KGgo=" } },
+  ]);
+});
+
 test("Codex design Agent uses the official CLI session and cannot mutate a locked workflow", async () => {
   let requestedPrompt = "";
   const result = await generateProductConversationReply({
@@ -174,6 +198,30 @@ test("Codex design Agent uses the official CLI session and cannot mutate a locke
   assert.equal(result.content, "当前交付已锁定，我会把它作为下一轮建议。");
   assert.deepEqual(result.options, []);
   assert.equal(result.runtime, "CODEX_CLI");
+});
+
+test("conversation images are attached to Codex prompts", async () => {
+  let images: unknown;
+  await generateProductConversationReply({
+    userContent: "检查参考图",
+    images: Object.freeze([{ contentType: "image/jpeg" as const, dataBase64: "/9j/2Q==" }]),
+    history: Object.freeze([]),
+    project,
+    allowDraftMutation: false,
+    settings: Object.freeze({
+      agentRuntime: "CODEX_CLI" as const,
+      baseUrl: "https://openai.example",
+      primaryModel: "account-default",
+      modelOverrides: Object.freeze({ design: null, development: null, test: null, image: null }),
+      revision: 3,
+    }),
+    apiKey: JSON.stringify({ tokens: { access_token: "test" } }),
+    codexRunner: async input => {
+      images = input.images;
+      return JSON.stringify({ reply: "参考图已收到。", projectDocumentPatch: null });
+    },
+  });
+  assert.deepEqual(images, [{ dataBase64: "/9j/2Q==", extension: "jpg" }]);
 });
 
 test("draft conversations allow exploratory replies without repeating the project document", async () => {
