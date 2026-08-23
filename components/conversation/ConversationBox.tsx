@@ -51,6 +51,7 @@ type ConversationBoxProps = Readonly<{
   disabled?: boolean;
   focusKey?: string | number;
   composerPrefix?: ReactNode;
+  composerNotice?: ReactNode;
   primaryAction?: ReactNode;
   intro?: ReactNode;
   emptyTitle?: string;
@@ -79,6 +80,7 @@ export function ConversationBox({
   disabled = false,
   focusKey,
   composerPrefix,
+  composerNotice,
   primaryAction,
   intro,
   emptyTitle,
@@ -408,6 +410,7 @@ export function ConversationBox({
             {sending ? <TypingDots /> : <>{text("发送", "SEND")}<SendIcon /></>}
           </button>
         </footer>
+        {composerNotice}
       </form>
     </div>
   );

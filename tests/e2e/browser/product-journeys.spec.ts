@@ -264,8 +264,9 @@ test("the project chat streams Agent progress, answers questions, and confirms i
 
   await input.fill("能不能增加键盘和手柄都能完成核心循环的能力？");
   await page.getByRole("button", { name: "发送项目消息" }).click();
-  const confirmation = page.locator(".conversation-change-confirmation");
+  const confirmation = page.locator(".conversation-box-composer .conversation-change-confirmation");
   await expect(confirmation).toBeVisible();
+  await expect(page.locator(".conversation-box-messages .conversation-change-confirmation")).toHaveCount(0);
   await expect(confirmation.getByRole("button", { name: "确认修改并重跑" })).toBeVisible();
   await page.reload();
   await expect(confirmation).toBeVisible();

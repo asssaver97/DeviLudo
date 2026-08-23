@@ -1127,7 +1127,7 @@ export function ProjectStudio({ projectId }: { projectId: string }) {
                 focusKey={conversationFocusKey}
                 messages={orderedMessages}
                 attachments={conversationImages}
-                intro={project.pendingImplementationChange ? (
+                composerNotice={project.pendingImplementationChange ? (
                   <section className="conversation-change-confirmation" aria-label={text("待确认实现变更", "Pending implementation change")}>
                     <span>{text("Intent Agent · 等待确认", "INTENT AGENT · CONFIRMATION REQUIRED")}</span>
                     <b>{project.pendingImplementationChange.summary}</b>

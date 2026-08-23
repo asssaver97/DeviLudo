@@ -3684,6 +3684,10 @@ textarea {
   padding: 14px;
 }
 
+.conversation-box-composer > .conversation-change-confirmation {
+  margin-top: 0;
+}
+
 .conversation-change-confirmation > span {
   color: var(--yellow);
   font: 700 11px/1.2 var(--font-mono);
