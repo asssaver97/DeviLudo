@@ -3674,35 +3674,44 @@ textarea {
   color: var(--yellow);
 }
 
-.conversation-change-confirmation {
-  background: color-mix(in srgb, var(--yellow) 8%, var(--panel));
+.conversation-change-action {
+  display: inline-flex;
+  position: relative;
+}
+
+.conversation-box-composer:has(.conversation-change-action) {
+  overflow: visible;
+  z-index: 3;
+}
+
+.conversation-change-action > [role="tooltip"] {
+  background: #080f19;
   border: 1px solid color-mix(in srgb, var(--yellow) 55%, var(--line));
-  border-radius: 10px;
-  display: grid;
-  gap: 8px;
-  margin: 12px;
-  padding: 14px;
-}
-
-.conversation-box-composer > .conversation-change-confirmation {
-  margin-top: 0;
-}
-
-.conversation-change-confirmation > span {
-  color: var(--yellow);
-  font: 700 11px/1.2 var(--font-mono);
-  letter-spacing: .08em;
-}
-
-.conversation-change-confirmation > p {
-  margin: 0;
+  bottom: calc(100% + 9px);
+  box-shadow: 4px 4px 0 rgba(0, 0, 0, .45);
+  color: var(--ink);
+  font: 12px/1.6 var(--font-geist-mono), monospace;
+  max-height: 180px;
+  opacity: 0;
+  overflow-y: auto;
+  padding: 10px 12px;
+  pointer-events: none;
+  position: absolute;
+  right: 0;
+  transform: translateY(4px);
+  transition: opacity .12s ease, transform .12s ease, visibility .12s ease;
+  visibility: hidden;
   white-space: pre-wrap;
+  width: min(520px, calc(100vw - 48px));
+  z-index: 8;
 }
 
-.conversation-change-confirmation > div {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 8px;
+.conversation-change-action:hover > [role="tooltip"],
+.conversation-change-action:focus-within > [role="tooltip"] {
+  opacity: 1;
+  pointer-events: auto;
+  transform: translateY(0);
+  visibility: visible;
 }
 
 .conversation-box-message .agent-generation-progress-events .progress-completed {

@@ -2167,6 +2167,12 @@ async function processConversationMessage(input: Readonly<{
     });
   }
 
+  if (pending) {
+    await repository.rejectImplementationChange(
+      workspace.id, projectId, pending.id, requestIdempotencyKey(request, "change-abandon"),
+    );
+  }
+
   const responderRoles = intentDecision.intent === "QUESTION" || !intentDecision.actionable
     ? intentDecision.responderRoles : undefined;
   const agentReplies = await conversationAgentReplies({

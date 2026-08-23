@@ -195,7 +195,7 @@ test("new-game conversations validate, persist and keep their context locked", a
   expect(switched.status()).toBe(409);
 });
 
-test("project conversations apply explicit feedback and defer tentative delivery changes", async ({ stack }) => {
+test("project conversations apply explicit feedback, defer tentative changes, and abandon an unconfirmed direction", async ({ stack }) => {
   await stack.configureAgent();
   const project = await stack.createProject({
     name: "星港维修队",
@@ -255,13 +255,33 @@ test("project conversations apply explicit feedback and defer tentative delivery
   const lockedBody = await locked.json() as {
     conversation: Conversation;
     workflowAction: string;
-    changeRequest: { state: string };
+    changeRequest: { id: string; state: string };
   };
   const lockedConversation = lockedBody.conversation;
   expect(lockedConversation.messages[1].metadata).toMatchObject({ source: "AI_AGENT", appliedToDraft: false });
   expect(lockedConversation.messages[1].content).toContain("测试设计 Agent");
   expect(lockedBody.workflowAction).toBe("AWAITING_CONFIRMATION");
   expect(lockedBody.changeRequest.state).toBe("PENDING");
+  expect((await stack.readProject(lockedProject.id)).specification.revisionNotes).toEqual(notesBefore);
+
+  const followUp = await stack.web("/api/conversations/messages", {
+    method: "POST",
+    data: { conversationId: lockedConversation.id, content: "当前测试进度是什么？" },
+  });
+  expect(followUp.status()).toBe(200);
+  const followUpBody = await followUp.json() as {
+    intentDecision: { intent: string };
+    project: { pendingImplementationChange: unknown };
+    workflowAction: string;
+  };
+  expect(followUpBody.intentDecision.intent).toBe("QUESTION");
+  expect(followUpBody.workflowAction).toBe("NONE");
+  expect(followUpBody.project.pendingImplementationChange).toBeNull();
+  expect(await stack.queryRows<{ decision: string; state: string }>(`
+    SELECT decision, state
+      FROM deviludo.implementation_change_requests
+     WHERE id = '${lockedBody.changeRequest.id}'::uuid
+  `)).toEqual([{ decision: "REJECT", state: "REJECTED" }]);
   expect((await stack.readProject(lockedProject.id)).specification.revisionNotes).toEqual(notesBefore);
 });
 

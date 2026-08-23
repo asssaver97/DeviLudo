@@ -264,14 +264,26 @@ test("the project chat streams Agent progress, answers questions, and confirms i
 
   await input.fill("能不能增加键盘和手柄都能完成核心循环的能力？");
   await page.getByRole("button", { name: "发送项目消息" }).click();
-  const confirmation = page.locator(".conversation-box-composer .conversation-change-confirmation");
-  await expect(confirmation).toBeVisible();
-  await expect(page.locator(".conversation-box-messages .conversation-change-confirmation")).toHaveCount(0);
-  await expect(confirmation.getByRole("button", { name: "确认修改并重跑" })).toBeVisible();
+  const confirmAction = page.locator(".conversation-box-composer .conversation-change-action");
+  const confirmChange = confirmAction.getByRole("button", { name: "确认修改并重跑" });
+  const sendMessage = page.getByRole("button", { name: "发送项目消息" });
+  const implementation = confirmAction.getByRole("tooltip");
+  await expect(confirmAction).toBeVisible();
+  await expect(confirmChange).toBeVisible();
+  await expect(confirmChange).toBeInViewport();
+  await expect(page.getByRole("button", { name: "保持当前实现" })).toHaveCount(0);
+  const confirmBounds = await confirmChange.boundingBox();
+  const sendBounds = await sendMessage.boundingBox();
+  expect(confirmBounds).not.toBeNull();
+  expect(sendBounds).not.toBeNull();
+  expect(confirmBounds!.x + confirmBounds!.width).toBeLessThanOrEqual(sendBounds!.x);
+  await expect(implementation).toBeHidden();
+  await confirmChange.hover();
+  await expect(implementation).toBeVisible();
   await page.reload();
-  await expect(confirmation).toBeVisible();
-  await confirmation.getByRole("button", { name: "确认修改并重跑" }).click();
-  await expect(confirmation).toHaveCount(0);
+  await expect(confirmAction).toBeVisible();
+  await confirmChange.click();
+  await expect(confirmAction).toHaveCount(0);
   await expect.poll(async () => await stack.queryRows<{ state: string }>(`
     SELECT state::text FROM deviludo.jobs WHERE id = '${jobId}'::uuid
   `)).toEqual([{ state: "CANCELLED" }]);

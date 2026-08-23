@@ -1127,27 +1127,25 @@ export function ProjectStudio({ projectId }: { projectId: string }) {
                 focusKey={conversationFocusKey}
                 messages={orderedMessages}
                 attachments={conversationImages}
-                composerNotice={project.pendingImplementationChange ? (
-                  <section className="conversation-change-confirmation" aria-label={text("待确认实现变更", "Pending implementation change")}>
-                    <span>{text("Intent Agent · 等待确认", "INTENT AGENT · CONFIRMATION REQUIRED")}</span>
-                    <b>{project.pendingImplementationChange.summary}</b>
-                    <p>{project.pendingImplementationChange.implementationBrief}</p>
-                    <div>
-                      <button className="button button-primary" disabled={decidingChange || sendingMessage} onClick={() => void decidePendingChange("CONFIRM")} type="button">
-                        {text("确认修改并重跑", "CONFIRM CHANGE AND RE-RUN")}
-                      </button>
-                      <button className="button button-secondary" disabled={decidingChange || sendingMessage} onClick={() => void decidePendingChange("REJECT")} type="button">
-                        {text("保持当前实现", "KEEP CURRENT IMPLEMENTATION")}
-                      </button>
-                    </div>
-                  </section>
-                ) : null}
                 onOptionSelect={option => void sendConversationMessage(undefined, option)}
                 onAttachmentsChange={setConversationImages}
                 onSubmit={sendConversationMessage}
                 onValueChange={setConversationInput}
                 placeholder={text("提问，或提出实现调整…", "Ask a question or request an implementation change…")}
-                primaryAction={!viewingHistoricalIteration && requirementsReady && !sendingMessage ? (
+                primaryAction={!viewingHistoricalIteration && project.pendingImplementationChange ? (
+                  <span className="conversation-change-action">
+                    <button
+                      aria-describedby={`change-implementation-${project.pendingImplementationChange.id}`}
+                      className="button button-primary"
+                      disabled={decidingChange || sendingMessage}
+                      onClick={() => void decidePendingChange("CONFIRM")}
+                      type="button"
+                    >{text("确认修改并重跑", "CONFIRM CHANGE AND RE-RUN")}</button>
+                    <span id={`change-implementation-${project.pendingImplementationChange.id}`} role="tooltip">
+                      {project.pendingImplementationChange.implementationBrief}
+                    </span>
+                  </span>
+                ) : !viewingHistoricalIteration && requirementsReady && !sendingMessage ? (
                   <button
                     className="button button-secondary conversation-box-develop"
                     disabled={busy}
