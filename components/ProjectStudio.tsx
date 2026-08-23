@@ -1142,7 +1142,7 @@ export function ProjectStudio({ projectId }: { projectId: string }) {
                       type="button"
                     >{text("确认修改并重跑", "CONFIRM CHANGE AND RE-RUN")}</button>
                     <span id={`change-implementation-${project.pendingImplementationChange.id}`} role="tooltip">
-                      {project.pendingImplementationChange.implementationBrief}
+                      {conciseChangeExplanation(project.pendingImplementationChange.summary)}
                     </span>
                   </span>
                 ) : !viewingHistoricalIteration && requirementsReady && !sendingMessage ? (
@@ -1278,6 +1278,13 @@ function newestProjectSnapshot(
 ): ProductProjectDetail {
   if (!current || current.id !== incoming.id || current.document.revision <= incoming.document.revision) return incoming;
   return Object.freeze({ ...incoming, document: current.document });
+}
+
+function conciseChangeExplanation(summary: string): string {
+  const normalized = summary.replace(/\s+/gu, " ").trim();
+  const boundary = normalized.search(/[；;。.!！?？]/u);
+  const firstClause = boundary >= 0 ? normalized.slice(0, boundary) : normalized;
+  return firstClause.length <= 120 ? firstClause : `${firstClause.slice(0, 119).trimEnd()}…`;
 }
 
 function aggregateJobState(states: readonly string[]): string {

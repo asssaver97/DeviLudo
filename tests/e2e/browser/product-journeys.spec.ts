@@ -264,6 +264,12 @@ test("the project chat streams Agent progress, answers questions, and confirms i
 
   await input.fill("能不能增加键盘和手柄都能完成核心循环的能力？");
   await page.getByRole("button", { name: "发送项目消息" }).click();
+  await stack.executeSql(`
+    UPDATE deviludo.implementation_change_requests
+       SET summary = '采用方案 B 重设计主菜单：使用中央极简纵向导航，弱化容器感，并让按钮组与背景之间保留大面积呼吸空间；保留既有功能、焦点顺序、分辨率适配以及全部 E2E 目标，同时继续说明不属于确认提示的内部实施细节。'
+     WHERE project_id = '${project.id}'::uuid AND state = 'PENDING';
+  `);
+  await page.reload();
   const confirmAction = page.locator(".conversation-box-composer .conversation-change-action");
   const confirmChange = confirmAction.getByRole("button", { name: "确认修改并重跑" });
   const sendMessage = page.getByRole("button", { name: "发送项目消息" });
@@ -280,6 +286,16 @@ test("the project chat streams Agent progress, answers questions, and confirms i
   await expect(implementation).toBeHidden();
   await confirmChange.hover();
   await expect(implementation).toBeVisible();
+  expect((await implementation.textContent())?.length).toBeLessThanOrEqual(120);
+  await expect(implementation).not.toContainText("内部实施细节");
+  const composerBounds = await page.locator(".conversation-box-composer").boundingBox();
+  const implementationBounds = await implementation.boundingBox();
+  expect(composerBounds).not.toBeNull();
+  expect(implementationBounds).not.toBeNull();
+  expect(implementationBounds!.x).toBeGreaterThanOrEqual(composerBounds!.x);
+  expect(implementationBounds!.x + implementationBounds!.width).toBeLessThanOrEqual(composerBounds!.x + composerBounds!.width);
+  expect(implementationBounds!.y).toBeGreaterThanOrEqual(composerBounds!.y);
+  expect(implementationBounds!.y + implementationBounds!.height).toBeLessThanOrEqual(composerBounds!.y + composerBounds!.height);
   await page.reload();
   await expect(confirmAction).toBeVisible();
   await confirmChange.click();
