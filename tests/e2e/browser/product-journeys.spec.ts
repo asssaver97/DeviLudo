@@ -283,9 +283,14 @@ test("the project chat streams Agent progress, answers questions, and confirms i
   expect(confirmBounds).not.toBeNull();
   expect(sendBounds).not.toBeNull();
   expect(confirmBounds!.x + confirmBounds!.width).toBeLessThanOrEqual(sendBounds!.x);
+  await page.getByRole("button", { name: "浅色", exact: true }).click();
+  await expect(page.locator("html")).toHaveAttribute("data-theme", "light");
   await expect(implementation).toBeHidden();
   await confirmChange.hover();
   await expect(implementation).toBeVisible();
+  await expect(implementation).toHaveCSS("background-color", "rgb(243, 248, 251)");
+  await expect(implementation).toHaveCSS("border-top-color", "rgb(140, 166, 185)");
+  await expect(implementation).toHaveCSS("color", "rgb(23, 33, 45)");
   expect((await implementation.textContent())?.length).toBeLessThanOrEqual(120);
   await expect(implementation).not.toContainText("内部实施细节");
   const composerBounds = await page.locator(".conversation-box-composer").boundingBox();

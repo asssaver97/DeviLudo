@@ -497,6 +497,13 @@ html[data-theme="light"] .conversation-box-composer.is-image-dragover {
   box-shadow: inset 0 0 0 2px rgba(8, 127, 167, .42);
 }
 
+html[data-theme="light"] .conversation-change-action > [role="tooltip"] {
+  background: #f3f8fb;
+  border-color: #8ca6b9;
+  box-shadow: 4px 4px 0 rgba(75, 96, 116, .18);
+  color: #17212d;
+}
+
 html[data-theme="light"] :is(.button-primary, .button-acid):hover {
   background: #066c8e;
   border-color: #044f69;
