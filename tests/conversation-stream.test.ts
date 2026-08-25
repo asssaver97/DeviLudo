@@ -17,7 +17,7 @@ test("conversation images allow up to eight MiB per file", () => {
 
 test("streaming reply activity moves from thinking to typing and then clears its status", () => {
   const initial = initialStreamingConversationReplies();
-  assert.deepEqual(initial, { DESIGN: { content: "", phase: "THINKING" } });
+  assert.deepEqual(initial, {});
 
   const developmentStarted = startStreamingConversationReply(initial, "DEVELOPMENT");
   assert.deepEqual(developmentStarted, { DEVELOPMENT: { content: "", phase: "THINKING" } });

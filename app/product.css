@@ -3650,20 +3650,8 @@ textarea {
 }
 
 .agent-generation-progress {
-  margin-bottom: 0;
   max-width: min(860px, 96%);
   width: 100%;
-}
-
-.conversation-live-progress {
-  background: #09111c;
-  border-bottom: 1px solid var(--line);
-  flex: 0 0 auto;
-  padding: 14px 24px;
-}
-
-.conversation-live-progress .agent-generation-progress {
-  max-width: none;
 }
 
 .agent-generation-progress-events {

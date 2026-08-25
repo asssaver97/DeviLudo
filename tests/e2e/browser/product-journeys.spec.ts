@@ -206,6 +206,7 @@ test("a Development reply that resolves an uncertain change exposes the confirma
   );
   await page.getByRole("button", { name: "发送项目消息" }).click();
   await expect(page.locator(".conversation-box-message.role-development")).toBeVisible();
+  await expect(page.locator(".conversation-box-message.role-design")).toHaveCount(0);
   await expect(page.locator(".conversation-box-composer").getByRole("button", { name: "确认修改并重跑" })).toBeVisible();
 });
 
@@ -240,9 +241,10 @@ test("the project chat streams Agent progress, answers questions, and confirms i
   `);
 
   await page.goto(`/projects/${project.id}`);
-  const liveProgress = page.locator(".conversation-live-progress");
+  const messageViewport = page.locator(".conversation-box-messages");
+  const liveProgress = messageViewport.locator(".agent-generation-progress");
   await expect(liveProgress.getByText("游戏生成进度", { exact: true })).toBeVisible();
-  await expect(page.locator(".conversation-box-messages .agent-generation-progress")).toHaveCount(0);
+  await expect(liveProgress).toHaveCount(1);
   await expect(page.getByText("正在分析项目结构", { exact: true })).toBeVisible();
   const progressOutput = page.locator(".agent-generation-progress-events .progress-agent_output");
   await expect(progressOutput).toHaveCount(1);
@@ -258,6 +260,9 @@ test("the project chat streams Agent progress, answers questions, and confirms i
   `);
   await expect(progressOutput).toContainText("生成进度行 24");
   await expect.poll(() => progressViewport.evaluate(element => (
+    element.scrollHeight - element.scrollTop - element.clientHeight <= 2
+  ))).toBe(true);
+  await expect.poll(() => messageViewport.evaluate(element => (
     element.scrollHeight - element.scrollTop - element.clientHeight <= 2
   ))).toBe(true);
 
@@ -367,7 +372,7 @@ test("the project chat streams Agent progress, answers questions, and confirms i
   await expect(page.getByText("E2E G2", { exact: true })).toBeVisible();
 });
 
-test("game generation progress is isolated from conversation history and resets between jobs", async ({ page, stack }) => {
+test("game generation progress is a chronological chat message and resets between jobs", async ({ page, stack }) => {
   const project = await stack.createProject({
     name: "进度生命周期隔离",
     concept: "验证长会话不会与游戏生成进度共享滚动和历史状态。",
@@ -419,11 +424,14 @@ test("game generation progress is isolated from conversation history and resets 
   `);
 
   await page.goto(`/projects/${project.id}`);
-  const liveProgress = page.locator(".conversation-live-progress");
   const messageViewport = page.locator(".conversation-box-messages");
+  const liveProgress = messageViewport.locator(".agent-generation-progress");
   await expect(liveProgress.getByText("游戏生成进度", { exact: true })).toBeVisible();
   await expect(liveProgress).toContainText("第一轮生成进度");
-  await expect(messageViewport.locator(".agent-generation-progress")).toHaveCount(0);
+  await expect(liveProgress).toHaveCount(1);
+  await expect.poll(() => messageViewport.evaluate(element => (
+    element.scrollHeight - element.scrollTop - element.clientHeight <= 2
+  ))).toBe(true);
 
   const historyMetrics = await messageViewport.evaluate(element => ({
     clientHeight: element.clientHeight,
@@ -484,7 +492,7 @@ test("game generation progress is isolated from conversation history and resets 
   await expect(liveProgress).not.toContainText("刷新进度不得移动会话历史");
 });
 
-test("an Agent reply follows the conversation without moving the whole page", async ({ page, stack }) => {
+test("intent routing does not invent a Design Agent while the request is still unclassified", async ({ page, stack }) => {
   const project = await stack.createProject({
     name: "稳定视窗",
     concept: "用于验证流式回复不会把整个项目页面拖到最底部。",
@@ -515,13 +523,13 @@ test("an Agent reply follows the conversation without moving the whole page", as
     await expect(page.locator(".project-conversation-box .conversation-composer-images")).toHaveCount(0);
     await expect(page.locator('.project-conversation-box .conversation-message-images img[alt="project-feedback.png"]')).toBeVisible();
     await expect(page.locator(".project-conversation-box .conversation-box-message.user .conversation-message-completed-at")).toHaveCount(0);
-    await expect(page.locator(".project-conversation-box .conversation-box-message.is-thinking")).toBeVisible();
-    await expect(page.getByText("正在思考", { exact: true })).toBeVisible();
+    await expect(page.locator(".project-conversation-box .conversation-box-message.is-thinking")).toHaveCount(0);
+    await expect(page.getByText("正在思考", { exact: true })).toHaveCount(0);
     await page.waitForTimeout(250);
     const pageScrollAfter = await page.evaluate(() => window.scrollY);
     expect(Math.abs(pageScrollAfter - pageScrollBefore)).toBeLessThanOrEqual(1);
     await page.getByRole("button", { name: "English" }).click();
-    await expect(page.getByText("Thinking", { exact: true })).toBeVisible();
+    await expect(page.getByText("Thinking", { exact: true })).toHaveCount(0);
   } finally {
     releaseRequest();
   }

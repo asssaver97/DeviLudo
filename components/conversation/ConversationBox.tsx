@@ -93,6 +93,7 @@ export function ConversationBox({
   const [imageError, setImageError] = useState<string | null>(null);
   const [imageDropActive, setImageDropActive] = useState(false);
   const followLatestMessage = useRef(true);
+  const latestProgressSequence = agentProgress?.events.at(-1)?.sequence ?? null;
   const latestOptionMessageId = useMemo(() => {
     if (sending) return null;
     for (let index = messages.length - 1; index >= 0; index -= 1) {
@@ -112,7 +113,7 @@ export function ConversationBox({
     const viewport = messageViewport.current;
     if (!showMessages || !viewport || !followLatestMessage.current) return;
     viewport.scrollTop = viewport.scrollHeight;
-  }, [messages, sending, showMessages, streamingReplies]);
+  }, [agentProgress?.running, latestProgressSequence, messages, sending, showMessages, streamingReplies]);
 
   useLayoutEffect(() => {
     if (focusKey === undefined || disabled) return;
@@ -191,9 +192,6 @@ export function ConversationBox({
 
   return (
     <div className={`conversation-box ${showMessages ? "has-messages" : "is-composer-only"} ${className}`.trim()}>
-      {showMessages && agentProgress?.running ? (
-        <AgentProgressPanel progress={agentProgress} />
-      ) : null}
       {showMessages ? (
         <div
           aria-live="polite"
@@ -281,13 +279,14 @@ export function ConversationBox({
               </div>
             </article>
           );
-          }) : (
+          }) : !agentProgress?.running ? (
             <div className="conversation-box-empty">
               <PlusIcon />
               <b>{emptyTitle ?? text("开始新的项目会话", "START A PROJECT CONVERSATION")}</b>
               <p>{emptyDescription ?? text("讨论玩法，或告诉 DeviLudo 下一步要做什么。", "Discuss the gameplay or tell DeviLudo what to build next.")}</p>
             </div>
-          )}
+          ) : null}
+          {agentProgress?.running ? <AgentProgressPanel progress={agentProgress} /> : null}
           {sending && showSendingReply ? (
             PROJECT_AGENT_ROLES.filter(role => Boolean(streamingReplies[role])).map(role => {
                 const identity = agentIdentity(role, text);
@@ -416,30 +415,28 @@ function AgentProgressPanel({
   }, [progress.running, rows]);
 
   return (
-    <div aria-live="polite" className="conversation-live-progress">
-      <article className="conversation-box-message assistant agent-generation-progress">
-        <span className="message-avatar">RUN</span>
-        <div>
-          <header>
-            <b>{text("游戏生成进度", "Game generation progress")}</b>
-            <span className="conversation-box-applied">{text("生成中", "RUNNING")}</span>
-          </header>
-          <div
-            className="agent-generation-progress-events"
-            onScroll={event => {
-              const viewport = event.currentTarget;
-              followLatest.current = viewport.scrollHeight - viewport.scrollTop - viewport.clientHeight <= 24;
-            }}
-            ref={viewportRef}
-          >
-            {rows.map(row => (
-              <p className={`progress-${row.kind.toLowerCase()}`} key={row.sequence}>{localizedAgentProgressContent(row, locale)}</p>
-            ))}
-            <TypingDots />
-          </div>
+    <article aria-live="polite" className="conversation-box-message assistant agent-generation-progress">
+      <span className="message-avatar">RUN</span>
+      <div>
+        <header>
+          <b>{text("游戏生成进度", "Game generation progress")}</b>
+          <span className="conversation-box-applied">{text("生成中", "RUNNING")}</span>
+        </header>
+        <div
+          className="agent-generation-progress-events"
+          onScroll={event => {
+            const viewport = event.currentTarget;
+            followLatest.current = viewport.scrollHeight - viewport.scrollTop - viewport.clientHeight <= 24;
+          }}
+          ref={viewportRef}
+        >
+          {rows.map(row => (
+            <p className={`progress-${row.kind.toLowerCase()}`} key={row.sequence}>{localizedAgentProgressContent(row, locale)}</p>
+          ))}
+          <TypingDots />
         </div>
-      </article>
-    </div>
+      </div>
+    </article>
   );
 }
 

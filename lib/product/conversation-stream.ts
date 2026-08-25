@@ -139,18 +139,17 @@ export async function sendConversationMessageStream(
 }
 
 export function initialStreamingConversationReplies(): StreamingConversationReplies {
-  return Object.freeze({ DESIGN: Object.freeze({ content: "", phase: "THINKING" }) });
+  return Object.freeze({});
 }
 
 export function startStreamingConversationReply(
   current: StreamingConversationReplies,
   agentRole: ProjectAgentRole,
 ): StreamingConversationReplies {
-  const next: Partial<Record<ProjectAgentRole, StreamingConversationReply>> = { ...current };
-  const placeholder = next.DESIGN;
-  if (agentRole !== "DESIGN" && placeholder?.phase === "THINKING" && !placeholder.content) delete next.DESIGN;
-  next[agentRole] = Object.freeze({ content: next[agentRole]?.content ?? "", phase: "THINKING" });
-  return Object.freeze(next);
+  return Object.freeze({
+    ...current,
+    [agentRole]: Object.freeze({ content: current[agentRole]?.content ?? "", phase: "THINKING" }),
+  });
 }
 
 export function appendStreamingConversationReply(
