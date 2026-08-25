@@ -77,7 +77,7 @@ CREATE TABLE deviludo.schema_metadata (
   applied_at timestamptz NOT NULL DEFAULT clock_timestamp()
 );
 INSERT INTO deviludo.schema_metadata(singleton, baseline, compatibility, current_version)
-VALUES (true, '001', 'deviludo-self-hosted-v1', '064_host_admission_outbox');
+VALUES (true, '001', 'deviludo-self-hosted-v1', '065_artifact_retention');
 
 -- Every post-baseline change is immutable and checksummed. Fresh databases are
 -- created from this full snapshot and then stamp the migrations incorporated by
@@ -772,6 +772,7 @@ CREATE TABLE deviludo.artifacts (
   sha256 text NOT NULL CHECK (sha256 ~ '^sha256:[0-9a-f]{64}$'),
   size_bytes bigint NOT NULL CHECK (size_bytes >= 0),
   metadata jsonb NOT NULL DEFAULT '{}'::jsonb CHECK (jsonb_typeof(metadata) = 'object'),
+  state text NOT NULL DEFAULT 'AVAILABLE' CHECK (state IN ('AVAILABLE', 'DELETING', 'DELETED')),
   created_at timestamptz NOT NULL DEFAULT clock_timestamp(),
   PRIMARY KEY (workspace_id, id),
   UNIQUE (workspace_id, workflow_id, object_key, sha256),
@@ -3574,6 +3575,16 @@ SET row_security = off
 AS $$
 DECLARE removed integer;
 BEGIN
+  UPDATE deviludo.artifacts
+     SET state = 'DELETED'
+   WHERE workspace_id = p_workspace_id AND bucket = p_bucket AND object_key = p_object_key
+     AND state = 'DELETING'
+     AND EXISTS (
+       SELECT 1 FROM deviludo.object_cleanup_queue queue
+        WHERE queue.workspace_id = p_workspace_id AND queue.bucket = p_bucket
+          AND queue.object_key = p_object_key AND queue.lease_token = p_lease_token
+          AND queue.lease_expires_at > clock_timestamp()
+     );
   DELETE FROM deviludo.object_cleanup_queue
    WHERE workspace_id = p_workspace_id AND bucket = p_bucket AND object_key = p_object_key
      AND lease_token = p_lease_token AND lease_expires_at > clock_timestamp();
@@ -3582,6 +3593,48 @@ BEGIN
 END
 $$;
 ALTER FUNCTION deviludo.complete_object_cleanup(uuid, text, text, uuid) OWNER TO deviludo_claim_executor;
+
+CREATE OR REPLACE FUNCTION deviludo.enqueue_expired_artifacts(
+  p_retention_days integer, p_limit integer
+)
+RETURNS integer
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = pg_catalog, deviludo
+SET row_security = off
+AS $$
+DECLARE enqueued integer;
+BEGIN
+  IF p_retention_days NOT BETWEEN 1 AND 3650 OR p_limit NOT BETWEEN 1 AND 500 THEN
+    RAISE EXCEPTION 'invalid artifact retention sweep';
+  END IF;
+  WITH candidate AS (
+    SELECT artifact.workspace_id, artifact.id, artifact.bucket, artifact.object_key
+      FROM deviludo.artifacts artifact
+     WHERE artifact.state = 'AVAILABLE'
+       AND artifact.kind IN ('BUILD', 'E2E_REPORT', 'SIGNED_BUILD', 'PUBLISH_RECEIPT', 'CLEAN_INSTALL_REPORT')
+       AND artifact.created_at < clock_timestamp() - make_interval(days => p_retention_days)
+       AND NOT EXISTS (
+         SELECT 1 FROM deviludo.artifact_inputs input
+         JOIN deviludo.jobs job ON job.workspace_id = input.workspace_id AND job.id = input.job_id
+          WHERE input.workspace_id = artifact.workspace_id AND input.artifact_id = artifact.id
+            AND job.state IN ('QUEUED', 'RUNNING', 'RETRY')
+       )
+     ORDER BY artifact.created_at, artifact.id
+     FOR UPDATE SKIP LOCKED LIMIT p_limit
+  ), queued AS (
+    INSERT INTO deviludo.object_cleanup_queue(workspace_id, bucket, object_key, reason)
+    SELECT workspace_id, bucket, object_key, 'artifact retention expired' FROM candidate
+    ON CONFLICT (workspace_id, bucket, object_key) DO NOTHING
+  )
+  UPDATE deviludo.artifacts artifact SET state = 'DELETING'
+    FROM candidate
+   WHERE artifact.workspace_id = candidate.workspace_id AND artifact.id = candidate.id;
+  GET DIAGNOSTICS enqueued = ROW_COUNT;
+  RETURN enqueued;
+END
+$$;
+ALTER FUNCTION deviludo.enqueue_expired_artifacts(integer, integer) OWNER TO deviludo_claim_executor;
 
 CREATE OR REPLACE FUNCTION deviludo.fail_object_cleanup(
   p_workspace_id uuid, p_bucket text, p_object_key text, p_lease_token uuid, p_error text
@@ -3953,7 +4006,8 @@ GRANT EXECUTE ON FUNCTION deviludo.claim_local_git_commit(integer),
   TO deviludo_scheduler;
 GRANT EXECUTE ON FUNCTION deviludo.claim_object_cleanup(integer),
   deviludo.complete_object_cleanup(uuid, text, text, uuid),
-  deviludo.fail_object_cleanup(uuid, text, text, uuid, text)
+  deviludo.fail_object_cleanup(uuid, text, text, uuid, text),
+  deviludo.enqueue_expired_artifacts(integer, integer)
   TO deviludo_scheduler;
 GRANT EXECUTE ON FUNCTION deviludo.claim_project_cleanup(integer),
   deviludo.complete_project_cleanup(uuid, uuid, uuid),
@@ -3977,6 +4031,7 @@ GRANT SELECT ON deviludo.project_documents,
   deviludo.runtime_images, deviludo.artifacts, deviludo.artifact_inputs,
   deviludo.external_signals, deviludo.steam_releases, deviludo.e2e_regression_traces
   TO deviludo_claim_executor;
+GRANT UPDATE (state) ON deviludo.artifacts TO deviludo_claim_executor;
 GRANT UPDATE ON deviludo.steam_releases TO deviludo_claim_executor;
 -- The asset generation lease and its settlement run as this role, which is the
 -- owner of those SECURITY DEFINER functions.

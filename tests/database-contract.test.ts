@@ -161,6 +161,18 @@ test("managed admission settlement is a leased idempotent database outbox", asyn
   }
 });
 
+test("managed artifact retention records lifecycle state and queues only disposable outputs",async()=>{
+  const sql=await readFile(sqlUrl,"utf8");
+  const migration=await readFile(new URL("../infra/postgres/migrations/065_artifact_retention.sql",import.meta.url),"utf8");
+  for(const source of [sql,migration]){
+    assert.match(source,/state text NOT NULL DEFAULT 'AVAILABLE'.*'DELETING'.*'DELETED'/s);
+    assert.match(source,/enqueue_expired_artifacts\([\s\S]*artifact\.kind IN \('BUILD', 'E2E_REPORT', 'SIGNED_BUILD', 'PUBLISH_RECEIPT', 'CLEAN_INSTALL_REPORT'\)/);
+    assert.match(source,/job\.state IN \('QUEUED', 'RUNNING', 'RETRY'\)/);
+    assert.match(source,/INSERT INTO deviludo\.object_cleanup_queue[\s\S]*artifact retention expired/);
+    assert.match(source,/complete_object_cleanup[\s\S]*SET state = 'DELETED'/);
+  }
+});
+
 test("Agent reruns select only the latest historical draft specification", async () => {
   const migration = await readFile(
     new URL("../infra/postgres/migrations/057_latest_agent_specification_input.sql", import.meta.url),

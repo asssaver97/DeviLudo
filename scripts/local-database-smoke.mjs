@@ -96,7 +96,7 @@ async function runDatabaseSmoke(url) {
       "acknowledge_host_source_events", "advance_asset_workflows", "claim_asset_generation", "claim_host_admission_event", "claim_job",
       "claim_local_git_commit", "claim_object_cleanup", "claim_project_cleanup", "claim_project_import_analysis", "cleanup_expired_executor_state",
       "complete_asset_generation", "complete_host_admission_event", "complete_local_git_commit", "complete_object_cleanup", "complete_project_cleanup",
-      "enqueue_host_source_event",
+      "enqueue_expired_artifacts", "enqueue_host_source_event",
       "fail_asset_generation", "fail_host_admission_event", "fail_local_git_commit", "fail_object_cleanup", "fail_project_cleanup",
       "pull_host_source_events", "reconcile_host_admission_events", "recover_expired_jobs",
       "retain_latest_e2e_report",
@@ -124,6 +124,8 @@ async function runDatabaseSmoke(url) {
     await assertFunctionPrivilege(owner, "deviludo_api", "deviludo.claim_local_git_commit(integer)", false);
     await assertFunctionPrivilege(owner, "deviludo_scheduler", "deviludo.claim_object_cleanup(integer)", true);
     await assertFunctionPrivilege(owner, "deviludo_api", "deviludo.claim_object_cleanup(integer)", false);
+    await assertFunctionPrivilege(owner, "deviludo_scheduler", "deviludo.enqueue_expired_artifacts(integer,integer)", true);
+    await assertFunctionPrivilege(owner, "deviludo_api", "deviludo.enqueue_expired_artifacts(integer,integer)", false);
     await assertFunctionPrivilege(owner, "deviludo_scheduler", "deviludo.reconcile_host_admission_events()", true);
     await assertFunctionPrivilege(owner, "deviludo_api", "deviludo.reconcile_host_admission_events()", false);
     await assertFunctionPrivilege(owner, "deviludo_scheduler", "deviludo.claim_host_admission_event(integer)", true);
@@ -583,6 +585,21 @@ async function runDatabaseSmoke(url) {
       throw new Error("Human release approval did not enqueue exactly one Steam publish");
     }
 
+    const expiredArtifactId=randomUUID();
+    const expiredArtifactKey=`workspaces/${workspaceIds[0]}/projects/${projectIds[0]}/jobs/retention-smoke/build.zip`;
+    await withWorkspace(sandbox,workspaceIds[0],client=>client.query(`INSERT INTO deviludo.artifacts(
+      workspace_id,id,project_id,workflow_id,kind,bucket,object_key,sha256,size_bytes,created_at
+    ) VALUES($1::uuid,$2::uuid,$3::uuid,$4::uuid,'BUILD','deviludo-artifacts',$5,$6,512,clock_timestamp()-interval '40 days')`,
+    [workspaceIds[0],expiredArtifactId,projectIds[0],workflowIds[0],expiredArtifactKey,`sha256:${"9".repeat(64)}`]));
+    const retention=await scheduler.query("SELECT deviludo.enqueue_expired_artifacts(30,25) AS enqueued");
+    if(Number(retention.rows[0]?.enqueued)<1)throw new Error("Expired downloadable artifact was not queued for deletion");
+    const deleting=await owner.query("SELECT state FROM deviludo.artifacts WHERE workspace_id=$1::uuid AND id=$2::uuid",[workspaceIds[0],expiredArtifactId]);
+    if(deleting.rows[0]?.state!=="DELETING")throw new Error("Expired artifact state was not persisted");
+    let expiredObjectCompleted=false;
+    for(let attempt=0;attempt<10&&!expiredObjectCompleted;attempt+=1){const claim=await scheduler.query(`SELECT "workspaceId"::text,bucket,"objectKey","leaseToken"::text FROM deviludo.claim_object_cleanup(60)`);const row=claim.rows[0];if(!row)break;const completed=await scheduler.query("SELECT deviludo.complete_object_cleanup($1::uuid,$2::text,$3::text,$4::uuid) completed",[row.workspaceId,row.bucket,row.objectKey,row.leaseToken]);if(completed.rows[0]?.completed!==true)throw new Error("Retention object cleanup lease did not settle");expiredObjectCompleted=row.objectKey===expiredArtifactKey;}
+    const deleted=await owner.query("SELECT state FROM deviludo.artifacts WHERE workspace_id=$1::uuid AND id=$2::uuid",[workspaceIds[0],expiredArtifactId]);
+    if(!expiredObjectCompleted||deleted.rows[0]?.state!=="DELETED")throw new Error("Deleted artifact lifecycle state was not persisted");
+
     console.log(JSON.stringify({
       database: "verified",
       forcedRlsTables: forcedNames.size,
@@ -593,6 +610,7 @@ async function runDatabaseSmoke(url) {
       repeatedClaimRejected: true,
       expiredLeaseRecovered: true,
       hostAdmissionOutbox: true,
+      artifactRetentionLifecycle: true,
       assetReadinessGate: true,
       assetRerunContinuation: true,
       releasePendingStageRerun: true,

@@ -19,6 +19,12 @@ test("sandbox concurrency rejects unsafe worker counts", () => {
   assert.throws(() => loadCoreConfig({ ...base, DEVILUDO_SANDBOX_CONCURRENCY: "3" }), /DEVILUDO_SANDBOX_CONCURRENCY/);
 });
 
+test("managed artifact retention is disabled by default and strictly bounded when configured",()=>{
+  assert.equal(loadCoreConfig(base).artifactRetentionDays,0);
+  assert.equal(loadCoreConfig({...base,DEVILUDO_R2_ARTIFACT_RETENTION_DAYS:"30"}).artifactRetentionDays,30);
+  assert.throws(()=>loadCoreConfig({...base,DEVILUDO_R2_ARTIFACT_RETENTION_DAYS:"3651"}),/ARTIFACT_RETENTION/);
+});
+
 test("telemetry defaults to the official collector and validates developer overrides", () => {
   const defaults = loadCoreConfig(base);
   assert.equal(defaults.telemetryEndpoint, DEFAULT_TELEMETRY_ENDPOINT);

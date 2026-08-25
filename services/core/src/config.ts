@@ -15,6 +15,7 @@ export type CoreConfig = Readonly<{
   e2eDevelopmentToken: string | null;
   pollMilliseconds: number;
   projectDocumentIdleSeconds: number;
+  artifactRetentionDays: number;
   assetGenerationPollMilliseconds: number;
   sandboxConcurrency: number;
   requiredReadyPools: readonly ServerPoolKind[];
@@ -50,6 +51,12 @@ export function loadCoreConfig(env: NodeJS.ProcessEnv = process.env): CoreConfig
     60,
     2_592_000,
     "DEVILUDO_PROJECT_DOCUMENT_IDLE_SECONDS",
+  );
+  const artifactRetentionDays = parseInteger(
+    env.DEVILUDO_R2_ARTIFACT_RETENTION_DAYS ?? "0",
+    0,
+    3_650,
+    "DEVILUDO_R2_ARTIFACT_RETENTION_DAYS",
   );
   // Asset generation sweeps on its own cadence rather than the sub-second
   // scheduler tick: each item takes tens of seconds of provider time, so claiming
@@ -126,6 +133,7 @@ export function loadCoreConfig(env: NodeJS.ProcessEnv = process.env): CoreConfig
     e2eDevelopmentToken,
     pollMilliseconds,
     projectDocumentIdleSeconds,
+    artifactRetentionDays,
     assetGenerationPollMilliseconds,
     sandboxConcurrency,
     requiredReadyPools: Object.freeze(requiredReadyPools),

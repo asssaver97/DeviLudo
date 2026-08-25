@@ -1904,6 +1904,7 @@ export class CoreRepository {
                       artifact.size_bytes::text, artifact.metadata, artifact.created_at::text
                  FROM deviludo.artifacts artifact
                 WHERE artifact.project_id = $1::uuid AND artifact.workflow_id = $2::uuid
+                  AND artifact.state = 'AVAILABLE'
                 ORDER BY artifact.kind, artifact.target_platform NULLS FIRST,
                          artifact.created_at DESC, artifact.id DESC
              ) latest
@@ -1940,6 +1941,7 @@ export class CoreRepository {
                     artifact.size_bytes::text, artifact.metadata, artifact.created_at::text
                FROM deviludo.artifacts artifact
               WHERE artifact.project_id = $1::uuid
+                AND artifact.state = 'AVAILABLE'
                 AND ($2::uuid IS NULL OR artifact.workflow_id = $2::uuid)
               ORDER BY artifact.kind, artifact.target_platform NULLS FIRST,
                        artifact.created_at DESC, artifact.id DESC
@@ -1967,7 +1969,7 @@ export class CoreRepository {
                 kind::text, target_platform::text, bucket, object_key, sha256,
                 size_bytes::text, metadata, created_at::text
            FROM deviludo.artifacts
-          WHERE project_id = $1::uuid AND id = $2::uuid`,
+          WHERE project_id = $1::uuid AND id = $2::uuid AND state = 'AVAILABLE'`,
         [projectId, artifactId],
       );
       return result.rows[0] ? artifactFromRow(result.rows[0]) : null;
@@ -3477,6 +3479,18 @@ export class CoreRepository {
       [leaseSeconds],
     );
     return result.rows[0] ? Object.freeze(result.rows[0]) : null;
+  }
+
+  async enqueueExpiredArtifacts(retentionDays: number, limit = 25): Promise<number> {
+    if (!Number.isSafeInteger(retentionDays) || retentionDays < 1 || retentionDays > 3_650
+      || !Number.isSafeInteger(limit) || limit < 1 || limit > 500) {
+      throw new Error("Artifact retention sweep is invalid");
+    }
+    const result = await this.database.pool.query<{ enqueued: number }>(
+      "SELECT deviludo.enqueue_expired_artifacts($1::integer, $2::integer) AS enqueued",
+      [retentionDays, limit],
+    );
+    return result.rows[0]?.enqueued ?? 0;
   }
 
   async completeObjectCleanup(input: PendingObjectCleanup): Promise<boolean> {
