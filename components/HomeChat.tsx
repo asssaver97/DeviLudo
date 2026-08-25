@@ -21,6 +21,7 @@ import {
 import { ConversationBox } from "./conversation/ConversationBox";
 import { GamepadIcon, PlusIcon, SparkIcon } from "./console/Icons";
 import { useLanguage } from "./i18n/LanguageProvider";
+import { useLocalInstance } from "./ProductShell";
 
 const STARTERS_ZH = Object.freeze([
   "我想做一款能在十分钟内完成一局的合作游戏",
@@ -36,6 +37,7 @@ const IMPORT_PROJECT_VALUE = "__import_existing_project__";
 
 export function HomeChat() {
   const { errorText, locale, text } = useLanguage();
+  const managed = useLocalInstance().mode === "MANAGED";
   const router = useRouter();
   const initialProjects = cachedValue<readonly ProductProjectSummary[]>(clientCacheKeys.projects);
   const [projects, setProjects] = useState<readonly ProductProjectSummary[]>(initialProjects ?? []);
@@ -134,7 +136,7 @@ export function HomeChat() {
       setConversation(failedOptimisticConversation(pendingConversation, failureMessage));
       setContent(message);
       setError(failureMessage);
-      if (cause instanceof ConversationStreamError && cause.code === "AGENT_CONFIG_REQUIRED") {
+      if (!managed && cause instanceof ConversationStreamError && cause.code === "AGENT_CONFIG_REQUIRED") {
         router.push("/settings?required=conversation");
         return;
       }

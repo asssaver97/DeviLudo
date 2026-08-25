@@ -83,6 +83,23 @@ export function parseConversationIntent(raw: string): ConversationIntentDecision
   });
 }
 
+export function reconcileConversationIntentReadiness(
+  decision: ConversationIntentDecision,
+  replies: readonly Readonly<{ readyForDevelopment: boolean }>[],
+): ConversationIntentDecision {
+  if (decision.intent !== "CHANGE_REQUEST" || replies.length === 0) return decision;
+  const actionable = replies.every(reply => reply.readyForDevelopment);
+  if (actionable === decision.actionable) return decision;
+  return Object.freeze({
+    ...decision,
+    actionable,
+    // A specialist may resolve the router's uncertainty, but that resolution
+    // is a proposal. Only the player's original, already-actionable command can
+    // retain immediate execution authority.
+    explicitExecution: actionable && decision.actionable && decision.explicitExecution,
+  });
+}
+
 function intentPrompt(input: Parameters<typeof classifyConversationIntent>[0]): string {
   const language = responseLanguageInstruction(input.responseLanguage);
   const context = JSON.stringify({
@@ -99,7 +116,9 @@ function intentPrompt(input: Parameters<typeof classifyConversationIntent>[0]): 
     "Classify the player's latest message. Never infer a code change from a question, explanation request, status request, brainstorming, or hypothetical suggestion.",
     "QUESTION means answer only and must never mutate requirements, source, jobs, or E2E goals.",
     "CHANGE_REQUEST means the player wants the implementation changed. Set explicitExecution true only for a direct imperative that authorizes doing the work now. Desires, suggestions, hypotheticals, and requests phrased as a possibility require confirmation.",
-    "Set actionable false when implementation details are too ambiguous to plan safely; responders must ask only the missing questions.",
+    "A reported product malfunction is actionable when the broken observable behavior and desired user outcome are clear. Diagnosing the source-level cause and reproducing the failure are part of implementation; do not demand a suspected cause, file name, or exact reproduction steps before planning.",
+    "For compound requests, set actionable true when at least one requested change is safely plannable and the remaining symptom can be handled through implementation diagnosis and real-input acceptance testing.",
+    "Set actionable false only when a missing product choice prevents every safe implementation path; responders must ask only the missing questions.",
     "Flag combinations are strict: QUESTION, CONFIRM_CHANGE, and REJECT_CHANGE require explicitExecution=false and actionable=false. CHANGE_REQUEST with actionable=false also requires explicitExecution=false. explicitExecution=true always requires actionable=true.",
     "CONFIRM_CHANGE and REJECT_CHANGE apply only when pendingChange exists and the player clearly accepts or rejects that exact proposal.",
     "Choose exactly one primary specialist to answer this turn: DESIGN for gameplay/product scope, DEVELOPMENT for source/build/runtime, TEST for acceptance/E2E/quality. Other specialists run later at their workflow nodes; never select multiple responders.",
@@ -157,12 +176,14 @@ function fixtureDecision(content: string, hasPendingChange: boolean): Conversati
     || new RegExp(`^(为什么|怎么|怎样|什么|是否|能否|会不会|当前|进度|why|how|what|when|can|could|would|is|are)${boundary}`, "u").test(normalized);
   const tentative = /^(?:我想|想做|希望|先讨论|先确认|能不能|可不可以|是否可以|如果|建议|考虑)/u.test(normalized)
     || new RegExp(`^(i want|i'd like|could|would|what if|maybe)${boundary}`, "u").test(normalized);
+  const needsSpecialistResolution = /待专业 agent 判断是否可实施|let the specialist decide whether this is actionable/u.test(normalized);
   const intent = pendingConfirmation ? "CONFIRM_CHANGE" : pendingRejection ? "REJECT_CHANGE"
     : tentative ? "CHANGE_REQUEST" : question ? "QUESTION" : "CHANGE_REQUEST";
+  const actionable = intent === "CHANGE_REQUEST" && !needsSpecialistResolution;
   return Object.freeze({
     intent,
-    explicitExecution: intent === "CHANGE_REQUEST" && !tentative,
-    actionable: intent === "CHANGE_REQUEST",
+    explicitExecution: actionable && !tentative,
+    actionable,
     responderRoles: Object.freeze(roles),
     summary: intent === "QUESTION" ? "Answer the player's question without changing the project."
       : intent === "CONFIRM_CHANGE" ? "Apply the pending implementation change."

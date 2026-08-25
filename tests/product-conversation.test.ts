@@ -78,6 +78,40 @@ test("project group chat routes one turn to one independently configured Agent",
   assert.doesNotMatch(histories[0], /Guidance from design-model|Guidance from test-model/);
 });
 
+test("an unresolved implementation change always returns actionable reply options", async () => {
+  let system = "";
+  const result = await generateProductConversationReply({
+    userContent: "修复操作问题",
+    history: Object.freeze([]),
+    project: Object.freeze({ ...project, workflowState: "RELEASE_DECISION_PENDING" }),
+    allowDraftMutation: false,
+    changePlanning: true,
+    agentRole: "DEVELOPMENT",
+    responseLanguage: "zh",
+    settings: claudeSettings(),
+    apiKey: "sk-test-secret",
+    fetchImpl: async (_url, init) => {
+      const body = JSON.parse(String(init?.body)) as { system: string };
+      system = body.system;
+      return new Response(JSON.stringify({
+        content: [{ type: "text", text: JSON.stringify({
+          reply: "还需要确定处理范围。",
+          options: [],
+          applyToDraft: false,
+          readyForDevelopment: false,
+          projectDocumentPatch: null,
+        }) }],
+      }), { status: 200, headers: { "content-type": "application/json" } });
+    },
+  });
+  assert.match(system, /never leave the player with neither options nor an executable proposal/);
+  assert.deepEqual(result.options, [
+    "仅实施已经明确的修改",
+    "先检查现有实现并用真实操作复现问题",
+  ]);
+  assert.equal(result.readyForDevelopment, false);
+});
+
 test("Claude design Agent receives project context and conversation history", async () => {
   let requestedUrl = "";
   let requestedBody: Record<string, unknown> = {};

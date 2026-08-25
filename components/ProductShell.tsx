@@ -2,7 +2,7 @@
 
 import Image from "next/image";
 import Link from "next/link";
-import { usePathname } from "next/navigation";
+import { usePathname, useRouter } from "next/navigation";
 import { createContext, useContext, useEffect, useState, type ReactNode } from "react";
 import type { LocalInstance } from "@/lib/product/contracts";
 import { cachedValue, clientCacheKeys, loadCached } from "@/lib/product/client-cache";
@@ -16,6 +16,7 @@ const LocalInstanceContext = createContext<LocalInstance | undefined>(undefined)
 export function ProductShell({ children }: { children: ReactNode }) {
   const { text } = useLanguage();
   const pathname = usePathname();
+  const router = useRouter();
   const cachedInstance = cachedValue<LocalInstance>(clientCacheKeys.instance);
   const [instance, setInstance] = useState<LocalInstance | null>(cachedInstance ?? null);
   const [instanceLoaded, setInstanceLoaded] = useState(Boolean(cachedInstance));
@@ -40,6 +41,12 @@ export function ProductShell({ children }: { children: ReactNode }) {
     return () => controller.abort();
   }, []);
 
+  useEffect(() => {
+    if (instance?.mode === "MANAGED" && (pathname.startsWith("/settings") || pathname === "/runtime")) {
+      router.replace("/projects");
+    }
+  }, [instance?.mode, pathname, router]);
+
   if (!instanceLoaded) {
     return (
       <div className="auth-screen">
@@ -61,6 +68,7 @@ export function ProductShell({ children }: { children: ReactNode }) {
   }
 
   const workspace = instance.workspace;
+  const managed = instance.mode === "MANAGED";
   const healthLabel = health === "ok" ? "SYSTEM ONLINE" : health === "degraded" ? "SYSTEM LIMITED" : "SYSTEM SYNCING";
   return (
     <div className="app-shell">
@@ -72,7 +80,7 @@ export function ProductShell({ children }: { children: ReactNode }) {
 
         <div className="workspace-switcher" aria-label={text("当前工作区", "Current workspace")}>
           <span aria-hidden="true" className="workspace-avatar">{workspaceMonogram(workspace.name)}</span>
-          <span><b>{workspace.name}</b><small>{text("免费自建实例", "Free self-hosted instance")}</small></span>
+          <span><b>{workspace.name}</b><small>{managed ? text("托管工作区", "Managed workspace") : text("免费自建实例", "Free self-hosted instance")}</small></span>
         </div>
 
         <nav aria-label={text("主要导航", "Main navigation")} className="shell-nav">
@@ -82,13 +90,15 @@ export function ProductShell({ children }: { children: ReactNode }) {
           <Link className={`shell-nav-item ${pathname.startsWith("/projects") ? "is-active" : ""}`} href="/projects">
             <GamepadIcon /><span>{text("项目", "Projects")}</span>{pathname.startsWith("/projects") ? <i aria-hidden="true" /> : null}
           </Link>
-          <p>CONFIG / {text("配置", "SYSTEM")}</p>
-          <Link className={`shell-nav-item ${pathname.startsWith("/settings") ? "is-active" : ""}`} href="/settings">
-            <SettingsIcon /><span>{text("设置", "Settings")}</span>{pathname.startsWith("/settings") ? <i aria-hidden="true" /> : null}
-          </Link>
-          <Link className={`shell-nav-item ${pathname === "/runtime" ? "is-active" : ""}`} href="/runtime">
-            <ServerIcon /><span>{text("运行状态", "Runtime")}</span>{pathname === "/runtime" ? <i aria-hidden="true" /> : null}
-          </Link>
+          {!managed ? <>
+            <p>CONFIG / {text("配置", "SYSTEM")}</p>
+            <Link className={`shell-nav-item ${pathname.startsWith("/settings") ? "is-active" : ""}`} href="/settings">
+              <SettingsIcon /><span>{text("设置", "Settings")}</span>{pathname.startsWith("/settings") ? <i aria-hidden="true" /> : null}
+            </Link>
+            <Link className={`shell-nav-item ${pathname === "/runtime" ? "is-active" : ""}`} href="/runtime">
+              <ServerIcon /><span>{text("运行状态", "Runtime")}</span>{pathname === "/runtime" ? <i aria-hidden="true" /> : null}
+            </Link>
+          </> : null}
         </nav>
       </aside>
 

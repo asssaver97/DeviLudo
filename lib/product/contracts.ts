@@ -5,8 +5,9 @@ export type WorkspaceSummary = Readonly<{
 }>;
 
 export type LocalInstance = Readonly<{
-  mode: "SELF_HOSTED";
+  mode: "SELF_HOSTED" | "MANAGED";
   workspace: WorkspaceSummary;
+  capabilities: readonly string[];
 }>;
 
 export type TelemetryStatus = Readonly<{

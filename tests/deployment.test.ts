@@ -185,13 +185,13 @@ test("production Core derives one anonymous installation ID from the host machin
 });
 
 test("Core sandbox concurrency is bounded and assigns independent worker ids", async () => {
-  const [config, main] = await Promise.all([
+  const [config, start] = await Promise.all([
     readFile(new URL("../services/core/src/config.ts", import.meta.url), "utf8"),
-    readFile(new URL("../services/core/src/main.ts", import.meta.url), "utf8"),
+    readFile(new URL("../services/core/src/start.ts", import.meta.url), "utf8"),
   ]);
   assert.match(config, /DEVILUDO_SANDBOX_CONCURRENCY[\s\S]*?1,[\s\S]*?2,/);
-  assert.match(main, /Array\.from\(\{ length: config\.sandboxConcurrency \}/);
-  assert.match(main, /`\$\{baseWorkerId\}-\$\{index \+ 1\}`/);
+  assert.match(start, /Array\.from\(\{ length: config\.sandboxConcurrency \}/);
+  assert.match(start, /`\$\{baseWorkerId\}-\$\{index \+ 1\}`/);
 });
 
 test("the isolated E2E launcher maps the actual Docker socket group into executord", async () => {
@@ -1229,7 +1229,7 @@ test("all self-hosted artifacts open through the verified host bridge", async ()
     readFile(new URL("../scripts/local-git-import-server.mjs", import.meta.url), "utf8"),
     readFile(new URL("../scripts/local-up.mjs", import.meta.url), "utf8"),
   ]);
-  assert.match(studio, /const opensOnHost = true/);
+  assert.match(studio, /const opensOnHost = !managed/);
   assert.match(studio, /fetch\(`\$\{bridgeUrl\}\/artifact\/open`/);
   assert.match(studio, /locale,[\s\S]*theme: document\.documentElement\.dataset\.theme/);
   assert.match(studio, /text\("打开", "OPEN"\)/);

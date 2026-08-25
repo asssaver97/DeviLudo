@@ -189,6 +189,26 @@ test("confirmed requirements update the project document before the streamed tur
   await expect(page.getByText("E2E G2", { exact: true })).toBeVisible();
 });
 
+test("a Development reply that resolves an uncertain change exposes the confirmation action", async ({ page, stack }) => {
+  await stack.configureAgent();
+  const project = await stack.createProject({
+    name: "开发确认按钮",
+    concept: "验证开发 Agent 完成规划后显示确认修改入口。",
+  });
+  await stack.executeSql(`
+    UPDATE deviludo.workflow_instances
+       SET state = 'RELEASE_DECISION_PENDING', updated_at = clock_timestamp()
+     WHERE id = '${project.workflowId}'::uuid;
+  `);
+  await page.goto(`/projects/${project.id}`);
+  await page.getByLabel("继续项目会话").fill(
+    "待专业 Agent 判断是否可实施：优化局内 UI，并修复真实输入无法操作的问题。",
+  );
+  await page.getByRole("button", { name: "发送项目消息" }).click();
+  await expect(page.locator(".conversation-box-message.role-development")).toBeVisible();
+  await expect(page.locator(".conversation-box-composer").getByRole("button", { name: "确认修改并重跑" })).toBeVisible();
+});
+
 test("the project chat streams Agent progress, answers questions, and confirms implementation reruns", async ({ page, stack }) => {
   await stack.configureAgent();
   const project = await stack.createProject({

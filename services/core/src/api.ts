@@ -33,7 +33,13 @@ import {
 import { detectAgentRuntimes } from "./agent-runtime-detection";
 import { testAgentConnection } from "./agent-connection";
 import type { CoreConfig } from "./config";
-import { localAccessContext, type LocalAccessContext } from "./access";
+import {
+  createLocalHostServices,
+  requireCoreCapability,
+  type CoreCapability,
+  type CoreHostServices,
+  type CorePrincipal,
+} from "./access";
 import {
   assertE2eCompletion,
   deliveryStages,
@@ -50,6 +56,7 @@ import {
   analyzeImportedProject,
   decodeProjectSourceStream,
   inspectProjectFiles,
+  inspectProjectZip,
   normalizeGitBranchName,
   normalizeGitHubRepositoryUrl,
   type ImportedSourceSnapshot,
@@ -64,7 +71,7 @@ import {
   type ProductConversationStreamCallbacks,
 } from "./product-conversation";
 import { generatedImageExtension, sniffContentType } from "./image-generation";
-import { classifyConversationIntent } from "./conversation-intent";
+import { classifyConversationIntent, reconcileConversationIntentReadiness } from "./conversation-intent";
 import {
   generateE2ePlayerDecision,
   MAX_PLAYER_POLICY_REQUEST_BYTES,
@@ -101,6 +108,7 @@ export async function runApi(
   signal: AbortSignal,
   agentSecrets: AgentSecretStore = createAgentSecretStore(),
   steamSecrets: SteamSecretStore = createSteamSecretStore(),
+  host: CoreHostServices = createLocalHostServices(),
 ): Promise<void> {
   const objectStore = new CoreObjectStore();
   const projectSources = new ProjectSourceStore(config.projectsRoot);
@@ -144,9 +152,15 @@ export async function runApi(
   app.addHook("preHandler", async request => {
     const path = request.url.split("?", 1)[0];
     if (!path.startsWith("/v1/") || path.startsWith("/v1/e2e/")) return;
+    if (path.startsWith("/v1/host/")) return;
     authorizeWeb(request, config);
-    if (path.startsWith("/v1/dev/")) return;
     const mutating = !["GET", "HEAD", "OPTIONS"].includes(request.method);
+    const principal = await host.access.resolvePrincipal(request, mutating);
+    authenticatedRequests.set(request, principal);
+    requireCoreCapability(principal, capabilityForRequest(path, request.method));
+    if (path.startsWith("/v1/dev/") && host.mode !== "self-hosted") {
+      throw httpError(404, "NOT_FOUND", "Not found");
+    }
     if (mutating && request.headers["x-deviludo-origin-verified"] !== "1") {
       throw httpError(403, "ORIGIN_REJECTED", "请求来源校验失败");
     }
@@ -176,22 +190,132 @@ export async function runApi(
     });
   });
 
+  app.get<{ Querystring: { limit?: string } }>("/v1/host/source-events", async (request, reply) => {
+    await host.internal.authorize(request, "source-events.read");
+    const limit = Number(request.query.limit ?? "100");
+    return reply.header("cache-control", "no-store").send({
+      events: await repository.listHostSourceEvents(limit),
+    });
+  });
+
+  app.post("/v1/host/source-events/ack", async (request, reply) => {
+    await host.internal.authorize(request, "source-events.ack");
+    const body = objectBody(request.body);
+    if (!Array.isArray(body.eventIds) || body.eventIds.some(value => typeof value !== "string")) {
+      throw httpError(400, "INVALID_SOURCE_EVENT_ACK", "Source event acknowledgement is invalid");
+    }
+    return reply.send({ acknowledged: await repository.acknowledgeHostSourceEvents(body.eventIds as string[]) });
+  });
+
+  app.post(
+    "/v1/host/projects/import",
+    { bodyLimit: 64 * 1024 * 1024 },
+    async (request, reply) => {
+      await host.internal.authorize(request, "projects.import");
+      const workspaceId = requestHeader(request, "x-deviludo-workspace-id");
+      const actorId = requestHeader(request, "x-deviludo-actor-id");
+      const workspaceName = decodedRequestHeader(request, "x-deviludo-workspace-name", "Workspace");
+      const projectName = decodedRequestHeader(request, "x-deviludo-project-name", "GitHub project");
+      if (!UUID.test(workspaceId) || !UUID.test(actorId) || !Buffer.isBuffer(request.body)) {
+        throw httpError(400, "INVALID_HOST_IMPORT", "Host project import request is invalid");
+      }
+      const project = await processHostedProjectImport({
+        request,
+        principal: Object.freeze({
+          actorId,
+          actorLabel: "Host actor",
+          workspace: Object.freeze({ id: workspaceId, name: workspaceName, createdAt: "" }),
+          capabilities: Object.freeze(["project.read", "project.write"] as const),
+        }),
+        repository,
+        agentSecrets,
+        projectSources,
+        source: inspectProjectZip({
+          bytes: request.body as Buffer,
+          sourceKind: "GIT",
+          displayName: projectName,
+        }),
+      });
+      return reply.code(project.created ? 201 : 200).send({ project: project.project });
+    },
+  );
+
+  app.get<{ Params: { workspaceId: string; projectId: string } }>(
+    "/v1/host/workspaces/:workspaceId/projects/:projectId",
+    async (request, reply) => {
+      await host.internal.authorize(request, "projects.read");
+      if (!UUID.test(request.params.workspaceId) || !UUID.test(request.params.projectId)) {
+        return reply.code(404).send({ code: "PROJECT_NOT_FOUND" });
+      }
+      const project = await repository.readProject(request.params.workspaceId, request.params.projectId);
+      return project
+        ? reply.header("cache-control", "no-store").send({ project })
+        : reply.code(404).send({ code: "PROJECT_NOT_FOUND" });
+    },
+  );
+
+  app.delete<{ Params: { workspaceId: string; projectId: string } }>(
+    "/v1/host/workspaces/:workspaceId/projects/:projectId",
+    async (request, reply) => {
+      await host.internal.authorize(request, "projects.delete");
+      if (!UUID.test(request.params.workspaceId) || !UUID.test(request.params.projectId)) {
+        return reply.code(404).send({ code: "PROJECT_NOT_FOUND" });
+      }
+      const deleted = await repository.deleteProject(
+        request.params.workspaceId,
+        request.params.projectId,
+        () => Promise.all([
+          objectStore.deleteProjectObjects(request.params.workspaceId, request.params.projectId),
+          projectSources.deleteProject(request.params.workspaceId, request.params.projectId),
+        ]).then(() => undefined),
+      );
+      return deleted ? reply.code(204).send() : reply.code(404).send({ code: "PROJECT_NOT_FOUND" });
+    },
+  );
+
+  app.get<{ Params: { workspaceId: string; projectId: string; revision: string } }>(
+    "/v1/host/workspaces/:workspaceId/projects/:projectId/source/:revision/archive",
+    async (request, reply) => {
+      await host.internal.authorize(request, "source.read");
+      const revision = Number(request.params.revision);
+      if (!UUID.test(request.params.workspaceId) || !UUID.test(request.params.projectId)
+        || !Number.isSafeInteger(revision) || revision < 1) {
+        return reply.code(404).send({ code: "SOURCE_REVISION_NOT_FOUND" });
+      }
+      const source = await repository.readSourceRevision({
+        workspaceId: request.params.workspaceId,
+        projectId: request.params.projectId,
+        revision,
+      });
+      if (!source) return reply.code(404).send({ code: "SOURCE_REVISION_NOT_FOUND" });
+      const archive = await projectSources.archive(source.relativePath);
+      if (archive.digest !== source.digest || archive.fileCount !== source.fileCount
+        || archive.totalBytes !== source.totalBytes) {
+        throw httpError(409, "SOURCE_REVISION_CORRUPTED", "Source revision digest mismatch");
+      }
+      return reply
+        .header("content-type", "application/gzip")
+        .header("content-disposition", `attachment; filename=source-r${revision}.tar.gz`)
+        .header("x-deviludo-source-digest", source.digest)
+        .send(archive.bytes);
+    },
+  );
+
   app.get("/v1/runtime/server-pools", async (request, reply) => {
-    requireLocalOperator();
     const [pools, nodes] = await Promise.all([repository.readServerPools(), repository.readServerNodes()]);
     return reply.send({ pools, nodes });
   });
 
   app.get("/v1/runtime/server-nodes", async (request, reply) => {
-    requireLocalOperator();
     return reply.send({ nodes: await repository.readServerNodes() });
   });
 
   app.get("/v1/instance", async (request, reply) => {
     const access = productAccess(request, config);
     return reply.header("cache-control", "no-store").send({ instance: {
-      mode: "SELF_HOSTED",
+      mode: host.mode === "managed" ? "MANAGED" : "SELF_HOSTED",
       workspace: access.workspace,
+      capabilities: access.capabilities,
     } });
   });
 
@@ -1239,7 +1363,6 @@ export async function runApi(
   });
 
   app.post("/v1/runtime/server-nodes", async (request, reply) => {
-    requireLocalOperator();
     const body = objectBody(request.body);
     if (!isServerPoolKind(body.poolKind)
       || !["linux", "windows", "macos"].includes(String(body.operatingSystem))
@@ -1258,7 +1381,7 @@ export async function runApi(
   });
 
   app.post("/v1/runtime/e2e-enrollment-tokens", async (request, reply) => {
-    const principal = requireLocalOperator();
+    const principal = productAccess(request, config);
     const body = objectBody(request.body);
     if (!isServerPoolKind(body.poolKind) || !body.poolKind.startsWith("E2E_")) {
       return reply.code(400).send({ code: "INVALID_E2E_POOL" });
@@ -1374,7 +1497,6 @@ export async function runApi(
   app.post<{ Params: { nodeId: string; action: string } }>(
     "/v1/runtime/server-nodes/:nodeId/:action",
     async (request, reply) => {
-      requireLocalOperator();
       const states: Readonly<Record<string, ServerNodeState>> = Object.freeze({
         activate: "ACTIVE",
         drain: "DRAINING",
@@ -1883,7 +2005,7 @@ function storeConversationImages(
 
 async function processConversationMessage(input: Readonly<{
   request: FastifyRequest;
-  principal: LocalAccessContext;
+  principal: CorePrincipal;
   repository: CoreRepository;
   objectStore: CoreObjectStore;
   agentSecrets: AgentSecretStore;
@@ -1981,7 +2103,9 @@ async function processConversationMessage(input: Readonly<{
       allowDraftMutation: intentDecision.intent === "CHANGE_REQUEST" && intentDecision.actionable,
       responseLanguage: command.responseLanguage,
       responderRoles: Object.freeze(["DESIGN"]),
+      changePlanning: intentDecision.intent === "CHANGE_REQUEST",
     }, repository, agentSecrets, input.stream ? { signal: input.signal, callbacks: input.stream } : undefined);
+    intentDecision = reconcileConversationIntentReadiness(intentDecision, agentReplies);
     input.onStage?.("SAVING");
     const targetWorkspace = workspace ?? Object.freeze({ id: randomUUID(), name, createdAt: "" });
     const projectId = deterministicProjectId(principal.actorId, idempotencyKey);
@@ -2179,7 +2303,9 @@ async function processConversationMessage(input: Readonly<{
     allowDraftMutation: intentDecision.intent === "CHANGE_REQUEST" && intentDecision.actionable,
     responseLanguage: command.responseLanguage,
     responderRoles: intentDecision.responderRoles,
+    changePlanning: intentDecision.intent === "CHANGE_REQUEST",
   }, repository, agentSecrets, input.stream ? { signal: input.signal, callbacks: input.stream } : undefined);
+  intentDecision = reconcileConversationIntentReadiness(intentDecision, agentReplies);
   input.onStage?.("SAVING");
   const conversation = await repository.appendConversationTurn({
     workspaceId: workspace.id,
@@ -2441,15 +2567,19 @@ const MAX_ASSET_BYTES = 8 * 1024 * 1024;
  * that before `MAX_ASSET_BYTES` can be enforced on the decoded buffer.
  */
 const MAX_ASSET_REQUEST_BYTES = Math.ceil(MAX_ASSET_BYTES * 4 / 3) + 4 * 1024;
-function productAccess(request: FastifyRequest, config: CoreConfig): LocalAccessContext {
+const authenticatedRequests = new WeakMap<FastifyRequest, CorePrincipal>();
+
+function productAccess(request: FastifyRequest, config: CoreConfig): CorePrincipal {
   authorizeWeb(request, config);
-  return localAccessContext();
+  const principal = authenticatedRequests.get(request);
+  if (!principal) throw unauthorized("Authentication context is unavailable");
+  return principal;
 }
 
 async function selectedWorkspaceFromRequest(
   _request: FastifyRequest,
   _repository: CoreRepository,
-  context: LocalAccessContext,
+  context: CorePrincipal,
 ) {
   return context.workspace;
 }
@@ -2457,13 +2587,21 @@ async function selectedWorkspaceFromRequest(
 async function requireSelectedWorkspace(
   request: FastifyRequest,
   repository: CoreRepository,
-  context: LocalAccessContext,
+  context: CorePrincipal,
 ) {
   return selectedWorkspaceFromRequest(request, repository, context);
 }
 
-function requireLocalOperator(): LocalAccessContext {
-  return localAccessContext();
+function capabilityForRequest(path: string, method: string): CoreCapability {
+  if (path.startsWith("/v1/runtime/")) return "instance.runtime.manage";
+  if (path.startsWith("/v1/settings/agent") || path.startsWith("/v1/settings/telemetry")) {
+    return "instance.agent.manage";
+  }
+  if (path.startsWith("/v1/settings/steam")) return "steam.manage";
+  if (/^\/v1\/projects\/[^/]+\/artifacts\/[^/]+\/download$/.test(path)) return "artifact.download";
+  if (method === "DELETE") return "project.delete";
+  if (["GET", "HEAD", "OPTIONS"].includes(method)) return "project.read";
+  return "project.write";
 }
 
 function requestIdempotencyKey(request: FastifyRequest, prefix: string): string {
@@ -2474,6 +2612,22 @@ function requestIdempotencyKey(request: FastifyRequest, prefix: string): string 
     throw httpError(400, "INVALID_IDEMPOTENCY_KEY", "Idempotency-Key 格式无效");
   }
   return value;
+}
+
+function requestHeader(request: FastifyRequest, name: string): string {
+  const value = request.headers[name];
+  return typeof value === "string" ? value.trim() : "";
+}
+
+function decodedRequestHeader(request: FastifyRequest, name: string, fallback: string): string {
+  const value = requestHeader(request, name);
+  if (!value) return fallback;
+  try {
+    const decoded = decodeURIComponent(value).trim();
+    return decoded.length >= 1 && decoded.length <= 200 ? decoded : fallback;
+  } catch {
+    throw httpError(400, "INVALID_HOST_HEADER", `Header ${name} is invalid`);
+  }
 }
 
 async function agentProjectName(
@@ -2585,7 +2739,7 @@ function projectSourceDigest(files: readonly SourceFile[]): string {
 
 async function queueBoundProjectImport(input: Readonly<{
   request: FastifyRequest;
-  principal: LocalAccessContext;
+  principal: CorePrincipal;
   repository: CoreRepository;
   name: string;
   responseLanguage: ResponseLanguage;
@@ -2651,6 +2805,103 @@ async function queueBoundProjectImport(input: Readonly<{
     statusCode: 202,
     payload: Object.freeze({ workspace, project, conversation: null }),
   });
+}
+
+async function processHostedProjectImport(input: Readonly<{
+  request: FastifyRequest;
+  principal: CorePrincipal;
+  repository: CoreRepository;
+  agentSecrets: AgentSecretStore;
+  projectSources: ProjectSourceStore;
+  source: ImportedSourceSnapshot;
+}>): Promise<Readonly<{ created: boolean; project: ProductProjectDetail }>> {
+  const idempotencyKey = requestIdempotencyKey(input.request, "host-project-import");
+  const prior = await input.repository.readProjectCreationReceipt(input.principal.workspace.id, idempotencyKey);
+  if (prior) {
+    if (prior.operationKind !== "PROJECT") throw httpError(409, "IDEMPOTENCY_KEY_REUSED", "Idempotency key was reused");
+    const project = await input.repository.readProject(prior.workspaceId, prior.projectId);
+    if (!project) throw new Error("Hosted project import receipt is incomplete");
+    return Object.freeze({ created: false, project });
+  }
+  const settings = await input.repository.readAgentSettings();
+  if (!settings) throw httpError(424, "AGENT_CONFIG_REQUIRED", "The platform Agent runtime is not configured");
+  const apiKey = await input.agentSecrets.readApiKey(settings.credentialSecretRef);
+  if (!apiKey) throw httpError(424, "AGENT_CONFIG_REQUIRED", "The platform Agent credential is unavailable");
+  const responseLanguage = parseResponseLanguage(requestHeader(input.request, "x-deviludo-response-language"));
+  let analysis;
+  try {
+    analysis = await analyzeImportedProject({ source: input.source, settings, apiKey, responseLanguage });
+  } catch (error) {
+    throw httpError(424, "AGENT_IMPORT_FAILED", error instanceof Error ? error.message : "Project analysis failed");
+  }
+
+  const projectId = deterministicProjectId(input.principal.actorId, idempotencyKey);
+  const workflowId = randomUUID();
+  const stored = await input.projectSources.publishFiles({
+    workspaceId: input.principal.workspace.id,
+    projectId,
+    revision: 1,
+    files: input.source.files,
+  });
+  try {
+    await input.repository.createPendingImportedProject({
+      actorId: input.principal.actorId,
+      workspaceId: input.principal.workspace.id,
+      workspaceName: input.principal.workspace.name,
+      projectId,
+      workflowId,
+      idempotencyKey,
+      name: analysis.name,
+      responseLanguage,
+      source: {
+        kind: "GIT",
+        repositoryUrl: input.source.repositoryUrl,
+        localDirectoryBindingId: projectId,
+        gitBranch: input.source.gitBranch,
+        displayName: input.source.displayName,
+      },
+      ...defaultWorkflowConfiguration(),
+    });
+    const completed = await input.repository.completeProjectImportAnalysis({
+      workspaceId: input.principal.workspace.id,
+      projectId,
+      workflowId,
+      actorId: input.principal.actorId,
+      leaseToken: "hosted",
+      hosted: true,
+      concept: analysis.concept,
+      specification: analysis.specification,
+      document: analysis.document,
+      responseLanguage,
+      assistantContent: analysis.assistantContent,
+      assistantMetadata: {
+        agentRuntime: analysis.runtime,
+        model: analysis.model,
+        settingsRevision: analysis.settingsRevision,
+      },
+      discovery: analysis.discovery,
+      source: {
+        kind: "GIT",
+        repositoryUrl: input.source.repositoryUrl,
+        localDirectoryBindingId: projectId,
+        gitBranch: input.source.gitBranch,
+        displayName: input.source.displayName,
+        fileCount: input.source.fileCount,
+        totalBytes: input.source.totalBytes,
+        revision: stored.revision,
+        relativePath: stored.relativePath,
+        sha256: stored.digest,
+      },
+    });
+    if (!completed) throw new Error("Hosted project import could not be completed");
+    const project = await input.repository.readProject(input.principal.workspace.id, projectId);
+    if (!project) throw new Error("Hosted project import could not be read");
+    return Object.freeze({ created: true, project });
+  } catch (error) {
+    await input.repository.deleteProject(input.principal.workspace.id, projectId, async () => undefined).catch(() => undefined);
+    await input.projectSources.deleteProject(input.principal.workspace.id, projectId).catch(() => undefined);
+    throw error;
+  }
 }
 
 async function runProjectImportAnalysisWorker(input: Readonly<{
@@ -2791,6 +3042,7 @@ async function conversationAgentReplies(
     allowDraftMutation: boolean;
     responseLanguage: ResponseLanguage;
     responderRoles?: readonly ProjectAgentRole[];
+    changePlanning?: boolean;
   }>,
   repository: CoreRepository,
   agentSecrets: AgentSecretStore,

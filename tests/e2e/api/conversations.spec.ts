@@ -378,6 +378,52 @@ test("an explicit source fix routes only to Development and starts the workflow 
   expect((await stack.readProject(project.id)).jobs.filter(job => job.kind === "AGENT_GENERATION")).toHaveLength(1);
 });
 
+test("Development readiness turns an initially uncertain change into a confirmable rerun", async ({ stack }) => {
+  await stack.configureAgent();
+  const project = await stack.createProject({
+    name: "开发确认闭环",
+    concept: "验证开发 Agent 解决意图不确定性后不会留下没有按钮的死路。",
+  });
+  await stack.executeSql(`
+    UPDATE deviludo.workflow_instances
+       SET state = 'RELEASE_DECISION_PENDING', updated_at = clock_timestamp()
+     WHERE id = '${project.workflowId}'::uuid;
+  `);
+  const response = await stack.web("/api/conversations/messages", {
+    method: "POST",
+    data: {
+      projectId: project.id,
+      content: "待专业 Agent 判断是否可实施：优化局内 UI，并修复真实输入无法操作的问题。",
+    },
+  });
+  expect(response.status()).toBe(201);
+  const body = await response.json() as {
+    conversation: Conversation;
+    intentDecision: {
+      intent: string;
+      actionable: boolean;
+      explicitExecution: boolean;
+      responderRoles: string[];
+      summary: string;
+    };
+    changeRequest: { state: string };
+    workflowAction: string;
+  };
+  expect(body.intentDecision).toEqual({
+    intent: "CHANGE_REQUEST",
+    actionable: true,
+    explicitExecution: false,
+    responderRoles: ["DEVELOPMENT"],
+    summary: "Update the implementation according to the player's request.",
+  });
+  expect(body.conversation.messages.at(-1)?.metadata).toMatchObject({
+    agentRole: "DEVELOPMENT",
+    readyForDevelopment: true,
+  });
+  expect(body.changeRequest.state).toBe("PENDING");
+  expect(body.workflowAction).toBe("AWAITING_CONFIRMATION");
+});
+
 test("messages during Agent generation are intent-routed and confirmed changes safely rerun it", async ({ stack }) => {
   await stack.configureAgent();
   const project = await stack.createProject({

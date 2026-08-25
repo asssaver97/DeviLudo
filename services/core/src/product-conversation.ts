@@ -84,6 +84,7 @@ type ConversationReplyInput = Readonly<{
   agentRole?: ProjectAgentRole;
   responseLanguage?: ResponseLanguage;
   responderRoles?: readonly ProjectAgentRole[];
+  changePlanning?: boolean;
 }>;
 
 export async function generateProductConversationReply(input: ConversationReplyInput): Promise<ProductConversationAgentReply> {
@@ -96,7 +97,13 @@ export async function generateProductConversationReply(input: ConversationReplyI
     return reply(input, model, parsed, input.allowDraftMutation);
   }
 
-  const system = systemPrompt(input.project, input.allowDraftMutation, input.agentRole ?? "DESIGN", parseResponseLanguage(input.responseLanguage));
+  const system = systemPrompt(
+    input.project,
+    input.allowDraftMutation,
+    input.agentRole ?? "DESIGN",
+    parseResponseLanguage(input.responseLanguage),
+    input.changePlanning === true,
+  );
   const history = compactHistory(input.history);
   const fetchImpl = input.fetchImpl ?? fetch;
   const raw = input.settings.agentRuntime === "CLAUDE_CODE"
@@ -120,7 +127,13 @@ export async function streamProductConversationReply(
     return reply(input, model, parsed, input.allowDraftMutation);
   }
 
-  const system = systemPrompt(input.project, input.allowDraftMutation, input.agentRole ?? "DESIGN", parseResponseLanguage(input.responseLanguage));
+  const system = systemPrompt(
+    input.project,
+    input.allowDraftMutation,
+    input.agentRole ?? "DESIGN",
+    parseResponseLanguage(input.responseLanguage),
+    input.changePlanning === true,
+  );
   const history = compactHistory(input.history);
   const fetchImpl = input.fetchImpl ?? fetch;
   let emitted = "";
@@ -202,6 +215,7 @@ function systemPrompt(
   allowDraftMutation: boolean,
   agentRole: ProjectAgentRole,
   responseLanguage: ResponseLanguage,
+  changePlanning: boolean,
 ): string {
   const context = JSON.stringify({
     project: {
@@ -234,6 +248,9 @@ function systemPrompt(
     ...roleInstructions,
     ...(languageInstruction ? [languageInstruction] : []),
     "Give concrete, actionable guidance and ask one to three critical follow-up questions only when necessary.",
+    changePlanning
+      ? "This turn is an implementation change request. Treat diagnosis of a reported user-visible failure as implementation work. If a missing product choice still prevents a safe plan, set readyForDevelopment false and return 2 to 5 concise reply options; never leave the player with neither options nor an executable proposal."
+      : "This turn is not planning an implementation change; do not invent confirmation choices.",
     "Use conversation history, the project document, the specification, and workflow state. Do not repeat questions whose answers are already known.",
     "When discovery exists, it is the structured source analysis from project import. Resolve each question before setting readyForDevelopment to true, and never ignore startupIssues, remainingWork, or recommendedPlan.",
     "When analysisStatus is NEEDS_INPUT, state which analysis questions this turn resolved and which remain. Every Agent must keep readyForDevelopment false while any blocking question remains.",
@@ -702,7 +719,7 @@ function messagesEndpoint(baseUrl: string): string {
 }
 
 function reply(
-  input: Pick<ConversationReplyInput, "settings" | "project">,
+  input: Pick<ConversationReplyInput, "settings" | "project" | "responseLanguage" | "changePlanning">,
   model: string,
   parsed: ParsedAgentReply,
   allowDraftMutation: boolean,
@@ -718,9 +735,12 @@ function reply(
   if (allowDraftMutation && parsed.applyToDraft && !documentChanged) {
     throw new Error("设计 Agent 未返回有效的项目说明增量，本轮需求未保存，请重试");
   }
+  const options = input.changePlanning && !parsed.readyForDevelopment && parsed.options.length === 0
+    ? clarificationFallbackOptions(parseResponseLanguage(input.responseLanguage))
+    : parsed.options;
   return Object.freeze({
     content: normalizeReply(parsed.content),
-    options: parsed.options,
+    options,
     applyToDraft: allowDraftMutation && documentChanged,
     readyForDevelopment: parsed.readyForDevelopment,
     projectDocument,
@@ -730,6 +750,12 @@ function reply(
     settingsRevision: input.settings.revision,
     e2eGoalDelta: parsed.e2eGoalDelta,
   });
+}
+
+function clarificationFallbackOptions(responseLanguage: ResponseLanguage): readonly string[] {
+  return responseLanguage === "zh"
+    ? Object.freeze(["仅实施已经明确的修改", "先检查现有实现并用真实操作复现问题"])
+    : Object.freeze(["Implement only the changes that are already clear", "Inspect the current build and reproduce the issue with real input"]);
 }
 
 function changedDocumentFields(

@@ -1,6 +1,10 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { classifyConversationIntent, parseConversationIntent } from "../services/core/src/conversation-intent";
+import {
+  classifyConversationIntent,
+  parseConversationIntent,
+  reconcileConversationIntentReadiness,
+} from "../services/core/src/conversation-intent";
 import { e2eGoalsDigest, mergeE2eGoals } from "../services/core/src/e2e-goals";
 
 test("Intent Agent validates structure and safely normalizes inconsistent action flags", () => {
@@ -48,6 +52,75 @@ test("Intent Agent validates structure and safely normalizes inconsistent action
     responderRoles: ["DESIGN", "DEVELOPMENT"],
     summary: "Do not fan one conversation turn out to multiple specialists.",
   })), /invalid decision/);
+});
+
+test("specialist readiness converts an uncertain change into confirmation and blocks an unsafe direct run", () => {
+  const uncertain = parseConversationIntent(JSON.stringify({
+    intent: "CHANGE_REQUEST",
+    explicitExecution: false,
+    actionable: false,
+    responderRoles: ["DEVELOPMENT"],
+    summary: "Fix the reported input failure.",
+  }));
+  assert.deepEqual(reconcileConversationIntentReadiness(uncertain, [{ readyForDevelopment: true }]), {
+    ...uncertain,
+    actionable: true,
+    explicitExecution: false,
+  });
+
+  const direct = parseConversationIntent(JSON.stringify({
+    intent: "CHANGE_REQUEST",
+    explicitExecution: true,
+    actionable: true,
+    responderRoles: ["DEVELOPMENT"],
+    summary: "Fix the reported input failure now.",
+  }));
+  assert.deepEqual(reconcileConversationIntentReadiness(direct, [{ readyForDevelopment: false }]), {
+    ...direct,
+    actionable: false,
+    explicitExecution: false,
+  });
+});
+
+test("Intent Agent treats observable product failures as diagnosable implementation work", async () => {
+  let prompt = "";
+  await classifyConversationIntent({
+    content: "优化局内 UI，而且游戏无法操作，修复操作问题。",
+    history: Object.freeze([]),
+    project: Object.freeze({
+      name: "操作修复",
+      concept: "验证可执行问题不会进入死路",
+      workflowState: "RELEASE_DECISION_PENDING",
+      specification: Object.freeze({}),
+      document: Object.freeze({ introduction: "操作修复", gameplay: "完成核心循环", categories: [], features: [] }),
+      analysisStatus: "READY" as const,
+      discovery: null,
+    }),
+    pendingChange: null,
+    settings: Object.freeze({
+      agentRuntime: "CLAUDE_CODE" as const,
+      baseUrl: "https://provider.example/v1",
+      primaryModel: "claude-primary",
+      modelOverrides: Object.freeze({ design: null, development: null, test: null, image: null }),
+      revision: 1,
+    }),
+    apiKey: "sk-test-secret",
+    responseLanguage: "zh",
+    fetchImpl: async (_url, init) => {
+      const body = JSON.parse(String(init?.body)) as { messages: readonly { content: string }[] };
+      prompt = body.messages[0]?.content ?? "";
+      return new Response(JSON.stringify({ content: [{ type: "text", text: JSON.stringify({
+        intent: "CHANGE_REQUEST",
+        explicitExecution: true,
+        actionable: true,
+        responderRoles: ["DEVELOPMENT"],
+        summary: "优化局内 UI 并诊断修复真实输入操作问题。",
+      }) }] }), { status: 200, headers: { "content-type": "application/json" } });
+    },
+  });
+  assert.match(prompt, /reported product malfunction is actionable/);
+  assert.match(prompt, /Diagnosing the source-level cause and reproducing the failure are part of implementation/);
+  assert.match(prompt, /compound requests/);
 });
 
 test("Intent Agent inspects conversation images before routing the message", async () => {

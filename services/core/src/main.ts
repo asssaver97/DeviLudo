@@ -1,30 +1,8 @@
-import { loadCoreConfig } from "./config";
-import { createDatabase } from "./database";
-import { runApi } from "./api";
-import { CoreRepository } from "./repository";
-import { runSandbox } from "./sandbox";
-import { runScheduler } from "./scheduler";
+import { createLocalHostServices } from "./access";
+import { startCore } from "./start";
 
 async function main(): Promise<void> {
-  const config = loadCoreConfig();
-  const database = createDatabase(config);
-  const repository = new CoreRepository(database);
-  const controller = new AbortController();
-  for (const event of ["SIGINT", "SIGTERM"] as const) {
-    process.once(event, () => controller.abort());
-  }
-  if (config.role === "api") return runApi(repository, database, config, controller.signal);
-  try {
-    if (config.role === "scheduler") await runScheduler(repository, config, controller.signal);
-    else {
-      const baseWorkerId = process.env.DEVILUDO_SANDBOX_ID ?? `sandbox-${process.pid}`;
-      await Promise.all(Array.from({ length: config.sandboxConcurrency }, (_, index) => (
-        runSandbox(repository, config, controller.signal, undefined, `${baseWorkerId}-${index + 1}`)
-      )));
-    }
-  } finally {
-    await database.close();
-  }
+  await startCore(createLocalHostServices(process.env.DEVILUDO_HOST_SERVICE_TOKEN ?? ""));
 }
 
 main().catch(error => {

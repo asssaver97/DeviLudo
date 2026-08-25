@@ -22,6 +22,7 @@ import type {
   ProductWorkflowIterationSummary,
 } from "@/lib/product/contracts";
 import { readAgentProgressStream } from "@/lib/product/agent-progress-stream";
+import { useLocalInstance } from "./ProductShell";
 import {
   appendStreamingConversationReply,
   chronologicalMessages,
@@ -73,6 +74,7 @@ type LocalGitState = Readonly<{
 
 export function ProjectStudio({ projectId }: { projectId: string }) {
   const { errorText, locale, text } = useLanguage();
+  const managed = useLocalInstance().mode === "MANAGED";
   const router = useRouter();
   const initialProject = cachedValue<ProductProjectDetail>(clientCacheKeys.project(projectId));
   const initialConversations = cachedValue<readonly ProductConversationSummary[]>(clientCacheKeys.conversations(projectId));
@@ -512,7 +514,7 @@ export function ProjectStudio({ projectId }: { projectId: string }) {
       setSelectedConversationId(failedConversation.id);
       setConversationInput(content);
       setError(failureMessage);
-      if (reason instanceof ConversationStreamError && reason.code === "AGENT_CONFIG_REQUIRED") {
+      if (!managed && reason instanceof ConversationStreamError && reason.code === "AGENT_CONFIG_REQUIRED") {
         router.push("/settings?required=conversation");
         return;
       }
@@ -570,7 +572,7 @@ export function ProjectStudio({ projectId }: { projectId: string }) {
         body: JSON.stringify({ ...(body ?? {}), responseLanguage: locale }),
       });
       const payload = await response.json().catch(() => ({})) as { code?: string; message?: string };
-      if (payload.code === "AGENT_CONFIG_REQUIRED") {
+      if (!managed && payload.code === "AGENT_CONFIG_REQUIRED") {
         router.push("/settings?required=agent-retry");
         return;
       }
@@ -658,7 +660,7 @@ export function ProjectStudio({ projectId }: { projectId: string }) {
     // Self-hosted artifacts already live in the local object store. Hand all
     // of them to the host bridge so reports and snapshots open in their default
     // macOS application instead of taking an unnecessary browser download path.
-    const opensOnHost = true;
+    const opensOnHost = !managed;
     setOpeningArtifactId(artifact.id);
     setError(null);
     try {

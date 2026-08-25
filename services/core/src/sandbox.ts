@@ -12,6 +12,7 @@ import type { JobProtocolV4, ObjectReference } from "./contracts";
 import type { CoreRepository } from "./repository";
 import { CoreObjectStore } from "./object-store";
 import { ProjectSourceStore } from "./project-sources";
+import type { CoreHostServices } from "./access";
 
 export type SandboxMode = "MICROVM" | "RESTRICTED_CONTAINER";
 export type SandboxPlan = Readonly<{
@@ -107,13 +108,16 @@ export async function runSandbox(
   signal: AbortSignal,
   backend: SandboxBackend = new ProcessSandboxBackend(),
   requestedWorkerId?: string,
+  _hostServices?: CoreHostServices,
 ): Promise<void> {
+  const hostServices = _hostServices;
   const workerId = requestedWorkerId ?? process.env.DEVILUDO_SANDBOX_ID ?? `sandbox-${process.pid}`;
   const objectStore = new CoreObjectStore();
   const projectSources = new ProjectSourceStore(config.projectsRoot);
   let executorAvailable: boolean | null = null;
   while (!signal.aborted) {
     let job: JobProtocolV4 | null = null;
+    let admissionReservationId: string | null = null;
     try {
       if (backend.probe) {
         try {
@@ -150,6 +154,23 @@ export async function runSandbox(
       }, 2_000);
       let progressWrites = Promise.resolve();
       try {
+        if (hostServices) {
+          const actorId = typeof job.payload.requestedByActorId === "string"
+            ? job.payload.requestedByActorId
+            : "00000000-0000-4000-8000-000000000000";
+          const admission = await hostServices.admission.reserve({
+            principal: Object.freeze({
+              actorId,
+              actorLabel: "Workflow actor",
+              workspace: Object.freeze({ id: job.workspaceId, name: "Managed workspace", createdAt: "" }),
+              capabilities: Object.freeze([]),
+            }),
+            operation: admissionOperation(job.jobKind),
+            operationId: `${job.workflowId}:${job.jobId}`,
+            estimatedUnits: job.timeoutSeconds,
+          });
+          admissionReservationId = admission.reservationId;
+        }
         if (job.jobKind === "AGENT_GENERATION") {
           const discarded = await discardOrphanedAgentSource(repository, projectSources, job);
           if (discarded) {
@@ -194,6 +215,15 @@ export async function runSandbox(
           executorReceipt: receipt,
         });
         if (!completed) throw new Error("Sandbox completion was rejected by fencing");
+        if (hostServices && admissionReservationId) {
+          const startedAt = Date.parse(receipt.startedAt);
+          const finishedAt = Date.parse(receipt.finishedAt);
+          const actualUnits = Number.isFinite(startedAt) && Number.isFinite(finishedAt)
+            ? Math.max(1, Math.ceil((finishedAt - startedAt) / 1_000))
+            : job.timeoutSeconds;
+          await hostServices.admission.settle({ reservationId: admissionReservationId, actualUnits });
+          admissionReservationId = null;
+        }
         if (job.jobKind === "AGENT_GENERATION") {
           await projectSources.deleteCheckpoint(job.workspaceId, job.projectId, job.workflowId).catch(error => {
             console.error(JSON.stringify({
@@ -219,6 +249,10 @@ export async function runSandbox(
         message: error instanceof Error ? error.message : String(error),
       }));
       if (job) {
+        if (hostServices && admissionReservationId) {
+          await hostServices.admission.cancel({ reservationId: admissionReservationId }).catch(() => undefined);
+          admissionReservationId = null;
+        }
         const message = error instanceof Error ? error.message : String(error);
         if (job.jobKind === "AGENT_GENERATION") {
           await discardOrphanedAgentSource(repository, projectSources, job).catch(cleanupError => {
@@ -235,6 +269,14 @@ export async function runSandbox(
       }
     }
   }
+}
+
+function admissionOperation(jobKind:JobProtocolV4["jobKind"]):"AGENT"|"SANDBOX"|"E2E"|"BUILD"|"STEAM_PUBLISH"{
+  if(jobKind==="AGENT_GENERATION"||jobKind==="PROJECT_DOCUMENT_MAINTENANCE")return"AGENT";
+  if(jobKind==="ARTIFACT_BUILD"||jobKind==="ARTIFACT_SIGN")return"BUILD";
+  if(jobKind==="STEAM_PUBLISH")return"STEAM_PUBLISH";
+  if(jobKind==="E2E_TEST")return"E2E";
+  return"SANDBOX";
 }
 
 async function discardOrphanedAgentSource(

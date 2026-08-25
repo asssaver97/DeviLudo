@@ -1,4 +1,5 @@
 import { createAgentSecretStore } from "./agent-settings";
+import type { CoreHostServices } from "./access";
 import { runAssetGenerationBatch, type AssetGenerationDependencies } from "./asset-generation";
 import type { CoreConfig } from "./config";
 import { CoreObjectStore } from "./object-store";
@@ -8,7 +9,9 @@ export async function runScheduler(
   repository: CoreRepository,
   config: CoreConfig,
   signal: AbortSignal,
+  _hostServices?: CoreHostServices,
 ): Promise<void> {
+  void _hostServices;
   // Built once and shared across ticks, but only if this deployment configured an
   // object store. `ObjectStore` requires a bucket, and asset generation is the
   // scheduler's only use for one: a deployment without it should keep running the

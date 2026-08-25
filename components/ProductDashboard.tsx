@@ -7,6 +7,9 @@ import { cachedValue, clientCacheKeys, loadCached, storeCached } from "@/lib/pro
 import type { ProductProjectSummary, WorkspaceSummary } from "@/lib/product/contracts";
 import { ArrowIcon, FileIcon, PlusIcon, SparkIcon } from "./console/Icons";
 import { localeTag, useLanguage } from "./i18n/LanguageProvider";
+import { useLocalInstance } from "./ProductShell";
+
+type ManagedRepository = Readonly<{ id: string; fullName: string; private: boolean }>;
 
 export function ProductDashboard({
   creationOnly = false,
@@ -16,6 +19,8 @@ export function ProductDashboard({
   initialMode?: "IDEA" | "IMPORT";
 }) {
   const { errorText, locale, text } = useLanguage();
+  const instance = useLocalInstance();
+  const managed = instance.mode === "MANAGED";
   const router = useRouter();
   const conceptRef = useRef<HTMLTextAreaElement>(null);
   const operationKey = useRef<string | null>(null);
@@ -23,8 +28,9 @@ export function ProductDashboard({
   const [projects, setProjects] = useState<readonly ProductProjectSummary[]>(initialProjects ?? []);
   const [name, setName] = useState("");
   const [concept, setConcept] = useState("");
-  const [importSource, setImportSource] = useState<"LOCAL" | "GITHUB">("LOCAL");
+  const [importSource, setImportSource] = useState<"LOCAL" | "GITHUB">(managed ? "GITHUB" : "LOCAL");
   const [githubRepositoryUrl, setGitHubRepositoryUrl] = useState("");
+  const [managedRepositories, setManagedRepositories] = useState<readonly ManagedRepository[]>([]);
   const [loading, setLoading] = useState(!initialProjects);
   const [creating, setCreating] = useState(false);
   const [retryingProjectId, setRetryingProjectId] = useState<string | null>(null);
@@ -35,7 +41,7 @@ export function ProductDashboard({
     // Resolve the host bridge while the import page is rendering so a click can
     // invoke the native folder chooser immediately instead of paying a Web API
     // round trip first.
-    if (creationOnly && initialMode === "IMPORT") void preloadLocalProjectBridgeUrl();
+    if (!managed && creationOnly && initialMode === "IMPORT") void preloadLocalProjectBridgeUrl();
     void loadCached(clientCacheKeys.projects, 10_000, async () => {
       const response = await fetch("/api/projects");
       const payload = response.status === 409 ? { projects: [] } : await readJson(response, errorText);
@@ -49,7 +55,22 @@ export function ProductDashboard({
     });
     if (creationOnly && initialMode === "IDEA") setTimeout(() => conceptRef.current?.focus(), 0);
     return () => { active = false; };
-  }, [creationOnly, errorText, initialMode, text]);
+  }, [creationOnly, errorText, initialMode, managed, text]);
+
+  useEffect(() => {
+    if (!managed || !creationOnly || initialMode !== "IMPORT") return;
+    const controller = new AbortController();
+    void fetch("/api/host/repositories", { cache: "no-store", signal: controller.signal })
+      .then(response => readJson(response, errorText))
+      .then(payload => {
+        const repositories = (payload as { data?: readonly ManagedRepository[] }).data;
+        if (!Array.isArray(repositories)) throw new Error("HOST_REPOSITORIES_INVALID");
+        setManagedRepositories(repositories);
+        if (repositories[0]) setGitHubRepositoryUrl(current => current || repositories[0].id);
+      })
+      .catch(reason => { if (!controller.signal.aborted) setError(messageFor(reason, text)); });
+    return () => controller.abort();
+  }, [creationOnly, errorText, initialMode, managed, text]);
 
   const hasProjectAnalysisInProgress = projects.some(project =>
     project.analysisStatus === "PENDING" || project.analysisStatus === "ANALYZING",
@@ -92,7 +113,7 @@ export function ProductDashboard({
       cacheProjectSummary(payload.project);
       router.push(`/projects/${payload.project.id}`);
     } catch (reason) {
-      if (reason instanceof ApiError && (reason.code === "AGENT_CONFIG_REQUIRED" || reason.code === "AGENT_NAMING_FAILED")) {
+      if (!managed && reason instanceof ApiError && (reason.code === "AGENT_CONFIG_REQUIRED" || reason.code === "AGENT_NAMING_FAILED")) {
         router.push("/settings?required=project-name");
         return;
       }
@@ -131,7 +152,7 @@ export function ProductDashboard({
         setCreating(false);
         return;
       }
-      if (reason instanceof ApiError && reason.code === "AGENT_CONFIG_REQUIRED") {
+      if (!managed && reason instanceof ApiError && reason.code === "AGENT_CONFIG_REQUIRED") {
         router.push("/settings?required=project-import");
         return;
       }
@@ -147,6 +168,20 @@ export function ProductDashboard({
     setError(null);
     operationKey.current ??= `project-bind:${crypto.randomUUID()}`;
     try {
+      if (managed) {
+        const response = await fetch("/api/host/projects/import", {
+          method: "POST",
+          headers: { "content-type": "application/json", "idempotency-key": operationKey.current },
+          body: JSON.stringify({ repositoryId: repositoryUrl, responseLanguage: locale }),
+        });
+        const payload = await readJson(response, errorText) as { data?: { project?: ProductProjectSummary }; project?: ProductProjectSummary };
+        const project = payload.data?.project ?? payload.project;
+        if (!project) throw new ApiError("HOST_IMPORT_INVALID", text("平台返回了无效的项目", "The platform returned an invalid project"));
+        operationKey.current = null;
+        cacheProjectSummary(project);
+        router.push(`/projects/${project.id}`);
+        return;
+      }
       const bridgeUrl = await localProjectBridgeUrl(text);
       const cloneResponse = await fetch(`${bridgeUrl}/github/clone`, {
         method: "POST",
@@ -174,7 +209,7 @@ export function ProductDashboard({
         setCreating(false);
         return;
       }
-      if (reason instanceof ApiError && reason.code === "AGENT_CONFIG_REQUIRED") {
+      if (!managed && reason instanceof ApiError && reason.code === "AGENT_CONFIG_REQUIRED") {
         router.push("/settings?required=project-import");
         return;
       }
@@ -223,10 +258,10 @@ export function ProductDashboard({
             </div>
           ) : (
             <div className="repository-onboarding-form project-import-form">
-              <div aria-label={text("项目来源", "Project source")} className="import-source-switch" role="tablist">
+              {!managed ? <div aria-label={text("项目来源", "Project source")} className="import-source-switch" role="tablist">
                 <button aria-controls="local-project-import" aria-selected={importSource === "LOCAL"} className={importSource === "LOCAL" ? "is-active" : ""} onClick={() => { setImportSource("LOCAL"); setError(null); }} role="tab" type="button"><FileIcon /> {text("本地项目", "LOCAL PROJECT")}</button>
                 <button aria-controls="github-project-import" aria-selected={importSource === "GITHUB"} className={importSource === "GITHUB" ? "is-active" : ""} onClick={() => { setImportSource("GITHUB"); setError(null); }} role="tab" type="button">GITHUB</button>
-              </div>
+              </div> : null}
               {importSource === "LOCAL" ? (
                 <div id="local-project-import" role="tabpanel">
                   <p>{text("选择本地 Godot 项目目录后，DeviLudo 只记录目录关联，不上传、不复制项目。Agent 始终读取原目录的最新源码，并把成功修改直接写回原目录。", "Choose a local Godot project directory and DeviLudo only records the directory link—it does not upload or copy the project. The Agent always reads and writes the original directory.")}</p>
@@ -235,10 +270,16 @@ export function ProductDashboard({
                 </div>
               ) : (
                 <div className="local-github-import" id="github-project-import" role="tabpanel">
-                  <p>{text("输入 GitHub 仓库地址并选择本地保存位置。DeviLudo 使用本机 Git 凭证直接克隆到该位置，随后只关联这个工作目录；项目内容和凭证都不会经浏览器上传。", "Enter a GitHub repository URL and choose a local destination. DeviLudo clones there with the host's Git credentials, then only links that working directory; neither project contents nor credentials are uploaded through the browser.")}</p>
-                  <label>{text("GitHub 仓库地址", "GitHub repository URL")}<input aria-label={text("GitHub 仓库地址", "GitHub repository URL")} autoCapitalize="none" autoComplete="off" onChange={event => setGitHubRepositoryUrl(event.target.value)} placeholder="https://github.com/owner/repository.git" spellCheck={false} value={githubRepositoryUrl} /></label>
-                  <small>{text("支持 HTTPS 和 git@github.com SSH 地址，包括本地凭证可访问的私有仓库；关联后可在项目页新建分支。", "Supports HTTPS and git@github.com SSH URLs, including private repositories available to your local credentials; create branches from the project page after linking it.")}</small>
-                  <div className="idea-submit-row"><button className="button button-acid" disabled={creating || !githubRepositoryUrl.trim()} onClick={() => void cloneAndBindGitHubProject()} type="button">{creating ? text("正在选择位置并克隆…", "SELECTING & CLONING…") : text("选择保存位置、克隆并关联", "CHOOSE, CLONE & LINK")}</button></div>
+                  <p>{managed
+                    ? text("选择已授权的 GitHub 仓库。平台导入源码归档，凭证不会交给 Core 或浏览器。", "Choose an authorized GitHub repository. The platform imports a source archive without exposing credentials to Core or the browser.")
+                    : text("输入 GitHub 仓库地址并选择本地保存位置。DeviLudo 使用本机 Git 凭证直接克隆到该位置，随后只关联这个工作目录；项目内容和凭证都不会经浏览器上传。", "Enter a GitHub repository URL and choose a local destination. DeviLudo clones there with the host's Git credentials, then only links that working directory; neither project contents nor credentials are uploaded through the browser.")}</p>
+                  <label>{managed ? text("GitHub 仓库", "GitHub repository") : text("GitHub 仓库地址", "GitHub repository URL")}{managed
+                    ? <select aria-label={text("GitHub 仓库", "GitHub repository")} onChange={event => setGitHubRepositoryUrl(event.target.value)} value={githubRepositoryUrl}>{managedRepositories.map(repository => <option key={repository.id} value={repository.id}>{repository.fullName}{repository.private ? " · private" : ""}</option>)}</select>
+                    : <input aria-label={text("GitHub 仓库地址", "GitHub repository URL")} autoCapitalize="none" autoComplete="off" onChange={event => setGitHubRepositoryUrl(event.target.value)} placeholder="https://github.com/owner/repository.git" spellCheck={false} value={githubRepositoryUrl} />}</label>
+                  <small>{managed
+                    ? text("若列表为空，请先在账号页面连接或重新授权 GitHub。", "If the list is empty, connect or reauthorize GitHub from your account page.")
+                    : text("支持 HTTPS 和 git@github.com SSH 地址，包括本地凭证可访问的私有仓库；关联后可在项目页新建分支。", "Supports HTTPS and git@github.com SSH URLs, including private repositories available to your local credentials; create branches from the project page after linking it.")}</small>
+                  <div className="idea-submit-row"><button className="button button-acid" disabled={creating || !githubRepositoryUrl.trim()} onClick={() => void cloneAndBindGitHubProject()} type="button">{creating ? text("正在导入…", "IMPORTING…") : managed ? text("导入并分析", "IMPORT & ANALYZE") : text("选择保存位置、克隆并关联", "CHOOSE, CLONE & LINK")}</button></div>
                 </div>
               )}
             </div>

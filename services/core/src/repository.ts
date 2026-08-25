@@ -64,6 +64,39 @@ export class CoreRepository {
     await this.database.pool.query("SELECT 1");
   }
 
+  async listHostSourceEvents(limit = 100): Promise<readonly HostSourceEvent[]> {
+    if (!Number.isSafeInteger(limit) || limit < 1 || limit > 500) {
+      throw new Error("Source event page size is invalid");
+    }
+    const result = await this.database.pool.query<HostSourceEventRow>(
+      `SELECT event_id::text, workspace_id::text, project_id::text, workflow_id::text,
+              source_revision::text, content_digest, actor_id::text, created_at::text
+         FROM deviludo.pull_host_source_events($1::integer)`,
+      [limit],
+    );
+    return Object.freeze(result.rows.map(row => Object.freeze({
+      eventId: row.event_id,
+      workspaceId: row.workspace_id,
+      projectId: row.project_id,
+      workflowId: row.workflow_id,
+      sourceRevision: Number(row.source_revision),
+      digest: row.content_digest,
+      actorId: row.actor_id,
+      createdAt: row.created_at,
+    })));
+  }
+
+  async acknowledgeHostSourceEvents(eventIds: readonly string[]): Promise<number> {
+    if (eventIds.length < 1 || eventIds.length > 500 || eventIds.some(id => !UUID.test(id))) {
+      throw new Error("Source event acknowledgement is invalid");
+    }
+    const result = await this.database.pool.query<{ acknowledged: string }>(
+      "SELECT deviludo.acknowledge_host_source_events($1::uuid[])::text AS acknowledged",
+      [eventIds],
+    );
+    return Number(result.rows[0]?.acknowledged ?? 0);
+  }
+
   async readSourceRevision(input: Readonly<{
     workspaceId: string;
     projectId: string;
@@ -1109,6 +1142,7 @@ export class CoreRepository {
     workflowId: string;
     actorId: string;
     leaseToken: string;
+    hosted?: boolean;
     concept: string;
     specification: Readonly<Record<string, unknown>>;
     document: ProjectDocumentContent;
@@ -1140,7 +1174,7 @@ export class CoreRepository {
         [input.workflowId, input.projectId],
       );
       const row = workflow.rows[0];
-      if (!row || !analysisLeaseMatches(row.state_data, input.leaseToken)) return false;
+      if (!row || (!input.hosted && !analysisLeaseMatches(row.state_data, input.leaseToken))) return false;
 
       const currentDocument = await client.query<{ revision: string }>(
         "SELECT revision::text FROM deviludo.project_documents WHERE project_id = $1::uuid FOR UPDATE",
@@ -4209,6 +4243,28 @@ export type PendingProjectImportAnalysis = Readonly<{
   displayName: string;
   responseLanguage: ResponseLanguage;
 }>;
+
+export type HostSourceEvent = Readonly<{
+  eventId: string;
+  workspaceId: string;
+  projectId: string;
+  workflowId: string;
+  sourceRevision: number;
+  digest: string;
+  actorId: string;
+  createdAt: string;
+}>;
+
+type HostSourceEventRow = {
+  event_id: string;
+  workspace_id: string;
+  project_id: string;
+  workflow_id: string;
+  source_revision: string;
+  content_digest: string;
+  actor_id: string;
+  created_at: string;
+};
 
 type PendingProjectImportAnalysisRow = {
   workspaceId: string;
