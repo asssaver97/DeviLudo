@@ -64,6 +64,15 @@ export interface CoreHostServices {
     settle(input: Readonly<{ reservationId: string; actualUnits: number }>): Promise<void>;
     cancel(input: Readonly<{ reservationId: string }>): Promise<void>;
   }>;
+  readonly audit: Readonly<{
+    record(input: Readonly<{
+      principal: CorePrincipal;
+      action: string;
+      targetType: string;
+      targetId: string;
+      metadata: Readonly<Record<string, unknown>>;
+    }>): Promise<void>;
+  }>;
   readonly internal: Readonly<{
     authorize(request: FastifyRequest, scope: string): Promise<void>;
   }>;
@@ -94,6 +103,7 @@ export function createLocalHostServices(internalToken = ""): CoreHostServices {
       settle: async () => undefined,
       cancel: async () => undefined,
     }),
+    audit: Object.freeze({ record: async () => undefined }),
     internal: Object.freeze({
       authorize: async (request: FastifyRequest) => {
         if (!internalToken || !bearerMatches(request.headers.authorization, internalToken)) {

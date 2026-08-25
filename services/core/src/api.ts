@@ -388,13 +388,20 @@ export async function runApi(
       credentialVersion: credential.version,
       updatedBy: principal.actorLabel,
     });
+    await host.audit.record({
+      principal,
+      action: "agent_configuration.save",
+      targetType: "instance_agent_configuration",
+      targetId: "default",
+      metadata: { agentRuntime: saved.agentRuntime, baseUrl: saved.baseUrl },
+    });
     return reply.header("cache-control", "no-store").send({
       settings: publicAgentSettings(saved),
     });
   });
 
   app.post("/v1/settings/agent/test", async (request, reply) => {
-    productAccess(request, config);
+    const principal = productAccess(request, config);
     const settings = await repository.readAgentSettings();
     if (!settings) throw new Error("请先保存 Agent 配置");
     const credential = await agentSecrets.readApiKey(settings.credentialSecretRef);
@@ -405,6 +412,13 @@ export async function runApi(
       throw httpError(424, "AGENT_CONNECTION_FAILED",
         error instanceof Error ? error.message : "Agent 连接测试失败");
     }
+    await host.audit.record({
+      principal,
+      action: "agent_configuration.test",
+      targetType: "instance_agent_configuration",
+      targetId: "default",
+      metadata: { outcome: "SUCCEEDED" },
+    });
     return reply.header("cache-control", "no-store").send({ ok: true });
   });
 
@@ -1367,6 +1381,7 @@ export async function runApi(
   });
 
   app.post("/v1/runtime/server-nodes", async (request, reply) => {
+    const principal = productAccess(request, config);
     const body = objectBody(request.body);
     if (!isServerPoolKind(body.poolKind)
       || !["linux", "windows", "macos"].includes(String(body.operatingSystem))
@@ -1380,6 +1395,13 @@ export async function runApi(
       poolKind: body.poolKind,
       operatingSystem,
       capabilities: body.capabilities as string[],
+    });
+    await host.audit.record({
+      principal,
+      action: "runtime_node.create",
+      targetType: "runtime_node",
+      targetId: node.id,
+      metadata: { poolKind: node.poolKind, operatingSystem: node.operatingSystem },
     });
     return reply.code(201).send({ node });
   });
@@ -1395,6 +1417,13 @@ export async function runApi(
       tokenHash: digest(token),
       poolKind: body.poolKind as Extract<ServerPoolKind, `E2E_${string}`>,
       createdBy: principal.actorId,
+    });
+    await host.audit.record({
+      principal,
+      action: "runtime_enrollment_token.create",
+      targetType: "runtime_pool",
+      targetId: body.poolKind,
+      metadata: { expiresAt: created.expiresAt },
     });
     return reply.code(201).send({ enrollment: { ...created, token } });
   });
@@ -1501,6 +1530,7 @@ export async function runApi(
   app.post<{ Params: { nodeId: string; action: string } }>(
     "/v1/runtime/server-nodes/:nodeId/:action",
     async (request, reply) => {
+      const principal = productAccess(request, config);
       const states: Readonly<Record<string, ServerNodeState>> = Object.freeze({
         activate: "ACTIVE",
         drain: "DRAINING",
@@ -1509,6 +1539,13 @@ export async function runApi(
       const state = states[request.params.action];
       if (!state) return reply.code(404).send({ code: "UNKNOWN_NODE_ACTION" });
       const node = await repository.transitionServerNode(request.params.nodeId, state);
+      if (node) await host.audit.record({
+        principal,
+        action: `runtime_node.${request.params.action}`,
+        targetType: "runtime_node",
+        targetId: node.id,
+        metadata: { state: node.state, poolKind: node.poolKind },
+      });
       return node ? reply.send({ node }) : reply.code(404).send({ code: "SERVER_NODE_NOT_FOUND" });
     },
   );
