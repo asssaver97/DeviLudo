@@ -229,6 +229,7 @@ export async function runApi(
         }),
         repository,
         agentSecrets,
+        host,
         projectSources,
         source: inspectProjectZip({
           bytes: request.body as Buffer,
@@ -744,7 +745,9 @@ export async function runApi(
           message: "未完成素材缺少生成提示词，请上传对应图片或重新运行 Agent",
         });
       }
-      const settings = await repository.readAgentSettings();
+      const settings = host.mode==="managed"
+        ? (await agentConnection(host,principal,"image",repository,agentSecrets)).settings
+        : await repository.readAgentSettings();
       if (!settings || (settings.agentRuntime === "CLAUDE_CODE" && !settings.imageModel)) {
         return reply.code(424).send({
           code: "IMAGE_GENERATION_CONFIG_REQUIRED",
@@ -996,7 +999,7 @@ export async function runApi(
   app.post("/v1/conversations/messages", { bodyLimit: 18 * 1024 * 1024 }, async (request, reply) => {
     const principal = productAccess(request, config);
     const command = conversationMessageCommand(request.body);
-    const result = await processConversationMessage({ request, principal, repository, objectStore, agentSecrets, command });
+    const result = await processConversationMessage({ request, principal, repository, objectStore, agentSecrets, host, command });
     return reply.code(result.statusCode).send(result.payload);
   });
 
@@ -1022,6 +1025,7 @@ export async function runApi(
         repository,
         objectStore,
         agentSecrets,
+        host,
         command,
         signal: abortController.signal,
         onStage: phase => write({ type: "status", phase }),
@@ -1322,11 +1326,12 @@ export async function runApi(
         message: "流程正在运行中，请先取消当前交付再选择重跑节点",
       });
     }
-    if (stage === "AGENT_GENERATION" && !await repository.readAgentSettings()) {
-      return reply.code(424).send({
-        code: "AGENT_CONFIG_REQUIRED",
-        message: "请先完成全局 Agent 配置，再重新生成",
-      });
+    if (stage === "AGENT_GENERATION") {
+      if(host.mode==="managed")await agentConnection(host,principal,"development",repository,agentSecrets);
+      else if(!await repository.readAgentSettings())return reply.code(424).send({
+          code: "AGENT_CONFIG_REQUIRED",
+          message: "请先完成全局 Agent 配置，再重新生成",
+        });
     }
     const signalInput = {
       kind: "STAGE_RERUN_REQUESTED",
@@ -2009,12 +2014,13 @@ async function processConversationMessage(input: Readonly<{
   repository: CoreRepository;
   objectStore: CoreObjectStore;
   agentSecrets: AgentSecretStore;
+  host: CoreHostServices;
   command: ConversationMessageCommand;
   signal?: AbortSignal;
   onStage?: (phase: "NAMING" | "RESPONDING" | "SAVING") => void;
   stream?: ProductConversationStreamCallbacks;
 }>): Promise<ConversationMessageResult> {
-  const { request, principal, repository, objectStore, agentSecrets, command } = input;
+  const { request, principal, repository, objectStore, agentSecrets, host, command } = input;
   let workspace = await selectedWorkspaceFromRequest(request, repository, principal);
   let projectId = command.projectId;
   let existingConversation: ProductConversation | null = null;
@@ -2055,10 +2061,8 @@ async function processConversationMessage(input: Readonly<{
         }),
       });
     }
-    const initialSettings = await repository.readAgentSettings();
-    if (!initialSettings) throw httpError(424, "AGENT_CONFIG_REQUIRED", "请先配置全局 Agent 连接");
-    const initialApiKey = await agentSecrets.readApiKey(initialSettings.credentialSecretRef);
-    if (!initialApiKey) throw httpError(424, "AGENT_CONFIG_REQUIRED", "无法读取全局 Agent 凭据，请重新保存配置");
+    const initialConnection = await agentConnection(host, principal, "conversation", repository, agentSecrets);
+    const { settings:initialSettings,apiKey:initialApiKey }=initialConnection;
     const seedSpecification = specificationFromConcept("Untitled", command.content, command.responseLanguage);
     let intentDecision: ConversationIntentDecision;
     try {
@@ -2084,7 +2088,7 @@ async function processConversationMessage(input: Readonly<{
       throw httpError(424, "INTENT_AGENT_FAILED", error instanceof Error ? error.message : "Intent Agent 调用失败");
     }
     input.onStage?.("NAMING");
-    const name = await agentProjectName(command.content, repository, agentSecrets, command.responseLanguage);
+    const name = await agentProjectName(command.content, repository, agentSecrets, command.responseLanguage,initialConnection);
     const specification = specificationFromConcept(name, command.content, command.responseLanguage);
     input.onStage?.("RESPONDING");
     const agentReplies = await conversationAgentReplies({
@@ -2104,7 +2108,7 @@ async function processConversationMessage(input: Readonly<{
       responseLanguage: command.responseLanguage,
       responderRoles: Object.freeze(["DESIGN"]),
       changePlanning: intentDecision.intent === "CHANGE_REQUEST",
-    }, repository, agentSecrets, input.stream ? { signal: input.signal, callbacks: input.stream } : undefined);
+    }, repository, agentSecrets, input.stream ? { signal: input.signal, callbacks: input.stream } : undefined,initialConnection);
     intentDecision = reconcileConversationIntentReadiness(intentDecision, agentReplies);
     input.onStage?.("SAVING");
     const targetWorkspace = workspace ?? Object.freeze({ id: randomUUID(), name, createdAt: "" });
@@ -2168,10 +2172,8 @@ async function processConversationMessage(input: Readonly<{
   if (!projectId) throw new Error("Conversation project is required");
   const project = await repository.readProject(workspace.id, projectId);
   if (!project) throw httpError(404, "PROJECT_NOT_FOUND", "项目已不存在");
-  const settings = await repository.readAgentSettings();
-  if (!settings) throw httpError(424, "AGENT_CONFIG_REQUIRED", "请先配置全局 Agent 连接");
-  const apiKey = await agentSecrets.readApiKey(settings.credentialSecretRef);
-  if (!apiKey) throw httpError(424, "AGENT_CONFIG_REQUIRED", "无法读取全局 Agent 凭据，请重新保存配置");
+  const connection=await agentConnection(host,principal,"conversation",repository,agentSecrets);
+  const {settings,apiKey}=connection;
   input.onStage?.("RESPONDING");
   let intentDecision: ConversationIntentDecision;
   try {
@@ -2206,6 +2208,7 @@ async function processConversationMessage(input: Readonly<{
       && pending.baseDocumentRevision !== project.document.revision) {
       const plan = await replanImplementationChange({
         repository, agentSecrets, workspaceId: workspace.id, project, changeRequest: pending,
+        connection,
         responseLanguage: command.responseLanguage,
       });
       input.onStage?.("SAVING");
@@ -2304,7 +2307,7 @@ async function processConversationMessage(input: Readonly<{
     responseLanguage: command.responseLanguage,
     responderRoles: intentDecision.responderRoles,
     changePlanning: intentDecision.intent === "CHANGE_REQUEST",
-  }, repository, agentSecrets, input.stream ? { signal: input.signal, callbacks: input.stream } : undefined);
+  }, repository, agentSecrets, input.stream ? { signal: input.signal, callbacks: input.stream } : undefined,connection);
   intentDecision = reconcileConversationIntentReadiness(intentDecision, agentReplies);
   input.onStage?.("SAVING");
   const conversation = await repository.appendConversationTurn({
@@ -2635,10 +2638,11 @@ async function agentProjectName(
   repository: CoreRepository,
   agentSecrets: AgentSecretStore,
   responseLanguage: ResponseLanguage,
+  resolved?:Readonly<{settings:StoredInstanceAgentSettings;apiKey:string}>,
 ): Promise<string> {
-  const settings = await repository.readAgentSettings();
+  const settings = resolved?.settings??await repository.readAgentSettings();
   if (!settings) throw httpError(424, "AGENT_CONFIG_REQUIRED", "请先配置全局 Agent 连接");
-  const apiKey = await agentSecrets.readApiKey(settings.credentialSecretRef);
+  const apiKey = resolved?.apiKey??await agentSecrets.readApiKey(settings.credentialSecretRef);
   if (!apiKey) throw httpError(424, "AGENT_CONFIG_REQUIRED", "无法读取全局 Agent 凭据，请重新保存配置");
   try {
     return await generateProjectName({ concept, settings, apiKey, responseLanguage });
@@ -2646,6 +2650,37 @@ async function agentProjectName(
     const message = error instanceof Error ? error.message : "Agent 项目命名失败";
     throw httpError(424, "AGENT_NAMING_FAILED", message);
   }
+}
+
+async function agentConnection(
+  host:CoreHostServices,
+  principal:CorePrincipal,
+  workload:"conversation"|"design"|"development"|"test"|"image",
+  repository:CoreRepository,
+  agentSecrets:AgentSecretStore,
+):Promise<Readonly<{settings:StoredInstanceAgentSettings;apiKey:string}>>{
+  const hosted=await host.agent.resolveRuntime({principal,workload});
+  if(hosted){
+    const secret=await agentSecrets.writeApiKey(hosted.apiKey);
+    const settings=await repository.saveAgentSettings({
+      agentRuntime:hosted.agentRuntime,
+      baseUrl:hosted.baseUrl,
+      primaryModel:hosted.primaryModel,
+      modelOverrides:hosted.modelOverrides,
+      imageModel:hosted.imageModel,
+      credentialSecretRef:secret.secretRef,
+      apiKeyMask:secret.mask,
+      apiKeyFingerprint:secret.fingerprint,
+      credentialVersion:secret.version,
+      updatedBy:"Managed host routing",
+    });
+    return Object.freeze({settings,apiKey:hosted.apiKey});
+  }
+  const settings=await repository.readAgentSettings();
+  if(!settings)throw httpError(424,"AGENT_CONFIG_REQUIRED","平台 Agent Runtime 尚未配置");
+  const apiKey=await agentSecrets.readApiKey(settings.credentialSecretRef);
+  if(!apiKey)throw httpError(424,"AGENT_CONFIG_REQUIRED","平台 Agent 凭据不可用");
+  return Object.freeze({settings,apiKey});
 }
 
 async function readBoundProjectSource(
@@ -2812,6 +2847,7 @@ async function processHostedProjectImport(input: Readonly<{
   principal: CorePrincipal;
   repository: CoreRepository;
   agentSecrets: AgentSecretStore;
+  host:CoreHostServices;
   projectSources: ProjectSourceStore;
   source: ImportedSourceSnapshot;
 }>): Promise<Readonly<{ created: boolean; project: ProductProjectDetail }>> {
@@ -2823,10 +2859,7 @@ async function processHostedProjectImport(input: Readonly<{
     if (!project) throw new Error("Hosted project import receipt is incomplete");
     return Object.freeze({ created: false, project });
   }
-  const settings = await input.repository.readAgentSettings();
-  if (!settings) throw httpError(424, "AGENT_CONFIG_REQUIRED", "The platform Agent runtime is not configured");
-  const apiKey = await input.agentSecrets.readApiKey(settings.credentialSecretRef);
-  if (!apiKey) throw httpError(424, "AGENT_CONFIG_REQUIRED", "The platform Agent credential is unavailable");
+  const {settings,apiKey}=await agentConnection(input.host,input.principal,"development",input.repository,input.agentSecrets);
   const responseLanguage = parseResponseLanguage(requestHeader(input.request, "x-deviludo-response-language"));
   let analysis;
   try {
@@ -3050,10 +3083,11 @@ async function conversationAgentReplies(
     signal?: AbortSignal;
     callbacks: ProductConversationStreamCallbacks;
   }>,
+  resolved?:Readonly<{settings:StoredInstanceAgentSettings;apiKey:string}>,
 ): Promise<readonly ProductConversationGroupReply[]> {
-  const settings = await repository.readAgentSettings();
+  const settings = resolved?.settings??await repository.readAgentSettings();
   if (!settings) throw httpError(424, "AGENT_CONFIG_REQUIRED", "请先配置全局 Agent 连接");
-  const apiKey = await agentSecrets.readApiKey(settings.credentialSecretRef);
+  const apiKey = resolved?.apiKey??await agentSecrets.readApiKey(settings.credentialSecretRef);
   if (!apiKey) throw httpError(424, "AGENT_CONFIG_REQUIRED", "无法读取全局 Agent 凭据，请重新保存配置");
   try {
     if (stream) {
@@ -3076,6 +3110,7 @@ async function replanImplementationChange(input: Readonly<{
   project: ProductProjectDetail;
   changeRequest: ImplementationChangeRequest;
   responseLanguage: ResponseLanguage;
+  connection?:Readonly<{settings:StoredInstanceAgentSettings;apiKey:string}>;
 }>): Promise<Readonly<{
   replies: readonly ProductConversationGroupReply[];
   implementationBrief: string;
@@ -3107,7 +3142,7 @@ async function replanImplementationChange(input: Readonly<{
     allowDraftMutation: true,
     responseLanguage: input.responseLanguage,
     responderRoles: Object.freeze(["DESIGN"]),
-  }, input.repository, input.agentSecrets);
+  }, input.repository, input.agentSecrets,undefined,input.connection);
   const design = replies.find(reply => reply.agentRole === "DESIGN");
   if (!design?.projectDocumentPatch) {
     throw httpError(409, "CHANGE_REPLAN_INCOMPLETE", "项目说明已变化，Design Agent 未能生成新的变更提案");
