@@ -89,7 +89,10 @@ export function ProjectStudio({ projectId }: { projectId: string }) {
   const [sendingMessage, setSendingMessage] = useState(false);
   const [decidingChange, setDecidingChange] = useState(false);
   const [streamingReplies, setStreamingReplies] = useState<StreamingConversationReplies>({});
-  const [agentProgress, setAgentProgress] = useState<readonly AgentProgressEvent[]>([]);
+  const [agentProgressBuffer, setAgentProgressBuffer] = useState<Readonly<{
+    jobId: string | null;
+    events: readonly AgentProgressEvent[];
+  }>>(() => Object.freeze({ jobId: null, events: Object.freeze([]) }));
   const [artifacts, setArtifacts] = useState<readonly ArtifactRecord[]>(initialArtifacts ?? []);
   const [iterations, setIterations] = useState<readonly ProductWorkflowIterationSummary[]>([]);
   const [selectedWorkflowId, setSelectedWorkflowId] = useState<string | null>(null);
@@ -310,17 +313,17 @@ export function ProjectStudio({ projectId }: { projectId: string }) {
     .at(-1)?.id ?? null;
   const agentRunning = project?.workflowState === "AGENT_RUNNING";
   const activeAgentProgress = useMemo(
-    () => activeAgentJobId
-      ? Object.freeze(agentProgress.filter(event => event.jobId === activeAgentJobId))
+    () => agentRunning && activeAgentJobId && agentProgressBuffer.jobId === activeAgentJobId
+      ? agentProgressBuffer.events
       : Object.freeze([]),
-    [activeAgentJobId, agentProgress],
+    [activeAgentJobId, agentProgressBuffer, agentRunning],
   );
 
   useEffect(() => {
+    agentProgressCursor.current = 0;
     if (!agentRunning || !activeAgentJobId) return;
     const controller = new AbortController();
     let active = true;
-    agentProgressCursor.current = 0;
     void (async () => {
       while (active && !controller.signal.aborted) {
         try {
@@ -330,11 +333,14 @@ export function ProjectStudio({ projectId }: { projectId: string }) {
             controller.signal,
             event => {
               if (!active || event.jobId !== activeAgentJobId) return;
-              setAgentProgress(current => {
-                const activeEvents = current.filter(item => item.jobId === activeAgentJobId);
+              setAgentProgressBuffer(current => {
+                const activeEvents = current.jobId === activeAgentJobId ? current.events : Object.freeze([]);
                 return activeEvents.some(item => item.sequence === event.sequence)
                   ? current
-                  : Object.freeze([...activeEvents, event].slice(-200));
+                  : Object.freeze({
+                    jobId: activeAgentJobId,
+                    events: Object.freeze([...activeEvents, event].slice(-200)),
+                  });
               });
             },
           );

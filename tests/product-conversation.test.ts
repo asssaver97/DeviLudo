@@ -37,7 +37,7 @@ function claudeSettings(revision = 1, overrides: AgentModelOverrides = Object.fr
   });
 }
 
-test("project group chat invokes design, development, and test Agents with independent models", async () => {
+test("project group chat routes one turn to one independently configured Agent", async () => {
   const models: string[] = [];
   const prompts: string[] = [];
   const histories: string[] = [];
@@ -46,6 +46,7 @@ test("project group chat invokes design, development, and test Agents with indep
     history: Object.freeze([]),
     project,
     allowDraftMutation: true,
+    responderRoles: Object.freeze(["DEVELOPMENT"]),
     settings: claudeSettings(9, Object.freeze({
         design: "design-model",
         development: "development-model",
@@ -70,14 +71,11 @@ test("project group chat invokes design, development, and test Agents with indep
     },
   });
 
-  assert.deepEqual(models, ["design-model", "development-model", "test-model"]);
-  assert.deepEqual(replies.map(reply => reply.agentRole), ["DESIGN", "DEVELOPMENT", "TEST"]);
-  assert.match(prompts[0], /Design Agent/);
-  assert.match(prompts[1], /Development Agent/);
-  assert.match(prompts[2], /Test Agent/);
+  assert.deepEqual(models, ["development-model"]);
+  assert.deepEqual(replies.map(reply => reply.agentRole), ["DEVELOPMENT"]);
+  assert.match(prompts[0], /Development Agent/);
   assert.ok(prompts.every(prompt => prompt.includes("All natural-language output must be in English")));
-  assert.match(histories[1], /Guidance from design-model/);
-  assert.match(histories[2], /Guidance from development-model/);
+  assert.doesNotMatch(histories[0], /Guidance from design-model|Guidance from test-model/);
 });
 
 test("Claude design Agent receives project context and conversation history", async () => {

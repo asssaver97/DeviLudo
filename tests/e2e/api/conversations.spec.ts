@@ -160,7 +160,7 @@ test("new-game conversations validate, persist and keep their context locked", a
   expect(startedBody.project.name).toBe("时间回廊");
   expect(startedBody.workspace.name).toBe("Local workspace");
   expect(first.messages.map(message => message.role)).toEqual([
-    "USER", "ASSISTANT", "ASSISTANT", "ASSISTANT",
+    "USER", "ASSISTANT",
   ]);
   expect(first.messages[1].content).toContain("测试设计 Agent");
   expect(first.messages[1].metadata).toMatchObject({
@@ -178,12 +178,12 @@ test("new-game conversations validate, persist and keep their context locked", a
   });
   expect(continued.status()).toBe(200);
   const second = (await continued.json() as { conversation: Conversation }).conversation;
-  expect(second.messages).toHaveLength(8);
-  expect(second.messages[7].content).toContain("测试设计 Agent");
+  expect(second.messages).toHaveLength(4);
+  expect(second.messages[3].content).toContain("测试设计 Agent");
 
   const read = await stack.web(`/api/conversations/${first.id}`);
   expect(read.ok()).toBeTruthy();
-  expect((await read.json() as { conversation: Conversation }).conversation.messages).toHaveLength(8);
+  expect((await read.json() as { conversation: Conversation }).conversation.messages).toHaveLength(4);
   expect((await stack.web(`/api/conversations/${randomUUID()}`)).status()).toBe(404);
   expect((await stack.web("/api/conversations/not-a-uuid")).status()).toBe(404);
 
@@ -310,6 +310,38 @@ test("an explicit development command in a draft conversation automatically appr
   expect((await discussed.json() as { project: { workflowState: string } }).project.workflowState).toBe("DRAFT");
 });
 
+test("an explicit source fix routes only to Development and starts the workflow rerun", async ({ stack }) => {
+  await stack.configureAgent();
+  const project = await stack.createProject({
+    name: "单角色修复路由",
+    concept: "验证代码修复由开发 Agent 单独回应，并在授权后交给游戏生成节点实施。",
+  });
+  await stack.executeSql(`
+    UPDATE deviludo.workflow_instances
+       SET state = 'RELEASE_DECISION_PENDING', updated_at = clock_timestamp()
+     WHERE id = '${project.workflowId}'::uuid;
+  `);
+
+  const response = await stack.web("/api/conversations/messages", {
+    method: "POST",
+    data: { projectId: project.id, content: "修复代码中的输入处理错误并立即重新生成游戏。" },
+  });
+  expect(response.status()).toBe(201);
+  const body = await response.json() as {
+    conversation: Conversation;
+    changeRequest: { state: string };
+    intentDecision: { responderRoles: string[] };
+    workflowAction: string;
+  };
+  expect(body.intentDecision.responderRoles).toEqual(["DEVELOPMENT"]);
+  expect(body.conversation.messages.map(message => (
+    message.role === "USER" ? "USER" : message.metadata.agentRole
+  ))).toEqual(["USER", "DEVELOPMENT"]);
+  expect(body.changeRequest.state).toBe("APPLIED");
+  expect(body.workflowAction).toBe("AGENT_RERUN_STARTED");
+  expect((await stack.readProject(project.id)).jobs.filter(job => job.kind === "AGENT_GENERATION")).toHaveLength(1);
+});
+
 test("messages during Agent generation are intent-routed and confirmed changes safely rerun it", async ({ stack }) => {
   await stack.configureAgent();
   const project = await stack.createProject({
@@ -365,6 +397,7 @@ test("messages during Agent generation are intent-routed and confirmed changes s
   });
   expect(proposed.status()).toBe(200);
   const proposedBody = await proposed.json() as {
+    conversation: Conversation;
     changeRequest: { id: string; state: string };
     workflowAction: string;
     intentDecision: { intent: string; explicitExecution: boolean };
@@ -372,6 +405,9 @@ test("messages during Agent generation are intent-routed and confirmed changes s
   expect(proposedBody.intentDecision).toMatchObject({ intent: "CHANGE_REQUEST", explicitExecution: false });
   expect(proposedBody.workflowAction).toBe("AWAITING_CONFIRMATION");
   expect(proposedBody.changeRequest.state).toBe("PENDING");
+  expect(proposedBody.conversation.messages.slice(-2).map(message => (
+    message.role === "USER" ? "USER" : message.metadata.agentRole
+  ))).toEqual(["USER", "DESIGN"]);
   expect((await stack.readProject(project.id)).document.revision).toBe(documentBefore);
 
   const confirmKey = `confirm:${randomUUID()}`;
@@ -635,13 +671,13 @@ test("project conversations are listed by recency and project deletion removes t
   expect(summaries.map(item => item.id)).toEqual([secondConversation.id, firstConversation.id]);
   expect(summaries[0]).toMatchObject({
     preview: "再单独讨论美术风格和声音反馈。",
-    messageCount: 4,
+    messageCount: 2,
     userMessageCount: 1,
     systemGenerated: false,
   });
   expect(summaries[1]).toMatchObject({
     preview: "先讨论录音回放与历史改写之间的核心循环。",
-    messageCount: 8,
+    messageCount: 4,
     userMessageCount: 2,
     systemGenerated: false,
   });

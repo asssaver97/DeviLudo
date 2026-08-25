@@ -201,7 +201,9 @@ test("the project chat streams Agent progress, answers questions, and confirms i
   `);
 
   await page.goto(`/projects/${project.id}`);
-  await expect(page.getByText("DeviLudo 开发 Agent", { exact: true })).toBeVisible();
+  const liveProgress = page.locator(".conversation-live-progress");
+  await expect(liveProgress.getByText("游戏生成进度", { exact: true })).toBeVisible();
+  await expect(page.locator(".conversation-box-messages .agent-generation-progress")).toHaveCount(0);
   await expect(page.getByText("正在分析项目结构", { exact: true })).toBeVisible();
   const progressOutput = page.locator(".agent-generation-progress-events .progress-agent_output");
   await expect(progressOutput).toHaveCount(1);
@@ -309,6 +311,123 @@ test("the project chat streams Agent progress, answers questions, and confirms i
     SELECT state::text FROM deviludo.jobs WHERE id = '${jobId}'::uuid
   `)).toEqual([{ state: "CANCELLED" }]);
   await expect(page.getByText("E2E G2", { exact: true })).toBeVisible();
+});
+
+test("game generation progress is isolated from conversation history and resets between jobs", async ({ page, stack }) => {
+  const project = await stack.createProject({
+    name: "进度生命周期隔离",
+    concept: "验证长会话不会与游戏生成进度共享滚动和历史状态。",
+  });
+  const conversationId = randomUUID();
+  const firstJobId = randomUUID();
+  const secondJobId = randomUUID();
+  await stack.executeSql(`
+    INSERT INTO deviludo.project_conversations(workspace_id, id, project_id, mode, title)
+    VALUES (
+      '${project.workspaceId}'::uuid, '${conversationId}'::uuid, '${project.id}'::uuid,
+      'PROJECT_FEEDBACK', '进度与历史隔离测试'
+    );
+    WITH conversation AS (
+      SELECT workspace_id, id
+        FROM deviludo.project_conversations
+       WHERE id = '${conversationId}'::uuid
+    )
+    INSERT INTO deviludo.conversation_messages(
+      workspace_id, conversation_id, role, content, metadata
+    )
+    SELECT conversation.workspace_id, conversation.id,
+           CASE WHEN entry % 2 = 1 THEN 'USER' ELSE 'ASSISTANT' END,
+           '用于填充长会话历史的消息 ' || entry::text || '，确保滚动区域足够长。',
+           CASE WHEN entry % 2 = 1 THEN '{}'::jsonb ELSE '{"agentRole":"DESIGN"}'::jsonb END
+      FROM conversation
+      CROSS JOIN generate_series(1, 36) AS entries(entry);
+
+    UPDATE deviludo.workflow_instances
+       SET state = 'AGENT_RUNNING', updated_at = clock_timestamp()
+     WHERE id = '${project.workflowId}'::uuid;
+    INSERT INTO deviludo.jobs(
+      workspace_id, id, workflow_id, project_id, kind, pool_kind,
+      required_capabilities, exclusive, runtime_image, output_contract,
+      state, idempotency_key, lease_owner, lease_token, lease_expires_at, fencing_token
+    ) VALUES (
+      '${project.workspaceId}'::uuid, '${firstJobId}'::uuid, '${project.workflowId}'::uuid, '${project.id}'::uuid,
+      'AGENT_GENERATION', 'CORE', ARRAY['MICROVM','NETWORK_POLICY'], false,
+      'sha256:${"c".repeat(64)}', '{"kinds":["SPECIFICATION"],"maxBytes":1073741824}'::jsonb,
+      'RUNNING', 'browser-progress-lifecycle-first', 'browser-progress-lifecycle-first', gen_random_uuid(),
+      clock_timestamp() + interval '1 hour', 1
+    );
+    INSERT INTO deviludo.job_progress_events(
+      workspace_id, project_id, workflow_id, job_id, event_kind, content
+    ) VALUES (
+      '${project.workspaceId}'::uuid, '${project.id}'::uuid, '${project.workflowId}'::uuid, '${firstJobId}'::uuid,
+      'AGENT_OUTPUT', '第一轮生成进度'
+    );
+  `);
+
+  await page.goto(`/projects/${project.id}`);
+  const liveProgress = page.locator(".conversation-live-progress");
+  const messageViewport = page.locator(".conversation-box-messages");
+  await expect(liveProgress.getByText("游戏生成进度", { exact: true })).toBeVisible();
+  await expect(liveProgress).toContainText("第一轮生成进度");
+  await expect(messageViewport.locator(".agent-generation-progress")).toHaveCount(0);
+
+  const historyMetrics = await messageViewport.evaluate(element => ({
+    clientHeight: element.clientHeight,
+    scrollHeight: element.scrollHeight,
+  }));
+  expect(historyMetrics.scrollHeight).toBeGreaterThan(historyMetrics.clientHeight + 200);
+  await messageViewport.evaluate(element => {
+    element.scrollTop = Math.floor((element.scrollHeight - element.clientHeight) / 2);
+    element.dispatchEvent(new Event("scroll"));
+  });
+  const historyScrollTop = await messageViewport.evaluate(element => element.scrollTop);
+  await stack.executeSql(`
+    INSERT INTO deviludo.job_progress_events(
+      workspace_id, project_id, workflow_id, job_id, event_kind, content
+    ) VALUES (
+      '${project.workspaceId}'::uuid, '${project.id}'::uuid, '${project.workflowId}'::uuid, '${firstJobId}'::uuid,
+      'AGENT_OUTPUT', '刷新进度不得移动会话历史'
+    );
+  `);
+  await expect(liveProgress).toContainText("刷新进度不得移动会话历史");
+  expect(await messageViewport.evaluate(element => element.scrollTop)).toBe(historyScrollTop);
+
+  await stack.executeSql(`
+    UPDATE deviludo.jobs
+       SET state = 'SUCCEEDED', lease_owner = NULL, lease_token = NULL,
+           lease_expires_at = NULL, updated_at = clock_timestamp()
+     WHERE id = '${firstJobId}'::uuid;
+    UPDATE deviludo.workflow_instances
+       SET state = 'ARTIFACT_BUILDING', updated_at = clock_timestamp()
+     WHERE id = '${project.workflowId}'::uuid;
+  `);
+  await expect(liveProgress).toHaveCount(0, { timeout: 10_000 });
+
+  await stack.executeSql(`
+    UPDATE deviludo.workflow_instances
+       SET state = 'AGENT_RUNNING', updated_at = clock_timestamp()
+     WHERE id = '${project.workflowId}'::uuid;
+    INSERT INTO deviludo.jobs(
+      workspace_id, id, workflow_id, project_id, kind, pool_kind,
+      required_capabilities, exclusive, runtime_image, output_contract,
+      state, idempotency_key, lease_owner, lease_token, lease_expires_at, fencing_token
+    ) VALUES (
+      '${project.workspaceId}'::uuid, '${secondJobId}'::uuid, '${project.workflowId}'::uuid, '${project.id}'::uuid,
+      'AGENT_GENERATION', 'CORE', ARRAY['MICROVM','NETWORK_POLICY'], false,
+      'sha256:${"d".repeat(64)}', '{"kinds":["SPECIFICATION"],"maxBytes":1073741824}'::jsonb,
+      'RUNNING', 'browser-progress-lifecycle-second', 'browser-progress-lifecycle-second', gen_random_uuid(),
+      clock_timestamp() + interval '1 hour', 2
+    );
+    INSERT INTO deviludo.job_progress_events(
+      workspace_id, project_id, workflow_id, job_id, event_kind, content
+    ) VALUES (
+      '${project.workspaceId}'::uuid, '${project.id}'::uuid, '${project.workflowId}'::uuid, '${secondJobId}'::uuid,
+      'AGENT_OUTPUT', '第二轮独立生成进度'
+    );
+  `);
+  await expect(liveProgress).toContainText("第二轮独立生成进度", { timeout: 10_000 });
+  await expect(liveProgress).not.toContainText("第一轮生成进度");
+  await expect(liveProgress).not.toContainText("刷新进度不得移动会话历史");
 });
 
 test("an Agent reply follows the conversation without moving the whole page", async ({ page, stack }) => {

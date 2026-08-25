@@ -8,11 +8,11 @@ test("Intent Agent validates structure and safely normalizes inconsistent action
     intent: "QUESTION",
     explicitExecution: false,
     actionable: false,
-    responderRoles: ["DEVELOPMENT", "TEST"],
+    responderRoles: ["DEVELOPMENT"],
     summary: "Explain the current E2E failure without modifying the project.",
   }));
   assert.equal(question.intent, "QUESTION");
-  assert.deepEqual(question.responderRoles, ["DEVELOPMENT", "TEST"]);
+  assert.deepEqual(question.responderRoles, ["DEVELOPMENT"]);
 
   assert.deepEqual(parseConversationIntent(JSON.stringify({
     intent: "QUESTION",
@@ -41,6 +41,13 @@ test("Intent Agent validates structure and safely normalizes inconsistent action
     summary: "Cannot execute an unactionable request",
   });
   assert.throws(() => parseConversationIntent("{\"intent\":\"QUESTION\"}"), /invalid decision/);
+  assert.throws(() => parseConversationIntent(JSON.stringify({
+    intent: "CHANGE_REQUEST",
+    explicitExecution: false,
+    actionable: true,
+    responderRoles: ["DESIGN", "DEVELOPMENT"],
+    summary: "Do not fan one conversation turn out to multiple specialists.",
+  })), /invalid decision/);
 });
 
 test("Intent Agent inspects conversation images before routing the message", async () => {

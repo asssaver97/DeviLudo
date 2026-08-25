@@ -85,21 +85,14 @@ export function ConversationBox({
   emptyDescription,
   className = "",
 }: ConversationBoxProps) {
-  const { errorText, locale, text } = useLanguage();
+  const { errorText, text } = useLanguage();
   const messageViewport = useRef<HTMLDivElement | null>(null);
-  const progressViewport = useRef<HTMLDivElement | null>(null);
   const textarea = useRef<HTMLTextAreaElement | null>(null);
   const imageInput = useRef<HTMLInputElement | null>(null);
   const imageDragDepth = useRef(0);
   const [imageError, setImageError] = useState<string | null>(null);
   const [imageDropActive, setImageDropActive] = useState(false);
   const followLatestMessage = useRef(true);
-  const followLatestProgress = useRef(true);
-  const progressRows = useMemo(
-    () => agentProgressDisplayRows(agentProgress?.events ?? Object.freeze([])),
-    [agentProgress?.events],
-  );
-  const progressJobId = agentProgress?.events.at(-1)?.jobId ?? null;
   const latestOptionMessageId = useMemo(() => {
     if (sending) return null;
     for (let index = messages.length - 1; index >= 0; index -= 1) {
@@ -119,19 +112,7 @@ export function ConversationBox({
     const viewport = messageViewport.current;
     if (!showMessages || !viewport || !followLatestMessage.current) return;
     viewport.scrollTop = viewport.scrollHeight;
-  }, [agentProgress, messages, sending, showMessages, streamingReplies]);
-
-  useLayoutEffect(() => {
-    followLatestProgress.current = true;
-    const viewport = progressViewport.current;
-    if (viewport) viewport.scrollTop = viewport.scrollHeight;
-  }, [progressJobId]);
-
-  useLayoutEffect(() => {
-    const viewport = progressViewport.current;
-    if (!viewport || !followLatestProgress.current) return;
-    viewport.scrollTop = viewport.scrollHeight;
-  }, [agentProgress?.running, progressRows]);
+  }, [messages, sending, showMessages, streamingReplies]);
 
   useLayoutEffect(() => {
     if (focusKey === undefined || disabled) return;
@@ -206,6 +187,9 @@ export function ConversationBox({
 
   return (
     <div className={`conversation-box ${showMessages ? "has-messages" : "is-composer-only"} ${className}`.trim()}>
+      {showMessages && agentProgress?.running ? (
+        <AgentProgressPanel progress={agentProgress} />
+      ) : null}
       {showMessages ? (
         <div
           aria-live="polite"
@@ -291,30 +275,6 @@ export function ConversationBox({
               <p>{emptyDescription ?? text("讨论玩法，或告诉 DeviLudo 下一步要做什么。", "Discuss the gameplay or tell DeviLudo what to build next.")}</p>
             </div>
           )}
-          {agentProgress?.running || agentProgress?.events.length ? (
-            <article className="conversation-box-message assistant agent-generation-progress">
-              <span className="message-avatar">AI</span>
-              <div>
-                <header>
-                  <b>{text("DeviLudo 开发 Agent", "DeviLudo Development Agent")}</b>
-                  {agentProgress.running ? <span className="conversation-box-applied">{text("生成中", "RUNNING")}</span> : null}
-                </header>
-                <div
-                  className="agent-generation-progress-events"
-                  onScroll={event => {
-                    const viewport = event.currentTarget;
-                    followLatestProgress.current = viewport.scrollHeight - viewport.scrollTop - viewport.clientHeight <= 24;
-                  }}
-                  ref={progressViewport}
-                >
-                  {progressRows.map(row => (
-                    <p className={`progress-${row.kind.toLowerCase()}`} key={row.sequence}>{localizedAgentProgressContent(row, locale)}</p>
-                  ))}
-                  {agentProgress.running ? <TypingDots /> : null}
-                </div>
-              </div>
-            </article>
-          ) : null}
           {sending && showSendingReply ? (
             PROJECT_AGENT_ROLES.filter(role => Boolean(streamingReplies[role])).map(role => {
                 const identity = agentIdentity(role, text);
@@ -409,6 +369,55 @@ export function ConversationBox({
           </button>
         </footer>
       </form>
+    </div>
+  );
+}
+
+function AgentProgressPanel({
+  progress,
+}: Readonly<{ progress: Readonly<{ running: boolean; events: readonly AgentProgressEvent[] }> }>) {
+  const { locale, text } = useLanguage();
+  const viewportRef = useRef<HTMLDivElement | null>(null);
+  const followLatest = useRef(true);
+  const rows = useMemo(() => agentProgressDisplayRows(progress.events), [progress.events]);
+  const jobId = progress.events.at(-1)?.jobId ?? null;
+
+  useLayoutEffect(() => {
+    followLatest.current = true;
+    const viewport = viewportRef.current;
+    if (viewport) viewport.scrollTop = viewport.scrollHeight;
+  }, [jobId]);
+
+  useLayoutEffect(() => {
+    const viewport = viewportRef.current;
+    if (!viewport || !followLatest.current) return;
+    viewport.scrollTop = viewport.scrollHeight;
+  }, [progress.running, rows]);
+
+  return (
+    <div aria-live="polite" className="conversation-live-progress">
+      <article className="conversation-box-message assistant agent-generation-progress">
+        <span className="message-avatar">RUN</span>
+        <div>
+          <header>
+            <b>{text("游戏生成进度", "Game generation progress")}</b>
+            <span className="conversation-box-applied">{text("生成中", "RUNNING")}</span>
+          </header>
+          <div
+            className="agent-generation-progress-events"
+            onScroll={event => {
+              const viewport = event.currentTarget;
+              followLatest.current = viewport.scrollHeight - viewport.scrollTop - viewport.clientHeight <= 24;
+            }}
+            ref={viewportRef}
+          >
+            {rows.map(row => (
+              <p className={`progress-${row.kind.toLowerCase()}`} key={row.sequence}>{localizedAgentProgressContent(row, locale)}</p>
+            ))}
+            <TypingDots />
+          </div>
+        </div>
+      </article>
     </div>
   );
 }
