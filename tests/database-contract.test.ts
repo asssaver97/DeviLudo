@@ -52,6 +52,7 @@ test("every workspace-owned table fails closed with forced row isolation", async
   assert.match(sql, /FUNCTION deviludo\.reconcile_p0_capacity\(\)[\s\S]*SECURITY INVOKER/);
   assert.match(sql, /FUNCTION deviludo\.cleanup_expired_executor_state\(\)[\s\S]*SECURITY DEFINER/);
   assert.match(sql, /CREATE TABLE deviludo\.project_conversations \([\s\S]*project_id uuid NOT NULL/);
+  assert.match(sql, /CREATE TABLE deviludo\.conversation_messages \([\s\S]*completed_at timestamptz NOT NULL DEFAULT clock_timestamp\(\)[\s\S]*conversation_messages_completed_after_creation CHECK \(completed_at >= created_at\)/);
   assert.match(sql, /CREATE TABLE deviludo\.project_source_revisions[\s\S]*relative_path text NOT NULL[\s\S]*content_digest text NOT NULL/);
   assert.doesNotMatch(sql, /UNIQUE \(workspace_id, project_id, content_digest\)/);
   assert.doesNotMatch(sql, /source_ready_outbox|pull_source_ready_events|acknowledge_source_ready_events/);
@@ -593,6 +594,18 @@ test("asset Manifest garbage collection migration upgrades existing databases at
   assert.match(migration, /INSERT INTO deviludo\.object_cleanup_queue[\s\S]*old\.status = 'generated'/);
   assert.match(migration, /old\.generation_prompt IS DISTINCT FROM item->>'generationPrompt'/);
   assert.match(migration, /status <> 'uploaded'/);
+});
+
+test("conversation completion migration backfills old messages and records future completion times", async () => {
+  const migration = await readFile(
+    new URL("../infra/postgres/migrations/061_conversation_message_completed_at.sql", import.meta.url),
+    "utf8",
+  );
+  assert.match(migration, /ADD COLUMN completed_at timestamptz/);
+  assert.match(migration, /SET completed_at = created_at/);
+  assert.match(migration, /ALTER COLUMN completed_at SET DEFAULT clock_timestamp\(\)/);
+  assert.match(migration, /ALTER COLUMN completed_at SET NOT NULL/);
+  assert.match(migration, /CHECK \(completed_at >= created_at\)/);
 });
 
 test("asset re-plan migration atomically clears stale existing-source paths", async () => {

@@ -2929,7 +2929,7 @@ export class CoreRepository {
     conversation: ProductConversationRow,
   ): Promise<ProductConversation> {
     const messages = await client.query<ProductConversationMessageRow>(
-      `SELECT message_id::text, role, content, metadata, created_at::text
+      `SELECT message_id::text, role, content, metadata, created_at::text, completed_at::text
          FROM deviludo.conversation_messages
         WHERE conversation_id = $1::uuid
         ORDER BY message_id`,
@@ -2949,6 +2949,7 @@ export class CoreRepository {
         attachments: publicConversationImages(message.metadata),
         metadata: publicConversationMetadata(message.metadata),
         createdAt: message.created_at,
+        completedAt: new Date(message.completed_at).toISOString(),
       }))),
     });
   }
@@ -4016,6 +4017,7 @@ export type ProductConversation = Readonly<{
     }>[];
     metadata: Readonly<Record<string, unknown>>;
     createdAt: string;
+    completedAt: string;
   }>[];
 }>;
 
@@ -4054,6 +4056,7 @@ type ProductConversationMessageRow = {
   content: string;
   metadata: Record<string, unknown>;
   created_at: string;
+  completed_at: string;
 };
 
 const CONVERSATION_IMAGES_METADATA_KEY = "conversationImages";

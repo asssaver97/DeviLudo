@@ -9,7 +9,7 @@ import {
 } from "@aws-sdk/client-s3";
 import { getSignedUrl } from "@aws-sdk/s3-request-presigner";
 import type { JobProtocolV4, ObjectReference } from "./contracts";
-import type { ArtifactRecord } from "@/lib/product/contracts";
+import { MAX_CONVERSATION_IMAGE_BYTES, type ArtifactRecord } from "@/lib/product/contracts";
 import { createHash, randomUUID } from "node:crypto";
 import { parseProjectDocumentContent, projectDocumentMarkdown } from "@/lib/product/project-document";
 import { parseResponseLanguage } from "@/lib/product/response-language";
@@ -24,7 +24,6 @@ export type StoredConversationImage = Readonly<{
   sha256: string;
 }>;
 
-const MAX_CONVERSATION_IMAGE_BYTES = 5 * 1024 * 1024;
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 
 export class CoreObjectStore {

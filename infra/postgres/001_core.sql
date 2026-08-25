@@ -77,7 +77,7 @@ CREATE TABLE deviludo.schema_metadata (
   applied_at timestamptz NOT NULL DEFAULT clock_timestamp()
 );
 INSERT INTO deviludo.schema_metadata(singleton, baseline, compatibility, current_version)
-VALUES (true, '001', 'deviludo-self-hosted-v1', '060_asset_manifest_garbage_collection');
+VALUES (true, '001', 'deviludo-self-hosted-v1', '061_conversation_message_completed_at');
 
 -- Every post-baseline change is immutable and checksummed. Fresh databases are
 -- created from this full snapshot and then stamp the migrations incorporated by
@@ -373,9 +373,11 @@ CREATE TABLE deviludo.conversation_messages (
   content text NOT NULL CHECK (length(content) BETWEEN 1 AND 4000),
   metadata jsonb NOT NULL DEFAULT '{}'::jsonb CHECK (jsonb_typeof(metadata) = 'object'),
   created_at timestamptz NOT NULL DEFAULT clock_timestamp(),
+  completed_at timestamptz NOT NULL DEFAULT clock_timestamp(),
   PRIMARY KEY (workspace_id, message_id),
   FOREIGN KEY (workspace_id, conversation_id)
-    REFERENCES deviludo.project_conversations(workspace_id, id) ON DELETE CASCADE
+    REFERENCES deviludo.project_conversations(workspace_id, id) ON DELETE CASCADE,
+  CONSTRAINT conversation_messages_completed_after_creation CHECK (completed_at >= created_at)
 );
 CREATE INDEX conversation_messages_thread
   ON deviludo.conversation_messages(workspace_id, conversation_id, message_id);

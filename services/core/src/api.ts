@@ -2,15 +2,18 @@ import { createHash, createPublicKey, randomBytes, randomUUID, timingSafeEqual }
 import type { Socket } from "node:net";
 import { readFileSync } from "node:fs";
 import Fastify, { type FastifyRequest } from "fastify";
-import type {
-  ConversationIntentDecision,
-  ConversationWorkflowAction,
-  E2eGoalDelta,
-  ImplementationChangeRequest,
-  ProductConversation,
-  ProductProjectDetail,
-  ProjectAgentRole,
-  WorkspaceSummary,
+import {
+  MAX_CONVERSATION_IMAGES,
+  MAX_CONVERSATION_IMAGE_BYTES,
+  MAX_CONVERSATION_IMAGE_TOTAL_BYTES,
+  type ConversationIntentDecision,
+  type ConversationWorkflowAction,
+  type E2eGoalDelta,
+  type ImplementationChangeRequest,
+  type ProductConversation,
+  type ProductProjectDetail,
+  type ProjectAgentRole,
+  type WorkspaceSummary,
 } from "@/lib/product/contracts";
 import {
   assertPoolOperatingSystem,
@@ -1783,10 +1786,6 @@ type ConversationImageCommand = ConversationImageInput & Readonly<{
   extension: "png" | "jpg" | "webp";
   content: Buffer;
 }>;
-
-const MAX_CONVERSATION_IMAGES = 4;
-const MAX_CONVERSATION_IMAGE_BYTES = 5 * 1024 * 1024;
-const MAX_CONVERSATION_IMAGE_TOTAL_BYTES = 12 * 1024 * 1024;
 
 type ConversationMessageResult = Readonly<{
   statusCode: 200 | 201;

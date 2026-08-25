@@ -3559,6 +3559,17 @@ textarea {
   border-color: #4a4a32;
 }
 
+.conversation-message-completed-at {
+  color: var(--muted);
+  display: block;
+  font: 9px/1.4 var(--font-geist-mono), monospace;
+  margin-top: 5px;
+}
+
+.conversation-box-message.user .conversation-message-completed-at {
+  text-align: right;
+}
+
 .conversation-message-images {
   display: grid;
   gap: 8px;

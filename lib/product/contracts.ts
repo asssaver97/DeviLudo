@@ -291,7 +291,13 @@ export type ProductConversationMessage = Readonly<{
   attachments: readonly ConversationImageAttachment[];
   metadata: Readonly<Record<string, unknown>>;
   createdAt: string;
+  /** Set only after the complete message has been accepted or has failed. */
+  completedAt: string | null;
 }>;
+
+export const MAX_CONVERSATION_IMAGES = 4;
+export const MAX_CONVERSATION_IMAGE_BYTES = 8 * 1024 * 1024;
+export const MAX_CONVERSATION_IMAGE_TOTAL_BYTES = 12 * 1024 * 1024;
 
 export type ConversationImageAttachment = Readonly<{
   id: string;

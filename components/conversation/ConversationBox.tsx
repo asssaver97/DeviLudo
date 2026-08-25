@@ -13,22 +13,22 @@ import {
   type ReactNode,
 } from "react";
 import {
+  MAX_CONVERSATION_IMAGES,
+  MAX_CONVERSATION_IMAGE_BYTES,
+  MAX_CONVERSATION_IMAGE_TOTAL_BYTES,
   PROJECT_AGENT_ROLES,
   type AgentProgressEvent,
   type ProductConversationMessage,
   type ProjectAgentRole,
 } from "@/lib/product/contracts";
 import {
-  MAX_CONVERSATION_IMAGES,
-  MAX_CONVERSATION_IMAGE_BYTES,
-  MAX_CONVERSATION_IMAGE_TOTAL_BYTES,
   type ConversationImageDraft,
   type StreamingConversationReplies,
 } from "@/lib/product/conversation-stream";
 import { agentProgressDisplayRows, localizedAgentProgressContent } from "@/lib/product/agent-progress";
 import { CloseIcon, PlusIcon, SendIcon } from "../console/Icons";
 import { TypingDots } from "../console/TypingDots";
-import { useLanguage } from "../i18n/LanguageProvider";
+import { localeTag, useLanguage } from "../i18n/LanguageProvider";
 
 type ConversationBoxProps = Readonly<{
   conversationKey: string | null;
@@ -85,7 +85,7 @@ export function ConversationBox({
   emptyDescription,
   className = "",
 }: ConversationBoxProps) {
-  const { errorText, text } = useLanguage();
+  const { errorText, locale, text } = useLanguage();
   const messageViewport = useRef<HTMLDivElement | null>(null);
   const textarea = useRef<HTMLTextAreaElement | null>(null);
   const imageInput = useRef<HTMLInputElement | null>(null);
@@ -133,7 +133,11 @@ export function ConversationBox({
       return;
     }
     if (files.some(file => !isConversationImageType(file.type) || file.size < 1 || file.size > MAX_CONVERSATION_IMAGE_BYTES)) {
-      setImageError(text("仅支持 5 MB 以内的 PNG、JPEG 或 WebP 图片", "Use PNG, JPEG, or WebP images up to 5 MB each"));
+      const limitMiB = MAX_CONVERSATION_IMAGE_BYTES / 1024 / 1024;
+      setImageError(text(
+        `仅支持 ${limitMiB} MB 以内的 PNG、JPEG 或 WebP 图片`,
+        `Use PNG, JPEG, or WebP images up to ${limitMiB} MB each`,
+      ));
       return;
     }
     if (attachments.reduce((total, item) => total + item.sizeBytes, 0)
@@ -255,6 +259,15 @@ export function ConversationBox({
                   </div>
                 ) : null}
                 <p>{message.content}</p>
+                {message.completedAt ? (
+                  <time
+                    className="conversation-message-completed-at"
+                    dateTime={message.completedAt}
+                    title={formatMessageCompletedAt(message.completedAt, locale, true)}
+                  >
+                    {formatMessageCompletedAt(message.completedAt, locale)}
+                  </time>
+                ) : null}
                 {failed && typeof message.metadata.failureMessage === "string" ? (
                   <small className="conversation-box-failure-detail">{errorText(message.metadata.failureMessage, "消息未保存，请重试", "Message was not saved. Please retry.")}</small>
                 ) : null}
@@ -371,6 +384,14 @@ export function ConversationBox({
       </form>
     </div>
   );
+}
+
+function formatMessageCompletedAt(timestamp: string, locale: "zh" | "en", full = false): string {
+  const date = new Date(timestamp);
+  if (Number.isNaN(date.getTime())) return "";
+  return new Intl.DateTimeFormat(localeTag(locale), full
+    ? { dateStyle: "medium", timeStyle: "medium" }
+    : { month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit" }).format(date);
 }
 
 function AgentProgressPanel({

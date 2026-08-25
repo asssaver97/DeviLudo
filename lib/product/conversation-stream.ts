@@ -41,10 +41,6 @@ export type ConversationStreamCallbacks = Readonly<{
   onProjectDocument?: (project: ProductProjectDetail) => void;
 }>;
 
-export const MAX_CONVERSATION_IMAGES = 4;
-export const MAX_CONVERSATION_IMAGE_BYTES = 5 * 1024 * 1024;
-export const MAX_CONVERSATION_IMAGE_TOTAL_BYTES = 12 * 1024 * 1024;
-
 export class ConversationStreamError extends Error {
   readonly code: string;
 
@@ -213,6 +209,7 @@ export function optimisticConversation(
     }))),
     metadata: Object.freeze({ pending: true }),
     createdAt: now,
+    completedAt: null,
   });
   if (current) {
     return Object.freeze({
@@ -242,6 +239,7 @@ export function failedOptimisticConversation(
     if (message.role !== "USER" || message.metadata.pending !== true) continue;
     messages[index] = Object.freeze({
       ...message,
+      completedAt: new Date().toISOString(),
       metadata: Object.freeze({
         ...message.metadata,
         pending: false,
@@ -260,8 +258,8 @@ export function chronologicalMessages(
   return messages
     .map((message, index) => ({ message, index }))
     .sort((left, right) => {
-      const leftTime = Date.parse(left.message.createdAt);
-      const rightTime = Date.parse(right.message.createdAt);
+      const leftTime = Date.parse(left.message.completedAt ?? left.message.createdAt);
+      const rightTime = Date.parse(right.message.completedAt ?? right.message.createdAt);
       if (Number.isFinite(leftTime) && Number.isFinite(rightTime) && leftTime !== rightTime) return leftTime - rightTime;
       if (/^\d+$/.test(left.message.id) && /^\d+$/.test(right.message.id)) {
         const leftId = BigInt(left.message.id);

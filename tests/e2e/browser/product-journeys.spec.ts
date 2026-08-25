@@ -3,6 +3,25 @@ import { test, expect } from "../fixtures/stack";
 
 const ONE_PIXEL_PNG = Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAACXBIWXMAAAPoAAAD6AG1e1JrAAAADUlEQVR4nGNg2PL/PwAFHgKz57crZQAAAABJRU5ErkJggg==", "base64");
 
+test("the conversation composer accepts images above five MiB up to the new eight MiB limit", async ({ page, stack }) => {
+  const project = await stack.createProject({
+    name: "会话图片边界",
+    concept: "验证聊天框放宽后的图片大小边界。",
+  });
+  await page.goto(`/projects/${project.id}`);
+  const imageInput = page.getByLabel("选择会话图片");
+  const accepted = Buffer.alloc(6 * 1024 * 1024);
+  ONE_PIXEL_PNG.copy(accepted);
+  await imageInput.setInputFiles({ name: "six-mib.png", mimeType: "image/png", buffer: accepted });
+  await expect(page.locator('.conversation-composer-images img[alt="six-mib.png"]')).toBeVisible();
+  await expect(page.locator(".conversation-image-error")).toHaveCount(0);
+
+  const rejected = Buffer.alloc(8 * 1024 * 1024 + 1);
+  ONE_PIXEL_PNG.copy(rejected);
+  await imageInput.setInputFiles({ name: "over-eight-mib.png", mimeType: "image/png", buffer: rejected });
+  await expect(page.locator(".conversation-image-error")).toHaveText("仅支持 8 MB 以内的 PNG、JPEG 或 WebP 图片");
+});
+
 test("product navigation preserves the shell and reuses project data without reconnecting",async({page,stack})=>{
   expect(stack.webUrl.protocol).toBe("http:");
   let instanceRequests=0;
@@ -258,7 +277,22 @@ test("the project chat streams Agent progress, answers questions, and confirms i
   const question = "当前 Agent 正在做什么？";
   await input.fill(question);
   await page.getByRole("button", { name: "发送项目消息" }).click();
-  await expect(page.locator(".project-conversation-box .conversation-box-message", { hasText: question })).toBeVisible();
+  const completedQuestion = page.locator(".project-conversation-box .conversation-box-message", { hasText: question });
+  await expect(completedQuestion).toBeVisible();
+  const completedTime = completedQuestion.locator(".conversation-message-completed-at");
+  await expect(completedTime).toBeVisible();
+  await expect(completedTime).toHaveAttribute("datetime", /\d{4}-\d{2}-\d{2}T/);
+  const bubbleAndTime = await completedQuestion.evaluate(element => {
+    const bubble = element.querySelector("p")?.getBoundingClientRect();
+    const time = element.querySelector("time")?.getBoundingClientRect();
+    const timeElement = element.querySelector("time");
+    return {
+      below: Boolean(bubble && time && time.top >= bubble.bottom),
+      color: timeElement ? getComputedStyle(timeElement).color : "",
+    };
+  });
+  expect(bubbleAndTime.below).toBe(true);
+  expect(bubbleAndTime.color).not.toBe("");
   await expect(page.locator(".project-conversation-box .conversation-box-message.is-thinking")).toHaveCount(0);
   expect(await stack.queryRows<{ state: string }>(`
     SELECT state::text FROM deviludo.jobs WHERE id = '${jobId}'::uuid
@@ -460,6 +494,7 @@ test("an Agent reply follows the conversation without moving the whole page", as
     await sendButton.click();
     await expect(page.locator(".project-conversation-box .conversation-composer-images")).toHaveCount(0);
     await expect(page.locator('.project-conversation-box .conversation-message-images img[alt="project-feedback.png"]')).toBeVisible();
+    await expect(page.locator(".project-conversation-box .conversation-box-message.user .conversation-message-completed-at")).toHaveCount(0);
     await expect(page.locator(".project-conversation-box .conversation-box-message.is-thinking")).toBeVisible();
     await expect(page.getByText("正在思考", { exact: true })).toBeVisible();
     await page.waitForTimeout(250);

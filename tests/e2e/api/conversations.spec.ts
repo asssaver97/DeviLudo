@@ -16,6 +16,8 @@ type Conversation = Readonly<{
       sizeBytes: number;
     }>[];
     metadata: Readonly<Record<string, unknown>>;
+    createdAt: string;
+    completedAt: string;
   }>[];
 }>;
 
@@ -27,11 +29,13 @@ test("conversation stream emits reply deltas before the persisted result", async
     name: "流式会话验证",
     concept: "验证设计搭档的回复会逐段进入对话框。",
   });
+  const requestStartedAt = Date.now();
   const response = await stack.web("/api/conversations/messages/stream", {
     method: "POST",
     headers: { "idempotency-key": `conversation:${randomUUID()}` },
     data: { projectId: project.id, content: "请先给出一条清晰的玩法建议。" },
   });
+  const requestFinishedAt = Date.now();
   expect(response.status()).toBe(200);
   const events = (await response.text()).trim().split("\n").map(line => JSON.parse(line) as Record<string, unknown>);
   const starts = events.filter(event => event.type === "agent_start");
@@ -56,6 +60,14 @@ test("conversation stream emits reply deltas before the persisted result", async
     workflowAction: string;
   };
   expect(complete.conversation.messages.map(message => message.role)).toEqual(["USER", "ASSISTANT"]);
+  for (const message of complete.conversation.messages) {
+    const createdAt = Date.parse(message.createdAt);
+    const messageCompletedAt = Date.parse(message.completedAt);
+    expect(Number.isFinite(messageCompletedAt)).toBe(true);
+    expect(messageCompletedAt).toBeGreaterThanOrEqual(createdAt);
+    expect(messageCompletedAt).toBeGreaterThanOrEqual(requestStartedAt - 1_000);
+    expect(messageCompletedAt).toBeLessThanOrEqual(requestFinishedAt + 1_000);
+  }
   expect(complete.conversation.messages[1].metadata.agentRole).toBe("DESIGN");
   expect(complete.intentDecision.intent).toBe("QUESTION");
   expect(complete.workflowAction).toBe("NONE");
@@ -113,6 +125,30 @@ test("conversation images are validated, persisted, displayed through an authent
     },
   });
   expect(disguised.status()).toBe(400);
+
+  const maximumImage = Buffer.alloc(8 * 1024 * 1024);
+  Buffer.from(ONE_PIXEL_PNG, "base64").copy(maximumImage);
+  const acceptedBoundary = await stack.web("/api/conversations/messages", {
+    method: "POST",
+    data: {
+      projectId: project.id,
+      content: "验证八兆图片边界。",
+      attachments: [{ filename: "eight-mib.png", contentType: "image/png", dataBase64: maximumImage.toString("base64") }],
+    },
+  });
+  expect(acceptedBoundary.status()).toBe(201);
+
+  const oversizedImage = Buffer.alloc(8 * 1024 * 1024 + 1);
+  Buffer.from(ONE_PIXEL_PNG, "base64").copy(oversizedImage);
+  const rejectedBoundary = await stack.web("/api/conversations/messages", {
+    method: "POST",
+    data: {
+      projectId: project.id,
+      content: "拒绝超过八兆的图片。",
+      attachments: [{ filename: "over-eight-mib.png", contentType: "image/png", dataBase64: oversizedImage.toString("base64") }],
+    },
+  });
+  expect(rejectedBoundary.status()).toBe(400);
 });
 
 test("new-game conversations validate, persist and keep their context locked", async ({ stack }) => {
