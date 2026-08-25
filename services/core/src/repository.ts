@@ -3493,6 +3493,60 @@ export class CoreRepository {
     return result.rows[0]?.enqueued ?? 0;
   }
 
+  async recordPendingOutput(job: JobProtocolV4, object: Readonly<{
+    kind: string;
+    targetPlatform?: string;
+    bucket: string;
+    key: string;
+    sha256: string;
+    sizeBytes: number;
+  }>): Promise<void> {
+    const prefix = `workspaces/${job.workspaceId}/projects/${job.projectId}/jobs/${job.jobId}/`;
+    if (object.bucket.length < 3
+      || !object.key.startsWith(prefix)
+      || !/^sha256:[0-9a-f]{64}$/.test(object.sha256)
+      || !Number.isSafeInteger(object.sizeBytes)
+      || object.sizeBytes < 1
+      || object.sizeBytes > job.outputContract.maxBytes
+      || (object.targetPlatform !== undefined && object.targetPlatform !== job.targetOperatingSystem)
+      || !job.outputContract.kinds.includes(object.kind)) {
+      throw new Error("Pending output boundary is invalid");
+    }
+    await this.database.withWorkspace(job.workspaceId, client => client.query(
+      `INSERT INTO deviludo.pending_object_uploads(
+         workspace_id, job_id, bucket, object_key, kind, target_platform, sha256, size_bytes, cleanup_after
+       ) VALUES(
+         $1::uuid, $2::uuid, $3, $4, $5::deviludo.artifact_kind, $6::deviludo.server_os,
+         $7, $8, clock_timestamp() + interval '1 day'
+       )
+       ON CONFLICT (workspace_id, bucket, object_key) DO UPDATE
+         SET job_id = $2::uuid, kind = $5::deviludo.artifact_kind,
+             target_platform = $6::deviludo.server_os, sha256 = $7, size_bytes = $8,
+             cleanup_after = clock_timestamp() + interval '1 day'`,
+      [
+        job.workspaceId,
+        job.jobId,
+        object.bucket,
+        object.key,
+        object.kind,
+        object.targetPlatform ?? null,
+        object.sha256,
+        String(object.sizeBytes),
+      ],
+    ));
+  }
+
+  async reconcileExpiredUploads(limit = 25): Promise<number> {
+    if (!Number.isSafeInteger(limit) || limit < 1 || limit > 500) {
+      throw new Error("Pending upload sweep is invalid");
+    }
+    const result = await this.database.pool.query<{ enqueued: number }>(
+      "SELECT deviludo.reconcile_expired_uploads($1::integer) AS enqueued",
+      [limit],
+    );
+    return result.rows[0]?.enqueued ?? 0;
+  }
+
   async completeObjectCleanup(input: PendingObjectCleanup): Promise<boolean> {
     const result = await this.database.pool.query<{ completed: boolean }>(
       "SELECT deviludo.complete_object_cleanup($1::uuid, $2::text, $3::text, $4::uuid) AS completed",

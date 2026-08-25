@@ -77,7 +77,7 @@ CREATE TABLE deviludo.schema_metadata (
   applied_at timestamptz NOT NULL DEFAULT clock_timestamp()
 );
 INSERT INTO deviludo.schema_metadata(singleton, baseline, compatibility, current_version)
-VALUES (true, '001', 'deviludo-self-hosted-v1', '065_artifact_retention');
+VALUES (true, '001', 'deviludo-self-hosted-v1', '066_pending_upload_cleanup');
 
 -- Every post-baseline change is immutable and checksummed. Fresh databases are
 -- created from this full snapshot and then stamp the migrations incorporated by
@@ -783,6 +783,34 @@ CREATE TABLE deviludo.artifacts (
   CHECK (object_key LIKE 'workspaces/' || workspace_id::text || '/projects/' || project_id::text || '/%')
 );
 
+CREATE TABLE deviludo.pending_object_uploads (
+  workspace_id uuid NOT NULL,
+  job_id uuid NOT NULL,
+  bucket text NOT NULL CHECK (length(bucket) BETWEEN 3 AND 255),
+  object_key text NOT NULL CHECK (object_key LIKE 'workspaces/' || workspace_id::text || '/%'),
+  kind deviludo.artifact_kind NOT NULL,
+  target_platform deviludo.server_os,
+  sha256 text NOT NULL CHECK (sha256 ~ '^sha256:[0-9a-f]{64}$'),
+  size_bytes bigint NOT NULL CHECK (size_bytes > 0),
+  cleanup_after timestamptz NOT NULL,
+  created_at timestamptz NOT NULL DEFAULT clock_timestamp(),
+  PRIMARY KEY (workspace_id, bucket, object_key),
+  FOREIGN KEY (workspace_id, job_id) REFERENCES deviludo.jobs(workspace_id, id) ON DELETE CASCADE
+);
+
+CREATE OR REPLACE FUNCTION deviludo.clear_pending_upload_on_artifact()
+RETURNS trigger LANGUAGE plpgsql SET search_path = pg_catalog, deviludo AS $$
+BEGIN
+  DELETE FROM deviludo.pending_object_uploads
+   WHERE workspace_id = NEW.workspace_id AND bucket = NEW.bucket AND object_key = NEW.object_key;
+  RETURN NEW;
+END
+$$;
+CREATE TRIGGER artifacts_clear_pending_upload
+AFTER INSERT ON deviludo.artifacts
+FOR EACH ROW EXECUTE FUNCTION deviludo.clear_pending_upload_on_artifact();
+REVOKE ALL ON FUNCTION deviludo.clear_pending_upload_on_artifact() FROM PUBLIC;
+
 CREATE TABLE deviludo.object_cleanup_queue (
   workspace_id uuid NOT NULL,
   bucket text NOT NULL CHECK (length(bucket) BETWEEN 3 AND 255),
@@ -1275,7 +1303,7 @@ BEGIN
     'workflow_e2e_goal_revisions', 'steam_releases', 'workflow_events',
     'jobs', 'external_signals', 'job_progress_events',
     'operation_receipts', 'workspace_claim_fairness',
-    'artifacts', 'artifact_inputs', 'object_cleanup_queue', 'project_cleanup_requests', 'host_admission_events', 'e2e_policy_locks', 'e2e_policy_decisions', 'e2e_test_plans',
+    'artifacts', 'artifact_inputs', 'pending_object_uploads', 'object_cleanup_queue', 'project_cleanup_requests', 'host_admission_events', 'e2e_policy_locks', 'e2e_policy_decisions', 'e2e_test_plans',
     'e2e_regression_traces', 'executor_receipts', 'project_creation_receipts',
     'asset_manifests', 'asset_items'
   ]
@@ -3524,6 +3552,45 @@ AS $$
   ON CONFLICT (operation_key) DO NOTHING
 $$;
 
+CREATE OR REPLACE FUNCTION deviludo.reconcile_expired_uploads(p_limit integer)
+RETURNS integer
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = pg_catalog, deviludo
+SET row_security = off
+AS $$
+DECLARE enqueued integer;
+BEGIN
+  IF p_limit NOT BETWEEN 1 AND 500 THEN RAISE EXCEPTION 'invalid pending upload sweep'; END IF;
+  WITH candidate AS (
+    SELECT pending.workspace_id, pending.bucket, pending.object_key
+      FROM deviludo.pending_object_uploads pending
+      JOIN deviludo.jobs job ON job.workspace_id = pending.workspace_id AND job.id = pending.job_id
+     WHERE pending.cleanup_after <= clock_timestamp()
+       AND job.state IN ('SUCCEEDED', 'FAILED', 'CANCELLED')
+       AND NOT EXISTS (
+         SELECT 1 FROM deviludo.artifacts artifact
+          WHERE artifact.workspace_id = pending.workspace_id
+            AND artifact.bucket = pending.bucket AND artifact.object_key = pending.object_key
+       )
+     ORDER BY pending.cleanup_after, pending.created_at
+     FOR UPDATE OF pending SKIP LOCKED LIMIT p_limit
+  ), queued AS (
+    INSERT INTO deviludo.object_cleanup_queue(workspace_id, bucket, object_key, reason)
+    SELECT workspace_id, bucket, object_key, 'authorized upload did not become an artifact' FROM candidate
+    ON CONFLICT (workspace_id, bucket, object_key) DO NOTHING
+  ), removed AS (
+    DELETE FROM deviludo.pending_object_uploads pending USING candidate
+     WHERE pending.workspace_id = candidate.workspace_id AND pending.bucket = candidate.bucket
+       AND pending.object_key = candidate.object_key
+    RETURNING pending.workspace_id
+  ) SELECT count(*)::integer INTO enqueued FROM removed;
+  RETURN enqueued;
+END
+$$;
+ALTER FUNCTION deviludo.reconcile_expired_uploads(integer) OWNER TO deviludo_claim_executor;
+REVOKE ALL ON FUNCTION deviludo.reconcile_expired_uploads(integer) FROM PUBLIC;
+
 CREATE OR REPLACE FUNCTION deviludo.claim_object_cleanup(p_lease_seconds integer)
 RETURNS TABLE (
   "workspaceId" uuid,
@@ -3925,6 +3992,8 @@ GRANT SELECT ON deviludo.workflow_e2e_goal_revisions TO deviludo_scheduler, devi
 -- keep that read capability column-scoped instead of exposing cleanup details.
 GRANT SELECT (workspace_id, bucket, object_key), INSERT ON deviludo.object_cleanup_queue
   TO deviludo_api, deviludo_sandbox;
+GRANT SELECT, INSERT, UPDATE, DELETE ON deviludo.pending_object_uploads
+  TO deviludo_api, deviludo_sandbox;
 GRANT SELECT, INSERT, DELETE ON deviludo.project_creation_receipts TO deviludo_api;
 GRANT SELECT, INSERT, UPDATE ON
   deviludo.projects, deviludo.project_source_revisions,
@@ -4007,6 +4076,7 @@ GRANT EXECUTE ON FUNCTION deviludo.claim_local_git_commit(integer),
 GRANT EXECUTE ON FUNCTION deviludo.claim_object_cleanup(integer),
   deviludo.complete_object_cleanup(uuid, text, text, uuid),
   deviludo.fail_object_cleanup(uuid, text, text, uuid, text),
+  deviludo.reconcile_expired_uploads(integer),
   deviludo.enqueue_expired_artifacts(integer, integer)
   TO deviludo_scheduler;
 GRANT EXECUTE ON FUNCTION deviludo.claim_project_cleanup(integer),
@@ -4037,6 +4107,7 @@ GRANT UPDATE ON deviludo.steam_releases TO deviludo_claim_executor;
 -- owner of those SECURITY DEFINER functions.
 GRANT SELECT, UPDATE ON deviludo.asset_items TO deviludo_claim_executor;
 GRANT SELECT, INSERT, UPDATE, DELETE ON deviludo.object_cleanup_queue TO deviludo_claim_executor;
+GRANT SELECT, INSERT, UPDATE, DELETE ON deviludo.pending_object_uploads TO deviludo_claim_executor;
 GRANT INSERT ON deviludo.project_cleanup_requests TO deviludo_api;
 GRANT SELECT, INSERT, UPDATE, DELETE ON deviludo.project_cleanup_requests TO deviludo_claim_executor;
 GRANT SELECT, INSERT, UPDATE, DELETE ON deviludo.host_admission_events TO deviludo_claim_executor;

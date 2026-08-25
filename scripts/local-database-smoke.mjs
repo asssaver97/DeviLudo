@@ -41,7 +41,7 @@ async function runDatabaseSmoke(url) {
       "workflow_instances", "workflow_events", "jobs", "external_signals",
       "job_progress_events", "implementation_change_requests", "workflow_e2e_goal_revisions",
       "operation_receipts",
-      "workspace_claim_fairness", "artifacts", "artifact_inputs", "object_cleanup_queue",
+      "workspace_claim_fairness", "artifacts", "artifact_inputs", "pending_object_uploads", "object_cleanup_queue",
       "project_cleanup_requests", "host_admission_events",
       "e2e_policy_locks", "e2e_policy_decisions", "e2e_regression_traces", "executor_receipts",
       "project_creation_receipts",
@@ -98,7 +98,7 @@ async function runDatabaseSmoke(url) {
       "complete_asset_generation", "complete_host_admission_event", "complete_local_git_commit", "complete_object_cleanup", "complete_project_cleanup",
       "enqueue_expired_artifacts", "enqueue_host_source_event",
       "fail_asset_generation", "fail_host_admission_event", "fail_local_git_commit", "fail_object_cleanup", "fail_project_cleanup",
-      "pull_host_source_events", "reconcile_host_admission_events", "recover_expired_jobs",
+      "pull_host_source_events", "reconcile_expired_uploads", "reconcile_host_admission_events", "recover_expired_jobs",
       "retain_latest_e2e_report",
       "schedule_idle_project_document_maintenance",
     ];
@@ -126,6 +126,8 @@ async function runDatabaseSmoke(url) {
     await assertFunctionPrivilege(owner, "deviludo_api", "deviludo.claim_object_cleanup(integer)", false);
     await assertFunctionPrivilege(owner, "deviludo_scheduler", "deviludo.enqueue_expired_artifacts(integer,integer)", true);
     await assertFunctionPrivilege(owner, "deviludo_api", "deviludo.enqueue_expired_artifacts(integer,integer)", false);
+    await assertFunctionPrivilege(owner, "deviludo_scheduler", "deviludo.reconcile_expired_uploads(integer)", true);
+    await assertFunctionPrivilege(owner, "deviludo_api", "deviludo.reconcile_expired_uploads(integer)", false);
     await assertFunctionPrivilege(owner, "deviludo_scheduler", "deviludo.reconcile_host_admission_events()", true);
     await assertFunctionPrivilege(owner, "deviludo_api", "deviludo.reconcile_host_admission_events()", false);
     await assertFunctionPrivilege(owner, "deviludo_scheduler", "deviludo.claim_host_admission_event(integer)", true);
@@ -585,12 +587,50 @@ async function runDatabaseSmoke(url) {
       throw new Error("Human release approval did not enqueue exactly one Steam publish");
     }
 
+    const failedUploadKey = `workspaces/${workspaceIds[0]}/projects/${projectIds[0]}/jobs/${jobIds[0]}/failed-upload.json`;
+    await owner.query(
+      "UPDATE deviludo.jobs SET state = 'FAILED', updated_at = clock_timestamp() WHERE workspace_id = $1::uuid AND id = $2::uuid",
+      [workspaceIds[0], jobIds[0]],
+    );
+    await withWorkspace(sandbox, workspaceIds[0], client => client.query(
+      `INSERT INTO deviludo.pending_object_uploads(
+         workspace_id, job_id, bucket, object_key, kind, sha256, size_bytes, cleanup_after
+       ) VALUES(
+         $1::uuid, $2::uuid, 'deviludo-artifacts', $3, 'PROJECT_DOCUMENT', $4,
+         128, clock_timestamp() - interval '1 minute'
+       )`,
+      [workspaceIds[0], jobIds[0], failedUploadKey, `sha256:${"8".repeat(64)}`],
+    ));
+    const failedUploads = await scheduler.query(
+      "SELECT deviludo.reconcile_expired_uploads(25) AS enqueued",
+    );
+    if (Number(failedUploads.rows[0]?.enqueued) !== 1) {
+      throw new Error("Failed authorized upload was not reconciled");
+    }
+    const pendingAfterReconcile = await owner.query(
+      "SELECT 1 FROM deviludo.pending_object_uploads WHERE workspace_id = $1::uuid AND object_key = $2",
+      [workspaceIds[0], failedUploadKey],
+    );
+    const queuedFailedUpload = await owner.query(
+      "SELECT 1 FROM deviludo.object_cleanup_queue WHERE workspace_id = $1::uuid AND object_key = $2",
+      [workspaceIds[0], failedUploadKey],
+    );
+    if (pendingAfterReconcile.rowCount || queuedFailedUpload.rowCount !== 1) {
+      throw new Error("Failed upload cleanup was not durably queued");
+    }
+
     const expiredArtifactId=randomUUID();
-    const expiredArtifactKey=`workspaces/${workspaceIds[0]}/projects/${projectIds[0]}/jobs/retention-smoke/build.zip`;
+    const expiredArtifactKey=`workspaces/${workspaceIds[0]}/projects/${projectIds[0]}/jobs/${jobIds[0]}/retention-smoke-build.zip`;
+    await withWorkspace(sandbox,workspaceIds[0],client=>client.query(`INSERT INTO deviludo.pending_object_uploads(
+      workspace_id,job_id,bucket,object_key,kind,sha256,size_bytes,cleanup_after
+    ) VALUES($1::uuid,$2::uuid,'deviludo-artifacts',$3,'BUILD',$4,512,clock_timestamp()+interval '1 day')`,
+    [workspaceIds[0],jobIds[0],expiredArtifactKey,`sha256:${"9".repeat(64)}`]));
     await withWorkspace(sandbox,workspaceIds[0],client=>client.query(`INSERT INTO deviludo.artifacts(
       workspace_id,id,project_id,workflow_id,kind,bucket,object_key,sha256,size_bytes,created_at
     ) VALUES($1::uuid,$2::uuid,$3::uuid,$4::uuid,'BUILD','deviludo-artifacts',$5,$6,512,clock_timestamp()-interval '40 days')`,
     [workspaceIds[0],expiredArtifactId,projectIds[0],workflowIds[0],expiredArtifactKey,`sha256:${"9".repeat(64)}`]));
+    const completedUploadPending=await owner.query("SELECT 1 FROM deviludo.pending_object_uploads WHERE workspace_id=$1::uuid AND object_key=$2",[workspaceIds[0],expiredArtifactKey]);
+    if(completedUploadPending.rowCount)throw new Error("Completed artifact retained its pending upload record");
     const retention=await scheduler.query("SELECT deviludo.enqueue_expired_artifacts(30,25) AS enqueued");
     if(Number(retention.rows[0]?.enqueued)<1)throw new Error("Expired downloadable artifact was not queued for deletion");
     const deleting=await owner.query("SELECT state FROM deviludo.artifacts WHERE workspace_id=$1::uuid AND id=$2::uuid",[workspaceIds[0],expiredArtifactId]);
@@ -610,6 +650,7 @@ async function runDatabaseSmoke(url) {
       repeatedClaimRejected: true,
       expiredLeaseRecovered: true,
       hostAdmissionOutbox: true,
+      failedUploadLifecycle: true,
       artifactRetentionLifecycle: true,
       assetReadinessGate: true,
       assetRerunContinuation: true,

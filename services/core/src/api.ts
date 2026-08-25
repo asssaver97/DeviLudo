@@ -1650,12 +1650,14 @@ export async function runApi(
     const nodeId = await authorizeE2e(request, config, repository);
     const body = objectBody(request.body);
     const job = await repository.loadLeasedJob(jobIdentity(request.params.jobId, body), nodeId ? `e2e:${nodeId}` : undefined);
-    return reply.send(await objectStore.authorizeOutput(job, {
+    const authorization = await objectStore.authorizeOutput(job, {
       kind: String(body.kind ?? ""),
       sha256: String(body.sha256 ?? ""),
       sizeBytes: Number(body.sizeBytes),
       targetPlatform: job.targetOperatingSystem,
-    }));
+    });
+    await repository.recordPendingOutput(job, authorization.object);
+    return reply.send(authorization);
   });
 
   app.post<{ Params: { jobId: string } }>("/v1/e2e/jobs/:jobId/outputs/complete", async (request, reply) => {

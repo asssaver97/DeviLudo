@@ -173,6 +173,28 @@ test("managed artifact retention records lifecycle state and queues only disposa
   }
 });
 
+test("authorized uploads are durably reconciled after terminal jobs", async () => {
+  const sql = await readFile(sqlUrl, "utf8");
+  const migration = await readFile(
+    new URL("../infra/postgres/migrations/066_pending_upload_cleanup.sql", import.meta.url),
+    "utf8",
+  );
+  for (const source of [sql, migration]) {
+    assert.match(source, /CREATE TABLE deviludo\.pending_object_uploads/);
+    if (source === migration) {
+      assert.match(source, /ALTER TABLE deviludo\.pending_object_uploads FORCE ROW LEVEL SECURITY/);
+    } else {
+      assert.match(source, /'pending_object_uploads'/);
+    }
+    assert.match(source, /artifacts_clear_pending_upload[\s\S]*AFTER INSERT ON deviludo\.artifacts/);
+    assert.match(source, /DELETE FROM deviludo\.pending_object_uploads[\s\S]*NEW\.object_key/);
+    assert.match(source, /reconcile_expired_uploads\([\s\S]*job\.state IN \('SUCCEEDED', 'FAILED', 'CANCELLED'\)/);
+    assert.match(source, /NOT EXISTS \([\s\S]*FROM deviludo\.artifacts artifact/);
+    assert.match(source, /authorized upload did not become an artifact/);
+    assert.match(source, /REVOKE ALL ON FUNCTION deviludo\.reconcile_expired_uploads\(integer\) FROM PUBLIC/);
+  }
+});
+
 test("Agent reruns select only the latest historical draft specification", async () => {
   const migration = await readFile(
     new URL("../infra/postgres/migrations/057_latest_agent_specification_input.sql", import.meta.url),

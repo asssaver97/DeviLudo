@@ -41,6 +41,9 @@ export async function runScheduler(
       );
       const expiredAuthRecordsRemoved = await repository.cleanupExpiredAuthState();
       const localGitCommit = await runLocalGitCommit(repository, config, signal);
+      const expiredUploadsEnqueued = hostServices?.mode === "managed"
+        ? await repository.reconcileExpiredUploads()
+        : 0;
       const expiredArtifactsEnqueued = hostServices?.mode === "managed" && config.artifactRetentionDays > 0
         ? await repository.enqueueExpiredArtifacts(config.artifactRetentionDays)
         : 0;
@@ -66,6 +69,7 @@ export async function runScheduler(
         recovered,
         projectDocumentsScheduled,
         expiredAuthRecordsRemoved,
+        expiredUploadsEnqueued,
         expiredArtifactsEnqueued,
         ...(localGitCommit ? { localGitCommit } : {}),
         ...(objectCleanup ? { objectCleanup } : {}),
