@@ -255,6 +255,18 @@ export async function runApi(
     },
   );
 
+  app.get<{ Params: { workspaceId: string } }>(
+    "/v1/host/workspaces/:workspaceId/projects",
+    async (request, reply) => {
+      await host.internal.authorize(request, "projects.read");
+      if (!UUID.test(request.params.workspaceId)) {
+        return reply.code(404).send({ code: "WORKSPACE_NOT_FOUND" });
+      }
+      const projects = await repository.listProjects(request.params.workspaceId);
+      return reply.header("cache-control", "no-store").send({ projects });
+    },
+  );
+
   app.delete<{ Params: { workspaceId: string; projectId: string } }>(
     "/v1/host/workspaces/:workspaceId/projects/:projectId",
     async (request, reply) => {
