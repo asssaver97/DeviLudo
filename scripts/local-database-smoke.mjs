@@ -42,6 +42,7 @@ async function runDatabaseSmoke(url) {
       "job_progress_events", "implementation_change_requests", "workflow_e2e_goal_revisions",
       "operation_receipts",
       "workspace_claim_fairness", "artifacts", "artifact_inputs", "object_cleanup_queue",
+      "project_cleanup_requests", "host_admission_events",
       "e2e_policy_locks", "e2e_policy_decisions", "e2e_regression_traces", "executor_receipts",
       "project_creation_receipts",
     ];
@@ -92,11 +93,12 @@ async function runDatabaseSmoke(url) {
     `);
     const artifactOwner = artifactOwnerResult.rows[0]?.owner;
     const expectedDefiners = [
-      "advance_asset_workflows", "claim_asset_generation", "claim_job",
-      "claim_local_git_commit", "claim_object_cleanup", "claim_project_import_analysis", "cleanup_expired_executor_state",
-      "complete_asset_generation", "complete_local_git_commit", "complete_object_cleanup",
-      "fail_asset_generation", "fail_local_git_commit", "fail_object_cleanup",
-      "recover_expired_jobs",
+      "acknowledge_host_source_events", "advance_asset_workflows", "claim_asset_generation", "claim_host_admission_event", "claim_job",
+      "claim_local_git_commit", "claim_object_cleanup", "claim_project_cleanup", "claim_project_import_analysis", "cleanup_expired_executor_state",
+      "complete_asset_generation", "complete_host_admission_event", "complete_local_git_commit", "complete_object_cleanup", "complete_project_cleanup",
+      "enqueue_host_source_event",
+      "fail_asset_generation", "fail_host_admission_event", "fail_local_git_commit", "fail_object_cleanup", "fail_project_cleanup",
+      "pull_host_source_events", "reconcile_host_admission_events", "recover_expired_jobs",
       "retain_latest_e2e_report",
       "schedule_idle_project_document_maintenance",
     ];
@@ -122,6 +124,10 @@ async function runDatabaseSmoke(url) {
     await assertFunctionPrivilege(owner, "deviludo_api", "deviludo.claim_local_git_commit(integer)", false);
     await assertFunctionPrivilege(owner, "deviludo_scheduler", "deviludo.claim_object_cleanup(integer)", true);
     await assertFunctionPrivilege(owner, "deviludo_api", "deviludo.claim_object_cleanup(integer)", false);
+    await assertFunctionPrivilege(owner, "deviludo_scheduler", "deviludo.reconcile_host_admission_events()", true);
+    await assertFunctionPrivilege(owner, "deviludo_api", "deviludo.reconcile_host_admission_events()", false);
+    await assertFunctionPrivilege(owner, "deviludo_scheduler", "deviludo.claim_host_admission_event(integer)", true);
+    await assertFunctionPrivilege(owner, "deviludo_api", "deviludo.claim_host_admission_event(integer)", false);
     await scheduler.query("SELECT deviludo.reconcile_p0_capacity()");
 
     await owner.query(
@@ -278,6 +284,13 @@ async function runDatabaseSmoke(url) {
     // and the same scheduler sweep advances it exactly once after upload.
     await owner.query(`UPDATE deviludo.jobs
        SET state = 'SUCCEEDED',
+           payload = jsonb_set(
+             jsonb_set(
+               jsonb_set(payload, '{hostAdmissionReservationId}', to_jsonb($3::text), true),
+               '{hostAdmissionReservedUnits}', to_jsonb(1800), true
+             ),
+             '{hostAdmissionStartedAt}', to_jsonb((clock_timestamp() - interval '2 seconds')::text), true
+           ),
            receipt = jsonb_build_object(
              'assetManifest', jsonb_build_object(
                'items', jsonb_build_array(
@@ -287,7 +300,34 @@ async function runDatabaseSmoke(url) {
            ),
            lease_owner = NULL, lease_token = NULL,
            lease_expires_at = NULL, heartbeat_at = NULL
-     WHERE workspace_id = $1::uuid AND id = $2::uuid`, [workspaceIds[0], jobIds[0]]);
+     WHERE workspace_id = $1::uuid AND id = $2::uuid`, [workspaceIds[0], jobIds[0], `database-smoke:${jobIds[0]}`]);
+    const admissionReconciled = await scheduler.query(
+      "SELECT deviludo.reconcile_host_admission_events()::integer AS inserted",
+    );
+    const admissionReplayed = await scheduler.query(
+      "SELECT deviludo.reconcile_host_admission_events()::integer AS inserted",
+    );
+    if (admissionReconciled.rows[0]?.inserted !== 1 || admissionReplayed.rows[0]?.inserted !== 0) {
+      throw new Error("Host admission reconciliation is not durable and idempotent");
+    }
+    const admissionClaim = await scheduler.query(`
+      SELECT "workspaceId"::text, "eventId"::text, "reservationId", action,
+             "actualUnits", "leaseToken"::text, attempt
+        FROM deviludo.claim_host_admission_event(60)
+    `);
+    if (admissionClaim.rows[0]?.workspaceId !== workspaceIds[0]
+      || admissionClaim.rows[0]?.reservationId !== `database-smoke:${jobIds[0]}`
+      || admissionClaim.rows[0]?.action !== "SETTLE"
+      || admissionClaim.rows[0]?.actualUnits < 1) {
+      throw new Error("Host admission settlement event was not leased correctly");
+    }
+    const admissionCompleted = await scheduler.query(
+      "SELECT deviludo.complete_host_admission_event($1::uuid, $2::uuid, $3::uuid) AS completed",
+      [workspaceIds[0], admissionClaim.rows[0].eventId, admissionClaim.rows[0].leaseToken],
+    );
+    if (admissionCompleted.rows[0]?.completed !== true) {
+      throw new Error("Host admission settlement event was not completed");
+    }
     await owner.query(`UPDATE deviludo.workflow_instances SET state = 'ASSET_GENERATING'
        WHERE workspace_id = $1::uuid AND id = $2::uuid`, [workspaceIds[0], workflowIds[0]]);
     await owner.query(`
@@ -552,6 +592,7 @@ async function runDatabaseSmoke(url) {
       concurrentClaims: claims.length,
       repeatedClaimRejected: true,
       expiredLeaseRecovered: true,
+      hostAdmissionOutbox: true,
       assetReadinessGate: true,
       assetRerunContinuation: true,
       releasePendingStageRerun: true,

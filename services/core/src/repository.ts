@@ -3289,6 +3289,35 @@ export class CoreRepository {
     return this.database.withWorkspace(identity.workspaceId, async client => this.readClaimedJob(client, identity, expectedLeaseOwner));
   }
 
+  async attachHostAdmission(job: JobProtocolV4, reservationId: string, reservedUnits: number): Promise<boolean> {
+    if (reservationId.length < 1 || reservationId.length > 2_000 || /[\r\n\0]/.test(reservationId)) {
+      throw new Error("Host admission reservation is invalid");
+    }
+    if (!Number.isSafeInteger(reservedUnits) || reservedUnits < 1 || reservedUnits > 86_400) {
+      throw new Error("Host admission reserved units are invalid");
+    }
+    return this.database.withWorkspace(job.workspaceId, async client => {
+      const result = await client.query(
+        `UPDATE deviludo.jobs
+            SET payload = CASE
+                  WHEN payload ? 'hostAdmissionReservationId' THEN payload
+                  ELSE jsonb_set(
+                    jsonb_set(
+                      jsonb_set(payload, '{hostAdmissionReservationId}', to_jsonb($4::text), true),
+                      '{hostAdmissionReservedUnits}', to_jsonb($5::integer), true
+                    ),
+                    '{hostAdmissionStartedAt}', to_jsonb(clock_timestamp()::text), true
+                  )
+                END,
+                updated_at = clock_timestamp()
+          WHERE id=$1::uuid AND state='RUNNING' AND lease_token=$2::uuid AND fencing_token=$3::bigint
+            AND (NOT payload ? 'hostAdmissionReservationId' OR payload->>'hostAdmissionReservationId'=$4::text)`,
+        [job.jobId, job.lease.token, job.lease.fencingToken, reservationId, reservedUnits],
+      );
+      return result.rowCount === 1;
+    });
+  }
+
   async heartbeat(job: JobProtocolV4): Promise<boolean> {
     return this.database.withWorkspace(job.workspaceId, async client => {
       const result = await client.query(
@@ -3488,6 +3517,42 @@ export class CoreRepository {
     const result = await this.database.pool.query<{ failed: boolean }>(
       "SELECT deviludo.fail_project_cleanup($1::uuid, $2::uuid, $3::uuid, $4::text) AS failed",
       [input.workspaceId, input.projectId, input.leaseToken, error.slice(0, 2_000)],
+    );
+    return result.rows[0]?.failed === true;
+  }
+
+  async reconcileHostAdmissionEvents(): Promise<number> {
+    const result = await this.database.pool.query<{ inserted: string }>(
+      "SELECT deviludo.reconcile_host_admission_events()::text AS inserted",
+    );
+    return Number(result.rows[0]?.inserted ?? 0);
+  }
+
+  async claimHostAdmissionEvent(leaseSeconds: number): Promise<PendingHostAdmissionEvent | null> {
+    if (!Number.isSafeInteger(leaseSeconds) || leaseSeconds < 30 || leaseSeconds > 600) {
+      throw new Error("Host admission event lease is invalid");
+    }
+    const result = await this.database.pool.query<PendingHostAdmissionEventRow>(
+      `SELECT "workspaceId"::text, "eventId"::text, "reservationId", action,
+              "actualUnits", "leaseToken"::text, attempt
+         FROM deviludo.claim_host_admission_event($1::integer)`,
+      [leaseSeconds],
+    );
+    return result.rows[0] ? Object.freeze(result.rows[0]) : null;
+  }
+
+  async completeHostAdmissionEvent(input: PendingHostAdmissionEvent): Promise<boolean> {
+    const result = await this.database.pool.query<{ completed: boolean }>(
+      "SELECT deviludo.complete_host_admission_event($1::uuid, $2::uuid, $3::uuid) AS completed",
+      [input.workspaceId, input.eventId, input.leaseToken],
+    );
+    return result.rows[0]?.completed === true;
+  }
+
+  async failHostAdmissionEvent(input: PendingHostAdmissionEvent, error: string): Promise<boolean> {
+    const result = await this.database.pool.query<{ failed: boolean }>(
+      "SELECT deviludo.fail_host_admission_event($1::uuid, $2::uuid, $3::uuid, $4::text) AS failed",
+      [input.workspaceId, input.eventId, input.leaseToken, error.slice(0, 2_000)],
     );
     return result.rows[0]?.failed === true;
   }
@@ -3881,6 +3946,16 @@ type PendingProjectCleanupRow = {
   attempt: number;
 };
 export type PendingProjectCleanup = Readonly<PendingProjectCleanupRow>;
+type PendingHostAdmissionEventRow = {
+  workspaceId: string;
+  eventId: string;
+  reservationId: string;
+  action: "SETTLE" | "CANCEL";
+  actualUnits: number | null;
+  leaseToken: string;
+  attempt: number;
+};
+export type PendingHostAdmissionEvent = Readonly<PendingHostAdmissionEventRow>;
 type AgentSettingsRow = {
   agent_runtime: string;
   base_url: string;

@@ -17,7 +17,8 @@ test("the fresh baseline fixes pool kinds and contains the durable workflow prim
     "workflow_events", "jobs", "external_signals", "job_progress_events",
     "implementation_change_requests", "workflow_e2e_goal_revisions", "operation_receipts",
     "project_source_revisions",
-    "artifacts", "artifact_inputs", "object_cleanup_queue", "executor_receipts",
+    "artifacts", "artifact_inputs", "object_cleanup_queue", "project_cleanup_requests",
+    "host_admission_events", "executor_receipts",
     "asset_manifests", "asset_items", "e2e_test_plans",
   ]) {
     assert.match(sql, new RegExp(`CREATE TABLE deviludo\\.${table}\\s*\\(`));
@@ -35,7 +36,8 @@ test("every workspace-owned table fails closed with forced row isolation", async
     "jobs", "external_signals", "job_progress_events", "implementation_change_requests",
     "workflow_e2e_goal_revisions",
     "operation_receipts", "workspace_claim_fairness",
-    "artifacts", "artifact_inputs", "object_cleanup_queue", "e2e_policy_locks", "e2e_policy_decisions", "e2e_test_plans", "e2e_regression_traces",
+    "artifacts", "artifact_inputs", "object_cleanup_queue", "project_cleanup_requests",
+    "host_admission_events", "e2e_policy_locks", "e2e_policy_decisions", "e2e_test_plans", "e2e_regression_traces",
     "executor_receipts", "project_creation_receipts",
     "asset_manifests", "asset_items",
   ]) {
@@ -138,6 +140,25 @@ test("every workspace-owned table fails closed with forced row isolation", async
   assert.match(sql, /artifact\.workflow_id = NEW\.workflow_id[\s\S]*artifact\.target_platform IS NOT DISTINCT FROM NEW\.target_platform/);
   assert.match(sql, /source IN \('PROJECT_CREATED', 'PROJECT_IMPORTED', 'USER_EDIT', 'AGENT_CONVERSATION', 'AGENT_IDLE_MAINTENANCE'\)/);
   assert.doesNotMatch(sql, /api_key\s+text/i);
+});
+
+test("managed admission settlement is a leased idempotent database outbox", async () => {
+  const sql = await readFile(sqlUrl, "utf8");
+  const migration = await readFile(
+    new URL("../infra/postgres/migrations/064_host_admission_outbox.sql", import.meta.url),
+    "utf8",
+  );
+  for (const source of [sql, migration]) {
+    assert.match(source, /CREATE TABLE deviludo\.host_admission_events/);
+    assert.match(source, /UNIQUE \(workspace_id, reservation_id\)/);
+    assert.match(source, /job\.state IN \('SUCCEEDED', 'FAILED', 'CANCELLED'\)/);
+    assert.match(source, /ON CONFLICT \(workspace_id, reservation_id\) DO NOTHING/);
+    assert.match(source, /hostAdmissionReservedUnits/);
+    assert.match(source, /BETWEEN 1 AND 86400/);
+    assert.match(source, /FOR UPDATE SKIP LOCKED/);
+    assert.match(source, /event\.state = 'RUNNING' AND event\.lease_expires_at <= clock_timestamp\(\)/);
+    assert.match(source, /REVOKE ALL ON FUNCTION deviludo\.claim_host_admission_event\(integer\) FROM PUBLIC/);
+  }
 });
 
 test("Agent reruns select only the latest historical draft specification", async () => {

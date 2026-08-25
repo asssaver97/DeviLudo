@@ -43,6 +43,12 @@ export async function runScheduler(
       const localGitCommit = await runLocalGitCommit(repository, config, signal);
       const objectCleanup = objectStore ? await runObjectCleanup(repository, objectStore) : null;
       const projectCleanup = await runProjectCleanup(repository, objectStore, projectSources);
+      const hostAdmissionEventsCreated = hostServices?.mode === "managed"
+        ? await repository.reconcileHostAdmissionEvents()
+        : 0;
+      const hostAdmission = hostServices?.mode === "managed"
+        ? await runHostAdmissionEvent(repository, hostServices)
+        : null;
       // Provider calls run less often than the sub-second recovery tick. The
       // durable asset gate is checked on every tick, however, so the last image or
       // a user's explicit "use placeholders" choice advances immediately.
@@ -60,6 +66,8 @@ export async function runScheduler(
         ...(localGitCommit ? { localGitCommit } : {}),
         ...(objectCleanup ? { objectCleanup } : {}),
         ...(projectCleanup ? { projectCleanup } : {}),
+        hostAdmissionEventsCreated,
+        ...(hostAdmission ? { hostAdmission } : {}),
         ...(assets ? {
           assetsClaimed: assets.claimed,
           assetsGenerated: assets.generated,
@@ -76,6 +84,32 @@ export async function runScheduler(
       }));
     }
     await delay(config.pollMilliseconds, signal);
+  }
+}
+
+async function runHostAdmissionEvent(repository: CoreRepository, hostServices: CoreHostServices) {
+  const event = await repository.claimHostAdmissionEvent(120);
+  if (!event) return null;
+  try {
+    if (event.action === "SETTLE") {
+      if (!Number.isSafeInteger(event.actualUnits) || (event.actualUnits ?? 0) < 1) {
+        throw new Error("Host admission settlement units are invalid");
+      }
+      await hostServices.admission.settle({
+        reservationId: event.reservationId,
+        actualUnits: event.actualUnits as number,
+      });
+    } else {
+      await hostServices.admission.cancel({ reservationId: event.reservationId });
+    }
+    if (!await repository.completeHostAdmissionEvent(event)) {
+      throw new Error("Host admission event completion lease was rejected");
+    }
+    return Object.freeze({ eventId: event.eventId, action: event.action, outcome: "SUCCEEDED", attempt: event.attempt });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    await repository.failHostAdmissionEvent(event, message).catch(() => undefined);
+    return Object.freeze({ eventId: event.eventId, action: event.action, outcome: "FAILED", attempt: event.attempt, error: message });
   }
 }
 

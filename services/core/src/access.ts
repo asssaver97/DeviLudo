@@ -59,6 +59,7 @@ export interface CoreHostServices {
       operation: CoreAdmissionOperation;
       operationId: string;
       estimatedUnits: number;
+      resource: "linux" | "windows" | "macos" | null;
     }>): Promise<CoreAdmission>;
     settle(input: Readonly<{ reservationId: string; actualUnits: number }>): Promise<void>;
     cancel(input: Readonly<{ reservationId: string }>): Promise<void>;

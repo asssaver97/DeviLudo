@@ -155,6 +155,7 @@ export async function runSandbox(
       let progressWrites = Promise.resolve();
       try {
         if (hostServices) {
+          const estimatedUnits = admissionEstimatedUnits(job);
           const actorId = typeof job.payload.requestedByActorId === "string"
             ? job.payload.requestedByActorId
             : "00000000-0000-4000-8000-000000000000";
@@ -167,9 +168,18 @@ export async function runSandbox(
             }),
             operation: admissionOperation(job.jobKind),
             operationId: `${job.workflowId}:${job.jobId}`,
-            estimatedUnits: job.timeoutSeconds,
+            estimatedUnits,
+            resource: job.targetOperatingSystem,
           });
           admissionReservationId = admission.reservationId;
+          if (admissionReservationId) {
+            const attached = await repository.attachHostAdmission(job, admissionReservationId, estimatedUnits);
+            if (!attached) throw new Error("Host admission reservation attachment was rejected by fencing");
+            // Terminal job state is reconciled to the durable host-admission
+            // outbox by the scheduler. From this point the process must not
+            // settle or cancel directly, even if it crashes or loses its lease.
+            admissionReservationId = null;
+          }
         }
         if (job.jobKind === "AGENT_GENERATION") {
           const discarded = await discardOrphanedAgentSource(repository, projectSources, job);
@@ -215,15 +225,6 @@ export async function runSandbox(
           executorReceipt: receipt,
         });
         if (!completed) throw new Error("Sandbox completion was rejected by fencing");
-        if (hostServices && admissionReservationId) {
-          const startedAt = Date.parse(receipt.startedAt);
-          const finishedAt = Date.parse(receipt.finishedAt);
-          const actualUnits = Number.isFinite(startedAt) && Number.isFinite(finishedAt)
-            ? Math.max(1, Math.ceil((finishedAt - startedAt) / 1_000))
-            : job.timeoutSeconds;
-          await hostServices.admission.settle({ reservationId: admissionReservationId, actualUnits });
-          admissionReservationId = null;
-        }
         if (job.jobKind === "AGENT_GENERATION") {
           await projectSources.deleteCheckpoint(job.workspaceId, job.projectId, job.workflowId).catch(error => {
             console.error(JSON.stringify({
@@ -249,6 +250,9 @@ export async function runSandbox(
         message: error instanceof Error ? error.message : String(error),
       }));
       if (job) {
+        // A reservation that was created but could not be durably attached has
+        // no database event that can clean it up. Attached reservations are
+        // deliberately left to the scheduler outbox.
         if (hostServices && admissionReservationId) {
           await hostServices.admission.cancel({ reservationId: admissionReservationId }).catch(() => undefined);
           admissionReservationId = null;
@@ -277,6 +281,12 @@ function admissionOperation(jobKind:JobProtocolV4["jobKind"]):"AGENT"|"SANDBOX"|
   if(jobKind==="STEAM_PUBLISH")return"STEAM_PUBLISH";
   if(jobKind==="E2E_TEST")return"E2E";
   return"SANDBOX";
+}
+
+function admissionEstimatedUnits(job: JobProtocolV4): number {
+  return job.jobKind === "AGENT_GENERATION" && job.timeoutSeconds < 5_400
+    ? 5_400
+    : job.timeoutSeconds;
 }
 
 async function discardOrphanedAgentSource(

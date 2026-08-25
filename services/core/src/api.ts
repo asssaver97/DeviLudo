@@ -1532,6 +1532,41 @@ export async function runApi(
       poolKind: body.poolKind,
       leaseSeconds: 60,
     });
+    if (job && host.mode === "managed") {
+      let unattachedReservationId: string | null = null;
+      try {
+        const requestedActorId = job.payload.requestedByActorId;
+        const actorId = typeof requestedActorId === "string" && UUID.test(requestedActorId)
+          ? requestedActorId
+          : "00000000-0000-4000-8000-000000000000";
+        const admission = await host.admission.reserve({
+          principal: Object.freeze({
+            actorId,
+            actorLabel: "Workflow actor",
+            workspace: Object.freeze({ id: job.workspaceId, name: "Managed workspace", createdAt: "" }),
+            capabilities: Object.freeze([]),
+          }),
+          operation: "E2E",
+          operationId: `${job.workflowId}:${job.jobId}`,
+          estimatedUnits: job.timeoutSeconds,
+          resource: job.targetOperatingSystem,
+        });
+        unattachedReservationId = admission.reservationId;
+        if (unattachedReservationId) {
+          if (!await repository.attachHostAdmission(job, unattachedReservationId, job.timeoutSeconds)) {
+            throw new Error("Host admission reservation attachment was rejected by fencing");
+          }
+          unattachedReservationId = null;
+        }
+      } catch (error) {
+        if (unattachedReservationId) {
+          await host.admission.cancel({ reservationId: unattachedReservationId }).catch(() => undefined);
+        }
+        await repository.fail(job, `HOST_ADMISSION: ${error instanceof Error ? error.message : String(error)}`)
+          .catch(() => undefined);
+        throw error;
+      }
+    }
     return reply.send({ job });
   });
 
