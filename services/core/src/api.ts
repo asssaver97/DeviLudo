@@ -1586,6 +1586,46 @@ export async function runApi(
     }));
   });
 
+  app.post<{ Params: { jobId: string } }>("/v1/e2e/jobs/:jobId/outputs/complete", async (request, reply) => {
+    const nodeId = await authorizeE2e(request, config, repository);
+    const body = objectBody(request.body);
+    const job = await repository.loadLeasedJob(jobIdentity(request.params.jobId, body), nodeId ? `e2e:${nodeId}` : undefined);
+    if (typeof body.uploadId !== "string" || !Array.isArray(body.parts)) {
+      return reply.code(400).send({ code: "INVALID_MULTIPART_OUTPUT" });
+    }
+    const parts = body.parts.map(value => {
+      if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+      const part = value as Record<string, unknown>;
+      return typeof part.etag === "string" && Number.isSafeInteger(Number(part.partNumber))
+        ? Object.freeze({ partNumber: Number(part.partNumber), etag: part.etag }) : null;
+    });
+    if (parts.some(part => !part)) return reply.code(400).send({ code: "INVALID_MULTIPART_OUTPUT" });
+    await objectStore.completeMultipartOutput(job, {
+      kind: String(body.kind ?? ""),
+      sha256: String(body.sha256 ?? ""),
+      sizeBytes: Number(body.sizeBytes),
+      targetPlatform: job.targetOperatingSystem,
+      uploadId: body.uploadId,
+      parts: parts as readonly Readonly<{ partNumber: number; etag: string }>[],
+    });
+    return reply.send({ completed: true });
+  });
+
+  app.post<{ Params: { jobId: string } }>("/v1/e2e/jobs/:jobId/outputs/abort", async (request, reply) => {
+    const nodeId = await authorizeE2e(request, config, repository);
+    const body = objectBody(request.body);
+    const job = await repository.loadLeasedJob(jobIdentity(request.params.jobId, body), nodeId ? `e2e:${nodeId}` : undefined);
+    if (typeof body.uploadId !== "string") return reply.code(400).send({ code: "INVALID_MULTIPART_OUTPUT" });
+    await objectStore.abortMultipartOutput(job, {
+      kind: String(body.kind ?? ""),
+      sha256: String(body.sha256 ?? ""),
+      sizeBytes: Number(body.sizeBytes),
+      targetPlatform: job.targetOperatingSystem,
+      uploadId: body.uploadId,
+    });
+    return reply.send({ aborted: true });
+  });
+
   app.post<{ Params: { jobId: string } }>("/v1/e2e/jobs/:jobId/player-policy/verify", async (request, reply) => {
     const nodeId = await authorizeE2e(request, config, repository);
     const body = objectBody(request.body);

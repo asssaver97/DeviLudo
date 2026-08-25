@@ -2,6 +2,8 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import {
   isValidOutputAuthorizationInput,
+  MULTIPART_OUTPUT_PART_BYTES,
+  MULTIPART_OUTPUT_THRESHOLD_BYTES,
   newProjectAssetObjectKey,
   outputUploadRequiredHeaders,
 } from "@/services/core/src/object-store";
@@ -14,6 +16,13 @@ test("E2E report artifact kinds are accepted by the output authorization contrac
     sha256: digest,
     sizeBytes: 1_024,
   }, 1_048_576), true);
+});
+
+test("large outputs use S3-compatible bounded multipart sizing", () => {
+  assert.equal(MULTIPART_OUTPUT_THRESHOLD_BYTES, 64 * 1024 * 1024);
+  assert.equal(MULTIPART_OUTPUT_PART_BYTES, 16 * 1024 * 1024);
+  assert.ok(MULTIPART_OUTPUT_PART_BYTES >= 5 * 1024 * 1024);
+  assert.ok(Math.ceil(2_147_483_648 / MULTIPART_OUTPUT_PART_BYTES) < 10_000);
 });
 
 test("output authorization rejects malformed artifact metadata", () => {

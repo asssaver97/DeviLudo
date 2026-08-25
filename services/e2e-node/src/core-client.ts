@@ -5,6 +5,22 @@ import type { JobCompletion, JobProtocolV4 } from "@/services/core/src/contracts
 import type { E2eNodeConfig } from "./config";
 import type { E2eInfrastructureFailure } from "@/lib/runtime/e2e-failure";
 
+export type OutputUploadAuthorization = Readonly<{
+  expiresAt: string;
+  object: JobProtocolV4["inputObjects"][number];
+  requiredHeaders: Readonly<Record<string, string>>;
+}> & (Readonly<{
+  uploadMode: "single";
+  uploadUrl: string;
+}> | Readonly<{
+  uploadMode: "multipart";
+  multipart: Readonly<{
+    uploadId: string;
+    partSizeBytes: number;
+    parts: readonly Readonly<{ partNumber: number; uploadUrl: string }>[];
+  }>;
+}>);
+
 export class CoreE2eClient {
   private constructor(
     private readonly config: E2eNodeConfig,
@@ -57,12 +73,26 @@ export class CoreE2eClient {
   }
 
   async uploadOutput(job: JobProtocolV4, input: Readonly<{ kind: string; sha256: string; sizeBytes: number }>) {
-    return this.call<{
-      uploadUrl: string;
-      expiresAt: string;
-      object: JobProtocolV4["inputObjects"][number];
-      requiredHeaders: Readonly<Record<string, string>>;
-    }>(`/v1/e2e/jobs/${job.jobId}/outputs`, { ...identity(job, this.config.nodeId), ...input });
+    return this.call<OutputUploadAuthorization>(`/v1/e2e/jobs/${job.jobId}/outputs`, { ...identity(job, this.config.nodeId), ...input });
+  }
+
+  async completeMultipartOutput(job: JobProtocolV4, input: Readonly<{
+    kind: string;
+    sha256: string;
+    sizeBytes: number;
+    uploadId: string;
+    parts: readonly Readonly<{ partNumber: number; etag: string }>[];
+  }>): Promise<void> {
+    await this.call(`/v1/e2e/jobs/${job.jobId}/outputs/complete`, { ...identity(job, this.config.nodeId), ...input });
+  }
+
+  async abortMultipartOutput(job: JobProtocolV4, input: Readonly<{
+    kind: string;
+    sha256: string;
+    sizeBytes: number;
+    uploadId: string;
+  }>): Promise<void> {
+    await this.call(`/v1/e2e/jobs/${job.jobId}/outputs/abort`, { ...identity(job, this.config.nodeId), ...input });
   }
 
   async verifyPlayerPolicy(job: JobProtocolV4): Promise<void> {

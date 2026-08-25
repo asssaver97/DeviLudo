@@ -1,4 +1,7 @@
 import {
+  AbortMultipartUploadCommand,
+  CompleteMultipartUploadCommand,
+  CreateMultipartUploadCommand,
   DeleteObjectsCommand,
   DeleteObjectCommand,
   GetObjectCommand,
@@ -6,6 +9,7 @@ import {
   ListObjectsV2Command,
   PutObjectCommand,
   S3Client,
+  UploadPartCommand,
 } from "@aws-sdk/client-s3";
 import { getSignedUrl } from "@aws-sdk/s3-request-presigner";
 import type { JobProtocolV4, ObjectReference } from "./contracts";
@@ -25,6 +29,8 @@ export type StoredConversationImage = Readonly<{
 }>;
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+export const MULTIPART_OUTPUT_THRESHOLD_BYTES = 64 * 1024 * 1024;
+export const MULTIPART_OUTPUT_PART_BYTES = 16 * 1024 * 1024;
 
 export class CoreObjectStore {
   private readonly client: S3Client;
@@ -213,30 +219,92 @@ export class CoreObjectStore {
     sizeBytes: number;
     targetPlatform: string | null;
   }>) {
-    if (!isValidOutputAuthorizationInput(input, job.outputContract.maxBytes)) {
-      throw new Error("Output authorization contract is invalid");
+    const descriptor = outputDescriptor(this.bucket, job, input);
+    if (input.sizeBytes > MULTIPART_OUTPUT_THRESHOLD_BYTES) {
+      const created = await this.client.send(new CreateMultipartUploadCommand({
+        Bucket: this.bucket,
+        Key: descriptor.key,
+        ContentType: descriptor.contentType,
+        Metadata: { sha256: input.sha256 },
+      }));
+      if (!created.UploadId) throw new Error("Multipart output upload was not created");
+      const partCount = Math.ceil(input.sizeBytes / MULTIPART_OUTPUT_PART_BYTES);
+      const parts = await Promise.all(Array.from({ length: partCount }, async (_, index) => {
+        const partNumber = index + 1;
+        const uploadUrl = await getSignedUrl(this.publicClient, new UploadPartCommand({
+          Bucket: this.bucket,
+          Key: descriptor.key,
+          UploadId: created.UploadId,
+          PartNumber: partNumber,
+        }), { expiresIn: 900 });
+        return Object.freeze({ partNumber, uploadUrl });
+      }));
+      return Object.freeze({
+        uploadMode: "multipart" as const,
+        expiresAt: new Date(Date.now() + 900_000).toISOString(),
+        object: descriptor.object,
+        requiredHeaders: Object.freeze({}),
+        multipart: Object.freeze({ uploadId: created.UploadId, partSizeBytes: MULTIPART_OUTPUT_PART_BYTES, parts: Object.freeze(parts) }),
+      });
     }
-    if (!job.outputContract.kinds.includes(input.kind)) throw new Error("Output kind is not allowed by the leased job");
-    const extension = input.kind === "BUILD" || input.kind === "SIGNED_BUILD"
-      ? ".tar.gz"
-      : input.kind === "E2E_REPORT" ? ".zip" : ".json";
-    const platform = input.targetPlatform ? `-${input.targetPlatform}` : "";
-    const filename = `${input.kind.toLowerCase().replaceAll("_", "-")}${platform}-${input.sha256.slice(7, 23)}${extension}`;
-    const key = `workspaces/${job.workspaceId}/projects/${job.projectId}/jobs/${job.jobId}/${filename}`;
-    const contentType = outputContentType(input.kind);
     const url = await getSignedUrl(this.publicClient, new PutObjectCommand({
       Bucket: this.bucket,
-      Key: key,
+      Key: descriptor.key,
       ContentLength: input.sizeBytes,
-      ContentType: contentType,
+      ContentType: descriptor.contentType,
       Metadata: { sha256: input.sha256 },
     }), { expiresIn: 120 });
     return Object.freeze({
+      uploadMode: "single" as const,
       uploadUrl: url,
       expiresAt: new Date(Date.now() + 120_000).toISOString(),
-      object: Object.freeze({ kind: input.kind, ...(input.targetPlatform ? { targetPlatform: input.targetPlatform } : {}), bucket: this.bucket, key, sha256: input.sha256, sizeBytes: input.sizeBytes }),
-      requiredHeaders: outputUploadRequiredHeaders(input.sizeBytes, contentType),
+      object: descriptor.object,
+      requiredHeaders: outputUploadRequiredHeaders(input.sizeBytes, descriptor.contentType),
     });
+  }
+
+  async completeMultipartOutput(job: JobProtocolV4, input: Readonly<{
+    kind: string;
+    sha256: string;
+    sizeBytes: number;
+    targetPlatform: string | null;
+    uploadId: string;
+    parts: readonly Readonly<{ partNumber: number; etag: string }>[];
+  }>): Promise<void> {
+    const descriptor = outputDescriptor(this.bucket, job, input);
+    if (input.sizeBytes <= MULTIPART_OUTPUT_THRESHOLD_BYTES || !isValidUploadId(input.uploadId)) {
+      throw new Error("Multipart output completion is invalid");
+    }
+    const expectedParts = Math.ceil(input.sizeBytes / MULTIPART_OUTPUT_PART_BYTES);
+    if (input.parts.length !== expectedParts || input.parts.some((part, index) =>
+      part.partNumber !== index + 1 || !Number.isSafeInteger(part.partNumber)
+      || typeof part.etag !== "string" || part.etag.length < 1 || part.etag.length > 200 || /[\r\n\0]/.test(part.etag))) {
+      throw new Error("Multipart output parts are invalid");
+    }
+    await this.client.send(new CompleteMultipartUploadCommand({
+      Bucket: this.bucket,
+      Key: descriptor.key,
+      UploadId: input.uploadId,
+      MultipartUpload: { Parts: input.parts.map(part => ({ PartNumber: part.partNumber, ETag: part.etag })) },
+    }));
+  }
+
+  async abortMultipartOutput(job: JobProtocolV4, input: Readonly<{
+    kind: string;
+    sha256: string;
+    sizeBytes: number;
+    targetPlatform: string | null;
+    uploadId: string;
+  }>): Promise<void> {
+    const descriptor = outputDescriptor(this.bucket, job, input);
+    if (input.sizeBytes <= MULTIPART_OUTPUT_THRESHOLD_BYTES || !isValidUploadId(input.uploadId)) {
+      throw new Error("Multipart output abort is invalid");
+    }
+    await this.client.send(new AbortMultipartUploadCommand({
+      Bucket: this.bucket,
+      Key: descriptor.key,
+      UploadId: input.uploadId,
+    }));
   }
 
   async verifyOutputs(job: JobProtocolV4, objects: readonly JobProtocolV4["inputObjects"][number][]): Promise<void> {
@@ -253,8 +321,9 @@ export class CoreObjectStore {
       } catch (error) {
         throw new Error(`Executor output object is unavailable: ${object.kind ?? "UNKNOWN"}`, { cause: error });
       }
-      if (head.ContentLength !== object.sizeBytes || head.Metadata?.sha256 !== object.sha256) {
-        throw new Error("Executor output object digest or size does not match storage metadata");
+      if (head.ContentLength !== object.sizeBytes || head.Metadata?.sha256 !== object.sha256
+        || head.ContentType !== outputContentType(object.kind ?? "")) {
+        throw new Error("Executor output object digest, size, or content type does not match storage metadata");
       }
       total += object.sizeBytes;
     }
@@ -384,6 +453,33 @@ export function outputUploadRequiredHeaders(sizeBytes: number, contentType = "ap
   // The AWS presigner hoists x-amz-meta-sha256 into the signed query string.
   // Repeating it as an unsigned HTTP header makes MinIO reject the request.
   return Object.freeze({ "content-length": String(sizeBytes), "content-type": contentType });
+}
+
+function outputDescriptor(bucket: string, job: JobProtocolV4, input: Readonly<{
+  kind: string;
+  sha256: string;
+  sizeBytes: number;
+  targetPlatform: string | null;
+}>) {
+  if (!isValidOutputAuthorizationInput(input, job.outputContract.maxBytes)) {
+    throw new Error("Output authorization contract is invalid");
+  }
+  if (!job.outputContract.kinds.includes(input.kind)) throw new Error("Output kind is not allowed by the leased job");
+  const extension = input.kind === "BUILD" || input.kind === "SIGNED_BUILD"
+    ? ".tar.gz"
+    : input.kind === "E2E_REPORT" ? ".zip" : ".json";
+  const platform = input.targetPlatform ? `-${input.targetPlatform}` : "";
+  const filename = `${input.kind.toLowerCase().replaceAll("_", "-")}${platform}-${input.sha256.slice(7, 23)}${extension}`;
+  const key = `workspaces/${job.workspaceId}/projects/${job.projectId}/jobs/${job.jobId}/${filename}`;
+  return Object.freeze({
+    key,
+    contentType: outputContentType(input.kind),
+    object: Object.freeze({ kind: input.kind, ...(input.targetPlatform ? { targetPlatform: input.targetPlatform } : {}), bucket, key, sha256: input.sha256, sizeBytes: input.sizeBytes }),
+  });
+}
+
+function isValidUploadId(value: string): boolean {
+  return typeof value === "string" && value.length >= 1 && value.length <= 2_000 && !/[\r\n\0]/.test(value);
 }
 
 function outputContentType(kind: string): string {

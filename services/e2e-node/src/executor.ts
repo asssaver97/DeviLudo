@@ -109,10 +109,39 @@ export async function executeE2eJob(
   for (const output of outputs) {
     const digest = `sha256:${createHash("sha256").update(output.content).digest("hex")}`;
     const upload = await client.uploadOutput(job, { kind: output.kind, sha256: digest, sizeBytes: output.content.length });
-    const uploaded = await fetch(upload.uploadUrl, { method: "PUT", body: new Uint8Array(output.content), headers: upload.requiredHeaders, signal: AbortSignal.timeout(120_000) });
-    if (!uploaded.ok) {
-      const detail = (await uploaded.text()).replace(/\s+/g, " ").trim().slice(0, 1_000);
-      throw new Error(`Artifact upload returned ${uploaded.status}${detail ? `: ${detail}` : ""}`);
+    if (upload.uploadMode === "single") {
+      const uploaded = await fetch(upload.uploadUrl, { method: "PUT", body: new Uint8Array(output.content), headers: upload.requiredHeaders, signal: AbortSignal.timeout(120_000) });
+      if (!uploaded.ok) {
+        const detail = (await uploaded.text()).replace(/\s+/g, " ").trim().slice(0, 1_000);
+        throw new Error(`Artifact upload returned ${uploaded.status}${detail ? `: ${detail}` : ""}`);
+      }
+    } else {
+      const completion = { kind: output.kind, sha256: digest, sizeBytes: output.content.length, uploadId: upload.multipart.uploadId };
+      try {
+        const completedParts: Array<{ partNumber: number; etag: string }> = [];
+        for (let offset = 0; offset < upload.multipart.parts.length; offset += 4) {
+          const batch = await Promise.all(upload.multipart.parts.slice(offset, offset + 4).map(async part => {
+            const start = (part.partNumber - 1) * upload.multipart.partSizeBytes;
+            const end = Math.min(start + upload.multipart.partSizeBytes, output.content.length);
+            const content = output.content.subarray(start, end);
+            const response = await fetch(part.uploadUrl, {
+              method: "PUT",
+              body: new Uint8Array(content),
+              headers: { "content-length": String(content.length) },
+              signal: AbortSignal.timeout(120_000),
+            });
+            if (!response.ok) throw new Error(`Multipart artifact part ${part.partNumber} returned ${response.status}`);
+            const etag = response.headers.get("etag");
+            if (!etag) throw new Error(`Multipart artifact part ${part.partNumber} omitted ETag`);
+            return { partNumber: part.partNumber, etag };
+          }));
+          completedParts.push(...batch);
+        }
+        await client.completeMultipartOutput(job, { ...completion, parts: completedParts });
+      } catch (error) {
+        await client.abortMultipartOutput(job, completion).catch(() => undefined);
+        throw error;
+      }
     }
     outputObjects.push(Object.freeze({
       ...upload.object, kind: output.kind, targetPlatform: job.targetOperatingSystem ?? undefined,
