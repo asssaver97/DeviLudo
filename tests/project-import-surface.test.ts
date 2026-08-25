@@ -86,7 +86,8 @@ test("project deletion only removes a local directory through its server-owned b
   const workflowDelete = repository.indexOf("DELETE FROM deviludo.workflow_instances", steamReleaseDelete);
   assert.ok(steamReleaseDelete > 0 && workflowDelete > steamReleaseDelete);
   assert.match(repository, /\["steam_releases", "asset_manifests"\]/);
-  assert.ok(repository.indexOf("await beforeDelete?.()") > repository.indexOf("DELETE FROM deviludo.projects"));
+  assert.ok(repository.indexOf("INSERT INTO deviludo.project_cleanup_requests") < repository.indexOf("DELETE FROM deviludo.projects"));
+  assert.ok(repository.indexOf("await _beforeDelete?.()") > repository.indexOf("DELETE FROM deviludo.projects"));
   assert.match(bridge, /const binding = await requireBinding\(value\)/);
   assert.match(bridge, /await rename\(binding\.path, quarantine\)/);
   assert.match(bridge, /await rm\(quarantine, \{ force: false, maxRetries: 3, recursive: true/);

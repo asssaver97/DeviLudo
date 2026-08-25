@@ -23,7 +23,10 @@ test("output authorization rejects malformed artifact metadata", () => {
 });
 
 test("pre-signed output uploads do not repeat hoisted S3 metadata as unsigned headers", () => {
-  assert.deepEqual(outputUploadRequiredHeaders(1_024), { "content-length": "1024" });
+  assert.deepEqual(outputUploadRequiredHeaders(1_024), {
+    "content-length": "1024",
+    "content-type": "application/octet-stream",
+  });
 });
 
 test("project assets use unique object keys so retired objects cannot alias replacements", () => {

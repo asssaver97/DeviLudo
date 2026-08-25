@@ -262,15 +262,8 @@ export async function runApi(
       if (!UUID.test(request.params.workspaceId) || !UUID.test(request.params.projectId)) {
         return reply.code(404).send({ code: "PROJECT_NOT_FOUND" });
       }
-      const deleted = await repository.deleteProject(
-        request.params.workspaceId,
-        request.params.projectId,
-        () => Promise.all([
-          objectStore.deleteProjectObjects(request.params.workspaceId, request.params.projectId),
-          projectSources.deleteProject(request.params.workspaceId, request.params.projectId),
-        ]).then(() => undefined),
-      );
-      return deleted ? reply.code(204).send() : reply.code(404).send({ code: "PROJECT_NOT_FOUND" });
+      const deleted = await repository.deleteProject(request.params.workspaceId, request.params.projectId);
+      return deleted ? reply.code(202).send({ accepted: true }) : reply.code(404).send({ code: "PROJECT_NOT_FOUND" });
     },
   );
 
@@ -908,15 +901,9 @@ export async function runApi(
     const deleted = await repository.deleteProject(
       workspace.id,
       request.params.projectId,
-      async () => {
-        await Promise.all([
-          objectStore.deleteProjectObjects(workspace.id, request.params.projectId),
-          projectSources.deleteProject(workspace.id, request.params.projectId),
-        ]);
-        if (deleteLocalDirectory && localDirectoryBindingId) {
-          await deleteBoundProjectDirectory(config, localDirectoryBindingId);
-        }
-      },
+      deleteLocalDirectory && localDirectoryBindingId
+        ? () => deleteBoundProjectDirectory(config, localDirectoryBindingId)
+        : undefined,
     );
     return deleted
       ? reply.code(204).send()

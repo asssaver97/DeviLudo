@@ -3,20 +3,24 @@ import type { CoreHostServices } from "./access";
 import { runAssetGenerationBatch, type AssetGenerationDependencies } from "./asset-generation";
 import type { CoreConfig } from "./config";
 import { CoreObjectStore } from "./object-store";
+import { ProjectSourceStore } from "./project-sources";
 import type { CoreRepository } from "./repository";
 
 export async function runScheduler(
   repository: CoreRepository,
   config: CoreConfig,
   signal: AbortSignal,
-  _hostServices?: CoreHostServices,
+  hostServices?: CoreHostServices,
 ): Promise<void> {
-  void _hostServices;
   // Built once and shared across ticks, but only if this deployment configured an
   // object store. `ObjectStore` requires a bucket, and asset generation is the
   // scheduler's only use for one: a deployment without it should keep running the
   // rest of the tick rather than crash-loop on a bucket it does not need.
   const objectStore = configuredObjectStore();
+  if (hostServices?.mode === "managed" && !objectStore) {
+    throw new Error("Managed scheduler requires an object store");
+  }
+  const projectSources = new ProjectSourceStore(config.projectsRoot);
   const assetGeneration = objectStore ? assetGenerationDependencies(repository, objectStore) : null;
   if (!assetGeneration) {
     console.log(JSON.stringify({
@@ -38,6 +42,7 @@ export async function runScheduler(
       const expiredAuthRecordsRemoved = await repository.cleanupExpiredAuthState();
       const localGitCommit = await runLocalGitCommit(repository, config, signal);
       const objectCleanup = objectStore ? await runObjectCleanup(repository, objectStore) : null;
+      const projectCleanup = await runProjectCleanup(repository, objectStore, projectSources);
       // Provider calls run less often than the sub-second recovery tick. The
       // durable asset gate is checked on every tick, however, so the last image or
       // a user's explicit "use placeholders" choice advances immediately.
@@ -54,6 +59,7 @@ export async function runScheduler(
         expiredAuthRecordsRemoved,
         ...(localGitCommit ? { localGitCommit } : {}),
         ...(objectCleanup ? { objectCleanup } : {}),
+        ...(projectCleanup ? { projectCleanup } : {}),
         ...(assets ? {
           assetsClaimed: assets.claimed,
           assetsGenerated: assets.generated,
@@ -169,6 +175,27 @@ async function runObjectCleanup(repository: CoreRepository, objectStore: CoreObj
     const message = error instanceof Error ? error.message : String(error);
     await repository.failObjectCleanup(request, message).catch(() => undefined);
     return Object.freeze({ objectKey: request.objectKey, outcome: "FAILED", attempt: request.attempt, error: message });
+  }
+}
+
+async function runProjectCleanup(
+  repository: CoreRepository,
+  objectStore: CoreObjectStore | null,
+  projectSources: ProjectSourceStore,
+) {
+  const request = await repository.claimProjectCleanup(120);
+  if (!request) return null;
+  try {
+    await Promise.all([
+      ...(objectStore ? [objectStore.deleteProjectObjects(request.workspaceId, request.projectId)] : []),
+      projectSources.deleteProject(request.workspaceId, request.projectId),
+    ]);
+    if (!await repository.completeProjectCleanup(request)) throw new Error("Project cleanup completion lease was rejected");
+    return Object.freeze({ projectId: request.projectId, outcome: "DELETED", attempt: request.attempt });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    await repository.failProjectCleanup(request, message).catch(() => undefined);
+    return Object.freeze({ projectId: request.projectId, outcome: "FAILED", attempt: request.attempt, error: message });
   }
 }
 

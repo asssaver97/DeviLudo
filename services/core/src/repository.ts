@@ -2041,7 +2041,7 @@ export class CoreRepository {
   async deleteProject(
     workspaceId: string,
     projectId: string,
-    beforeDelete?: () => Promise<void>,
+    _beforeDelete?: () => Promise<void>,
   ): Promise<boolean> {
     return this.database.withWorkspace(workspaceId, async client => {
       const project = await client.query<{ id: string }>(
@@ -2079,6 +2079,12 @@ export class CoreRepository {
       }
 
       const params = [workspaceId, projectId];
+      await client.query(
+        `INSERT INTO deviludo.project_cleanup_requests(workspace_id, project_id)
+         VALUES ($1::uuid, $2::uuid)
+         ON CONFLICT (workspace_id, project_id) DO NOTHING`,
+        params,
+      );
       await client.query(
         `DELETE FROM deviludo.project_creation_receipts
           WHERE workspace_id = $1::uuid AND project_id = $2::uuid`,
@@ -2185,10 +2191,10 @@ export class CoreRepository {
         params,
       );
       if (deleted.rowCount !== 1) return false;
-      // Run irreversible object/source/directory cleanup only after every
-      // database foreign-key check has succeeded. A callback failure still
-      // rolls this transaction back and keeps the project record visible.
-      await beforeDelete?.();
+      // Managed object/source cleanup is durable and asynchronous. The optional
+      // callback is reserved for self-hosted external directory bindings that
+      // cannot be represented by the managed cleanup queue.
+      await _beforeDelete?.();
       return true;
     });
   }
@@ -3460,6 +3466,32 @@ export class CoreRepository {
     return result.rows[0]?.failed === true;
   }
 
+  async claimProjectCleanup(leaseSeconds: number): Promise<PendingProjectCleanup | null> {
+    if (!Number.isSafeInteger(leaseSeconds) || leaseSeconds < 30 || leaseSeconds > 600) throw new Error("Project cleanup lease is invalid");
+    const result = await this.database.pool.query<PendingProjectCleanupRow>(
+      `SELECT "workspaceId"::text, "projectId"::text, "leaseToken"::text, attempt
+         FROM deviludo.claim_project_cleanup($1::integer)`,
+      [leaseSeconds],
+    );
+    return result.rows[0] ? Object.freeze(result.rows[0]) : null;
+  }
+
+  async completeProjectCleanup(input: PendingProjectCleanup): Promise<boolean> {
+    const result = await this.database.pool.query<{ completed: boolean }>(
+      "SELECT deviludo.complete_project_cleanup($1::uuid, $2::uuid, $3::uuid) AS completed",
+      [input.workspaceId, input.projectId, input.leaseToken],
+    );
+    return result.rows[0]?.completed === true;
+  }
+
+  async failProjectCleanup(input: PendingProjectCleanup, error: string): Promise<boolean> {
+    const result = await this.database.pool.query<{ failed: boolean }>(
+      "SELECT deviludo.fail_project_cleanup($1::uuid, $2::uuid, $3::uuid, $4::text) AS failed",
+      [input.workspaceId, input.projectId, input.leaseToken, error.slice(0, 2_000)],
+    );
+    return result.rows[0]?.failed === true;
+  }
+
   async reconcileCapacity(): Promise<void> {
     await this.database.pool.query("SELECT deviludo.reconcile_p0_capacity()");
   }
@@ -3842,6 +3874,13 @@ type PendingObjectCleanupRow = {
 };
 
 export type PendingObjectCleanup = Readonly<PendingObjectCleanupRow>;
+type PendingProjectCleanupRow = {
+  workspaceId: string;
+  projectId: string;
+  leaseToken: string;
+  attempt: number;
+};
+export type PendingProjectCleanup = Readonly<PendingProjectCleanupRow>;
 type AgentSettingsRow = {
   agent_runtime: string;
   base_url: string;

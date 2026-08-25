@@ -223,17 +223,19 @@ export class CoreObjectStore {
     const platform = input.targetPlatform ? `-${input.targetPlatform}` : "";
     const filename = `${input.kind.toLowerCase().replaceAll("_", "-")}${platform}-${input.sha256.slice(7, 23)}${extension}`;
     const key = `workspaces/${job.workspaceId}/projects/${job.projectId}/jobs/${job.jobId}/${filename}`;
+    const contentType = outputContentType(input.kind);
     const url = await getSignedUrl(this.publicClient, new PutObjectCommand({
       Bucket: this.bucket,
       Key: key,
       ContentLength: input.sizeBytes,
+      ContentType: contentType,
       Metadata: { sha256: input.sha256 },
     }), { expiresIn: 120 });
     return Object.freeze({
       uploadUrl: url,
       expiresAt: new Date(Date.now() + 120_000).toISOString(),
       object: Object.freeze({ kind: input.kind, ...(input.targetPlatform ? { targetPlatform: input.targetPlatform } : {}), bucket: this.bucket, key, sha256: input.sha256, sizeBytes: input.sizeBytes }),
-      requiredHeaders: outputUploadRequiredHeaders(input.sizeBytes),
+      requiredHeaders: outputUploadRequiredHeaders(input.sizeBytes, contentType),
     });
   }
 
@@ -378,8 +380,14 @@ export function isValidOutputAuthorizationInput(
     && input.sizeBytes <= maxBytes;
 }
 
-export function outputUploadRequiredHeaders(sizeBytes: number): Readonly<Record<string, string>> {
+export function outputUploadRequiredHeaders(sizeBytes: number, contentType = "application/octet-stream"): Readonly<Record<string, string>> {
   // The AWS presigner hoists x-amz-meta-sha256 into the signed query string.
   // Repeating it as an unsigned HTTP header makes MinIO reject the request.
-  return Object.freeze({ "content-length": String(sizeBytes) });
+  return Object.freeze({ "content-length": String(sizeBytes), "content-type": contentType });
+}
+
+function outputContentType(kind: string): string {
+  if (kind === "BUILD" || kind === "SIGNED_BUILD") return "application/gzip";
+  if (kind === "E2E_REPORT") return "application/zip";
+  return "application/json";
 }
