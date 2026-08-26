@@ -9,6 +9,7 @@ import { ProjectSourceStore } from "./project-sources";
 import type { CoreHostServices } from "./access";
 import type { ProjectRuntimeService } from "./project-runtime-service";
 import type { ProjectRuntimeRole } from "@/lib/product/contracts";
+import { resolveAgentModel } from "./agent-settings";
 
 export type SandboxMode = "MICROVM" | "RESTRICTED_CONTAINER";
 export type SandboxPlan = Readonly<{
@@ -175,7 +176,7 @@ export async function runSandbox(
           if (!project || !settings) throw new Error("Project or Agent Runtime settings are unavailable");
           const role = runtimeJobRole(job.payload);
           await repository.appendJobProgress(job, "PHASE", `${role} Agent is resuming its persistent project session`);
-          await projectRuntime.initialize({
+          const initializedContext = await projectRuntime.initialize({
             workspaceId: job.workspaceId, projectId: job.projectId,
             language: responseLanguageFromJob(job), concept: project.concept, settings,
             source: project.source ? {
@@ -183,9 +184,10 @@ export async function runSandbox(
               relativePath: project.source.relativePath,
             } : null,
           });
+          const responseLanguage = responseLanguageFromJob(job, initializedContext.language);
           const runtimeResult = await projectRuntime.turn({
             workspaceId: job.workspaceId, projectId: job.projectId, role, mode: "PRIMARY",
-            prompt: runtimeJobPrompt(job, role), responseLanguage: responseLanguageFromJob(job), settings,
+            prompt: runtimeJobPrompt(job, role), responseLanguage, settings,
             sourceRevision: project.source?.revision ?? null,
             sourceRelativePath: project.source?.relativePath ?? null,
             onEvent: content => {
@@ -223,6 +225,14 @@ export async function runSandbox(
             planRevision: context.e2e.planRevision ?? null,
             verdict: runtimeResult.structured.verdict ?? null,
             handoff: runtimeResult.structured.handoff ?? null,
+            responseLanguage,
+            agentRuntime: settings.agentRuntime,
+            model: resolveAgentModel(
+              settings.primaryModel,
+              settings.modelOverrides,
+              role.toLowerCase() as "design" | "development" | "test",
+            ),
+            settingsRevision: settings.revision,
           }));
           if (!completed) throw new Error("Persistent Agent turn completion was rejected by fencing");
           await projectRuntime.recordWorkflowJobResult({
@@ -326,8 +336,11 @@ function runtimeJobRole(payload: Readonly<Record<string, unknown>>): ProjectRunt
   return role as ProjectRuntimeRole;
 }
 
-function responseLanguageFromJob(job: JobProtocolV4): "en" | "zh" {
-  return job.payload.responseLanguage === "zh" ? "zh" : "en";
+function responseLanguageFromJob(job: JobProtocolV4, fallback: "en" | "zh" = "en"): "en" | "zh" {
+  if (job.payload.responseLanguage === "zh" || job.payload.responseLanguage === "en") {
+    return job.payload.responseLanguage;
+  }
+  return fallback;
 }
 
 function runtimeJobPrompt(job: JobProtocolV4, role: ProjectRuntimeRole): string {

@@ -176,6 +176,10 @@ export function completeStreamingConversationReply(
   });
 }
 
+export function streamingConversationReplyIsActive(reply: StreamingConversationReply): boolean {
+  return reply.phase !== "COMPLETE";
+}
+
 function isProjectAgentRole(value: unknown): value is ProjectAgentRole {
   return value === "DESIGN" || value === "DEVELOPMENT" || value === "TEST";
 }

@@ -22,6 +22,7 @@ import {
   type ProjectAgentRole,
 } from "@/lib/product/contracts";
 import {
+  streamingConversationReplyIsActive,
   type ConversationImageDraft,
   type StreamingConversationReplies,
 } from "@/lib/product/conversation-stream";
@@ -314,7 +315,10 @@ export function ConversationBox({
                     <span className="message-avatar">{identity.avatar}</span>
                     <div>
                       <header><b>{identity.name}</b>{status ? <span className="conversation-agent-working">{status}</span> : null}</header>
-                      <p>{reply.content || <TypingDots />}</p>
+                      <p>
+                        {reply.content}
+                        {streamingConversationReplyIsActive(reply) ? <TypingDots /> : null}
+                      </p>
                     </div>
                   </article>
                 );
@@ -495,15 +499,24 @@ function conversationIntent(metadata: Readonly<Record<string, unknown>>): string
     ? String(intent) : null;
 }
 
-function messageAgentRole(message: ProductConversationMessage): ProjectAgentRole {
+type ConversationDisplayAgentRole = ProjectAgentRole | "ANALYSIS";
+
+function messageAgentRole(message: ProductConversationMessage): ConversationDisplayAgentRole {
   const role = message.metadata.agentRole;
+  if (role === "ANALYSIS" || message.metadata.source === "PROJECT_IMPORT_AGENT") return "ANALYSIS";
   return role === "DEVELOPMENT" || role === "TEST" || role === "DESIGN" ? role : "DESIGN";
 }
 
 function agentIdentity(
-  role: ProjectAgentRole,
+  role: ConversationDisplayAgentRole,
   text: (chinese: string, english: string) => string,
 ): Readonly<{ avatar: string; name: string; shortName: string; responsibility: string }> {
+  if (role === "ANALYSIS") return Object.freeze({
+    avatar: "AN",
+    name: text("DeviLudo 分析 Agent", "DeviLudo Analysis Agent"),
+    shortName: text("分析", "ANALYSIS"),
+    responsibility: text("源码与现状分析", "Source analysis"),
+  });
   if (role === "DEVELOPMENT") return Object.freeze({
     avatar: "DV",
     name: text("DeviLudo 开发 Agent", "DeviLudo Development Agent"),

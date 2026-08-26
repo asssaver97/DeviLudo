@@ -542,6 +542,43 @@ test("intent routing does not invent a Design Agent while the request is still u
   await expect(page.locator(".project-conversation-box .conversation-composer-images")).toHaveCount(0);
 });
 
+test("streaming Agent text keeps animated dots visible until the reply completes", async ({ page, stack }) => {
+  const project = await stack.createProject({
+    name: "流式省略号",
+    concept: "验证 Agent 已输出正文但尚未完成时仍显示跳动省略号。",
+  });
+  await page.addInitScript(() => {
+    const nativeFetch = window.fetch.bind(window);
+    window.fetch = async (resource: RequestInfo | URL, init?: RequestInit) => {
+      const url = typeof resource === "string" ? resource : resource instanceof URL ? resource.href : resource.url;
+      if (url.endsWith("/api/conversations/messages/stream") && init?.method === "POST") {
+        const encoder = new TextEncoder();
+        return new Response(new ReadableStream<Uint8Array>({
+          start(controller) {
+            controller.enqueue(encoder.encode(`${JSON.stringify({ type: "agent_start", agentRole: "DESIGN" })}\n`));
+            controller.enqueue(encoder.encode(`${JSON.stringify({
+              type: "agent_delta",
+              agentRole: "DESIGN",
+              delta: "正在整理完整的玩法与开发计划",
+            })}\n`));
+          },
+        }), { status: 200, headers: { "content-type": "application/x-ndjson" } });
+      }
+      return nativeFetch(resource, init);
+    };
+  });
+
+  await page.goto(`/projects/${project.id}`);
+  await page.getByLabel("继续项目会话").fill("请完善当前玩法设计。");
+  await page.getByRole("button", { name: "发送项目消息" }).click();
+  const streamingReply = page.locator(".project-conversation-box .conversation-box-message.role-design.is-typing");
+  await expect(streamingReply).toContainText("正在整理完整的玩法与开发计划");
+  const dots = streamingReply.locator("[aria-label='等待回复']");
+  await expect(dots).toBeVisible();
+  await expect(dots.locator("i")).toHaveCount(3);
+  await expect(dots.locator("i").first()).toHaveCSS("animation-name", "typing-dot-bounce");
+});
+
 test("a creator can refine and deliver a game through every Core and platform stage", async ({ page, stack }) => {
   test.setTimeout(180_000);
   await stack.configureAgent();
@@ -699,10 +736,9 @@ test("keyboard creation derives a name and an active delivery can be cancelled",
   await expect(page.getByRole("heading", { name: "月影邮差" })).toBeVisible();
   await page.getByLabel("继续项目会话").fill("需求已经完整，请确认可以按照当前方案开发。");
   await page.getByRole("button", { name: "发送项目消息" }).click();
-  await page.getByRole("button", { name: "确认修改并重跑" }).click();
-  await expect(page.getByRole("button", { name: "停止自动执行" })).toBeVisible();
-  await page.getByRole("button", { name: "停止自动执行" }).click();
-  await expect(page.getByRole("button", { name: "继续自动执行" })).toBeVisible();
+  await expect(page.getByRole("button", { name: "中止" })).toBeVisible();
+  await page.getByRole("button", { name: "中止" }).click();
+  await expect(page.getByRole("button", { name: "继续" })).toBeVisible();
   const projectId = page.url().split("/").pop() ?? "";
   expect((await stack.readProject(projectId)).workflowState).toBe("STOPPED");
 
@@ -968,7 +1004,11 @@ test("a creator can link a local project without uploading it and continue its A
   await expect(page).toHaveURL(/\/projects\/[0-9a-f-]{36}$/);
   await expect(page.getByRole("heading", { name: "clock-game" })).toBeVisible();
   await expect(page.getByRole("heading", { name: "会话记录" })).toBeVisible();
-  await expect(page.getByText(/现有信息足以进入需求确认；如需调整分析结论/)).toBeVisible();
+  await expect(page.locator(".conversation-box-message.role-analysis").getByText("DeviLudo 分析 Agent", { exact: true })).toBeVisible();
+  await expect(page.locator(".conversation-box-message.role-design").getByText("DeviLudo 设计 Agent", { exact: true })).toBeVisible();
+  await expect(page.locator(".conversation-box-message.role-analysis")).not.toContainText("开发计划");
+  await expect(page.locator(".conversation-box-message.role-design")).toContainText("开发计划");
+  await expect(page.locator(".conversation-box-message.role-design")).toContainText("是否按照当前计划开发？");
   await expect(page.getByText("启动游戏，使用真实玩家输入，并完成现有核心交互循环。", { exact: true })).toBeVisible();
   await expect(page.getByLabel("展开项目交付配置").getByText("main", { exact: true })).toBeVisible();
   await page.getByLabel("展开项目交付配置").click();

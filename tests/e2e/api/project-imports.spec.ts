@@ -47,11 +47,16 @@ test("bound local directory creates immediately, then finishes its source snapsh
   const conversations = await conversationsResponse.json() as { conversations: readonly { id: string }[] };
   const conversationResponse = await stack.web(`/api/conversations/${conversations.conversations[0].id}`);
   const conversation = (await conversationResponse.json() as {
-    conversation: { id: string; messages: readonly { role: string; content: string }[] };
+    conversation: { id: string; messages: readonly { role: string; content: string; metadata: Record<string, unknown> }[] };
   }).conversation;
-  expect(conversation.messages.map(message => message.role)).toEqual(["USER", "ASSISTANT"]);
+  expect(conversation.messages.map(message => message.role)).toEqual(["USER", "ASSISTANT", "ASSISTANT"]);
   expect(conversation.messages[1].content).toContain("## Project content");
-  expect(conversation.messages[1].content).toContain("## Recommended development plan");
+  expect(conversation.messages[1].content).not.toContain("Development plan");
+  expect(conversation.messages[1].content).not.toContain("Shall we develop according to the current plan?");
+  expect(conversation.messages[1].metadata).toMatchObject({ agentRole: "ANALYSIS", agentName: "DeviLudo Analysis Agent" });
+  expect(conversation.messages[2].metadata).toMatchObject({ agentRole: "DESIGN", agentName: "DeviLudo Design Agent" });
+  expect(conversation.messages[2].content).toContain("Development plan");
+  expect(conversation.messages[2].content).toMatch(/Shall we develop according to the current plan\?$/);
 
   const sources = await stack.queryRows<{
     revision:number;content_digest:string;relative_path:string;file_count:number;
@@ -67,7 +72,7 @@ test("bound local directory creates immediately, then finishes its source snapsh
     data: { conversationId: conversation.id, content: "接下来增加一个可以保留线索的日志面板。" },
   });
   expect(continued.status(), await continued.text()).toBe(200);
-  expect((await continued.json() as { conversation: { messages: unknown[] } }).conversation.messages).toHaveLength(4);
+  expect((await continued.json() as { conversation: { messages: unknown[] } }).conversation.messages).toHaveLength(5);
 
   const replay = await stack.web(localBindingUrl, {
     method: "POST",

@@ -14,7 +14,9 @@ import {
   updateProjectContext,
 } from "@/services/core/src/project-context";
 import {
+  designReplyAction,
   implementationChangeReady,
+  lightweightProjectRuntimeIntent,
   parseProjectRuntimeIntent,
   parseProjectRuntimeReply,
   projectRuntimeIntentPrompt,
@@ -31,6 +33,7 @@ import {
   canonicalToolName,
   nativeToolName,
   ROLE_TO_CANONICAL_TOOLS,
+  toolInputSchema,
 } from "@/services/project-runtime/tool-names.mjs";
 
 const workspaceId = "10000000-0000-4000-8000-000000000001";
@@ -60,6 +63,65 @@ test("persistent Runtime intent selects exactly one role and rejects contradicto
     workflowState: "TESTING",
     recentMessages: [],
   }), /targetRole must be exactly one/);
+});
+
+test("lightweight Intent routes common messages without a Runtime turn", () => {
+  assert.deepEqual(lightweightProjectRuntimeIntent({
+    content: "都按照建议来",
+    hasAttachments: false,
+    hasPendingChange: false,
+  }), {
+    intent: "CHANGE_REQUEST",
+    targetRole: "DESIGN",
+    explicitExecution: true,
+    actionable: true,
+    summary: "Update the implementation according to the player's request.",
+  });
+  assert.equal(designReplyAction({
+    intent: "CHANGE_REQUEST",
+    targetRole: "DESIGN",
+    explicitExecution: true,
+    actionable: true,
+    summary: "Accept every recommended design choice and begin development.",
+  }, "DESIGN"), "START_DEVELOPMENT");
+  assert.deepEqual(lightweightProjectRuntimeIntent({
+    content: "当前测试进度是什么？",
+    hasAttachments: false,
+    hasPendingChange: true,
+  }), {
+    intent: "QUESTION",
+    targetRole: "TEST",
+    explicitExecution: false,
+    actionable: false,
+    summary: "Answer the player's question from the current project context.",
+  });
+  assert.deepEqual(lightweightProjectRuntimeIntent({
+    content: "能不能增加键盘和手柄都能完成核心循环的能力？",
+    hasAttachments: false,
+    hasPendingChange: false,
+  }), {
+    intent: "CHANGE_REQUEST",
+    targetRole: "DESIGN",
+    explicitExecution: false,
+    actionable: true,
+    summary: "Update the implementation according to the player's request.",
+  });
+  assert.equal(lightweightProjectRuntimeIntent({
+    content: "看看这个",
+    hasAttachments: true,
+    hasPendingChange: false,
+  }), null);
+  assert.deepEqual(lightweightProjectRuntimeIntent({
+    content: "都按照建议来",
+    hasAttachments: false,
+    hasPendingChange: true,
+  }), {
+    intent: "CONFIRM_CHANGE",
+    targetRole: "DESIGN",
+    explicitExecution: false,
+    actionable: false,
+    summary: "Confirm the pending implementation change.",
+  });
 });
 
 test("specialist output is attributed to the real persistent role session", () => {
@@ -114,9 +176,21 @@ test("ready Design replies end with a development plan and localized confirmatio
     implementationBrief: "先完成核心循环，再接入界面与验收测试。",
     projectDocumentPatch: {},
     e2eGoalDelta: { add: [], replace: [], retire: [] },
-  }), "DESIGN", settings, "zh");
+  }), "DESIGN", settings, "zh", "AWAITING_CONFIRMATION");
   assert.match(reply.content, /开发计划\n先完成核心循环，再接入界面与验收测试。/u);
   assert.ok(reply.content.endsWith("是否按照当前计划开发？"));
+
+  const authorized = parseProjectRuntimeReply(result("DESIGN", {
+    content: "玩法和验收目标已经明确。\n\n## 开发计划（按风险排序）\n先完成核心循环。\n\n**开发计划**\n再完成验收测试。\n\n是否按照当前计划开发？",
+    readyForDevelopment: true,
+    options: [],
+    implementationBrief: "先完成核心循环，再接入界面与验收测试。",
+    projectDocumentPatch: {},
+    e2eGoalDelta: { add: [], replace: [], retire: [] },
+  }), "DESIGN", settings, "zh", "START_DEVELOPMENT");
+  assert.equal(authorized.content.match(/开发计划/gu)?.length, 1);
+  assert.ok(authorized.content.endsWith("开始开发"));
+  assert.doesNotMatch(authorized.content, /是否按照当前计划开发？/u);
 });
 
 test("incomplete design discovery cannot stage or execute an implementation change", () => {
@@ -195,6 +269,21 @@ test("Runtime exposes provider-safe native MCP names and maps them to authorized
   assert.equal(canonicalToolName("ANALYSIS", "source_checkpoint"), null);
 });
 
+test("Analysis MCP advertises the complete canonical report schema", () => {
+  const schema = toolInputSchema("context.update_analysis") as {
+    required: readonly string[];
+    properties: { analysis: { required: readonly string[]; properties: Record<string, Record<string, unknown>> } };
+  };
+  assert.deepEqual(schema.required, ["analysis"]);
+  assert.equal(schema.properties.analysis.required.length, 15);
+  for (const field of ["categories", "features", "coreLoop", "acceptanceCriteria", "completedWork", "remainingWork", "startupIssues", "risks"]) {
+    assert.equal(schema.properties.analysis.properties[field]?.type, "array");
+  }
+  assert.equal(schema.properties.analysis.properties.completedWork?.maxItems, 32);
+  assert.equal(schema.properties.analysis.properties.recommendedPlan, undefined);
+  assert.equal(schema.properties.analysis.properties.questions, undefined);
+});
+
 test("MCP audit records summarize large tool results and redact credentials", () => {
   const result = summarizeToolAuditValue({
     context: { plan: "x".repeat(70_000), credentialSecretRef: "vault://must-not-persist" },
@@ -250,8 +339,10 @@ test("Core has one Runtime path and controlled task images cannot execute Agent 
   assert.match(turn, /\/opt\/deviludo\/readonly-workspace/);
   assert.match(turn, /mcp_servers\.deviludo\.env_vars/);
   assert.match(turn, /ephemeralMcpConfig/);
+  assert.match(turn, /request\.role === "INTENT"[\s\S]*model_reasoning_effort=low/);
   assert.doesNotMatch(turn, /--ignore-user-config/);
   assert.match(runtimeService, /workflow\.analysisTurnId !== result\.turnId/);
+  assert.match(runtimeService, /normalizeImportedProjectAnalysisReport\(input\.arguments\.analysis\)/);
 });
 
 test("conversation persistence does not reject replies when the workflow advances concurrently", async () => {

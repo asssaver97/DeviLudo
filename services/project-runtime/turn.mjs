@@ -33,7 +33,9 @@ const prompt = [
   `Use the installed, signed ${skillName} Skill for this turn. Its instructions are mandatory.`,
   `The verified Skill instructions are embedded below so this externally sandboxed Runtime does not need a shell merely to read them:\n\n${skillInstructions}`,
   `Current role: ${request.role}. Turn mode: ${request.mode}.`,
-  `The canonical compressed project context is mounted at ${contextPath}. Use context_read instead of attempting to decode or edit it.`,
+  request.role === "INTENT"
+    ? "The compact routing snapshot in this prompt is sufficient. Do not call tools or read the canonical project context."
+    : `The canonical compressed project context is mounted at ${contextPath}. Use context_read instead of attempting to decode or edit it.`,
   request.mode === "COMPACT" ? "Compaction mode is summary-only: do not use mutating tools, edit source, or start workflow work. Return a restoration-ready structured summary." : "",
   request.mode === "READ_ONLY_BRANCH" ? "This is a read-only branch. Answer the question only. Do not mutate project state or files." : "This is the primary role session. Use only authorized tools for durable state changes.",
   request.attachmentPaths.length ? `Inspect the player attachments at these read-only turn paths:\n${request.attachmentPaths.join("\n")}` : "",
@@ -82,13 +84,16 @@ if (request.runtime === "CLAUDE_CODE") {
   }), { mode: 0o600 });
   args = [
     "-p", "--bare", "--output-format", "stream-json", "--include-partial-messages", "--verbose",
-    "--max-turns", "100", "--tools", writable
-      ? "Read,Write,Edit,Glob,Grep,Bash,mcp__deviludo__*"
-      : "Read,Glob,Grep,mcp__deviludo__*",
+    "--max-turns", request.role === "INTENT" ? "1" : "100", "--tools", request.role === "INTENT"
+      ? ""
+      : writable
+        ? "Read,Write,Edit,Glob,Grep,Bash,mcp__deviludo__*"
+        : "Read,Glob,Grep,mcp__deviludo__*",
     "--disallowedTools", "Agent,Task,WebFetch,WebSearch", "--dangerously-skip-permissions",
     "--mcp-config", ephemeralMcpConfig, "--strict-mcp-config",
     previous ? "--resume" : "--session-id", nativeSessionId,
   ];
+  if (request.role === "INTENT") args.push("--config", "model_reasoning_effort=low");
   if (request.mode === "READ_ONLY_BRANCH" && previous) args.push("--fork-session");
   args.push(prompt);
   command = "claude";

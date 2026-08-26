@@ -97,8 +97,10 @@ import { ProjectSourceStore } from "./project-sources";
 import { ProjectRuntimeRepository } from "./project-runtime-repository";
 import { ProjectRuntimeService } from "./project-runtime-service";
 import {
+  designReplyAction,
   implementationChangeReady,
   implementationBrief as runtimeImplementationBrief,
+  lightweightProjectRuntimeIntent,
   parseProjectRuntimeIntent,
   parseProjectRuntimeReply,
   projectRuntimeIntentPrompt,
@@ -1294,7 +1296,9 @@ export async function runApi(
           sourceRevision: project.source?.revision ?? null,
           sourceRelativePath: project.source?.relativePath ?? null,
         });
-        const replannedReply = parseProjectRuntimeReply(replannedResult, "DESIGN", settings, responseLanguage);
+        const replannedReply = parseProjectRuntimeReply(
+          replannedResult, "DESIGN", settings, responseLanguage, "AWAITING_CONFIRMATION",
+        );
         const replacement = await repository.createImplementationChangeRequest({
           workspaceId: workspace.id,
           projectId: project.id,
@@ -2269,25 +2273,32 @@ async function processConversationMessage(input: Readonly<{
       settings,
       source: null,
     });
-    const intentResult = await input.projectRuntime.turn({
-      workspaceId: targetWorkspace.id,
-      projectId,
-      role: "INTENT",
-      mode: "PRIMARY",
-      prompt: projectRuntimeIntentPrompt({
-        content: command.content,
-        hasAttachments: command.images.length > 0,
-        hasPendingChange: false,
-        workflowState: "DRAFT",
-        recentMessages: Object.freeze([]),
-      }),
-      responseLanguage: command.responseLanguage,
-      settings,
-      sourceRevision: null,
-      sourceRelativePath: null,
-      attachments: command.images,
-    }).catch(error => { throw httpError(424, "INTENT_AGENT_FAILED", error instanceof Error ? error.message : "Intent Agent failed"); });
-    const intentDecision = parseProjectRuntimeIntent(intentResult);
+    let intentDecision = lightweightProjectRuntimeIntent({
+      content: command.content,
+      hasAttachments: command.images.length > 0,
+      hasPendingChange: false,
+    });
+    if (!intentDecision) {
+      const intentResult = await input.projectRuntime.turn({
+        workspaceId: targetWorkspace.id,
+        projectId,
+        role: "INTENT",
+        mode: "PRIMARY",
+        prompt: projectRuntimeIntentPrompt({
+          content: command.content,
+          hasAttachments: command.images.length > 0,
+          hasPendingChange: false,
+          workflowState: "DRAFT",
+          recentMessages: Object.freeze([]),
+        }),
+        responseLanguage: command.responseLanguage,
+        settings,
+        sourceRevision: null,
+        sourceRelativePath: null,
+        attachments: command.images,
+      }).catch(error => { throw httpError(424, "INTENT_AGENT_FAILED", error instanceof Error ? error.message : "Intent Agent failed"); });
+      intentDecision = parseProjectRuntimeIntent(intentResult);
+    }
     input.onStage?.("RESPONDING");
     const specialistRole = intentDecision.targetRole;
     input.stream?.onStart(specialistRole);
@@ -2312,7 +2323,13 @@ async function processConversationMessage(input: Readonly<{
         input.stream?.onDelta(specialistRole, delta);
       },
     }).catch(error => { throw httpError(424, "AGENT_CONVERSATION_FAILED", error instanceof Error ? error.message : "Project Agent failed"); });
-    const specialistReply = parseProjectRuntimeReply(specialistResult, specialistRole, settings, command.responseLanguage);
+    const specialistReply = parseProjectRuntimeReply(
+      specialistResult,
+      specialistRole,
+      settings,
+      command.responseLanguage,
+      designReplyAction(intentDecision, specialistRole),
+    );
     if (!streamedSpecialistOutput) input.stream?.onDelta(specialistRole, specialistReply.content);
     input.stream?.onComplete(specialistRole);
     input.onStage?.("SAVING");
@@ -2401,25 +2418,32 @@ async function processConversationMessage(input: Readonly<{
     } : null,
   });
   input.onStage?.("RESPONDING");
-  const intentResult = await input.projectRuntime.turn({
-    workspaceId: workspace.id,
-    projectId,
-    role: "INTENT",
-    mode: "PRIMARY",
-    prompt: projectRuntimeIntentPrompt({
-      content: command.content,
-      hasAttachments: command.images.length > 0,
-      hasPendingChange: project.pendingImplementationChange !== null,
-      workflowState: project.workflowState,
-      recentMessages: existingConversation?.messages ?? Object.freeze([]),
-    }),
-    responseLanguage: command.responseLanguage,
-    settings,
-    sourceRevision: project.source?.revision ?? null,
-    sourceRelativePath: project.source?.relativePath ?? null,
-    attachments: command.images,
-  }).catch(error => { throw httpError(424, "INTENT_AGENT_FAILED", error instanceof Error ? error.message : "Intent Agent failed"); });
-  const intentDecision = parseProjectRuntimeIntent(intentResult);
+  let intentDecision = lightweightProjectRuntimeIntent({
+    content: command.content,
+    hasAttachments: command.images.length > 0,
+    hasPendingChange: project.pendingImplementationChange !== null,
+  });
+  if (!intentDecision) {
+    const intentResult = await input.projectRuntime.turn({
+      workspaceId: workspace.id,
+      projectId,
+      role: "INTENT",
+      mode: "PRIMARY",
+      prompt: projectRuntimeIntentPrompt({
+        content: command.content,
+        hasAttachments: command.images.length > 0,
+        hasPendingChange: project.pendingImplementationChange !== null,
+        workflowState: project.workflowState,
+        recentMessages: existingConversation?.messages ?? Object.freeze([]),
+      }),
+      responseLanguage: command.responseLanguage,
+      settings,
+      sourceRevision: project.source?.revision ?? null,
+      sourceRelativePath: project.source?.relativePath ?? null,
+      attachments: command.images,
+    }).catch(error => { throw httpError(424, "INTENT_AGENT_FAILED", error instanceof Error ? error.message : "Intent Agent failed"); });
+    intentDecision = parseProjectRuntimeIntent(intentResult);
+  }
   const conversationId = command.conversationId ?? randomUUID();
   let userAttachments: ReturnType<typeof storeConversationImages> | null = null;
   const storedUserAttachments = () => {
@@ -2451,7 +2475,9 @@ async function processConversationMessage(input: Readonly<{
         sourceRevision: project.source?.revision ?? null,
         sourceRelativePath: project.source?.relativePath ?? null,
       });
-      const replannedReply = parseProjectRuntimeReply(replannedResult, "DESIGN", settings, command.responseLanguage);
+      const replannedReply = parseProjectRuntimeReply(
+        replannedResult, "DESIGN", settings, command.responseLanguage, "AWAITING_CONFIRMATION",
+      );
       input.onStage?.("SAVING");
       const conversation = await repository.appendConversationTurn({
         workspaceId: workspace.id,
@@ -2585,7 +2611,13 @@ async function processConversationMessage(input: Readonly<{
       input.stream?.onDelta(specialistRole, delta);
     },
   }).catch(error => { throw httpError(424, "AGENT_CONVERSATION_FAILED", error instanceof Error ? error.message : "Project Agent failed"); });
-  const specialistReply = parseProjectRuntimeReply(specialistResult, specialistRole, settings, command.responseLanguage);
+  const specialistReply = parseProjectRuntimeReply(
+    specialistResult,
+    specialistRole,
+    settings,
+    command.responseLanguage,
+    designReplyAction(intentDecision, specialistRole),
+  );
   if (!streamedSpecialistOutput) input.stream?.onDelta(specialistRole, specialistReply.content);
   input.stream?.onComplete(specialistRole);
   input.onStage?.("SAVING");
@@ -3165,6 +3197,15 @@ async function processHostedProjectImport(input: Readonly<{
       model: resolveAgentModel(settings.primaryModel, settings.modelOverrides, "analysis"),
       settingsRevision: settings.revision,
     });
+    const designAssistant = await designImportedProject({
+      projectRuntime: input.projectRuntime,
+      workspaceId: input.principal.workspace.id,
+      projectId,
+      responseLanguage,
+      settings,
+      sourceRevision: stored.revision,
+      sourceRelativePath: stored.relativePath,
+    });
     const completed = await input.repository.completeProjectImportAnalysis({
       workspaceId: input.principal.workspace.id,
       projectId,
@@ -3183,6 +3224,7 @@ async function processHostedProjectImport(input: Readonly<{
         model: analysis.model,
         settingsRevision: analysis.settingsRevision,
       },
+      designAssistant,
       discovery: analysis.discovery,
       source: {
         kind: "GIT",
@@ -3206,6 +3248,45 @@ async function processHostedProjectImport(input: Readonly<{
     await input.projectSources.deleteProject(input.principal.workspace.id, projectId).catch(() => undefined);
     throw error;
   }
+}
+
+async function designImportedProject(input: Readonly<{
+  projectRuntime: ProjectRuntimeService;
+  workspaceId: string;
+  projectId: string;
+  responseLanguage: ResponseLanguage;
+  settings: StoredInstanceAgentSettings;
+  sourceRevision: number;
+  sourceRelativePath: string;
+}>): Promise<Readonly<{ content: string; metadata: Readonly<Record<string, unknown>> }>> {
+  const result = await input.projectRuntime.turn({
+    workspaceId: input.workspaceId,
+    projectId: input.projectId,
+    role: "DESIGN",
+    mode: "READ_ONLY_BRANCH",
+    prompt: [
+      "The Analysis Agent has completed the imported-project source analysis and persisted it in canonical context at workflow.analysis.",
+      "Read that report first, then continue as the Design Agent. Preserve verified working behavior and turn the analysis findings into a coherent, playable game design.",
+      "Resolve design gaps when evidence supports a reversible default; ask only high-impact player questions that remain unresolved.",
+      "Do not edit source or durable project state in this read-only branch.",
+      "Return the standard Design Agent JSON response and decide readyForDevelopment from the completed design, not from analysis completion.",
+    ].join("\n"),
+    responseLanguage: input.responseLanguage,
+    settings: input.settings,
+    sourceRevision: input.sourceRevision,
+    sourceRelativePath: input.sourceRelativePath,
+  });
+  const reply = parseProjectRuntimeReply(
+    result, "DESIGN", input.settings, input.responseLanguage, "AWAITING_CONFIRMATION",
+  );
+  return Object.freeze({
+    content: reply.content,
+    metadata: Object.freeze({
+      ...conversationAgentMetadata(reply),
+      runtimeTurnId: result.turnId,
+      runtimeSessionId: result.sessionId,
+    }),
+  });
 }
 
 async function runProjectImportAnalysisWorker(input: Readonly<{
@@ -3286,6 +3367,15 @@ async function runProjectImportAnalysisWorker(input: Readonly<{
         model: resolveAgentModel(settings.primaryModel, settings.modelOverrides, "analysis"),
         settingsRevision: settings.revision,
       });
+      const designAssistant = await designImportedProject({
+        projectRuntime: input.projectRuntime,
+        workspaceId: claimed.workspaceId,
+        projectId: claimed.projectId,
+        responseLanguage: claimed.responseLanguage,
+        settings,
+        sourceRevision: stored.revision,
+        sourceRelativePath: stored.relativePath,
+      });
       const completed = await input.repository.completeProjectImportAnalysis({
         workspaceId: claimed.workspaceId,
         projectId: claimed.projectId,
@@ -3303,9 +3393,8 @@ async function runProjectImportAnalysisWorker(input: Readonly<{
           model: analysis.model,
           settingsRevision: analysis.settingsRevision,
           analyzedProjectName: analysis.name,
-          readyForDevelopment: analysis.discovery.questions.length === 0,
-          analysisQuestions: analysis.discovery.questions,
         },
+        designAssistant,
         discovery: analysis.discovery,
         source: {
           kind: source.sourceKind as "GIT" | "LOCAL_DIRECTORY",

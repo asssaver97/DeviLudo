@@ -1331,6 +1331,10 @@ textarea {
   animation-delay: .24s;
 }
 
+.conversation-box-message.is-typing .typing-dots {
+  margin-left: 8px;
+}
+
 @keyframes typing-dot-bounce {
   0%, 60%, 100% { transform: translateY(0); }
   30% { transform: translateY(-5px); }
@@ -3651,8 +3655,10 @@ textarea {
 }
 
 .conversation-box-message.role-design .message-avatar { background: #172437; color: var(--blue); }
+.conversation-box-message.role-analysis .message-avatar { background: #2a2417; color: #e8bd65; }
 .conversation-box-message.role-development .message-avatar { background: #17241f; color: var(--green); }
 .conversation-box-message.role-test .message-avatar { background: #271d31; color: #cba7ff; }
+.conversation-box-message.role-analysis p { border-left-color: #92743c; }
 .conversation-box-message.role-development p { border-left-color: #397c66; }
 .conversation-box-message.role-test p { border-left-color: #7957a7; }
 

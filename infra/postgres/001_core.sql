@@ -16,8 +16,11 @@ BEGIN
   IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'deviludo_claim_executor') THEN
     CREATE ROLE deviludo_claim_executor NOLOGIN BYPASSRLS;
   END IF;
+  IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'deviludo_conversation_writer') THEN
+    CREATE ROLE deviludo_conversation_writer NOLOGIN BYPASSRLS;
+  END IF;
   EXECUTE format(
-    'GRANT deviludo_api, deviludo_scheduler, deviludo_sandbox TO %I',
+    'GRANT deviludo_api, deviludo_scheduler, deviludo_sandbox, deviludo_conversation_writer TO %I',
     current_user
   );
 END
@@ -26,7 +29,8 @@ $roles$;
 CREATE SCHEMA deviludo;
 REVOKE ALL ON SCHEMA deviludo FROM PUBLIC;
 GRANT USAGE ON SCHEMA deviludo TO
-  deviludo_api, deviludo_scheduler, deviludo_sandbox, deviludo_claim_executor;
+  deviludo_api, deviludo_scheduler, deviludo_sandbox, deviludo_claim_executor,
+  deviludo_conversation_writer;
 
 CREATE TYPE deviludo.server_pool_kind AS ENUM (
   'WEB', 'CORE', 'E2E_LINUX', 'E2E_WINDOWS', 'E2E_MACOS'
@@ -1846,6 +1850,119 @@ BEGIN
   RETURN true;
 END
 $$;
+
+-- A persistent Development Agent completes under the sandbox role, but that role
+-- must not receive general access to player conversations. This narrow definer
+-- function validates the completed job and publishes only its player-facing
+-- result to the conversation associated with that workflow.
+CREATE OR REPLACE FUNCTION deviludo.publish_development_agent_message(
+  p_workspace_id uuid,
+  p_job_id uuid,
+  p_content text
+)
+RETURNS uuid
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = pg_catalog, deviludo
+SET row_security = off
+AS $$
+DECLARE
+  job deviludo.jobs%ROWTYPE;
+  turn_output jsonb;
+  selected_conversation_id uuid;
+  response_language text;
+  project_name text;
+BEGIN
+  IF nullif(current_setting('app.workspace_id', true), '')::uuid IS DISTINCT FROM p_workspace_id THEN
+    RAISE EXCEPTION 'Development Agent message workspace mismatch';
+  END IF;
+  IF length(p_content) NOT BETWEEN 1 AND 4000 THEN
+    RAISE EXCEPTION 'Development Agent message content is invalid';
+  END IF;
+
+  SELECT candidate.* INTO job
+    FROM deviludo.jobs candidate
+   WHERE candidate.workspace_id = p_workspace_id AND candidate.id = p_job_id
+     AND candidate.kind = 'AGENT_TURN' AND candidate.state = 'SUCCEEDED'
+     AND coalesce(candidate.payload->>'role', 'DEVELOPMENT') = 'DEVELOPMENT';
+  turn_output := job.receipt->'agentTurn';
+  IF job.id IS NULL OR jsonb_typeof(turn_output) <> 'object'
+    OR turn_output->>'role' IS DISTINCT FROM 'DEVELOPMENT' THEN
+    RAISE EXCEPTION 'Development Agent message job is invalid';
+  END IF;
+
+  SELECT selected.id INTO selected_conversation_id
+    FROM (
+      SELECT request.conversation_id AS id, 0 AS priority, request.updated_at
+        FROM deviludo.implementation_change_requests request
+       WHERE request.workspace_id = p_workspace_id
+         AND request.project_id = job.project_id
+         AND request.applied_workflow_id = job.workflow_id
+      UNION ALL
+      SELECT conversation.id, 1 AS priority, conversation.updated_at
+        FROM deviludo.project_conversations conversation
+       WHERE conversation.workspace_id = p_workspace_id
+         AND conversation.project_id = job.project_id
+    ) selected
+   ORDER BY selected.priority, selected.updated_at DESC
+   LIMIT 1;
+
+  response_language := CASE WHEN turn_output->>'responseLanguage' = 'zh' THEN 'zh' ELSE 'en' END;
+  IF selected_conversation_id IS NULL THEN
+    SELECT project.name INTO project_name
+      FROM deviludo.projects project
+     WHERE project.workspace_id = p_workspace_id AND project.id = job.project_id;
+    IF project_name IS NULL THEN
+      RAISE EXCEPTION 'Development Agent message project is unavailable';
+    END IF;
+    selected_conversation_id := gen_random_uuid();
+    INSERT INTO deviludo.project_conversations(workspace_id, id, project_id, mode, title)
+    VALUES (
+      p_workspace_id,
+      selected_conversation_id,
+      job.project_id,
+      'PROJECT_FEEDBACK',
+      CASE WHEN response_language = 'zh'
+        THEN project_name || ' · 游戏生成'
+        ELSE project_name || ' · Game generation'
+      END
+    );
+  END IF;
+
+  INSERT INTO deviludo.conversation_messages(
+    workspace_id, conversation_id, role, content, metadata
+  )
+  SELECT p_workspace_id, selected_conversation_id, 'ASSISTANT', p_content,
+         jsonb_strip_nulls(jsonb_build_object(
+           'source', 'WORKFLOW_AGENT',
+           'agentRole', 'DEVELOPMENT',
+           'agentName', 'DeviLudo Development Agent',
+           'agentRuntime', turn_output->'agentRuntime',
+           'model', turn_output->'model',
+           'settingsRevision', turn_output->'settingsRevision',
+           'runtimeTurnId', turn_output->'turnId',
+           'runtimeSessionId', turn_output->'sessionId',
+           'workflowJobId', job.id,
+           'purpose', turn_output->'purpose',
+           'sourceRevision', turn_output->'sourceRevision'
+         ))
+   WHERE NOT EXISTS (
+     SELECT 1
+       FROM deviludo.conversation_messages existing
+      WHERE existing.workspace_id = p_workspace_id
+        AND existing.conversation_id = selected_conversation_id
+        AND existing.metadata->>'workflowJobId' = job.id::text
+   );
+  IF FOUND THEN
+    UPDATE deviludo.project_conversations
+       SET updated_at = clock_timestamp()
+     WHERE workspace_id = p_workspace_id AND id = selected_conversation_id;
+  END IF;
+  RETURN selected_conversation_id;
+END
+$$;
+ALTER FUNCTION deviludo.publish_development_agent_message(uuid, uuid, text)
+  OWNER TO deviludo_conversation_writer;
 -- Agent turns execute in the project's persistent Runtime container. Build,
 -- platform E2E and Steam remain controlled host jobs.
 CREATE OR REPLACE FUNCTION deviludo.stage_running_state(p_kind deviludo.job_kind)
@@ -3938,7 +4055,16 @@ GRANT SELECT ON deviludo.runtime_images TO deviludo_scheduler, deviludo_sandbox;
 GRANT INSERT, UPDATE ON deviludo.server_nodes TO deviludo_api;
 GRANT SELECT, INSERT, UPDATE ON deviludo.e2e_enrollment_tokens, deviludo.e2e_node_certificates TO deviludo_api;
 GRANT INSERT, SELECT ON deviludo.pool_capacity_intents TO deviludo_scheduler;
-GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA deviludo TO deviludo_api, deviludo_scheduler, deviludo_sandbox;
+GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA deviludo TO
+  deviludo_api, deviludo_scheduler, deviludo_sandbox, deviludo_conversation_writer;
+
+GRANT SELECT ON deviludo.jobs, deviludo.projects,
+  deviludo.implementation_change_requests, deviludo.project_conversations,
+  deviludo.conversation_messages
+  TO deviludo_conversation_writer;
+GRANT INSERT ON deviludo.project_conversations, deviludo.conversation_messages
+  TO deviludo_conversation_writer;
+GRANT UPDATE ON deviludo.project_conversations TO deviludo_conversation_writer;
 
 GRANT SELECT, INSERT, UPDATE, DELETE ON
   deviludo.workspaces, deviludo.workspace_steam_settings,
@@ -4046,6 +4172,8 @@ GRANT EXECUTE ON FUNCTION deviludo.start_steam_release(uuid, uuid, text, jsonb),
 GRANT EXECUTE ON FUNCTION deviludo.complete_job(uuid, uuid, bigint, bigint, jsonb, jsonb, text, text, text)
   TO deviludo_api, deviludo_sandbox;
 GRANT EXECUTE ON FUNCTION deviludo.complete_agent_turn_job(uuid, uuid, uuid, bigint, jsonb)
+  TO deviludo_sandbox;
+GRANT EXECUTE ON FUNCTION deviludo.publish_development_agent_message(uuid, uuid, text)
   TO deviludo_sandbox;
 GRANT EXECUTE ON FUNCTION deviludo.fail_job(uuid, uuid, bigint, text)
   TO deviludo_api, deviludo_sandbox;

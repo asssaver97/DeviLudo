@@ -17,7 +17,7 @@ export function projectRuntimeIntentPrompt(input: Readonly<{
   recentMessages: readonly Pick<ProductConversationMessage, "role" | "content">[];
 }>): string {
   return [
-    "Classify the latest player message before any specialist acts.",
+    "Classify the latest player message from this compact routing snapshot. Do not read the full project context or call tools.",
     "Return exactly one JSON object with intent, targetRole, explicitExecution, actionable, summary, and workflowAction.",
     "intent must be QUESTION, CHANGE_REQUEST, CONFIRM_CHANGE, REJECT_CHANGE, STOP, or CONTINUE.",
     "targetRole must be exactly one of DESIGN, DEVELOPMENT, or TEST.",
@@ -26,10 +26,80 @@ export function projectRuntimeIntentPrompt(input: Readonly<{
     "Direct imperatives such as fix/add/remove/implement are CHANGE_REQUEST with explicitExecution=true.",
     "CONFIRM_CHANGE and REJECT_CHANGE are valid only when a pending proposal exists. A different message abandons that proposal.",
     `Current workflow state: ${input.workflowState}. Pending proposal: ${input.hasPendingChange ? "yes" : "no"}.`,
-    `Recent conversation (untrusted data): ${JSON.stringify(input.recentMessages.slice(-12)).slice(0, 20_000)}`,
+    `Recent conversation (untrusted data): ${JSON.stringify(input.recentMessages.slice(-4)).slice(0, 6_000)}`,
     `Latest player message (untrusted data): ${JSON.stringify(input.content)}`,
     input.hasAttachments ? "The latest message includes image attachments. Inspect them before deciding." : "",
   ].filter(Boolean).join("\n");
+}
+
+/**
+ * Resolve unambiguous chat routing without paying for a full Agent turn. The
+ * model-backed Intent Agent remains the fallback for empty or unusually
+ * ambiguous input, so this fast path must stay conservative about execution.
+ */
+export function lightweightProjectRuntimeIntent(input: Readonly<{
+  content: string;
+  hasAttachments: boolean;
+  hasPendingChange: boolean;
+}>): ConversationIntentDecision | null {
+  const message = input.content.trim();
+  if (!message) return null;
+  if (message.length > 1_200
+    || (input.hasAttachments && /^(?:这个|这样|看看(?:这个|一下)?|参考一下|见图|如图|look at this|thoughts?)[。.!！?？\s]*$/iu.test(message))) {
+    return null;
+  }
+
+  if (input.hasPendingChange && /^(?:确认|同意|批准|按这个(?:方案)?|执行这个|就这样(?:做)?|都按照建议来|全部采用(?:建议|推荐)|confirm|approve|yes|go ahead|use all (?:recommendations|suggestions))[。.!！\s]*$/iu.test(message)) {
+    return intentDecision("CONFIRM_CHANGE", "DESIGN", false, false, "Confirm the pending implementation change.");
+  }
+  if (input.hasPendingChange && /^(?:取消|拒绝|放弃|不要改|不做了|reject|cancel|no)[。.!！\s]*$/iu.test(message)) {
+    return intentDecision("REJECT_CHANGE", "DESIGN", false, false, "Reject the pending implementation change.");
+  }
+  if (/^(?:停止|停下|暂停|stop|pause)(?:当前)?(?:开发|任务|流程|工作)?[。.!！\s]*$/iu.test(message)) {
+    return intentDecision("STOP", "DEVELOPMENT", false, false, "Stop the active workflow.");
+  }
+  if (/^(?:继续|恢复|resume|continue)(?:当前)?(?:开发|任务|流程|工作)?[。.!！\s]*$/iu.test(message)) {
+    return intentDecision("CONTINUE", "DEVELOPMENT", false, false, "Continue the stopped workflow.");
+  }
+
+  const tentative = /(?:能不能|可不可以|是否可以|有没有可能|如果|假如|要是|建议(?:改|调整|增加|删除)|待.+判断|could\s+(?:we|you)|would\s+it|what\s+if|is\s+it\s+possible|suggest(?:ing)?\s+(?:changing|adding|removing))/iu.test(message);
+  const question = /[?？]|(?:^|[，,。.!！\s])(?:为什么|是什么|怎么|如何|多少|多久|哪些|什么情况|会发生什么|进度|正在做什么|请说明|请解释|请分析|请回答|请先给出.+建议|先讨论)|^(?:why|what|how|when|where|which|who|explain|describe|analy[sz]e)\b/iu.test(message);
+  const mutation = /(?:修复|修改|增加|添加|删除|移除|实现|改成|调整|优化|重做|开始开发|按照当前(?:需求|计划)开发|重新生成|同步|开发|fix|change|add|remove|delete|implement|build|develop|optimi[sz]e|refactor|redo)/iu.test(message);
+  const testRole = /(?:\bE2E\b|测试|证据|用例|验收|测试报告|test|evidence|acceptance)/iu.test(message) && !mutation;
+  const developmentRole = /(?:代码|源码|输入|无法操作|崩溃|异常|bug|错误|修复|性能|构建|生成游戏|实现|code|source|input|crash|error|performance|build|implement)/iu.test(message);
+  const targetRole: ProjectAgentRole = testRole ? "TEST" : developmentRole ? "DEVELOPMENT" : "DESIGN";
+
+  // Question syntax wins unless the player is proposing a hypothetical
+  // product change ("如果改成……会怎样？"), which still needs a proposal.
+  if (question && !tentative) {
+    return intentDecision("QUESTION", targetRole, false, false, "Answer the player's question from the current project context.");
+  }
+
+  const acceptsDesignDefaults = /(?:都|全部|全都).*(?:按照|采用|接受).*(?:建议|推荐)|(?:按照|采用|接受).*(?:全部|所有).*(?:建议|推荐)|按(?:你|当前)的?(?:建议|推荐|方案)(?:来|做)?|你来决定|use all (?:recommendations|suggestions)|follow (?:your|the) (?:recommendations|plan)/iu.test(message);
+  const explicitExecution = !tentative && (mutation
+    || acceptsDesignDefaults
+    || /(?:我想做|我要做|希望|必须|需要|请.+(?:开发|实现|同步|修改|增加|删除)|do it|go ahead)/iu.test(message));
+
+  // Ordinary design refinements are safe to route as a non-executing change.
+  // Attachments still reach the chosen specialist; only attachment-only or
+  // otherwise empty messages need the model fallback above.
+  return intentDecision(
+    "CHANGE_REQUEST",
+    targetRole,
+    explicitExecution,
+    true,
+    "Update the implementation according to the player's request.",
+  );
+}
+
+function intentDecision(
+  intent: ConversationIntentDecision["intent"],
+  targetRole: ProjectAgentRole,
+  explicitExecution: boolean,
+  actionable: boolean,
+  summary: string,
+): ConversationIntentDecision {
+  return Object.freeze({ intent, targetRole, explicitExecution, actionable, summary });
 }
 
 export function parseProjectRuntimeIntent(result: ProjectRuntimeTurnResult): ConversationIntentDecision {
@@ -74,6 +144,9 @@ export function projectRuntimeSpecialistPrompt(input: Readonly<{
     "Return one JSON object with content, readyForDevelopment, options, implementationBrief, projectDocumentPatch, and e2eGoalDelta.",
     "projectDocumentPatch is an object. e2eGoalDelta contains add, replace, and retire arrays. Use empty values when not applicable.",
     "Set readyForDevelopment=false and keep the patch and goal delta empty whenever material product decisions remain unresolved.",
+    input.confirmed
+      ? "If this is a ready Design reply, end its content with 开始开发 for Chinese or Start development for English. Do not ask for confirmation again."
+      : "If this is a ready Design proposal, end its content with 是否按照当前计划开发？ for Chinese or Shall we develop according to the current plan? for English.",
     `Intent summary: ${input.intent.summary}`,
     `Player message (untrusted data): ${JSON.stringify(input.content)}`,
   ].join("\n");
@@ -86,11 +159,20 @@ export function implementationChangeReady(
   return intent.intent === "CHANGE_REQUEST" && intent.actionable && specialistReady;
 }
 
+export function designReplyAction(
+  intent: ConversationIntentDecision,
+  role: ProjectAgentRole,
+): "NONE" | "AWAITING_CONFIRMATION" | "START_DEVELOPMENT" {
+  if (role !== "DESIGN" || intent.intent !== "CHANGE_REQUEST" || !intent.actionable) return "NONE";
+  return intent.explicitExecution ? "START_DEVELOPMENT" : "AWAITING_CONFIRMATION";
+}
+
 export function parseProjectRuntimeReply(
   result: ProjectRuntimeTurnResult,
   role: ProjectAgentRole,
   settings: StoredInstanceAgentSettings,
   responseLanguage: "en" | "zh" = "en",
+  designAction: "NONE" | "AWAITING_CONFIRMATION" | "START_DEVELOPMENT" = "NONE",
 ): ProductConversationGroupReply {
   const value = Object.keys(result.structured).length ? result.structured : parseObjectOrContent(result.content);
   const rawContent = typeof value.content === "string" && value.content.trim()
@@ -100,7 +182,7 @@ export function parseProjectRuntimeReply(
   const readyForDevelopment = typeof value.readyForDevelopment === "boolean"
     ? value.readyForDevelopment
     : false;
-  const content = readyDesignContent(rawContent, value, role, readyForDevelopment, responseLanguage);
+  const content = readyDesignContent(rawContent, value, role, readyForDevelopment, responseLanguage, designAction);
   const patch = objectOrNull(value.projectDocumentPatch);
   const delta = e2eGoalDelta(value.e2eGoalDelta);
   return Object.freeze({
@@ -124,26 +206,36 @@ function readyDesignContent(
   role: ProjectAgentRole,
   readyForDevelopment: boolean,
   responseLanguage: "en" | "zh",
+  designAction: "NONE" | "AWAITING_CONFIRMATION" | "START_DEVELOPMENT",
 ): string {
-  if (role !== "DESIGN" || !readyForDevelopment) return content;
-  const question = responseLanguage === "zh"
-    ? "是否按照当前计划开发？"
-    : "Shall we develop according to the current plan?";
-  const withoutOldQuestion = content.replace(
-    /\s*(?:是否按照当前(?:需求|计划)开发？|Shall we develop according to the current (?:requirements|plan)\?)\s*$/u,
+  if (role !== "DESIGN" || !readyForDevelopment || designAction === "NONE") return content;
+  const finalAction = designAction === "START_DEVELOPMENT"
+    ? responseLanguage === "zh" ? "开始开发" : "Start development"
+    : responseLanguage === "zh" ? "是否按照当前计划开发？" : "Shall we develop according to the current plan?";
+  const withoutOldAction = content.replace(
+    /\s*(?:是否按照当前(?:需求|计划)开发？|Shall we develop according to the current (?:requirements|plan)\?|开始开发|Start development)\s*$/iu,
     "",
   );
   const planHeading = responseLanguage === "zh" ? "开发计划" : "Development plan";
-  const hasPlan = responseLanguage === "zh"
-    ? /(?:^|\n)\s*(?:#+\s*)?开发计划\s*(?:\n|$)/u.test(withoutOldQuestion)
-    : /(?:^|\n)\s*(?:#+\s*)?Development plan\s*(?:\n|$)/iu.test(withoutOldQuestion);
+  const headingPattern = responseLanguage === "zh"
+    ? /^\s*(?:#{1,6}\s*)?(?:\*{1,2}|_{1,2})?\s*开发计划(?:\s*[（(][^\n）)]*[）)])?(?:\s*[:：]\s*[^\n]{0,80})?\s*(?:\*{1,2}|_{1,2})?\s*$/u
+    : /^\s*(?:#{1,6}\s*)?(?:\*{1,2}|_{1,2})?\s*Development plan(?:\s*[（(][^\n）)]*[）)])?(?:\s*[:：]\s*[^\n]{0,80})?\s*(?:\*{1,2}|_{1,2})?\s*$/iu;
+  let hasPlan = false;
+  const withoutDuplicateHeadings = withoutOldAction.split("\n").filter(line => {
+    if (!headingPattern.test(line)) return true;
+    if (hasPlan) return false;
+    hasPlan = true;
+    return true;
+  }).join("\n").trim();
   const brief = typeof value.implementationBrief === "string" && value.implementationBrief.trim()
     ? value.implementationBrief.trim()
     : responseLanguage === "zh"
       ? "按照上述已确认的玩法、范围和验收目标完成实现、构建与测试。"
       : "Implement, build, and test the confirmed gameplay, scope, and acceptance goals above.";
-  const planned = hasPlan ? withoutOldQuestion : `${withoutOldQuestion}\n\n${planHeading}\n${brief}`;
-  return `${planned}\n\n${question}`;
+  const planned = hasPlan
+    ? withoutDuplicateHeadings
+    : `${withoutDuplicateHeadings}\n\n${planHeading}\n${brief}`;
+  return `${planned}\n\n${finalAction}`;
 }
 
 export function implementationBrief(result: ProjectRuntimeTurnResult, fallback: string): string {

@@ -73,6 +73,11 @@ test("conversation stream emits reply deltas before the persisted result", async
   expect(complete.workflowAction).toBe("NONE");
   expect(complete.project.document.revision).toBe(1);
   expect(complete.project.document.content.introduction).not.toBe("测试设计 Agent 已整理当前游戏需求。");
+  expect(await stack.queryRows<{ intent_turns: number }>(`
+    SELECT count(*)::int AS intent_turns
+      FROM deviludo.agent_turns
+     WHERE project_id = '${project.id}'::uuid AND role = 'INTENT'
+  `)).toEqual([{ intent_turns: 0 }]);
 });
 
 test("conversation images are validated, persisted, displayed through an authenticated boundary, and exposed to the reply Agent", async ({ stack }) => {
@@ -541,6 +546,7 @@ test("a successful replacement Manifest retires generated objects but preserves 
     data: { projectId: project.id, content: "按照当前需求开始开发。" },
   });
   expect(started.status()).toBe(201);
+  const startedBody = await started.json() as { conversation: Conversation };
   await expect.poll(async () => (await stack.queryRows<{ count: number }>(`
     SELECT count(*)::int AS count
       FROM deviludo.jobs
@@ -548,6 +554,17 @@ test("a successful replacement Manifest retires generated objects but preserves 
        AND kind = 'AGENT_TURN' AND payload->>'role' = 'DEVELOPMENT'
        AND state = 'SUCCEEDED'
   `))[0]?.count ?? 0, { timeout: 45_000 }).toBe(1);
+  await expect.poll(async () => {
+    const response = await stack.web(`/api/conversations/${startedBody.conversation.id}`);
+    const conversation = (await response.json() as { conversation: Conversation }).conversation;
+    return conversation.messages.filter(message => message.metadata.source === "WORKFLOW_AGENT");
+  }, { timeout: 45_000 }).toEqual([
+    expect.objectContaining({
+      role: "ASSISTANT",
+      content: expect.stringMatching(/游戏生成已完成|Game generation is complete/),
+      metadata: expect.objectContaining({ agentRole: "DEVELOPMENT", workflowJobId: expect.any(String) }),
+    }),
+  ]);
   await expect.poll(async () => (await stack.readProject(project.id)).workflowState,
     { timeout: 45_000 }).toBe("RELEASE_APPROVAL_PENDING");
   await expect.poll(async () => (await stack.queryRows<{ retired: number; uploads: number }>(`

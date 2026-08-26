@@ -35,6 +35,24 @@ export type ImportedProjectAnalysis = Readonly<{
   settingsRevision: number;
 }>;
 
+export type ImportedProjectAnalysisReport = Readonly<{
+  name: string;
+  introduction: string;
+  gameplay: string;
+  categories: readonly string[];
+  features: readonly string[];
+  coreLoop: readonly string[];
+  playerExperience: string;
+  acceptanceCriteria: readonly string[];
+  gameContent: string;
+  currentDevelopmentState: string;
+  completedWork: readonly string[];
+  remainingWork: readonly string[];
+  startupFlow: string;
+  startupIssues: readonly string[];
+  risks: readonly string[];
+}>;
+
 export type SourceFile = Readonly<{ path: string; bytes: Buffer }>;
 
 export type GitHubRepository = Readonly<{
@@ -214,37 +232,31 @@ export function parseImportedProjectAnalysis(raw: string, responseLanguage: Resp
       ? `项目分析 Agent 无法完成：${reason}`
       : `The Project Analysis Agent could not complete: ${reason}`);
   }
-  const name = requiredText(result.name, "项目名称", 200);
-  if (name.length < 2) throw new Error("项目名称至少需要 2 个字符");
-  const document = parseProjectDocumentContent({
-    introduction: result.introduction,
-    gameplay: result.gameplay,
-    categories: result.categories,
-    features: result.features,
-  });
-  const coreLoop = requiredList(result.coreLoop, "核心循环");
-  const playerExperience = requiredText(result.playerExperience, "玩家体验", 4_000);
-  const acceptanceCriteria = requiredList(result.acceptanceCriteria, "验收标准");
+  const report = normalizeImportedProjectAnalysisReport(result);
+  const document = Object.freeze({
+    introduction: report.introduction,
+    gameplay: report.gameplay,
+    categories: report.categories,
+    features: report.features,
+  } satisfies ProjectDocumentContent);
   const discovery = Object.freeze({
-    gameContent: requiredText(result.gameContent, "游戏内容", 4_000),
-    currentDevelopmentState: requiredText(result.currentDevelopmentState, "当前开发状态", 4_000),
-    completedWork: Object.freeze(optionalList(result.completedWork, "已完成事项")),
-    remainingWork: Object.freeze(optionalList(result.remainingWork, "未完成事项")),
-    startupFlow: requiredText(result.startupFlow, "启动流程", 4_000),
-    startupIssues: Object.freeze(optionalList(result.startupIssues, "启动体验问题")),
-    risks: Object.freeze(optionalList(result.risks, "项目风险")),
-    recommendedPlan: Object.freeze(requiredList(result.recommendedPlan, "开发计划")),
-    questions: Object.freeze(optionalList(result.questions, "待确认问题", 5)),
+    gameContent: report.gameContent,
+    currentDevelopmentState: report.currentDevelopmentState,
+    completedWork: report.completedWork,
+    remainingWork: report.remainingWork,
+    startupFlow: report.startupFlow,
+    startupIssues: report.startupIssues,
+    risks: report.risks,
   } satisfies ProjectDiscoveryReport);
   const assistantContent = formatDiscoveryReport(discovery, responseLanguage);
   return Object.freeze({
-    name,
+    name: report.name,
     concept: document.introduction,
     specification: Object.freeze({
       vision: document.introduction,
-      coreLoop: Object.freeze(coreLoop),
-      playerExperience,
-      acceptanceCriteria: Object.freeze(acceptanceCriteria),
+      coreLoop: report.coreLoop,
+      playerExperience: report.playerExperience,
+      acceptanceCriteria: report.acceptanceCriteria,
       revisionNotes: Object.freeze([]),
     }),
     document,
@@ -253,9 +265,47 @@ export function parseImportedProjectAnalysis(raw: string, responseLanguage: Resp
   });
 }
 
+/**
+ * Convert provider/tool output into the canonical imported-analysis report.
+ * JSON-schema-capable Agents are instructed to send arrays, while a singular
+ * string is repaired as a one-item array so a harmless shape mistake cannot
+ * discard an otherwise complete source analysis.
+ */
+export function normalizeImportedProjectAnalysisReport(value: unknown): ImportedProjectAnalysisReport {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    throw new Error("项目分析 Agent 返回格式无效");
+  }
+  const result = value as Record<string, unknown>;
+  const name = requiredText(result.name, "项目名称", 200);
+  if (name.length < 2) throw new Error("项目名称至少需要 2 个字符");
+  const document = parseProjectDocumentContent({
+    introduction: result.introduction,
+    gameplay: result.gameplay,
+    categories: providerList(result.categories, "游戏分类", 1, 32),
+    features: providerList(result.features, "主要特性", 1, 32),
+  });
+  return Object.freeze({
+    name,
+    introduction: document.introduction,
+    gameplay: document.gameplay,
+    categories: document.categories,
+    features: document.features,
+    coreLoop: Object.freeze(providerList(result.coreLoop, "核心循环", 1, 32)),
+    playerExperience: requiredText(result.playerExperience, "玩家体验", 4_000),
+    acceptanceCriteria: Object.freeze(providerList(result.acceptanceCriteria, "验收标准", 1, 32)),
+    gameContent: requiredText(result.gameContent, "游戏内容", 4_000),
+    currentDevelopmentState: requiredText(result.currentDevelopmentState, "当前开发状态", 4_000),
+    completedWork: Object.freeze(providerList(result.completedWork, "已完成事项", 0, 32)),
+    remainingWork: Object.freeze(providerList(result.remainingWork, "未完成事项", 0, 32)),
+    startupFlow: requiredText(result.startupFlow, "启动流程", 4_000),
+    startupIssues: Object.freeze(providerList(result.startupIssues, "启动体验问题", 0, 32)),
+    risks: Object.freeze(providerList(result.risks, "项目风险", 0, 32)),
+  });
+}
+
 function formatDiscoveryReport(report: ProjectDiscoveryReport, responseLanguage: ResponseLanguage): string {
   if (responseLanguage === "zh") {
-    const sections: string[] = [
+    return [
       `## 项目内容\n${report.gameContent}`,
       `## 当前开发状态\n${report.currentDevelopmentState}`,
       listSection("已完成", report.completedWork, "暂未从源码中确认已完整完成的模块。"),
@@ -263,17 +313,10 @@ function formatDiscoveryReport(report: ProjectDiscoveryReport, responseLanguage:
       `## 启动流程\n${report.startupFlow}`,
       listSection("启动体验问题", report.startupIssues, "未从静态源码中发现明确的启动体验问题。"),
       listSection("风险", report.risks, "暂未发现需要单独提示的风险。"),
-      listSection("建议开发计划", report.recommendedPlan, ""),
-    ];
-    if (report.questions.length) {
-      sections.push(listSection("开始开发前需要你确认", report.questions, ""));
-      sections.push("请回答以上问题；确认完成前，开发流程不会启动。");
-    } else {
-      sections.push("现有信息足以进入需求确认；如需调整分析结论，请直接在会话中说明。");
-    }
-    return sections.join("\n\n");
+      "项目分析已完成，以上结论将交给 Design Agent 继续设计。",
+    ].join("\n\n");
   }
-  const sections: string[] = [
+  return [
     `## Project content\n${report.gameContent}`,
     `## Current development state\n${report.currentDevelopmentState}`,
     listSection("Completed", report.completedWork, "No fully completed module was confirmed from the source."),
@@ -281,15 +324,8 @@ function formatDiscoveryReport(report: ProjectDiscoveryReport, responseLanguage:
     `## Startup flow\n${report.startupFlow}`,
     listSection("Startup experience issues", report.startupIssues, "No explicit startup experience issue was found by static source analysis."),
     listSection("Risks", report.risks, "No separate project risk was identified."),
-    listSection("Recommended development plan", report.recommendedPlan, ""),
-  ];
-  if (report.questions.length) {
-    sections.push(listSection("Confirm before development", report.questions, ""));
-    sections.push("Answer these questions before development starts.");
-  } else {
-    sections.push("The available information is sufficient for requirement confirmation. Correct any analysis conclusion in the project conversation.");
-  }
-  return sections.join("\n\n");
+    "Project analysis is complete. These findings will now be passed to the Design Agent for further design.",
+  ].join("\n\n");
 }
 
 function listSection(title: string, values: readonly string[], empty: string): string {
@@ -579,14 +615,12 @@ function requiredText(value: unknown, label: string, maxLength: number): string 
   return normalized;
 }
 
-function requiredList(value: unknown, label: string): string[] {
-  if (!Array.isArray(value) || value.length < 1 || value.length > 32) throw new Error(`${label}必须包含 1 至 32 项`);
-  return value.map(item => requiredText(item, label, 300));
-}
-
-function optionalList(value: unknown, label: string, maximum = 32): string[] {
-  if (!Array.isArray(value) || value.length > maximum) throw new Error(`${label}必须包含 0 至 ${maximum} 项`);
-  return value.map(item => requiredText(item, label, 300));
+function providerList(value: unknown, label: string, minimum: number, maximum: number): string[] {
+  const values = typeof value === "string" ? [value] : value;
+  if (!Array.isArray(values) || values.length < minimum || values.length > maximum) {
+    throw new Error(`${label}必须包含 ${minimum} 至 ${maximum} 项`);
+  }
+  return values.map(item => requiredText(item, label, 300));
 }
 
 function normalizeDisplayName(value: string): string {

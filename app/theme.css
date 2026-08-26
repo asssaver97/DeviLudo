@@ -150,7 +150,8 @@ html[data-theme="light"] .workspace-switcher {
 
 html[data-theme="light"] .workspace-avatar,
 html[data-theme="light"] .agent-member i,
-html[data-theme="light"] .conversation-box-message.role-design .message-avatar {
+html[data-theme="light"] .conversation-box-message.role-design .message-avatar,
+html[data-theme="light"] .conversation-box-message.role-analysis .message-avatar {
   background: #e4f4fa;
   border-color: var(--blue);
   color: var(--blue);

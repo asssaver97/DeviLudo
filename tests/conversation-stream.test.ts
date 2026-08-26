@@ -8,6 +8,7 @@ import {
   initialStreamingConversationReplies,
   optimisticConversation,
   startStreamingConversationReply,
+  streamingConversationReplyIsActive,
 } from "../lib/product/conversation-stream";
 import { MAX_CONVERSATION_IMAGE_BYTES } from "../lib/product/contracts";
 
@@ -24,9 +25,11 @@ test("streaming reply activity moves from thinking to typing and then clears its
 
   const typing = appendStreamingConversationReply(developmentStarted, "DEVELOPMENT", "先检查控制器。");
   assert.deepEqual(typing, { DEVELOPMENT: { content: "先检查控制器。", phase: "TYPING" } });
+  assert.equal(streamingConversationReplyIsActive(typing.DEVELOPMENT!), true);
 
   const complete = completeStreamingConversationReply(typing, "DEVELOPMENT");
   assert.deepEqual(complete, { DEVELOPMENT: { content: "先检查控制器。", phase: "COMPLETE" } });
+  assert.equal(streamingConversationReplyIsActive(complete.DEVELOPMENT!), false);
 });
 
 test("completed Agent replies remain visible without a status while the next Agent thinks", () => {

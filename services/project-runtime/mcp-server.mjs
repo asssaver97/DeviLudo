@@ -4,6 +4,7 @@ import {
   canonicalToolName,
   nativeToolName,
   ROLE_TO_CANONICAL_TOOLS,
+  toolInputSchema,
 } from "./tool-names.mjs";
 
 const role = process.env.DEVILUDO_AGENT_ROLE ?? "";
@@ -20,7 +21,7 @@ if (!(role in ROLE_TO_CANONICAL_TOOLS) || !gateway.startsWith("http://") || ![tu
 const definitions = ROLE_TO_CANONICAL_TOOLS[role].map(canonicalName => Object.freeze({
   name: nativeToolName(canonicalName),
   description: toolDescription(canonicalName),
-  inputSchema: Object.freeze({ type: "object", additionalProperties: true }),
+  inputSchema: toolInputSchema(canonicalName),
 }));
 
 let buffer = "";
@@ -80,5 +81,8 @@ function sendError(id, code, message) {
 }
 
 function toolDescription(name) {
+  if (name === "context.update_analysis") {
+    return "Persist the complete imported-project analysis. Pass the canonical report in the required analysis object.";
+  }
   return `DeviLudo built-in ${name} tool. Access is enforced for the ${role} role and audited by turn.`;
 }

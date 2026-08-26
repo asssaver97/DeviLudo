@@ -11,6 +11,7 @@ import {
 import { normalizeProjectPath } from "@/lib/product/source-archive";
 import { planE2eExecution, validateTestManifest } from "@/lib/product/test-manifest";
 import { resolveAgentModel } from "./agent-settings";
+import { normalizeImportedProjectAnalysisReport } from "./project-import";
 import {
   createProjectContext,
   ProjectContextStore,
@@ -519,10 +520,10 @@ export class ProjectRuntimeService {
     if (["conversation.reply", "workflow.intent_decision"].includes(input.name)) return Object.freeze({ accepted: true });
     if (input.name === "workflow.stop") return this.updateWorkflow(input.workspaceId, input.projectId, { state: "STOPPED", stopped: true });
     if (input.name === "workflow.continue") return this.updateWorkflow(input.workspaceId, input.projectId, { state: "DEVELOPING", stopped: false });
-    if (input.name === "context.update_analysis") return this.updateWorkflow(input.workspaceId, input.projectId, {
-      analysis: boundedObject(input.arguments),
-      analysisTurnId: input.turnId,
-    });
+    if (input.name === "context.update_analysis") {
+      const analysis = normalizeImportedProjectAnalysisReport(input.arguments.analysis);
+      return this.updateWorkflow(input.workspaceId, input.projectId, { analysis, analysisTurnId: input.turnId });
+    }
     if (input.name === "requirements.update") {
       return this.confirmApprovedField(input.workspaceId, input.projectId,
         "requirements", arrayOfObjects(input.arguments.requirements));

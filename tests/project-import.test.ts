@@ -8,6 +8,7 @@ import {
   inspectProjectZip,
   normalizeGitBranchName,
   normalizeGitHubRepositoryUrl,
+  normalizeImportedProjectAnalysisReport,
   parseImportedProjectAnalysis,
 } from "@/services/core/src/project-import";
 
@@ -133,15 +134,39 @@ test("Runtime import analysis creates the collaborative document and development
         remainingWork: ["完整关卡流程"],
         startupFlow: "项目主场景直接进入回廊关卡。",
         startupIssues: ["缺少主菜单，启动后直接进入进行中的关卡状态。"],
-        risks: ["状态持久化仍需验证"],
-        recommendedPlan: ["补齐主菜单与新游戏入口", "完成首个关卡", "增加真实操作验收"],
-        questions: ["启动后应显示主菜单，还是自动继续最近存档？"],
+        risks: ["状态持久化仍需验证", "源码未明确启动后应显示主菜单还是继续最近存档。"],
   }), "zh");
   assert.equal(analysis.name, "时序回廊");
   assert.deepEqual(analysis.document.categories, ["解谜", "冒险"]);
   assert.deepEqual(analysis.specification.coreLoop, ["探索", "推理", "重置"]);
   assert.match(analysis.assistantContent, /启动后直接进入进行中的关卡状态/);
-  assert.deepEqual(analysis.discovery.questions, ["启动后应显示主菜单，还是自动继续最近存档？"]);
+  assert.doesNotMatch(analysis.assistantContent, /开发计划/u);
+  assert.doesNotMatch(analysis.assistantContent, /是否按照当前计划开发？/u);
+  assert.ok(analysis.assistantContent.endsWith("项目分析已完成，以上结论将交给 Design Agent 继续设计。"));
+});
+
+test("import analysis repairs singular provider list fields before persistence", () => {
+  const report = normalizeImportedProjectAnalysisReport({
+    name: "商业帝国",
+    introduction: "一款商业经营游戏。",
+    gameplay: "采购、定价、销售并扩张商业版图。",
+    categories: ["模拟", "经营"],
+    features: ["动态市场"],
+    coreLoop: ["采购", "销售", "扩张"],
+    playerExperience: "持续优化经营策略。",
+    acceptanceCriteria: ["能够完成一次经营周期"],
+    gameContent: "经营并扩张商业版图。",
+    currentDevelopmentState: "核心玩法已经实现。",
+    completedWork: "主游戏循环、保存读取和基础 AI 已实现。",
+    remainingWork: "仍需完成目标平台构建和真人平衡测试。",
+    startupFlow: "启动后进入主菜单。",
+    startupIssues: "尚未取得目标平台实际启动证据。",
+    risks: "复杂经济系统仍可能产生后期滚雪球。",
+  });
+  assert.deepEqual(report.completedWork, ["主游戏循环、保存读取和基础 AI 已实现。"]);
+  assert.deepEqual(report.remainingWork, ["仍需完成目标平台构建和真人平衡测试。"]);
+  assert.deepEqual(report.startupIssues, ["尚未取得目标平台实际启动证据。"]);
+  assert.deepEqual(report.risks, ["复杂经济系统仍可能产生后期滚雪球。"]);
 });
 
 test("Runtime import analysis preserves an Agent block reason instead of reporting a missing project name", () => {
@@ -178,8 +203,6 @@ test("import analysis recovers JSON wrapped in prose with literal newlines and t
     '  "startupFlow": "标题页进入新游戏。",',
     '  "startupIssues": [],',
     '  "risks": ["经济平衡尚未验证",],',
-    '  "recommendedPlan": ["补齐新手流程", "验证经济平衡",],',
-    '  "questions": [],',
     "}",
     "```",
     "可以继续开始开发。",
@@ -189,4 +212,6 @@ test("import analysis recovers JSON wrapped in prose with literal newlines and t
   assert.match(analysis.document.introduction, /建立商业帝国/);
   assert.deepEqual(analysis.document.categories, ["模拟", "经营"]);
   assert.deepEqual(analysis.specification.coreLoop, ["采购", "销售", "扩张"]);
+  assert.doesNotMatch(analysis.assistantContent, /开发计划/u);
+  assert.ok(analysis.assistantContent.endsWith("项目分析已完成，以上结论将交给 Design Agent 继续设计。"));
 });

@@ -33,6 +33,12 @@ Cover this design inventory at a depth proportional to the game's scope:
 - experience: information hierarchy, feedback, telegraphs, game feel, pacing, onboarding, accessibility, and how the player learns without relying on unexplained text;
 - proof: smallest playable slice, major design risks, tunable parameters, exploit checks, and observable acceptance goals.
 
+## Continue From Imported-Project Analysis
+
+When invoked after an import, read the completed Analysis Agent report from canonical context before proposing anything. Treat its source findings as evidence, not as a design decision or development plan. Preserve working behavior and already-expressed project intent unless a deliberate change is clearly justified.
+
+Translate gaps, risks, incomplete systems, and startup findings into a coherent next design step. Evaluate the existing core loop with the same agency, tension, mastery, counterplay, feedback, pacing, and dominant-strategy checks used for a new game. Ask the player only for unresolved product choices that materially change the intended experience; do not ask them to reconfirm facts the Analysis Agent already established. If the evidence and existing design are sufficient, complete the design and decide readiness normally. Only this Design stage may present a development plan and ask whether to proceed with it.
+
 Set `readyForDevelopment` to `false` while any unresolved decision would change the core fantasy, primary verbs, core loop, success or failure rules, control scheme, required scope, or acceptance model. During discovery, keep `projectDocumentPatch` empty and all `e2eGoalDelta` arrays empty. The response content must clearly state the current decisions and the next questions; do not present an incomplete proposal as ready for confirmation.
 
 ## Design Gameplay With Depth
@@ -88,7 +94,7 @@ Mark `readyForDevelopment` true only when a fresh DEVELOPMENT and TEST reader ca
 - fixed invariants, tunable values or ranges, known risks, rejected alternatives, and explicit exclusions;
 - the smallest playable slice and acceptance scenarios for the intended experience and every active requirement.
 
-When `readyForDevelopment` is true, the player-facing `content` must end with a development-plan section. Choose the plan's content, level of detail, organization, emphasis, and sequence freely according to the game, current project state, approved design, and implementation risks. Do not require a fixed template, checklist, set of topics, number of steps, or phase order. Keep the plan useful for player review and do not introduce scope that is absent from the approved design. After the plan, end the entire `content` with the localized equivalent of `是否按照当前计划开发？`; for Chinese output use that exact sentence. Put no text after the question.
+When `readyForDevelopment` is true, the player-facing `content` must contain exactly one development-plan section. Choose the plan's content, level of detail, organization, emphasis, and sequence freely according to the game, current project state, approved design, and implementation risks. Do not require a fixed template, checklist, set of topics, number of steps, or phase order. Keep the plan useful for player review and do not introduce scope that is absent from the approved design. If the turn prompt says the player already authorized execution, end the entire Chinese `content` with the exact text `开始开发` (or `Start development` in English) and do not ask for confirmation again. Otherwise end with the localized equivalent of `是否按照当前计划开发？`; for Chinese output use that exact question. Put no text after the final action.
 
 For a new game, `projectDocumentPatch` must provide the complete supported document fields: `introduction`, `gameplay`, `categories`, and `features`. Make `gameplay` structured, unambiguous player-facing prose covering the loop and major rules; make `features` observable acceptance statements rather than marketing adjectives. For an existing game, include the complete affected fields and preserve every non-conflicting decision.
 

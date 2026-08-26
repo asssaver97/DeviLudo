@@ -147,14 +147,14 @@ export function ProjectStudio({ projectId }: { projectId: string }) {
     });
   }, [errorText, projectId]);
 
-  const loadConversations = useCallback(async () => {
+  const loadConversations = useCallback(async (force = false) => {
     const selectionRevision = conversationSelectionRevision.current;
     const values = await loadCached(clientCacheKeys.conversations(projectId), 30_000, async () => {
       const response = await fetch(`/api/projects/${encodeURIComponent(projectId)}/conversations`, { cache: "no-store" });
       const payload = await response.json() as { conversations?: readonly ProductConversationSummary[]; message?: string };
       if (!response.ok || !payload.conversations) throw new Error(errorText(payload.message, `历史会话读取失败 (${response.status})`, `Unable to load conversation history (${response.status})`));
       return payload.conversations;
-    });
+    }, { force });
     if (selectionRevision !== conversationSelectionRevision.current) return;
     setConversations(values);
     const initialId = values[0]?.id ?? null;
@@ -172,6 +172,28 @@ export function ProjectStudio({ projectId }: { projectId: string }) {
     if (selectionRevision !== conversationSelectionRevision.current) return;
     setConversation(value);
   }, [errorText, projectId]);
+
+  const refreshSelectedConversation = useCallback(async () => {
+    const conversationId = selectedConversationId;
+    if (!conversationId) {
+      await loadConversations(true);
+      return;
+    }
+    if (conversationId.startsWith("pending-")) return;
+    const response = await fetch(`/api/conversations/${encodeURIComponent(conversationId)}`, { cache: "no-store" });
+    const payload = await response.json() as { conversation?: ProductConversation; message?: string };
+    if (!response.ok || !payload.conversation) {
+      throw new Error(errorText(payload.message, `会话读取失败 (${response.status})`, `Unable to load conversation (${response.status})`));
+    }
+    const value = payload.conversation;
+    storeCached(clientCacheKeys.conversation(conversationId), value, 30_000);
+    setConversation(current => current?.id === conversationId ? value : current);
+    setConversations(current => {
+      if (!current.some(item => item.id === conversationId)) return current;
+      const summary = conversationSummary(value);
+      return Object.freeze([summary, ...current.filter(item => item.id !== conversationId)]);
+    });
+  }, [errorText, loadConversations, selectedConversationId]);
 
   const loadArtifacts = useCallback(async (force = false) => {
     const values = await loadCached(clientCacheKeys.artifacts(projectId), 10_000, async () => {
@@ -265,13 +287,16 @@ export function ProjectStudio({ projectId }: { projectId: string }) {
     let timer: ReturnType<typeof setTimeout> | null = null;
     const poll = async () => {
       if (document.visibilityState === "visible") {
-        await Promise.all([loadProject(true), loadArtifacts(true), loadIterations(), loadAssetManifest(), loadRuntime()]).catch(() => undefined);
+        await Promise.all([
+          loadProject(true), loadArtifacts(true), loadIterations(), loadAssetManifest(), loadRuntime(),
+          refreshSelectedConversation(),
+        ]).catch(() => undefined);
       }
       if (!stopped) timer = setTimeout(poll, 3_000);
     };
     timer = setTimeout(poll, 3_000);
     return () => { stopped = true; if (timer) clearTimeout(timer); };
-  }, [loadArtifacts, loadAssetManifest, loadIterations, loadProject, loadRuntime, projectAnalysisInProgress, workflowState]);
+  }, [loadArtifacts, loadAssetManifest, loadIterations, loadProject, loadRuntime, projectAnalysisInProgress, refreshSelectedConversation, workflowState]);
 
   async function controlRuntime(action: "stop" | "continue") {
     if (busy) return;
@@ -803,7 +828,7 @@ export function ProjectStudio({ projectId }: { projectId: string }) {
     requirementsReady,
     historical: viewingHistoricalIteration,
     workflowState: viewedWorkflowState,
-    questionCount: project.discovery?.questions.length ?? 0,
+    questionCount: 0,
   }, text);
   const viewedIterationNumber = viewingHistoricalIteration
     ? historicalIteration.iterationNumber
@@ -905,12 +930,12 @@ export function ProjectStudio({ projectId }: { projectId: string }) {
             ) : null}
             {!viewingHistoricalIteration && deliveryActive && runtimeView?.runtime?.state !== "STOPPED" ? (
               <button className="button button-secondary" disabled={busy} onClick={() => void controlRuntime("stop")} type="button">
-                {text("停止自动执行", "STOP AUTOMATION")}
+                {text("中止", "ABORT")}
               </button>
             ) : null}
             {!viewingHistoricalIteration && runtimeView?.runtime?.state === "STOPPED" ? (
               <button className="button button-primary" disabled={busy} onClick={() => void controlRuntime("continue")} type="button">
-                {text("继续自动执行", "CONTINUE AUTOMATION")}
+                {text("继续", "CONTINUE")}
               </button>
             ) : null}
             {!viewingHistoricalIteration && ITERATION_TERMINAL_STATES.has(project.workflowState) ? (

@@ -203,9 +203,9 @@ export type ProductProjectSummary = Readonly<{
 
 /**
  * Source-backed projects must be understood before implementation starts. The
- * report is deliberately product-facing: it records what the game is, where
- * development actually stands, and which assumptions still require a player
- * decision instead of hiding those findings in an Agent transcript.
+ * report is deliberately product-facing: it records what the game is and
+ * where development actually stands. Product decisions belong to the Design
+ * Agent stage that follows this source analysis.
  */
 export type ProjectDiscoveryReport = Readonly<{
   gameContent: string;
@@ -215,8 +215,6 @@ export type ProjectDiscoveryReport = Readonly<{
   startupFlow: string;
   startupIssues: readonly string[];
   risks: readonly string[];
-  recommendedPlan: readonly string[];
-  questions: readonly string[];
 }>;
 
 export type ProjectSourceRevision = Readonly<{

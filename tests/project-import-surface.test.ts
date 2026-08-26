@@ -3,10 +3,11 @@ import { readFile } from "node:fs/promises";
 import test from "node:test";
 
 test("project linking is reachable from Home and separates local and GitHub sources", async () => {
-  const [home, dashboard, studio, bridge, proxy, core, repository, projectImport, analysisSkill, configuration, baseline] = await Promise.all([
+  const [home, dashboard, studio, conversationBox, bridge, proxy, core, repository, projectImport, analysisSkill, configuration, baseline] = await Promise.all([
     readFile(new URL("../components/HomeChat.tsx", import.meta.url), "utf8"),
     readFile(new URL("../components/ProductDashboard.tsx", import.meta.url), "utf8"),
     readFile(new URL("../components/ProjectStudio.tsx", import.meta.url), "utf8"),
+    readFile(new URL("../components/conversation/ConversationBox.tsx", import.meta.url), "utf8"),
     readFile(new URL("../scripts/local-git-import-server.mjs", import.meta.url), "utf8"),
     readFile(new URL("../app/api/[...segments]/route.ts", import.meta.url), "utf8"),
     readFile(new URL("../services/core/src/api.ts", import.meta.url), "utf8"),
@@ -49,9 +50,16 @@ test("project linking is reachable from Home and separates local and GitHub sour
   assert.match(dashboard, /project\.analysisStatus === "NEEDS_INPUT"/);
   assert.match(studio, /text\("已有项目分析", "PROJECT ANALYSIS"\)/);
   assert.match(studio, /analysisStatus === "NEEDS_INPUT"/);
-  assert.match(projectImport, /completedWork.*remainingWork.*startupFlow.*startupIssues.*recommendedPlan.*questions/s);
+  assert.match(projectImport, /completedWork.*remainingWork.*startupFlow.*startupIssues.*risks/s);
+  assert.doesNotMatch(projectImport, /recommendedPlan|discovery\.questions/);
   assert.match(analysisSkill, /startup flow, reproducible startup problems/);
-  assert.match(repository, /status: input\.discovery\.questions\.length \? "NEEDS_INPUT" : "READY"/);
+  assert.match(analysisSkill, /not the design stage/);
+  assert.match(repository, /status: "READY"/);
+  assert.match(repository, /agentRole: "ANALYSIS"/);
+  assert.match(repository, /source: "PROJECT_IMPORT_DESIGN_AGENT"/);
+  assert.match(core, /role: "ANALYSIS"[\s\S]*designImportedProject/);
+  assert.match(core, /role: "DESIGN"[\s\S]*mode: "READ_ONLY_BRANCH"/);
+  assert.match(conversationBox, /role === "ANALYSIS"[\s\S]*DeviLudo 分析 Agent/);
   assert.match(repository, /state_data #>> '\{importAnalysis,status\}' = 'NEEDS_INPUT'/);
   assert.match(core, /pending\?\.state === "WAITING_FOR_ANALYSIS"[\s\S]*applyConfirmedConversationChange/);
   assert.match(baseline, /CREATE OR REPLACE FUNCTION deviludo\.claim_project_import_analysis\(p_lease_seconds integer\)/);

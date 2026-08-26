@@ -28,10 +28,7 @@ if (request.mode === "COMPACT") {
 } else if (request.role === "ANALYSIS") {
   const projectName = String(context?.workflow?.projectName ?? "Imported game");
   structured = analysisReport(projectName, request.responseLanguage);
-  await callTool("context.update_analysis", {
-    status: "READY",
-    report: "Fixture Runtime inspected the imported project without modifying it.",
-  });
+  await callTool("context.update_analysis", { analysis: structured });
   content = JSON.stringify(structured);
 } else if (request.role === "DESIGN") {
   const goals = Array.isArray(context?.e2e?.goals) ? context.e2e.goals : [];
@@ -83,6 +80,9 @@ if (request.mode === "COMPACT") {
     sourceRevision: checkpoint.revision,
   });
   structured = {
+    content: request.responseLanguage === "zh"
+      ? "游戏生成已完成，新的源码版本已经提交，现已进入受控构建与测试流程。"
+      : "Game generation is complete. The new source revision is ready for controlled build and testing.",
     sourceRevision: checkpoint.revision,
     handoff: { toRole: "TEST", sourceRevision: checkpoint.revision },
   };
@@ -230,8 +230,6 @@ function analysisReport(projectName, language) {
     startupFlow: "打开项目入口，加载首个场景并开始主要交互。",
     startupIssues: [],
     risks: ["平台特定的输入行为仍需 E2E 证据"],
-    recommendedPlan: ["确认需求", "开发已批准变更", "运行完整跨平台测试计划"],
-    questions: [],
   };
   return {
     name: projectName,
@@ -249,8 +247,6 @@ function analysisReport(projectName, language) {
     startupFlow: "Open the project entry point, load the first scene, and begin the primary interaction.",
     startupIssues: [],
     risks: ["Platform-specific input behavior still requires E2E evidence"],
-    recommendedPlan: ["Confirm requirements", "Develop the approved changes", "Run the complete cross-platform test plan"],
-    questions: [],
   };
 }
 

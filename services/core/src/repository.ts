@@ -961,6 +961,10 @@ export class CoreRepository {
     responseLanguage?: ResponseLanguage;
     assistantContent: string;
     assistantMetadata: Readonly<Record<string, unknown>>;
+    designAssistant: Readonly<{
+      content: string;
+      metadata: Readonly<Record<string, unknown>>;
+    }>;
     discovery: ProjectDiscoveryReport;
     source: Readonly<{
       kind: "GIT" | "LOCAL_DIRECTORY";
@@ -1073,7 +1077,7 @@ export class CoreRepository {
           },
           importAnalysis: {
             ...currentAnalysis,
-            status: input.discovery.questions.length ? "NEEDS_INPUT" : "READY",
+            status: "READY",
             error: null,
             report: input.discovery,
             completedAt: new Date().toISOString(),
@@ -1122,7 +1126,18 @@ export class CoreRepository {
         [input.workspaceId, conversationId, input.assistantContent, JSON.stringify({
           ...input.assistantMetadata,
           source: "PROJECT_IMPORT_AGENT",
+          agentRole: "ANALYSIS",
+          agentName: "DeviLudo Analysis Agent",
           appliedToDraft: true,
+        })],
+      );
+      await client.query(
+        `INSERT INTO deviludo.conversation_messages(workspace_id, conversation_id, role, content, metadata)
+         VALUES ($1::uuid, $2::uuid, 'ASSISTANT', $3, $4::jsonb)`,
+        [input.workspaceId, conversationId, input.designAssistant.content, JSON.stringify({
+          ...input.designAssistant.metadata,
+          source: "PROJECT_IMPORT_DESIGN_AGENT",
+          importStage: "DESIGN",
         })],
       );
       return true;
@@ -2184,13 +2199,23 @@ export class CoreRepository {
     job: JobProtocolV4,
     output: Readonly<Record<string, unknown>>,
   ): Promise<boolean> {
-    const result = await this.database.withWorkspace(job.workspaceId, client => client.query(
-      `SELECT deviludo.complete_agent_turn_job(
-         $1::uuid, $2::uuid, $3::uuid, $4::bigint, $5::jsonb
-       ) AS completed`,
-      [job.workspaceId, job.jobId, job.lease.token, job.lease.fencingToken, JSON.stringify(output)],
-    ));
-    return result.rows[0]?.completed === true;
+    return this.database.withWorkspace(job.workspaceId, async client => {
+      const result = await client.query(
+        `SELECT deviludo.complete_agent_turn_job(
+           $1::uuid, $2::uuid, $3::uuid, $4::bigint, $5::jsonb
+         ) AS completed`,
+        [job.workspaceId, job.jobId, job.lease.token, job.lease.fencingToken, JSON.stringify(output)],
+      );
+      if (result.rows[0]?.completed !== true) return false;
+      if (output.role !== "DEVELOPMENT") return true;
+
+      const responseLanguage = output.responseLanguage === "zh" ? "zh" : "en";
+      await client.query(
+        `SELECT deviludo.publish_development_agent_message($1::uuid, $2::uuid, $3::text)`,
+        [job.workspaceId, job.jobId, workflowDevelopmentConversationContent(output, responseLanguage)],
+      );
+      return true;
+    });
   }
 
   async readAgentProgress(
@@ -4519,10 +4544,8 @@ function projectDiscoveryFromValue(value: unknown): ProjectDiscoveryReport | nul
   const startupFlow = text(report.startupFlow);
   const startupIssues = list(report.startupIssues);
   const risks = list(report.risks);
-  const recommendedPlan = list(report.recommendedPlan);
-  const questions = list(report.questions);
   if (!gameContent || !currentDevelopmentState || !completedWork || !remainingWork || !startupFlow
-    || !startupIssues || !risks || !recommendedPlan?.length || !questions) return null;
+    || !startupIssues || !risks) return null;
   return Object.freeze({
     gameContent,
     currentDevelopmentState,
@@ -4531,8 +4554,6 @@ function projectDiscoveryFromValue(value: unknown): ProjectDiscoveryReport | nul
     startupFlow,
     startupIssues,
     risks,
-    recommendedPlan,
-    questions,
   });
 }
 
@@ -4594,6 +4615,23 @@ function objectValue(value: unknown): Record<string, unknown> {
   return value && typeof value === "object" && !Array.isArray(value)
     ? value as Record<string, unknown>
     : {};
+}
+
+function workflowDevelopmentConversationContent(
+  output: Readonly<Record<string, unknown>>,
+  responseLanguage: "en" | "zh",
+): string {
+  const structured = objectValue(output.structured);
+  const authored = typeof structured.content === "string" ? structured.content.trim() : "";
+  if (authored) return authored.slice(0, 4_000);
+  const summary = typeof objectValue(structured.handoff).summary === "string"
+    ? String(objectValue(structured.handoff).summary).trim()
+    : "";
+  const revision = Number(output.sourceRevision ?? structured.sourceRevision);
+  const transition = responseLanguage === "zh"
+    ? `游戏生成已完成${Number.isSafeInteger(revision) && revision > 0 ? `，源码版本 ${revision} 已提交` : ""}，现已进入受控构建与测试流程。`
+    : `Game generation is complete${Number.isSafeInteger(revision) && revision > 0 ? ` and source revision ${revision} is committed` : ""}. Controlled build and testing are now starting.`;
+  return `${summary ? `${summary}\n\n` : ""}${transition}`.slice(0, 4_000);
 }
 
 function analysisLeaseMatches(stateData: Record<string, unknown>, leaseToken: string): boolean {
