@@ -7,12 +7,15 @@ RUN --mount=type=cache,target=/root/.npm apt-get update && DEBIAN_FRONTEND=nonin
  && useradd --create-home --uid 10001 task
 COPY services/project-runtime/runtime.mjs /usr/local/bin/deviludo-project-runtime
 COPY services/project-runtime/turn.mjs /usr/local/bin/deviludo-project-turn
+COPY services/project-runtime/runtime-events.mjs /usr/local/bin/runtime-events.mjs
 COPY services/project-runtime/mcp-server.mjs /usr/local/bin/deviludo-mcp
+COPY services/project-runtime/tool-names.mjs /usr/local/bin/tool-names.mjs
 COPY services/project-runtime/io.mjs /usr/local/bin/deviludo-runtime-io
 COPY services/project-runtime/volume-init.mjs /usr/local/bin/deviludo-runtime-volume-init
-COPY services/project-runtime/mcp.json /opt/deviludo/mcp.json
 COPY services/project-runtime/skills /opt/deviludo/skills
 RUN find /opt/deviludo/skills -type f -name SKILL.md -print0 | sort -z | xargs -0 sha256sum > /opt/deviludo/skills.sha256 \
+ && mkdir -p /opt/deviludo/readonly-workspace \
+ && chmod 0555 /opt/deviludo/readonly-workspace \
  && chmod 0444 /opt/deviludo/skills.sha256 \
  && chmod 0555 /usr/local/bin/deviludo-project-runtime /usr/local/bin/deviludo-project-turn \
     /usr/local/bin/deviludo-mcp /usr/local/bin/deviludo-runtime-io /usr/local/bin/deviludo-runtime-volume-init

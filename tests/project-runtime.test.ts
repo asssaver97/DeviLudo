@@ -23,6 +23,15 @@ import {
   summarizeRuntimeToolCalls,
   summarizeToolAuditValue,
 } from "@/services/core/src/project-runtime-service";
+import {
+  finalRuntimeContent,
+  structuredRuntimeOutput,
+} from "@/services/project-runtime/runtime-events.mjs";
+import {
+  canonicalToolName,
+  nativeToolName,
+  ROLE_TO_CANONICAL_TOOLS,
+} from "@/services/project-runtime/tool-names.mjs";
 
 const workspaceId = "10000000-0000-4000-8000-000000000001";
 const projectId = "10000000-0000-4000-8000-000000000002";
@@ -134,6 +143,29 @@ test("the Runtime lifecycle uses fixed five-minute pause and thirty-minute destr
   assert.equal(PROJECT_RUNTIME_PAUSED_DESTROY_MS, 30 * 60_000);
 });
 
+test("Codex JSONL returns the final agent message instead of the entire event stream", () => {
+  const output = [
+    JSON.stringify({ type: "thread.started", thread_id: "thread-1" }),
+    JSON.stringify({ type: "item.completed", item: { type: "agent_message", text: "Inspecting the project." } }),
+    JSON.stringify({ type: "item.completed", item: { type: "agent_message", text: '{"name":"Big Rich","complete":true}' } }),
+  ].join("\n");
+  const content = finalRuntimeContent(output);
+  assert.equal(content, '{"name":"Big Rich","complete":true}');
+  assert.deepEqual(structuredRuntimeOutput(content), { name: "Big Rich", complete: true });
+});
+
+test("Runtime exposes provider-safe native MCP names and maps them to authorized Core tools", () => {
+  for (const [role, canonicalNames] of Object.entries(ROLE_TO_CANONICAL_TOOLS)) {
+    for (const canonicalName of canonicalNames) {
+      const nativeName = nativeToolName(canonicalName);
+      assert.match(nativeName, /^[a-z][a-z0-9_]*$/);
+      assert.equal(canonicalToolName(role, nativeName), canonicalName);
+    }
+  }
+  assert.equal(nativeToolName("context.read"), "context_read");
+  assert.equal(canonicalToolName("ANALYSIS", "source_checkpoint"), null);
+});
+
 test("MCP audit records summarize large tool results and redact credentials", () => {
   const result = summarizeToolAuditValue({
     context: { plan: "x".repeat(70_000), credentialSecretRef: "vault://must-not-persist" },
@@ -168,18 +200,29 @@ test("MCP audit records summarize large tool results and redact credentials", ()
 });
 
 test("Core has one Runtime path and controlled task images cannot execute Agent turns", async () => {
-  const [api, runner, fixture, supervisor] = await Promise.all([
+  const [api, runner, fixture, supervisor, turn, runtimeService] = await Promise.all([
     readFile(new URL("../services/core/src/api.ts", import.meta.url), "utf8"),
     readFile(new URL("../services/sandbox-executor/task-runner.mjs", import.meta.url), "utf8"),
     readFile(new URL("../services/sandbox-executor/task-fixture-agent.mjs", import.meta.url), "utf8"),
     readFile(new URL("../services/sandbox-executor/src/project-runtime-supervisor.ts", import.meta.url), "utf8"),
+    readFile(new URL("../services/project-runtime/turn.mjs", import.meta.url), "utf8"),
+    readFile(new URL("../services/core/src/project-runtime-service.ts", import.meta.url), "utf8"),
   ]);
   assert.doesNotMatch(api, /generateE2eTestPlan|generateE2ePlayerDecision|classifyConversationIntent|generateProductConversationReply/);
   assert.doesNotMatch(runner, /AGENT_TURN|runAgent|runProjectDocumentMaintenance/);
   assert.doesNotMatch(fixture, /AGENT_TURN/);
   assert.match(supervisor, /--cap-drop=ALL/);
   assert.match(supervisor, /--security-opt=no-new-privileges/);
+  assert.match(supervisor, /size=64m/);
+  assert.match(supervisor, /existing\.imageId !== runtimeImageId/);
   assert.doesNotMatch(supervisor, /docker\.sock|hypervisor|\/dev\/kvm/);
+  assert.match(turn, /--dangerously-bypass-approvals-and-sandbox/);
+  assert.match(turn, /--disable", "shell_tool/);
+  assert.match(turn, /\/opt\/deviludo\/readonly-workspace/);
+  assert.match(turn, /mcp_servers\.deviludo\.env_vars/);
+  assert.match(turn, /ephemeralMcpConfig/);
+  assert.doesNotMatch(turn, /--ignore-user-config/);
+  assert.match(runtimeService, /workflow\.analysisTurnId !== result\.turnId/);
 });
 
 test("conversation persistence does not reject replies when the workflow advances concurrently", async () => {

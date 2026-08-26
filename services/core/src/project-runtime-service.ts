@@ -199,6 +199,12 @@ export class ProjectRuntimeService {
         leaseToken: started.leaseToken,
         leaseExpiresAt: new Date(Date.now() + 24 * 60 * 60_000).toISOString(),
       }, undefined, input.onEvent);
+      if (input.role === "ANALYSIS" && input.mode === "PRIMARY") {
+        const durable = await this.readContext(input.workspaceId, input.projectId);
+        if (durable.workflow.analysisTurnId !== result.turnId) {
+          throw new Error("Project Analysis Agent did not persist its report through context_update_analysis");
+        }
+      }
       const toolSummaries = summarizeRuntimeToolCalls(result.toolCalls);
       const completed = await this.repository.completeTurn({
         workspaceId: input.workspaceId,
@@ -513,7 +519,10 @@ export class ProjectRuntimeService {
     if (["conversation.reply", "workflow.intent_decision"].includes(input.name)) return Object.freeze({ accepted: true });
     if (input.name === "workflow.stop") return this.updateWorkflow(input.workspaceId, input.projectId, { state: "STOPPED", stopped: true });
     if (input.name === "workflow.continue") return this.updateWorkflow(input.workspaceId, input.projectId, { state: "DEVELOPING", stopped: false });
-    if (input.name === "context.update_analysis") return this.updateWorkflow(input.workspaceId, input.projectId, { analysis: boundedObject(input.arguments) });
+    if (input.name === "context.update_analysis") return this.updateWorkflow(input.workspaceId, input.projectId, {
+      analysis: boundedObject(input.arguments),
+      analysisTurnId: input.turnId,
+    });
     if (input.name === "requirements.update") {
       return this.confirmApprovedField(input.workspaceId, input.projectId,
         "requirements", arrayOfObjects(input.arguments.requirements));

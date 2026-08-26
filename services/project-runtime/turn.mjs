@@ -2,6 +2,11 @@
 import { createHash, randomUUID } from "node:crypto";
 import { cp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { spawn } from "node:child_process";
+import {
+  finalRuntimeContent,
+  runtimeEventText,
+  structuredRuntimeOutput,
+} from "./runtime-events.mjs";
 
 // Source changes must remain writable by the trusted Core project group so
 // server-side checkpointing and generated-asset retirement stay possible.
@@ -20,12 +25,15 @@ const nativeSessionId = previous?.nativeSessionId ?? randomUUID();
 await verifySkillManifest();
 await installNativeSkills();
 const skillName = `deviludo-${request.role.toLowerCase()}`;
+const skillInstructions = await readFile(skillFile, "utf8");
 const contextPath = process.env.DEVILUDO_PROJECT_CONTEXT_FILE ?? "/workspace/context/project-context.json.zst";
 const sourceDirectory = process.env.DEVILUDO_PROJECT_SOURCE_DIR ?? "/workspace/project";
+const writable = request.role === "DEVELOPMENT" && request.mode === "PRIMARY";
 const prompt = [
   `Use the installed, signed ${skillName} Skill for this turn. Its instructions are mandatory.`,
+  `The verified Skill instructions are embedded below so this externally sandboxed Runtime does not need a shell merely to read them:\n\n${skillInstructions}`,
   `Current role: ${request.role}. Turn mode: ${request.mode}.`,
-  `The canonical compressed project context is mounted at ${contextPath}. Use context.read instead of attempting to decode or edit it.`,
+  `The canonical compressed project context is mounted at ${contextPath}. Use context_read instead of attempting to decode or edit it.`,
   request.mode === "COMPACT" ? "Compaction mode is summary-only: do not use mutating tools, edit source, or start workflow work. Return a restoration-ready structured summary." : "",
   request.mode === "READ_ONLY_BRANCH" ? "This is a read-only branch. Answer the question only. Do not mutate project state or files." : "This is the primary role session. Use only authorized tools for durable state changes.",
   request.attachmentPaths.length ? `Inspect the player attachments at these read-only turn paths:\n${request.attachmentPaths.join("\n")}` : "",
@@ -40,26 +48,45 @@ const environment = {
   DEVILUDO_MCP_TOKEN_FILE: mcpTokenFile,
   DEVILUDO_PROJECT_CONTEXT_FILE: contextPath,
 };
+const mcpEnvironmentKeys = [
+  "DEVILUDO_AGENT_ROLE",
+  "DEVILUDO_AGENT_TURN_ID",
+  "DEVILUDO_MCP_TOKEN_FILE",
+  "DEVILUDO_MCP_GATEWAY",
+  "DEVILUDO_WORKSPACE_ID",
+  "DEVILUDO_PROJECT_ID",
+];
 const credential = (await readFile(credentialFile, "utf8")).trim();
 let command;
 let args;
 let input;
 let codexAuthFile = null;
 let ephemeralCodexHome = null;
+let ephemeralMcpConfig = null;
 if (request.runtime === "CLAUDE_CODE") {
   environment.ANTHROPIC_API_KEY = credential;
   environment.ANTHROPIC_AUTH_TOKEN = credential;
   environment.ANTHROPIC_BASE_URL = request.baseUrl;
   environment.ANTHROPIC_MODEL = request.model;
   environment.CLAUDE_CODE_DISABLE_BACKGROUND_TASKS = "1";
-  const writable = request.role === "DEVELOPMENT" && request.mode === "PRIMARY";
+  ephemeralMcpConfig = `/run/deviludo/${request.turnId}/mcp.json`;
+  await mkdir(`/run/deviludo/${request.turnId}`, { recursive: true, mode: 0o700 });
+  await writeFile(ephemeralMcpConfig, JSON.stringify({
+    mcpServers: {
+      deviludo: {
+        type: "stdio",
+        command: "/usr/local/bin/deviludo-mcp",
+        env: Object.fromEntries(mcpEnvironmentKeys.map(key => [key, environment[key]])),
+      },
+    },
+  }), { mode: 0o600 });
   args = [
     "-p", "--bare", "--output-format", "stream-json", "--include-partial-messages", "--verbose",
     "--max-turns", "100", "--tools", writable
       ? "Read,Write,Edit,Glob,Grep,Bash,mcp__deviludo__*"
       : "Read,Glob,Grep,mcp__deviludo__*",
     "--disallowedTools", "Agent,Task,WebFetch,WebSearch", "--dangerously-skip-permissions",
-    "--mcp-config", "/opt/deviludo/mcp.json", "--strict-mcp-config",
+    "--mcp-config", ephemeralMcpConfig, "--strict-mcp-config",
     previous ? "--resume" : "--session-id", nativeSessionId,
   ];
   if (request.mode === "READ_ONLY_BRANCH" && previous) args.push("--fork-session");
@@ -78,22 +105,34 @@ if (request.runtime === "CLAUDE_CODE") {
     delete environment.DEVILUDO_CODEX_PROVIDER_API_KEY;
   }
   const provider = official ? "deviludo_chatgpt" : "deviludo_custom";
-  args = ["exec", "--json", "--ignore-user-config",
+  args = ["exec", "--json",
     "--ignore-rules",
+    "--disable", "apps",
+    "--disable", "browser_use",
+    "--disable", "browser_use_external",
+    "--disable", "browser_use_full_cdp_access",
+    "--disable", "computer_use",
+    "--disable", "image_generation",
+    "--disable", "multi_agent",
+    "--disable", "recommended_plugins",
     "--config", `model_provider=${provider}`,
     "--config", `model_providers.${provider}.name=DeviLudo`,
     "--config", `model_providers.${provider}.base_url=${official ? "https://chatgpt.com/backend-api/codex" : request.baseUrl}`,
     "--config", "model_providers.${provider}.wire_api=responses".replace("${provider}", provider),
     "--config", `model_providers.${provider}.requires_openai_auth=${official}`,
     "--config", `model_providers.${provider}.supports_websockets=false`,
-    "--config", `mcp_servers.deviludo.command=/usr/local/bin/deviludo-mcp`,
+    "--config", `mcp_servers.deviludo.command=${JSON.stringify("/usr/local/bin/deviludo-mcp")}`,
+    "--config", `mcp_servers.deviludo.env_vars=${JSON.stringify(mcpEnvironmentKeys)}`,
+    "--config", "mcp_servers.deviludo.startup_timeout_sec=20",
+    "--config", "mcp_servers.deviludo.tool_timeout_sec=120",
     "--skip-git-repo-check",
-    ...(request.mode === "READ_ONLY_BRANCH" || request.role !== "DEVELOPMENT" ? ["--sandbox", "read-only"] : ["--dangerously-bypass-approvals-and-sandbox"]),
+    "--dangerously-bypass-approvals-and-sandbox",
+    ...(!writable ? ["--disable", "shell_tool"] : []),
   ];
   if (!official) args.push("--config", `model_providers.${provider}.env_key=DEVILUDO_CODEX_PROVIDER_API_KEY`);
   if (request.model !== "account-default") args.push("-m", request.model);
   for (const attachmentPath of request.attachmentPaths) args.push("-i", attachmentPath);
-  args.push("-C", sourceDirectory);
+  args.push("-C", writable ? sourceDirectory : "/opt/deviludo/readonly-workspace");
   // Every turn gets an isolated CODEX_HOME copy. A read-only branch can resume
   // the latest role transcript in that copy, answer with full context, and be
   // discarded without mutating the primary session history.
@@ -111,6 +150,7 @@ const result = await run(command, args, environment, input).finally(async () => 
     rm(credentialFile, { force: true }),
     rm(mcpTokenFile, { force: true }),
     ...(codexAuthFile ? [rm(codexAuthFile, { force: true })] : []),
+    ...(ephemeralMcpConfig ? [rm(ephemeralMcpConfig, { force: true })] : []),
   ]);
 });
 const sessionId = result.sessionId ?? nativeSessionId;
@@ -124,7 +164,7 @@ process.stdout.write(`${JSON.stringify({
   role: request.role,
   mode: request.mode,
   content: result.content,
-  structured: structuredOutput(result.content),
+  structured: structuredRuntimeOutput(result.content),
   toolCalls: result.toolCalls,
   sessionId,
   branchId: request.mode === "READ_ONLY_BRANCH" ? sessionId : null,
@@ -156,24 +196,14 @@ async function run(executable, args, env, stdin) {
     let event;
     try { event = JSON.parse(line); } catch { continue; }
     sessionId ??= event.session_id ?? event.thread_id ?? event.threadId ?? null;
-    const text = event.result ?? event.message?.content?.find?.(part => part.type === "text")?.text
-      ?? event.item?.content?.find?.(part => part.type === "output_text")?.text;
+    const text = runtimeEventText(event);
     if (typeof text === "string") content.push(text);
     if (event.type?.includes?.("tool") || event.item?.type?.includes?.("tool")) {
-      toolCalls.push({ name: String(event.name ?? event.item?.name ?? "tool"), arguments: {}, result: {}, startedAt, completedAt: new Date().toISOString() });
+      toolCalls.push({ name: String(event.name ?? event.item?.name ?? event.item?.tool ?? "tool"), arguments: {}, result: {}, startedAt, completedAt: new Date().toISOString() });
     }
   }
   if (exitCode !== 0) throw new Error(`${executable} exited ${String(exitCode)}: ${stderr.slice(-4000)}`);
-  return { content: content.at(-1) ?? stdout.trim(), toolCalls, sessionId };
-}
-
-function structuredOutput(content) {
-  const match = content.match(/```json\s*([\s\S]*?)```/i);
-  const candidate = match?.[1] ?? content;
-  try {
-    const value = JSON.parse(candidate.trim());
-    return value && typeof value === "object" && !Array.isArray(value) ? value : {};
-  } catch { return {}; }
+  return { content: content.at(-1) ?? finalRuntimeContent(stdout), toolCalls, sessionId };
 }
 
 async function readStdin() {

@@ -206,6 +206,14 @@ export function parseImportedProjectAnalysis(raw: string, responseLanguage: Resp
   try { value = parseProviderJsonObject(raw); } catch { throw new Error("项目分析 Agent 返回的 JSON 无效"); }
   if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error("项目分析 Agent 返回格式无效");
   const result = value as Record<string, unknown>;
+  if (result.status === "blocked" || result.status === "failed" || result.complete === false) {
+    const reason = typeof result.reason === "string" && result.reason.trim()
+      ? result.reason.trim().slice(0, 2_000)
+      : responseLanguage === "zh" ? "项目分析 Agent 未完成分析。" : "The Project Analysis Agent did not complete the analysis.";
+    throw new Error(responseLanguage === "zh"
+      ? `项目分析 Agent 无法完成：${reason}`
+      : `The Project Analysis Agent could not complete: ${reason}`);
+  }
   const name = requiredText(result.name, "项目名称", 200);
   if (name.length < 2) throw new Error("项目名称至少需要 2 个字符");
   const document = parseProjectDocumentContent({

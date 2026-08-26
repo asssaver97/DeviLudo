@@ -40,10 +40,12 @@ export class ProjectRuntimeSupervisor {
     validateEnsure(request, this.options.allowlistedImages);
     validateProjectsVolume(this.options.projectsVolume);
     const name = runtimeName(this.options.projectsVolume, request.workspaceId, request.projectId);
+    const runtimeImageId = await this.imageId(request.runtimeImage);
     const existing = await this.inspect(name);
     if (existing && (existing.generation !== request.generation
       || existing.fencingToken !== request.fencingToken
-      || existing.runtime !== request.runtime)) {
+      || existing.runtime !== request.runtime
+      || existing.imageId !== runtimeImageId)) {
       this.abortProjectTurns(request.workspaceId, request.projectId);
       await this.destroyExisting(name, request.projectId);
     } else if (existing?.state === "FAILED") {
@@ -73,7 +75,7 @@ export class ProjectRuntimeSupervisor {
     const args = [
       "create", "--name", name, "--read-only", "--cap-drop=ALL",
       "--security-opt=no-new-privileges", "--pids-limit=512", "--memory=6g", "--cpus=2.00",
-      "--tmpfs=/run/deviludo:rw,noexec,nosuid,nodev,size=4m,mode=0700,uid=10001,gid=10001",
+      "--tmpfs=/run/deviludo:rw,noexec,nosuid,nodev,size=64m,mode=0700,uid=10001,gid=10001",
       "--tmpfs=/tmp:rw,noexec,nosuid,nodev,size=256m,mode=0700,uid=10001,gid=10001",
       // Runtime owns its private state by UID, while project source is shared
       // through the Core/Executor project group for validated checkpoints and
@@ -287,6 +289,7 @@ export class ProjectRuntimeSupervisor {
 
   private async inspect(name: string): Promise<Readonly<{
     containerId: string;
+    imageId: string;
     generation: number;
     fencingToken: number;
     runtime: "CLAUDE_CODE" | "CODEX_CLI";
@@ -296,6 +299,7 @@ export class ProjectRuntimeSupervisor {
     if (!inspected) return null;
     return Object.freeze({
       containerId: String(inspected.containerId),
+      imageId: String(inspected.imageId),
       generation: Number(inspected.generation),
       fencingToken: Number(inspected.fencingToken),
       runtime: inspected.runtime as "CLAUDE_CODE" | "CODEX_CLI",
@@ -311,6 +315,7 @@ export class ProjectRuntimeSupervisor {
     if (labels["deviludo.kind"] !== "project-runtime" || labels["deviludo.executor"] !== this.options.executorId) return null;
     return Object.freeze({
       containerId: String(item.Id),
+      imageId: String(item.Image),
       workspaceId: String(labels["deviludo.workspace"]),
       projectId: String(labels["deviludo.project"]),
       generation: Number(labels["deviludo.generation"]),
@@ -318,6 +323,15 @@ export class ProjectRuntimeSupervisor {
       runtime: labels["deviludo.runtime"],
       state: item.State?.Paused ? "PAUSED" : item.State?.Running ? "RUNNING" : "FAILED",
     });
+  }
+
+  private async imageId(reference: string): Promise<string> {
+    const raw = await this.options.docker(["image", "inspect", reference], 30_000);
+    const id = JSON.parse(raw)?.[0]?.Id;
+    if (typeof id !== "string" || !/^sha256:[0-9a-f]{64}$/i.test(id)) {
+      throw new Error("Project Runtime image identity is invalid");
+    }
+    return id;
   }
 
   private abortProjectTurns(workspaceId: string, projectId: string): void {
@@ -340,7 +354,8 @@ function runtimeEventContent(line: string): string | null {
     const item = event.item as Record<string, unknown> | undefined;
     const delta = event.delta as Record<string, unknown> | undefined;
     const content = Array.isArray(message?.content) ? message.content : Array.isArray(item?.content) ? item.content : [];
-    const text = typeof delta?.text === "string" ? delta.text
+    const text = typeof item?.text === "string" ? item.text
+      : typeof delta?.text === "string" ? delta.text
       : content.map(part => {
         const value = part as Record<string, unknown>;
         return typeof value.text === "string" ? value.text : "";

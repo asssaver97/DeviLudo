@@ -144,6 +144,19 @@ test("Runtime import analysis creates the collaborative document and development
   assert.deepEqual(analysis.discovery.questions, ["启动后应显示主菜单，还是自动继续最近存档？"]);
 });
 
+test("Runtime import analysis preserves an Agent block reason instead of reporting a missing project name", () => {
+  assert.throws(() => parseImportedProjectAnalysis(JSON.stringify({
+    status: "blocked",
+    complete: false,
+    reason: "The signed analysis Skill was unavailable.",
+  }), "zh"), error => {
+    assert.match(String(error), /项目分析 Agent 无法完成/);
+    assert.match(String(error), /signed analysis Skill was unavailable/);
+    assert.doesNotMatch(String(error), /项目名称必须是文本/);
+    return true;
+  });
+});
+
 test("import analysis recovers JSON wrapped in prose with literal newlines and trailing commas", () => {
   const raw = [
     "分析完成，结果如下：",
