@@ -1,6 +1,7 @@
 import type {
   AgentModelOverrides,
   AgentRuntimeKind,
+  ConversationReplyOption,
   E2eGoal,
   E2eGoalDelta,
   ProjectAgentRole,
@@ -35,7 +36,7 @@ export type ConversationAgentSettings = Readonly<{
 
 export type ProductConversationAgentReply = Readonly<{
   content: string;
-  options: readonly string[];
+  options: readonly ConversationReplyOption[];
   applyToDraft: boolean;
   readyForDevelopment: boolean;
   projectDocument: ProjectDocumentContent | null;

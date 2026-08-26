@@ -17,8 +17,10 @@ import {
   MAX_CONVERSATION_IMAGE_BYTES,
   MAX_CONVERSATION_IMAGE_TOTAL_BYTES,
   isManualConversationReplyOption,
+  normalizeConversationReplyOptions,
   PROJECT_AGENT_ROLES,
   type AgentProgressEvent,
+  type ConversationReplyOption,
   type ProductConversationMessage,
   type ProjectAgentRole,
 } from "@/lib/product/contracts";
@@ -277,16 +279,22 @@ export function ConversationBox({
                       <button
                         className={isManualConversationReplyOption(option) ? "is-manual-answer" : undefined}
                         disabled={sending || disabled}
-                        key={option}
+                        key={option.label}
+                        aria-label={option.label}
                         onClick={() => {
                           if (isManualConversationReplyOption(option)) {
                             textarea.current?.focus();
                             return;
                           }
-                          onOptionSelect(option);
+                          onOptionSelect(option.label);
                         }}
                         type="button"
-                      >{option}</button>
+                      >
+                        <span>
+                          <b>{option.label}</b>
+                          {option.description ? <small>{option.description}</small> : null}
+                        </span>
+                      </button>
                     ))}
                   </div>
                 ) : null}
@@ -550,9 +558,6 @@ function agentIdentity(
   });
 }
 
-function conversationOptions(metadata: Readonly<Record<string, unknown>>): readonly string[] {
-  if (!Array.isArray(metadata.options)) return Object.freeze([]);
-  return Object.freeze(metadata.options.filter((option): option is string => (
-    typeof option === "string" && option.trim().length > 0 && option.length <= 160
-  )).slice(0, 5));
+function conversationOptions(metadata: Readonly<Record<string, unknown>>): readonly ConversationReplyOption[] {
+  return normalizeConversationReplyOptions(metadata.options);
 }

@@ -77,7 +77,7 @@ test("persistent Runtime intent selects exactly one role and rejects contradicto
     }),
     content: "帮我设计玩法",
     confirmed: false,
-  }), /2-4 mutually exclusive, directly sendable answers in options/);
+  }), /Each option object needs a concise label and one short description/);
 });
 
 test("lightweight Intent routes common messages without a Runtime turn", () => {
@@ -187,15 +187,28 @@ test("ready Design replies end with a development plan and localized confirmatio
   const discovery = parseProjectRuntimeReply(result("DESIGN", {
     content: "请选择核心循环方向。",
     readyForDevelopment: false,
-    options: [" 采用探索驱动方案（推荐） ", "采用战斗驱动方案", "采用战斗驱动方案", "很".repeat(200)],
+    options: [
+      { label: " 采用探索驱动方案（推荐） ", description: "通过探索发现持续改变后续路线的机会。" },
+      "采用战斗驱动方案",
+      { label: "采用战斗驱动方案", description: "重复项应被忽略。" },
+      { label: "很".repeat(200), description: "长".repeat(400) },
+      { label: "自己输入意见", description: "说明你希望采用的核心循环。" },
+    ],
     implementationBrief: "",
     projectDocumentPatch: {},
     e2eGoalDelta: { add: [], replace: [], retire: [] },
   }), "DESIGN", settings, "zh");
-  assert.deepEqual(discovery.options.slice(0, 2), ["采用探索驱动方案（推荐）", "采用战斗驱动方案"]);
+  assert.deepEqual(discovery.options.slice(0, 2), [
+    { label: "采用探索驱动方案（推荐）", description: "通过探索发现持续改变后续路线的机会。" },
+    { label: "采用战斗驱动方案", description: "" },
+  ]);
   assert.equal(discovery.options.length, 4);
-  assert.equal(discovery.options[2]?.length, 160);
-  assert.equal(discovery.options[3], "自己输入意见");
+  assert.equal(discovery.options[2]?.label.length, 160);
+  assert.equal(discovery.options[2]?.description.length, 300);
+  assert.deepEqual(discovery.options[3], {
+    label: "自己输入意见",
+    description: "说明你希望采用的核心循环。",
+  });
 
   const reply = parseProjectRuntimeReply(result("DESIGN", {
     content: "玩法和验收目标已经明确。",

@@ -257,13 +257,39 @@ test("project conversations apply explicit feedback, defer tentative changes, an
   const draftConversation = draftedBody.conversation;
   expect(draftConversation.mode).toBe("PROJECT_FEEDBACK");
   expect(draftConversation.projectId).toBe(project.id);
+  const expectedOptions = [
+    {
+      label: "采用强化资源管理方案（推荐）",
+      description: "强调资源来源、消耗与风险之间的持续取舍。",
+    },
+    {
+      label: "采用随机事件驱动方案",
+      description: "用可读的随机事件推动局势变化与临场决策。",
+    },
+    {
+      label: "自己输入意见",
+      description: "输入你自己的选择或补充意见。",
+    },
+  ];
   expect(draftConversation.messages[1].metadata).toMatchObject({
     source: "AI_AGENT",
     appliedToDraft: false,
     readyForDevelopment: true,
     projectDocumentUpdated: false,
-    options: ["采用强化资源管理方案（推荐）", "采用随机事件驱动方案", "自己输入意见"],
+    options: expectedOptions,
   });
+  const runtimeTurnId = String(draftConversation.messages[1].metadata.runtimeTurnId);
+  expect(runtimeTurnId).toMatch(/^[0-9a-f-]{36}$/i);
+  await stack.executeSql(`
+    UPDATE deviludo.conversation_messages
+       SET metadata = jsonb_set(metadata, '{options}', '[]'::jsonb, true)
+     WHERE conversation_id = '${draftConversation.id}'::uuid
+       AND message_id = ${draftConversation.messages[1].id}::bigint
+  `);
+  const recoveredResponse = await stack.web(`/api/conversations/${draftConversation.id}`);
+  expect(recoveredResponse.status()).toBe(200);
+  const recoveredConversation = (await recoveredResponse.json() as { conversation: Conversation }).conversation;
+  expect(recoveredConversation.messages[1].metadata.options).toEqual(expectedOptions);
   expect(draftConversation.messages[1].content).toContain("测试设计 Agent");
   expect(draftedBody.project.document).toMatchObject({
     revision: 2,

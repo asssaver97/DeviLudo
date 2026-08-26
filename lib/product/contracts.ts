@@ -94,9 +94,64 @@ export const MANUAL_CONVERSATION_REPLY_OPTIONS = Object.freeze({
   en: "Enter my own answer",
 } as const);
 
-export function isManualConversationReplyOption(option: string): boolean {
-  return option === MANUAL_CONVERSATION_REPLY_OPTIONS.zh
-    || option === MANUAL_CONVERSATION_REPLY_OPTIONS.en;
+const MANUAL_CONVERSATION_REPLY_DESCRIPTIONS = Object.freeze({
+  zh: "输入你自己的选择或补充意见。",
+  en: "Enter your own choice or additional guidance.",
+} as const);
+
+export type ConversationReplyOption = Readonly<{
+  label: string;
+  description: string;
+}>;
+
+export function isManualConversationReplyOption(option: string | ConversationReplyOption): boolean {
+  const label = typeof option === "string" ? option : option.label;
+  return label === MANUAL_CONVERSATION_REPLY_OPTIONS.zh
+    || label === MANUAL_CONVERSATION_REPLY_OPTIONS.en;
+}
+
+export function normalizeConversationReplyOptions(
+  value: unknown,
+  manualLanguage: "en" | "zh" | null = null,
+): readonly ConversationReplyOption[] {
+  if (!Array.isArray(value)) return Object.freeze([]);
+  const seen = new Set<string>();
+  const substantive: ConversationReplyOption[] = [];
+  let manual: ConversationReplyOption | null = null;
+  for (const candidate of value) {
+    const option = conversationReplyOption(candidate);
+    if (!option || seen.has(option.label)) continue;
+    seen.add(option.label);
+    if (isManualConversationReplyOption(option)) {
+      manual ??= option;
+      continue;
+    }
+    substantive.push(option);
+  }
+  const includeManual = manualLanguage !== null ? substantive.length > 0 : manual !== null;
+  const options = substantive.slice(0, includeManual ? 4 : 5);
+  if (includeManual) {
+    const language = manualLanguage ?? (manual?.label === MANUAL_CONVERSATION_REPLY_OPTIONS.zh ? "zh" : "en");
+    options.push(Object.freeze({
+      label: MANUAL_CONVERSATION_REPLY_OPTIONS[language],
+      description: manual?.description || MANUAL_CONVERSATION_REPLY_DESCRIPTIONS[language],
+    }));
+  }
+  return Object.freeze(options);
+}
+
+function conversationReplyOption(value: unknown): ConversationReplyOption | null {
+  const record = value && typeof value === "object" && !Array.isArray(value)
+    ? value as Record<string, unknown>
+    : null;
+  const rawLabel = typeof value === "string" ? value : record?.label;
+  if (typeof rawLabel !== "string") return null;
+  const label = rawLabel.trim().slice(0, 160).trim();
+  if (!label) return null;
+  const description = typeof record?.description === "string"
+    ? record.description.trim().slice(0, 300).trim()
+    : "";
+  return Object.freeze({ label, description });
 }
 
 /**

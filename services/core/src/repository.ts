@@ -3,6 +3,7 @@ import { randomUUID, verify } from "node:crypto";
 import { AssetManifestStore, reconcileExistingSourceAssets } from "./asset-manifest";
 import {
   AGENT_RUNTIME_KINDS,
+  normalizeConversationReplyOptions,
   type AgentProgressEvent,
   type AgentProgressEventKind,
   type AgentModelOverrides,
@@ -2900,10 +2901,23 @@ export class CoreRepository {
     conversation: ProductConversationRow,
   ): Promise<ProductConversation> {
     const messages = await client.query<ProductConversationMessageRow>(
-      `SELECT message_id::text, role, content, metadata, created_at::text, completed_at::text
-         FROM deviludo.conversation_messages
-        WHERE conversation_id = $1::uuid
-        ORDER BY message_id`,
+      `SELECT message.message_id::text, message.role, message.content,
+              CASE
+                WHEN coalesce(jsonb_array_length(
+                       CASE WHEN jsonb_typeof(message.metadata->'options') = 'array'
+                         THEN message.metadata->'options' ELSE '[]'::jsonb END
+                     ), 0) = 0
+                  AND jsonb_typeof(agent_turn.structured_output->'options') = 'array'
+                THEN jsonb_set(message.metadata, '{options}', agent_turn.structured_output->'options', true)
+                ELSE message.metadata
+              END AS metadata,
+              message.created_at::text, message.completed_at::text
+         FROM deviludo.conversation_messages message
+         LEFT JOIN deviludo.agent_turns agent_turn
+           ON agent_turn.workspace_id = message.workspace_id
+          AND agent_turn.id::text = message.metadata->>'runtimeTurnId'
+        WHERE message.conversation_id = $1::uuid
+        ORDER BY message.message_id`,
       [conversation.id],
     );
     return Object.freeze({
@@ -4240,6 +4254,12 @@ function publicConversationImages(metadata: Readonly<Record<string, unknown>>) {
 function publicConversationMetadata(metadata: Readonly<Record<string, unknown>>): Readonly<Record<string, unknown>> {
   const result = { ...metadata };
   delete result[CONVERSATION_IMAGES_METADATA_KEY];
+  if ("options" in result) {
+    const manualLanguage = result.agentRole === "DESIGN" && Array.isArray(result.options) && result.options.length > 0
+      ? /\p{Script=Han}/u.test(JSON.stringify(result.options)) ? "zh" : "en"
+      : null;
+    result.options = normalizeConversationReplyOptions(result.options, manualLanguage);
+  }
   return Object.freeze(result);
 }
 

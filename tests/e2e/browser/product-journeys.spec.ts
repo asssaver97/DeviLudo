@@ -839,7 +839,16 @@ test("the home chat supports both project feedback and a fresh game conversation
   ]);
   const suggestedReplies = page.getByRole("group", { name: "可选回复" });
   await expect(suggestedReplies).toBeVisible();
-  await expect(suggestedReplies.getByRole("button")).toHaveText(["采用强化资源管理方案（推荐）", "采用随机事件驱动方案", "自己输入意见"]);
+  await expect(suggestedReplies.getByRole("button").locator("b")).toHaveText([
+    "采用强化资源管理方案（推荐）",
+    "采用随机事件驱动方案",
+    "自己输入意见",
+  ]);
+  await expect(suggestedReplies.getByRole("button").locator("small")).toHaveText([
+    "强调资源来源、消耗与风险之间的持续取舍。",
+    "用可读的随机事件推动局势变化与临场决策。",
+    "输入你自己的选择或补充意见。",
+  ]);
 
   let releaseManualReply: () => void = () => {};
   const manualReplyGate = new Promise<void>(resolve => { releaseManualReply = resolve; });

@@ -3795,11 +3795,13 @@ textarea {
 }
 
 .conversation-box-options button {
+  align-items: flex-start;
   background: #101b29;
   border: 1px solid #405574;
   color: #dce8f5;
   cursor: pointer;
-  font: 600 14px/1.55 var(--font-geist-sans), Arial, "PingFang SC", "Microsoft YaHei", sans-serif;
+  display: flex;
+  font: 14px/1.55 var(--font-geist-sans), Arial, "PingFang SC", "Microsoft YaHei", sans-serif;
   padding: 11px 13px;
   text-align: left;
   transition: border-color 120ms ease, background 120ms ease, color 120ms ease;
@@ -3808,7 +3810,23 @@ textarea {
 .conversation-box-options button::before {
   color: var(--blue);
   content: "›";
+  flex: 0 0 auto;
   margin-right: 9px;
+}
+
+.conversation-box-options button > span {
+  display: grid;
+  gap: 3px;
+}
+
+.conversation-box-options button b {
+  font-weight: 700;
+}
+
+.conversation-box-options button small {
+  color: #90a4bd;
+  font-size: 12px;
+  line-height: 1.55;
 }
 
 .conversation-box-options button:hover,
@@ -3828,6 +3846,10 @@ textarea {
   background: transparent;
   border-style: dashed;
   color: var(--muted);
+}
+
+.conversation-box-options button.is-manual-answer small {
+  color: inherit;
 }
 
 .conversation-box-empty {

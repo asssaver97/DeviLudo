@@ -1,6 +1,5 @@
 import {
-  MANUAL_CONVERSATION_REPLY_OPTIONS,
-  isManualConversationReplyOption,
+  normalizeConversationReplyOptions,
   type ConversationIntentDecision,
   type E2eGoalDelta,
   type ProductConversationMessage,
@@ -143,11 +142,11 @@ export function projectRuntimeSpecialistPrompt(input: Readonly<{
       : input.confirmed
         ? "The player has authorized execution. Prepare the complete role-owned proposal; Core will persist it only after the readiness gate passes. This conversation branch remains read-only."
         : "Prepare a concise implementation proposal only. Do not mutate project state or source before confirmation.",
-    "Return one JSON object with content, readyForDevelopment, options, implementationBrief, projectDocumentPatch, and e2eGoalDelta.",
+    "Return one JSON object with content, readyForDevelopment, options, implementationBrief, projectDocumentPatch, and e2eGoalDelta. Every options entry must be an object with string label and description fields; never return a bare string option.",
     "projectDocumentPatch is an object. e2eGoalDelta contains add, replace, and retire arrays. Use empty values when not applicable.",
     "Set readyForDevelopment=false and keep the patch and goal delta empty whenever material product decisions remain unresolved.",
     input.intent.targetRole === "DESIGN"
-      ? "Design choice UX: prefer one material decision per reply. When its plausible answers are foreseeable, put 2-4 mutually exclusive, directly sendable answers in options instead of asking the player to type. Put the recommended answer first and mark it （推荐） in Chinese or (Recommended) in English; keep every substantive option within 160 characters. Always append exactly one final manual-answer option: 自己输入意见 in Chinese or Enter my own answer in English. Use options=[] only when no choice is requested or useful presets are genuinely impossible."
+      ? "Design choice UX: prefer one material decision per reply. When its plausible answers are foreseeable, put 2-4 mutually exclusive answers in options instead of asking the player to type. Each option object needs a concise label and one short description of its impact/tradeoff. Put the recommended answer first and mark its label （推荐） in Chinese or (Recommended) in English; keep labels within 160 characters and descriptions within 300 characters. Always append exactly one final manual-answer object whose label is 自己输入意见 in Chinese or Enter my own answer in English. Use options=[] only when no choice is requested or useful presets are genuinely impossible."
       : "Use options only for concise replies the player can select and send unchanged.",
     input.confirmed
       ? "If this is a ready Design reply, end its content with 开始开发 for Chinese or Start development for English. Do not ask for confirmation again."
@@ -193,7 +192,7 @@ export function parseProjectRuntimeReply(
   return Object.freeze({
     agentRole: role,
     content,
-    options: selectableReplyOptions(
+    options: normalizeConversationReplyOptions(
       value.options,
       role === "DESIGN" ? replyLanguage(rawContent, responseLanguage) : null,
     ),
@@ -291,22 +290,6 @@ function objectOrNull(value: unknown): Readonly<Record<string, unknown>> | null 
 function stringArray(value: unknown, maximum: number): readonly string[] {
   if (!Array.isArray(value)) return Object.freeze([]);
   return Object.freeze(value.filter(item => typeof item === "string" && item.trim()).slice(0, maximum).map(item => item.trim().slice(0, 500)));
-}
-
-function selectableReplyOptions(value: unknown, manualLanguage: "en" | "zh" | null): readonly string[] {
-  const seen = new Set<string>();
-  const options: string[] = [];
-  if (!Array.isArray(value)) return Object.freeze(options);
-  for (const item of value) {
-    if (typeof item !== "string") continue;
-    const option = item.trim().slice(0, 160).trim();
-    if (!option || seen.has(option) || isManualConversationReplyOption(option)) continue;
-    seen.add(option);
-    options.push(option);
-    if (options.length === (manualLanguage ? 4 : 5)) break;
-  }
-  if (manualLanguage && options.length > 0) options.push(MANUAL_CONVERSATION_REPLY_OPTIONS[manualLanguage]);
-  return Object.freeze(options);
 }
 
 function replyLanguage(content: string, fallback: "en" | "zh"): "en" | "zh" {
