@@ -247,7 +247,7 @@ export function HomeChat() {
     </button>
   ) : requirementsReady && !sending ? (
     <button className="button button-secondary conversation-box-develop" disabled={startingDevelopment} onClick={() => void startDevelopment()} type="button">
-      {startingDevelopment ? text("正在开始开发…", "STARTING…") : text("按照当前需求开发", "BUILD CURRENT REQUIREMENTS")}
+      {startingDevelopment ? text("正在开始开发…", "STARTING…") : text("按照当前计划开发", "BUILD CURRENT PLAN")}
     </button>
   ) : null;
 

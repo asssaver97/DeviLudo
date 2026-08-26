@@ -1230,7 +1230,7 @@ export function ProjectStudio({ projectId }: { projectId: string }) {
                     disabled={busy}
                     onClick={() => void mutate("approve")}
                     type="button"
-                  >{busy ? text("正在开始开发…", "STARTING…") : text("按照当前需求开发", "BUILD CURRENT REQUIREMENTS")}</button>
+                  >{busy ? text("正在开始开发…", "STARTING…") : text("按照当前计划开发", "BUILD CURRENT PLAN")}</button>
                 ) : null}
                 sendButtonLabel={text("发送项目消息", "Send project message")}
                 sending={sendingMessage}

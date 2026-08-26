@@ -1294,7 +1294,7 @@ export async function runApi(
           sourceRevision: project.source?.revision ?? null,
           sourceRelativePath: project.source?.relativePath ?? null,
         });
-        const replannedReply = parseProjectRuntimeReply(replannedResult, "DESIGN", settings);
+        const replannedReply = parseProjectRuntimeReply(replannedResult, "DESIGN", settings, responseLanguage);
         const replacement = await repository.createImplementationChangeRequest({
           workspaceId: workspace.id,
           projectId: project.id,
@@ -2312,7 +2312,7 @@ async function processConversationMessage(input: Readonly<{
         input.stream?.onDelta(specialistRole, delta);
       },
     }).catch(error => { throw httpError(424, "AGENT_CONVERSATION_FAILED", error instanceof Error ? error.message : "Project Agent failed"); });
-    const specialistReply = parseProjectRuntimeReply(specialistResult, specialistRole, settings);
+    const specialistReply = parseProjectRuntimeReply(specialistResult, specialistRole, settings, command.responseLanguage);
     if (!streamedSpecialistOutput) input.stream?.onDelta(specialistRole, specialistReply.content);
     input.stream?.onComplete(specialistRole);
     input.onStage?.("SAVING");
@@ -2451,7 +2451,7 @@ async function processConversationMessage(input: Readonly<{
         sourceRevision: project.source?.revision ?? null,
         sourceRelativePath: project.source?.relativePath ?? null,
       });
-      const replannedReply = parseProjectRuntimeReply(replannedResult, "DESIGN", settings);
+      const replannedReply = parseProjectRuntimeReply(replannedResult, "DESIGN", settings, command.responseLanguage);
       input.onStage?.("SAVING");
       const conversation = await repository.appendConversationTurn({
         workspaceId: workspace.id,
@@ -2585,7 +2585,7 @@ async function processConversationMessage(input: Readonly<{
       input.stream?.onDelta(specialistRole, delta);
     },
   }).catch(error => { throw httpError(424, "AGENT_CONVERSATION_FAILED", error instanceof Error ? error.message : "Project Agent failed"); });
-  const specialistReply = parseProjectRuntimeReply(specialistResult, specialistRole, settings);
+  const specialistReply = parseProjectRuntimeReply(specialistResult, specialistRole, settings, command.responseLanguage);
   if (!streamedSpecialistOutput) input.stream?.onDelta(specialistRole, specialistReply.content);
   input.stream?.onComplete(specialistRole);
   input.onStage?.("SAVING");

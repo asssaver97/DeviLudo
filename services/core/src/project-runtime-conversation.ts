@@ -90,12 +90,17 @@ export function parseProjectRuntimeReply(
   result: ProjectRuntimeTurnResult,
   role: ProjectAgentRole,
   settings: StoredInstanceAgentSettings,
+  responseLanguage: "en" | "zh" = "en",
 ): ProductConversationGroupReply {
   const value = Object.keys(result.structured).length ? result.structured : parseObjectOrContent(result.content);
-  const content = typeof value.content === "string" && value.content.trim()
+  const rawContent = typeof value.content === "string" && value.content.trim()
     ? value.content.trim()
     : result.content.trim();
-  if (!content) throw new Error(`${role} Agent returned no reply`);
+  if (!rawContent) throw new Error(`${role} Agent returned no reply`);
+  const readyForDevelopment = typeof value.readyForDevelopment === "boolean"
+    ? value.readyForDevelopment
+    : false;
+  const content = readyDesignContent(rawContent, value, role, readyForDevelopment, responseLanguage);
   const patch = objectOrNull(value.projectDocumentPatch);
   const delta = e2eGoalDelta(value.e2eGoalDelta);
   return Object.freeze({
@@ -103,9 +108,7 @@ export function parseProjectRuntimeReply(
     content,
     options: stringArray(value.options, 5),
     applyToDraft: false,
-    readyForDevelopment: typeof value.readyForDevelopment === "boolean"
-      ? value.readyForDevelopment
-      : true,
+    readyForDevelopment,
     projectDocument: null,
     projectDocumentPatch: patch,
     runtime: settings.agentRuntime,
@@ -113,6 +116,34 @@ export function parseProjectRuntimeReply(
     settingsRevision: settings.revision,
     e2eGoalDelta: delta,
   });
+}
+
+function readyDesignContent(
+  content: string,
+  value: Readonly<Record<string, unknown>>,
+  role: ProjectAgentRole,
+  readyForDevelopment: boolean,
+  responseLanguage: "en" | "zh",
+): string {
+  if (role !== "DESIGN" || !readyForDevelopment) return content;
+  const question = responseLanguage === "zh"
+    ? "是否按照当前计划开发？"
+    : "Shall we develop according to the current plan?";
+  const withoutOldQuestion = content.replace(
+    /\s*(?:是否按照当前(?:需求|计划)开发？|Shall we develop according to the current (?:requirements|plan)\?)\s*$/u,
+    "",
+  );
+  const planHeading = responseLanguage === "zh" ? "开发计划" : "Development plan";
+  const hasPlan = responseLanguage === "zh"
+    ? /(?:^|\n)\s*(?:#+\s*)?开发计划\s*(?:\n|$)/u.test(withoutOldQuestion)
+    : /(?:^|\n)\s*(?:#+\s*)?Development plan\s*(?:\n|$)/iu.test(withoutOldQuestion);
+  const brief = typeof value.implementationBrief === "string" && value.implementationBrief.trim()
+    ? value.implementationBrief.trim()
+    : responseLanguage === "zh"
+      ? "按照上述已确认的玩法、范围和验收目标完成实现、构建与测试。"
+      : "Implement, build, and test the confirmed gameplay, scope, and acceptance goals above.";
+  const planned = hasPlan ? withoutOldQuestion : `${withoutOldQuestion}\n\n${planHeading}\n${brief}`;
+  return `${planned}\n\n${question}`;
 }
 
 export function implementationBrief(result: ProjectRuntimeTurnResult, fallback: string): string {

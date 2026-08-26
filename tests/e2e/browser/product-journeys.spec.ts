@@ -575,7 +575,7 @@ test("a creator can refine and deliver a game through every Core and platform st
   await expect(page.getByText(concept).first()).toBeVisible();
   await expect(page.getByText("等待启动", { exact: true })).toHaveCount(0);
   await expect(page.getByRole("button", { name: "启动交付" })).toHaveCount(0);
-  await expect(page.getByRole("button", { name: "按照当前需求开发" })).toHaveCount(0);
+  await expect(page.getByRole("button", { name: "按照当前计划开发" })).toHaveCount(0);
   await expect(page.getByText("游戏规格", { exact: true })).toHaveCount(0);
   // Four delivery stages plus the Art and Music material nodes are waiting
   // before requirements discovery has approved the iteration.
@@ -630,7 +630,7 @@ test("a creator can refine and deliver a game through every Core and platform st
 
   await page.getByRole("button", { name: "完成本轮，不发布" }).click();
   await expect(page.getByText("交付完成", { exact: true })).toBeVisible({ timeout: 45_000 });
-  await expect(page.getByRole("button", { name: "按照当前需求开发" })).toHaveCount(0);
+  await expect(page.getByRole("button", { name: "按照当前计划开发" })).toHaveCount(0);
   await expect(page.getByRole("button", { name: "取消本次交付" })).toHaveCount(0);
 
   const projectId = page.url().split("/").pop() ?? "";
@@ -833,7 +833,7 @@ test("the home chat supports both project feedback and a fresh game conversation
   expect(viewport).not.toBeNull();
   expect(homeConversationBounds!.y + homeConversationBounds!.height).toBeLessThanOrEqual(viewport!.height);
   await expect(page.getByText("QUESTION", { exact: true })).toHaveCount(2);
-  await expect(page.getByRole("button", { name: "按照当前需求开发" })).toBeVisible();
+  await expect(page.getByRole("button", { name: "按照当前计划开发" })).toBeVisible();
   await expect(page.getByRole("link", { name: "打开项目" })).toHaveAttribute("href", `/projects/${project.id}`);
   expect((await stack.readProject(project.id)).workflowState).toBe("DRAFT");
 

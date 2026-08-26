@@ -90,6 +90,35 @@ test("specialist output is attributed to the real persistent role session", () =
   assert.equal(reply.model, "test-model");
 });
 
+test("ready Design replies end with a development plan and localized confirmation question", () => {
+  const settings = {
+    agentRuntime: "CODEX_CLI" as const,
+    baseUrl: "https://chatgpt.com",
+    primaryModel: "primary",
+    modelOverrides: { intent: null, analysis: null, design: null, development: null, test: null },
+    imageModel: null,
+    credentialSecretRef: "vault://instance/agent-runtime/api-key/versions/10000000-0000-4000-8000-000000000004",
+    credentialVersion: "10000000-0000-4000-8000-000000000004",
+    apiKeyMask: "••••",
+    apiKeyFingerprint: "sha256:000000000000",
+    testPolicyReady: true,
+    testPolicyCheckedRevision: 3,
+    revision: 3,
+    updatedBy: "test",
+    updatedAt: new Date(0).toISOString(),
+  };
+  const reply = parseProjectRuntimeReply(result("DESIGN", {
+    content: "玩法和验收目标已经明确。",
+    readyForDevelopment: true,
+    options: [],
+    implementationBrief: "先完成核心循环，再接入界面与验收测试。",
+    projectDocumentPatch: {},
+    e2eGoalDelta: { add: [], replace: [], retire: [] },
+  }), "DESIGN", settings, "zh");
+  assert.match(reply.content, /开发计划\n先完成核心循环，再接入界面与验收测试。/u);
+  assert.ok(reply.content.endsWith("是否按照当前计划开发？"));
+});
+
 test("incomplete design discovery cannot stage or execute an implementation change", () => {
   const change = parseProjectRuntimeIntent(result("INTENT", {
     intent: "CHANGE_REQUEST",
