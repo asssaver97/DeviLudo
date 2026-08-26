@@ -188,7 +188,7 @@ export function normalizeAgentModelOverrides(value: unknown): AgentModelOverride
   const input = value as Record<string, unknown>;
   if (Object.keys(input).length !== AGENT_MODEL_OVERRIDE_ROLES.length
     || AGENT_MODEL_OVERRIDE_ROLES.some(key => !(key in input))) {
-    throw new Error("Agent model overrides must contain design, development, and test");
+    throw new Error("Agent model overrides must contain intent, analysis, design, development, and test");
   }
   return Object.freeze(Object.fromEntries(AGENT_MODEL_OVERRIDE_ROLES.map(key => {
     const candidate = input[key];
@@ -199,7 +199,7 @@ export function normalizeAgentModelOverrides(value: unknown): AgentModelOverride
 }
 
 export function emptyAgentModelOverrides(): AgentModelOverrides {
-  return Object.freeze({ design: null, development: null, test: null });
+  return Object.freeze({ intent: null, analysis: null, design: null, development: null, test: null });
 }
 
 export function resolveAgentModel(

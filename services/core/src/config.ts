@@ -14,7 +14,6 @@ export type CoreConfig = Readonly<{
   webToken: string;
   e2eDevelopmentToken: string | null;
   pollMilliseconds: number;
-  projectDocumentIdleSeconds: number;
   artifactRetentionDays: number;
   assetGenerationPollMilliseconds: number;
   sandboxConcurrency: number;
@@ -46,12 +45,6 @@ export function loadCoreConfig(env: NodeJS.ProcessEnv = process.env): CoreConfig
   }
   const port = parseInteger(env.PORT ?? "8080", 1, 65535, "PORT");
   const pollMilliseconds = parseInteger(env.DEVILUDO_CORE_POLL_MS ?? "500", 50, 60_000, "DEVILUDO_CORE_POLL_MS");
-  const projectDocumentIdleSeconds = parseInteger(
-    env.DEVILUDO_PROJECT_DOCUMENT_IDLE_SECONDS ?? "86400",
-    60,
-    2_592_000,
-    "DEVILUDO_PROJECT_DOCUMENT_IDLE_SECONDS",
-  );
   const artifactRetentionDays = parseInteger(
     env.DEVILUDO_R2_ARTIFACT_RETENTION_DAYS ?? "0",
     0,
@@ -132,7 +125,6 @@ export function loadCoreConfig(env: NodeJS.ProcessEnv = process.env): CoreConfig
     webToken,
     e2eDevelopmentToken,
     pollMilliseconds,
-    projectDocumentIdleSeconds,
     artifactRetentionDays,
     assetGenerationPollMilliseconds,
     sandboxConcurrency,

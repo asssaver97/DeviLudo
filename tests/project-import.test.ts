@@ -3,14 +3,13 @@ import { gunzipSync } from "node:zlib";
 import test from "node:test";
 import { createStoredZip } from "@/lib/product/source-archive";
 import {
-  analyzeImportedProject,
   createTarGzip,
   inspectProjectFiles,
   inspectProjectZip,
   normalizeGitBranchName,
   normalizeGitHubRepositoryUrl,
+  parseImportedProjectAnalysis,
 } from "@/services/core/src/project-import";
-import type { StoredInstanceAgentSettings } from "@/services/core/src/repository";
 
 const encoder = new TextEncoder();
 const sourceZip = createStoredZip([
@@ -18,23 +17,6 @@ const sourceZip = createStoredZip([
   { path: "clock-game/README.md", bytes: encoder.encode("# Clock Game\nA time-loop puzzle adventure.") },
   { path: "clock-game/scripts/main.gd", bytes: encoder.encode("extends Node\nfunc reset_timeline(): pass") },
 ]);
-
-const settings: StoredInstanceAgentSettings = Object.freeze({
-  agentRuntime: "CLAUDE_CODE",
-  baseUrl: "https://gateway.example.com/anthropic/v1",
-  primaryModel: "claude-primary",
-  modelOverrides: Object.freeze({ design: null, development: null, test: null }),
-  imageModel: null,
-  credentialSecretRef: "vault://instance/agent-runtime/api-key/versions/30000000-0000-4000-8000-000000000099",
-  apiKeyMask: "sk-********alue",
-  apiKeyFingerprint: "sha256:0123456789ab",
-  credentialVersion: "30000000-0000-4000-8000-000000000099",
-  testPolicyReady: false,
-  testPolicyCheckedRevision: null,
-  revision: 7,
-  updatedBy: "tester",
-  updatedAt: new Date(0).toISOString(),
-});
 
 test("local project ZIP is normalized into an immutable source snapshot", () => {
   const snapshot = inspectProjectZip({
@@ -135,19 +117,8 @@ test("project import rejects credentials even when the archive is otherwise vali
   }), /不允许读取的凭据文件/);
 });
 
-test("import analysis creates the collaborative document and development specification", async () => {
-  const source = inspectProjectZip({ bytes: sourceZip, sourceKind: "LOCAL_ARCHIVE", displayName: "Clock Game" });
-  const analysis = await analyzeImportedProject({
-    source,
-    settings,
-    apiKey: "sk-test-secret",
-    responseLanguage: "zh",
-    fetchImpl: (async (_input, init) => {
-      const body = JSON.parse(String(init?.body)) as { system?: string; messages?: { content?: string }[] };
-      assert.match(JSON.stringify(body.messages), /reset_timeline/);
-      assert.match(String(body.system), /existing-game project analysis Agent/);
-      assert.match(String(body.system), /所有自然语言输出必须使用中文/);
-      return Response.json({ content: [{ type: "text", text: JSON.stringify({
+test("Runtime import analysis creates the collaborative document and development specification", () => {
+  const analysis = parseImportedProjectAnalysis(JSON.stringify({
         name: "时序回廊",
         introduction: "一款围绕时间循环展开的像素解谜游戏。",
         gameplay: "探索场景、记录线索并重置时间线来改变事件结果。",
@@ -165,54 +136,15 @@ test("import analysis creates the collaborative document and development specifi
         risks: ["状态持久化仍需验证"],
         recommendedPlan: ["补齐主菜单与新游戏入口", "完成首个关卡", "增加真实操作验收"],
         questions: ["启动后应显示主菜单，还是自动继续最近存档？"],
-      }) }] });
-    }) as typeof fetch,
-  });
+  }), "zh");
   assert.equal(analysis.name, "时序回廊");
   assert.deepEqual(analysis.document.categories, ["解谜", "冒险"]);
   assert.deepEqual(analysis.specification.coreLoop, ["探索", "推理", "重置"]);
   assert.match(analysis.assistantContent, /启动后直接进入进行中的关卡状态/);
   assert.deepEqual(analysis.discovery.questions, ["启动后应显示主菜单，还是自动继续最近存档？"]);
-  assert.equal(analysis.settingsRevision, 7);
 });
 
-test("import analysis retries a transient Provider connection failure", async () => {
-  const source = inspectProjectZip({ bytes: sourceZip, sourceKind: "LOCAL_ARCHIVE", displayName: "Clock Game" });
-  let attempts = 0;
-  const analysis = await analyzeImportedProject({
-    source,
-    settings,
-    apiKey: "sk-test-secret",
-    fetchImpl: (async () => {
-      attempts += 1;
-      if (attempts === 1) throw new TypeError("fetch failed");
-      return Response.json({ content: [{ type: "text", text: JSON.stringify({
-        name: "时序回廊",
-        introduction: "一款围绕时间循环展开的像素解谜游戏。",
-        gameplay: "探索场景、记录线索并重置时间线。",
-        categories: ["解谜"],
-        features: ["时间循环"],
-        coreLoop: ["探索", "重置"],
-        playerExperience: "在重复中掌握因果关系。",
-        acceptanceCriteria: ["能够完成一次时间循环"],
-        gameContent: "时间循环解谜。",
-        currentDevelopmentState: "可玩的核心原型。",
-        completedWork: ["循环重置"],
-        remainingWork: ["更多谜题"],
-        startupFlow: "标题页进入关卡。",
-        startupIssues: [],
-        risks: [],
-        recommendedPlan: ["增加谜题并回归核心循环"],
-        questions: [],
-      }) }] });
-    }) as typeof fetch,
-  });
-  assert.equal(attempts, 2);
-  assert.equal(analysis.name, "时序回廊");
-});
-
-test("import analysis recovers JSON wrapped in prose with literal newlines and trailing commas", async () => {
-  const source = inspectProjectZip({ bytes: sourceZip, sourceKind: "LOCAL_ARCHIVE", displayName: "Clock Game" });
+test("import analysis recovers JSON wrapped in prose with literal newlines and trailing commas", () => {
   const raw = [
     "分析完成，结果如下：",
     "```json",
@@ -239,12 +171,7 @@ test("import analysis recovers JSON wrapped in prose with literal newlines and t
     "```",
     "可以继续开始开发。",
   ].join("\n");
-  const analysis = await analyzeImportedProject({
-    source,
-    settings,
-    apiKey: "sk-test-secret",
-    fetchImpl: (async () => Response.json({ content: [{ type: "text", text: raw }] })) as typeof fetch,
-  });
+  const analysis = parseImportedProjectAnalysis(raw, "zh");
   assert.equal(analysis.name, "商业帝国");
   assert.match(analysis.document.introduction, /建立商业帝国/);
   assert.deepEqual(analysis.document.categories, ["模拟", "经营"]);

@@ -2013,7 +2013,7 @@ textarea {
 /* The second and third main-track columns are Agent and Build. Their boundary
    is 40% of a five-column track, so the branch reads as a real fork between the
    two instead of belonging to either stage. */
-.product-delivery-stage[data-stage-kind="AGENT_GENERATION"]::before {
+.product-delivery-stage[data-stage-kind="AGENT_TURN"]::before {
   border-left: 2px dashed #397c66;
   content: "";
   bottom: -50px;

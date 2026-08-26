@@ -89,14 +89,25 @@ export type AgentRuntimeAvailability = Readonly<{
 export const PROJECT_AGENT_ROLES = ["DESIGN", "DEVELOPMENT", "TEST"] as const;
 export type ProjectAgentRole = typeof PROJECT_AGENT_ROLES[number];
 
-export const CONVERSATION_INTENTS = ["QUESTION", "CHANGE_REQUEST", "CONFIRM_CHANGE", "REJECT_CHANGE"] as const;
+/**
+ * Runtime roles are deliberately separate from the three members rendered in
+ * the project group chat. Intent is a transient router and Analysis owns the
+ * import report; neither is presented as a permanent chat participant.
+ */
+export const PROJECT_RUNTIME_ROLES = ["INTENT", "ANALYSIS", ...PROJECT_AGENT_ROLES] as const;
+export type ProjectRuntimeRole = typeof PROJECT_RUNTIME_ROLES[number];
+
+export const PROJECT_RUNTIME_STATES = ["CREATING", "RUNNING", "PAUSING", "PAUSED", "COMPACTING", "DESTROYED", "STOPPED", "FAILED"] as const;
+export type ProjectRuntimeState = typeof PROJECT_RUNTIME_STATES[number];
+
+export const CONVERSATION_INTENTS = ["QUESTION", "CHANGE_REQUEST", "CONFIRM_CHANGE", "REJECT_CHANGE", "STOP", "CONTINUE"] as const;
 export type ConversationIntent = typeof CONVERSATION_INTENTS[number];
 
 export type ConversationIntentDecision = Readonly<{
   intent: ConversationIntent;
   explicitExecution: boolean;
   actionable: boolean;
-  responderRoles: readonly ProjectAgentRole[];
+  targetRole: ProjectAgentRole;
   summary: string;
 }>;
 
@@ -132,11 +143,13 @@ export type ImplementationChangeRequest = Readonly<{
 export type ConversationWorkflowAction = "NONE" | "AWAITING_CONFIRMATION" | "AGENT_STARTED"
   | "AGENT_RERUN_STARTED" | "NEW_ITERATION_STARTED" | "WAITING_FOR_ANALYSIS";
 
-export const AGENT_MODEL_OVERRIDE_ROLES = ["design", "development", "test"] as const;
+export const AGENT_MODEL_OVERRIDE_ROLES = ["intent", "analysis", "design", "development", "test"] as const;
 export type AgentModelOverrideRole = typeof AGENT_MODEL_OVERRIDE_ROLES[number];
 
 /** A null text-Agent override inherits the instance's primary model. */
 export type AgentModelOverrides = Readonly<{
+  intent: string | null;
+  analysis: string | null;
   design: string | null;
   development: string | null;
   test: string | null;
@@ -384,16 +397,17 @@ export type AgentProgressEvent = Readonly<{
 
 export const WORKFLOW_LABELS: Readonly<Record<string, string>> = Object.freeze({
   DRAFT: "需求讨论中",
-  AGENT_RUNNING: "Agent 生成中",
-  ASSET_GENERATING: "图片素材生成中",
-  ARTIFACT_BUILDING: "制品构建中",
-  E2E_TESTING: "跨平台测试中",
-  RELEASE_DECISION_PENDING: "等待发布决策",
-  SIGNING: "平台签名中",
+  ANALYZING: "项目分析中",
+  DESIGNING: "游戏设计中",
+  DEVELOPING: "游戏生成中",
+  BUILDING: "制品构建中",
+  TEST_PLANNING: "测试规划中",
+  TESTING: "跨平台测试中",
   RELEASE_APPROVAL_PENDING: "等待发布批准",
   STEAM_PUBLISHING: "Steam 发布中",
-  CLEAN_INSTALL_VERIFYING: "干净回装验证中",
   SUCCEEDED: "交付完成",
+  BLOCKED: "等待配置",
+  STOPPED: "已停止",
   FAILED: "流程失败",
   CANCELLED: "已取消",
 });

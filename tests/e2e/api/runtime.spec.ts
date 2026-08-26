@@ -29,7 +29,7 @@ test("health, self-hosted access, readiness and the fixed node lifecycle", async
 
   const mismatchedNode = await stack.coreWeb("/v1/runtime/server-nodes", {
     method: "POST",
-    data: { poolKind: "E2E_WINDOWS", operatingSystem: "linux", capabilities: ["E2E_TEST"] },
+    data: { poolKind: "E2E_WINDOWS", operatingSystem: "linux", capabilities: ["E2E_PLATFORM_RUN"] },
   });
   expect(mismatchedNode.status()).toBe(400);
 

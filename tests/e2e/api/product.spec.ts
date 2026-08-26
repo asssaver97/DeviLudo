@@ -154,7 +154,7 @@ test("a failed Agent generation retries with the currently registered runtime im
       exclusive, runtime_image, output_contract, state, attempt, idempotency_key, last_error
     ) VALUES (
       '${project.workspaceId}'::uuid, '${failedJobId}'::uuid, '${project.workflowId}'::uuid, '${project.id}'::uuid,
-      'AGENT_GENERATION', 'CORE', ARRAY['MICROVM','NETWORK_POLICY'], false, '${obsoleteRuntime}',
+      'AGENT_TURN', 'CORE', ARRAY['MICROVM','NETWORK_POLICY'], false, '${obsoleteRuntime}',
       '{"kinds":["SPECIFICATION"],"maxBytes":1073741824}'::jsonb,
       'FAILED', 5, 'obsolete-agent-runtime',
       'Sandbox executor failed: {"code":"EXECUTOR_REJECTED","message":"Runtime image is not in the signed release allowlist"}'
@@ -184,18 +184,18 @@ test("a failed Agent generation retries with the currently registered runtime im
     expiresAt: expect.any(String),
   });
 
-  const retryKey = `stage-rerun:AGENT_GENERATION:${randomUUID()}`;
+  const retryKey = `stage-rerun:AGENT_TURN:${randomUUID()}`;
   const retry = await stack.web(`/api/projects/${project.id}/rerun-stage`, {
     method: "POST",
-    data: { stage: "AGENT_GENERATION" },
+    data: { stage: "AGENT_TURN" },
     headers: { "idempotency-key": retryKey },
   });
   expect(retry.status(), await retry.text()).toBe(202);
-  expect(await retry.json()).toEqual({ accepted: true, stage: "AGENT_GENERATION" });
+  expect(await retry.json()).toEqual({ accepted: true, stage: "AGENT_TURN" });
 
   const duplicate = await stack.web(`/api/projects/${project.id}/rerun-stage`, {
     method: "POST",
-    data: { stage: "AGENT_GENERATION" },
+    data: { stage: "AGENT_TURN" },
     headers: { "idempotency-key": retryKey },
   });
   expect(duplicate.status(), await duplicate.text()).toBe(200);
@@ -203,11 +203,11 @@ test("a failed Agent generation retries with the currently registered runtime im
   const jobs = await stack.queryRows<{ id: string; runtime_image: string; state: string }>(`
     SELECT id::text, runtime_image, state::text
       FROM deviludo.jobs
-     WHERE workflow_id = '${project.workflowId}'::uuid AND kind = 'AGENT_GENERATION'
+     WHERE workflow_id = '${project.workflowId}'::uuid AND kind = 'AGENT_TURN'
      ORDER BY created_at
   `);
   expect(jobs).toHaveLength(2);
-  expect(jobs[0]).toMatchObject({ id: failedJobId, runtime_image: obsoleteRuntime, state: "CANCELLED" });
+  expect(jobs[0]).toMatchObject({ id: failedJobId, runtime_image: obsoleteRuntime, state: "FAILED" });
   expect(jobs[1].runtime_image).not.toBe(obsoleteRuntime);
   expect(["QUEUED", "RUNNING", "RETRY"]).toContain(jobs[1].state);
 });

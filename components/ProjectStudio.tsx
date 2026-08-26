@@ -47,29 +47,39 @@ import { localeTag, useLanguage } from "./i18n/LanguageProvider";
 // second-row branch at the Agent → build boundary because it is a build gate,
 // not a job kind in the serial workflow state machine.
 const PIPELINE = [
-  ["AGENT_GENERATION", "游戏生成", "Game Generation"],
-  ["ARTIFACT_BUILD", "制品构建", "Artifact Build"],
-  ["E2E_TEST", "跨平台 E2E", "Cross-platform E2E"],
+  ["AGENT_TURN", "游戏生成", "Game Generation"],
+  ["BUILD", "制品构建", "Artifact Build"],
+  ["E2E_PLATFORM_RUN", "跨平台 E2E", "Cross-platform E2E"],
   ["STEAM_PUBLISH", "Steam 上传", "Steam Upload"],
 ] as const;
 const ACTIVE_PIPELINE_STAGE: Readonly<Record<string, (typeof PIPELINE)[number][0]>> = Object.freeze({
-  AGENT_RUNNING: "AGENT_GENERATION",
-  // Asset generation is an asynchronous gate after Agent generation. While it
-  // is active, every serial stage after Agent is still waiting for its input.
-  ASSET_GENERATING: "AGENT_GENERATION",
-  ARTIFACT_BUILDING: "ARTIFACT_BUILD",
-  E2E_TESTING: "E2E_TEST",
+  ANALYZING: "AGENT_TURN",
+  DESIGNING: "AGENT_TURN",
+  DEVELOPING: "AGENT_TURN",
+  BUILDING: "BUILD",
+  TEST_PLANNING: "AGENT_TURN",
+  TESTING: "E2E_PLATFORM_RUN",
   STEAM_PUBLISHING: "STEAM_PUBLISH",
 });
-const RERUNNABLE_WORKFLOW_STATES = new Set(["RELEASE_DECISION_PENDING", "FAILED", "SUCCEEDED", "CANCELLED"]);
+const RERUNNABLE_WORKFLOW_STATES = new Set(["RELEASE_APPROVAL_PENDING", "FAILED", "SUCCEEDED", "CANCELLED"]);
 const ITERATION_TERMINAL_STATES = new Set(["FAILED", "SUCCEEDED", "CANCELLED"]);
 const ASSET_RERUN_WORKFLOW_STATES = new Set([
-  "ASSET_GENERATING", "RELEASE_DECISION_PENDING", "FAILED", "SUCCEEDED", "CANCELLED",
+  "DEVELOPING", "RELEASE_APPROVAL_PENDING", "FAILED", "SUCCEEDED", "CANCELLED",
 ]);
 
 type LocalGitState = Readonly<{
   repository: boolean;
   branch: string | null;
+}>;
+
+type ProjectRuntimeView = Readonly<{
+  runtime: Readonly<{
+    state: string;
+    runtime: string;
+    generation: number;
+    activeRole: string | null;
+  }> | null;
+  context: Readonly<{ revision: number }> | null;
 }>;
 
 export function ProjectStudio({ projectId }: { projectId: string }) {
@@ -100,6 +110,7 @@ export function ProjectStudio({ projectId }: { projectId: string }) {
   const [selectedWorkflowId, setSelectedWorkflowId] = useState<string | null>(null);
   const [historicalIteration, setHistoricalIteration] = useState<ProductWorkflowIterationDetail | null>(null);
   const [conversationFocusKey, setConversationFocusKey] = useState(0);
+  const conversationSelectionRevision = useRef(0);
   const [openingArtifactId, setOpeningArtifactId] = useState<string | null>(null);
   const agentProgressCursor = useRef(0);
   const [deleting, setDeleting] = useState(false);
@@ -119,6 +130,8 @@ export function ProjectStudio({ projectId }: { projectId: string }) {
   const [newBranchName, setNewBranchName] = useState("");
   const [editingLocalBranch, setEditingLocalBranch] = useState(false);
   const [branchBusy, setBranchBusy] = useState(false);
+  const [runtimeView, setRuntimeView] = useState<ProjectRuntimeView | null>(null);
+  const [testPlanRevision, setTestPlanRevision] = useState<number | null>(null);
 
   const loadProject = useCallback(async (force = false) => {
     const value = await loadCached(clientCacheKeys.project(projectId), 5_000, async () => {
@@ -135,12 +148,14 @@ export function ProjectStudio({ projectId }: { projectId: string }) {
   }, [errorText, projectId]);
 
   const loadConversations = useCallback(async () => {
+    const selectionRevision = conversationSelectionRevision.current;
     const values = await loadCached(clientCacheKeys.conversations(projectId), 30_000, async () => {
       const response = await fetch(`/api/projects/${encodeURIComponent(projectId)}/conversations`, { cache: "no-store" });
       const payload = await response.json() as { conversations?: readonly ProductConversationSummary[]; message?: string };
       if (!response.ok || !payload.conversations) throw new Error(errorText(payload.message, `历史会话读取失败 (${response.status})`, `Unable to load conversation history (${response.status})`));
       return payload.conversations;
     });
+    if (selectionRevision !== conversationSelectionRevision.current) return;
     setConversations(values);
     const initialId = values[0]?.id ?? null;
     setSelectedConversationId(initialId);
@@ -154,6 +169,7 @@ export function ProjectStudio({ projectId }: { projectId: string }) {
       if (!conversationResponse.ok || !conversationPayload.conversation) throw new Error(errorText(conversationPayload.message, `会话读取失败 (${conversationResponse.status})`, `Unable to load conversation (${conversationResponse.status})`));
       return conversationPayload.conversation;
     });
+    if (selectionRevision !== conversationSelectionRevision.current) return;
     setConversation(value);
   }, [errorText, projectId]);
 
@@ -165,6 +181,29 @@ export function ProjectStudio({ projectId }: { projectId: string }) {
       return payload.artifacts;
     }, { force });
     setArtifacts(values);
+  }, [errorText, projectId]);
+
+  const loadRuntime = useCallback(async () => {
+    const [runtimeResponse, planResponse] = await Promise.all([
+      fetch(`/api/projects/${encodeURIComponent(projectId)}/runtime`, { cache: "no-store" }),
+      fetch(`/api/projects/${encodeURIComponent(projectId)}/test-plan`, { cache: "no-store" }),
+    ]);
+    const runtimePayload = await runtimeResponse.json().catch(() => ({})) as ProjectRuntimeView & { message?: string };
+    const planPayload = await planResponse.json().catch(() => ({})) as {
+      plan?: Readonly<{ planRevision?: number }> | null;
+      message?: string;
+    };
+    if (!runtimeResponse.ok || !planResponse.ok) {
+      throw new Error(errorText(
+        runtimePayload.message ?? planPayload.message,
+        "项目 Runtime 状态读取失败",
+        "Unable to load Project Runtime status",
+      ));
+    }
+    setRuntimeView(Object.freeze({ runtime: runtimePayload.runtime ?? null, context: runtimePayload.context ?? null }));
+    setTestPlanRevision(Number.isSafeInteger(planPayload.plan?.planRevision)
+      ? Number(planPayload.plan?.planRevision)
+      : null);
   }, [errorText, projectId]);
 
   const loadAssetManifest = useCallback(async () => {
@@ -195,13 +234,13 @@ export function ProjectStudio({ projectId }: { projectId: string }) {
       // Resolve the parent resource first. For an unknown project this avoids
       // racing five 404 responses and presenting a random child-resource error.
       void loadProject()
-        .then(() => Promise.all([loadConversations(), loadArtifacts(), loadIterations(), loadAssetManifest()]))
+        .then(() => Promise.all([loadConversations(), loadArtifacts(), loadIterations(), loadAssetManifest(), loadRuntime()]))
         .catch(reason => {
           if (active) setError(reason instanceof Error ? reason.message : text("项目读取失败", "Unable to load project"));
         });
     }, 0);
     return () => { active = false; clearTimeout(initial); };
-  }, [loadArtifacts, loadAssetManifest, loadConversations, loadIterations, loadProject, text]);
+  }, [loadArtifacts, loadAssetManifest, loadConversations, loadIterations, loadProject, loadRuntime, text]);
 
   const localDirectoryBindingId = project?.localDirectory?.bindingId ?? null;
   useEffect(() => {
@@ -226,13 +265,29 @@ export function ProjectStudio({ projectId }: { projectId: string }) {
     let timer: ReturnType<typeof setTimeout> | null = null;
     const poll = async () => {
       if (document.visibilityState === "visible") {
-        await Promise.all([loadProject(true), loadArtifacts(true), loadIterations(), loadAssetManifest()]).catch(() => undefined);
+        await Promise.all([loadProject(true), loadArtifacts(true), loadIterations(), loadAssetManifest(), loadRuntime()]).catch(() => undefined);
       }
       if (!stopped) timer = setTimeout(poll, 3_000);
     };
     timer = setTimeout(poll, 3_000);
     return () => { stopped = true; if (timer) clearTimeout(timer); };
-  }, [loadArtifacts, loadAssetManifest, loadIterations, loadProject, projectAnalysisInProgress, workflowState]);
+  }, [loadArtifacts, loadAssetManifest, loadIterations, loadProject, loadRuntime, projectAnalysisInProgress, workflowState]);
+
+  async function controlRuntime(action: "stop" | "continue") {
+    if (busy) return;
+    setBusy(true);
+    setError(null);
+    try {
+      const response = await fetch(`/api/projects/${encodeURIComponent(projectId)}/${action}`, { method: "POST" });
+      const payload = await response.json().catch(() => ({})) as { message?: string };
+      if (!response.ok) throw new Error(errorText(payload.message, "Runtime 控制失败", "Unable to control Project Runtime"));
+      await Promise.all([loadProject(true), loadRuntime()]);
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : text("Runtime 控制失败", "Unable to control Project Runtime"));
+    } finally {
+      setBusy(false);
+    }
+  }
 
   async function retryMissingAssets() {
     if (retryingAssets || !assetManifestView?.manifest || selectedWorkflowId !== null) return;
@@ -249,7 +304,7 @@ export function ProjectStudio({ projectId }: { projectId: string }) {
       }
       setAssetPanelExpanded(true);
       setAssetManifestRefreshKey(value => value + 1);
-      // The request atomically reopens a completed delivery at ASSET_GENERATING.
+      // The request atomically reopens a completed delivery at DEVELOPING.
       // Refresh the workflow as well as the manifest so the active-state polling
       // effect starts immediately and follows Builder and E2E to completion.
       await Promise.all([loadProject(true), loadArtifacts(true), loadIterations(), loadAssetManifest()]);
@@ -311,9 +366,9 @@ export function ProjectStudio({ projectId }: { projectId: string }) {
   }
 
   const activeAgentJobId = project?.jobs
-    .filter(job => job.kind === "AGENT_GENERATION")
+    .filter(job => job.kind === "AGENT_TURN")
     .at(-1)?.id ?? null;
-  const agentRunning = project?.workflowState === "AGENT_RUNNING";
+  const agentRunning = project?.workflowState === "DEVELOPING";
   const activeAgentProgress = useMemo(
     () => agentRunning && activeAgentJobId && agentProgressBuffer.jobId === activeAgentJobId
       ? agentProgressBuffer.events
@@ -361,6 +416,7 @@ export function ProjectStudio({ projectId }: { projectId: string }) {
 
   async function openConversation(conversationId: string) {
     if (conversationId === selectedConversationId && conversation) return;
+    const selectionRevision = ++conversationSelectionRevision.current;
     setError(null);
     setSelectedConversationId(conversationId);
     try {
@@ -370,6 +426,7 @@ export function ProjectStudio({ projectId }: { projectId: string }) {
         if (!response.ok || !payload.conversation) throw new Error(errorText(payload.message, `会话读取失败 (${response.status})`, `Unable to load conversation (${response.status})`));
         return payload.conversation;
       });
+      if (selectionRevision !== conversationSelectionRevision.current) return;
       setConversation(value);
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : text("会话读取失败", "Unable to load conversation"));
@@ -377,6 +434,7 @@ export function ProjectStudio({ projectId }: { projectId: string }) {
   }
 
   function startConversation() {
+    conversationSelectionRevision.current += 1;
     setSelectedConversationId(null);
     setConversation(null);
     setConversationInput("");
@@ -466,6 +524,7 @@ export function ProjectStudio({ projectId }: { projectId: string }) {
     const displayedContent = content || text("请查看随附图片。", "Please review the attached image.");
     const previousConversation = conversation;
     const pendingConversation = optimisticConversation(previousConversation, projectId, displayedContent, project?.name ?? text("项目会话", "Project conversation"), images);
+    conversationSelectionRevision.current += 1;
     setSendingMessage(true);
     setError(null);
     setStreamingReplies(initialStreamingConversationReplies());
@@ -752,8 +811,8 @@ export function ProjectStudio({ projectId }: { projectId: string }) {
   const discoveryFinishedAt = discoveryStage.view.kind === "completed"
     ? pipelineEventFinishedAt(viewedEvents, "SPEC_APPROVED")
     : null;
-  const deliveryActive = !["DRAFT", "RELEASE_DECISION_PENDING", "SUCCEEDED", "FAILED", "CANCELLED"].includes(project.workflowState);
-  const viewedDeliveryActive = !["DRAFT", "RELEASE_DECISION_PENDING", "SUCCEEDED", "FAILED", "CANCELLED"].includes(viewedWorkflowState);
+  const deliveryActive = !["DRAFT", "RELEASE_APPROVAL_PENDING", "SUCCEEDED", "FAILED", "CANCELLED"].includes(project.workflowState);
+  const viewedDeliveryActive = !["DRAFT", "RELEASE_APPROVAL_PENDING", "SUCCEEDED", "FAILED", "CANCELLED"].includes(viewedWorkflowState);
   const latestFailedJob = viewedWorkflowState === "FAILED"
     ? latestPipelineJobs(currentPipelineJobs(viewedJobs)).find(job => job.state === "FAILED") ?? null
     : null;
@@ -813,6 +872,13 @@ export function ProjectStudio({ projectId }: { projectId: string }) {
           </div>
           <div className="product-delivery-pipeline-actions">
             {!viewingHistoricalIteration ? <span className="revision-badge">E2E G{project.e2eGoalRevision}</span> : null}
+            {!viewingHistoricalIteration && testPlanRevision !== null ? <span className="revision-badge">TEST P{testPlanRevision}</span> : null}
+            {!viewingHistoricalIteration && runtimeView?.context ? <span className="revision-badge">CTX R{runtimeView.context.revision}</span> : null}
+            {!viewingHistoricalIteration && runtimeView?.runtime ? (
+              <span className="revision-badge">
+                {text("运行环境", "RUNTIME")} · {runtimeStateLabel(runtimeView.runtime.state, text)} · G{runtimeView.runtime.generation}
+              </span>
+            ) : null}
             <label className="product-iteration-selector">
               <span>{text("查看轮次", "ITERATION")}</span>
               <select
@@ -837,9 +903,14 @@ export function ProjectStudio({ projectId }: { projectId: string }) {
                 {viewingHistoricalIteration ? text("历史只读", "READ ONLY") : workflowLabel(viewedWorkflowState, text)}
               </span>
             ) : null}
-            {!viewingHistoricalIteration && deliveryActive ? (
-              <button className="button button-secondary" disabled={busy} onClick={() => void mutate("cancel")} type="button">
-                {text("取消本次交付", "CANCEL DELIVERY")}
+            {!viewingHistoricalIteration && deliveryActive && runtimeView?.runtime?.state !== "STOPPED" ? (
+              <button className="button button-secondary" disabled={busy} onClick={() => void controlRuntime("stop")} type="button">
+                {text("停止自动执行", "STOP AUTOMATION")}
+              </button>
+            ) : null}
+            {!viewingHistoricalIteration && runtimeView?.runtime?.state === "STOPPED" ? (
+              <button className="button button-primary" disabled={busy} onClick={() => void controlRuntime("continue")} type="button">
+                {text("继续自动执行", "CONTINUE AUTOMATION")}
               </button>
             ) : null}
             {!viewingHistoricalIteration && ITERATION_TERMINAL_STATES.has(project.workflowState) ? (
@@ -939,7 +1010,7 @@ export function ProjectStudio({ projectId }: { projectId: string }) {
               return (
                 <li className={`product-delivery-stage status-${view.kind}`} data-stage-kind={kind} data-stage-status={view.kind} key={kind}>
                   <div className="product-delivery-stage-marker product-delivery-stage-rerun-target" aria-hidden="true">{view.symbol}</div>
-                  {kind === "AGENT_GENERATION" ? <span aria-hidden="true" className="product-delivery-material-junction" /> : null}
+                  {kind === "AGENT_TURN" ? <span aria-hidden="true" className="product-delivery-material-junction" /> : null}
                   <b className="product-delivery-stage-rerun-target">{text(chineseLabel, englishLabel)}</b>
                   <strong className="product-delivery-stage-rerun-target">{view.label}</strong>
                   <small>{inProfile
@@ -1456,11 +1527,11 @@ export function jobFailurePresentation(
 ): JobFailurePresentation {
   const raw = job.lastError ?? "";
   const stageLabel = pipelineKindLabels(job.kind);
-  const title = job.kind === "AGENT_GENERATION"
+  const title = job.kind === "AGENT_TURN"
     ? text("Agent 生成失败", "AGENT GENERATION FAILED")
     : text(`${stageLabel[0]}失败`, `${stageLabel[1]} failed`);
   const infrastructure = raw.match(/^E2E_INFRASTRUCTURE\/(NODE|VM|GODOT_RUNTIME|NETWORK):\s*(.*)$/s);
-  if (job.kind === "E2E_TEST" && infrastructure) {
+  if (job.kind === "E2E_PLATFORM_RUN" && infrastructure) {
     const labels: Record<string, readonly [string, string]> = {
       NODE: ["E2E 节点", "E2E node"],
       VM: ["隔离虚拟机", "isolated VM"],
@@ -1474,7 +1545,7 @@ export function jobFailurePresentation(
       action: text("修复对应基础设施后重新测试；无需重新生成游戏。", "Repair the affected infrastructure and rerun E2E; the game does not need to be regenerated."),
     };
   }
-  if (job.kind === "E2E_TEST" && /^E2E_PRODUCT:/i.test(raw)) {
+  if (job.kind === "E2E_PLATFORM_RUN" && /^E2E_PRODUCT:/i.test(raw)) {
     return {
       title: text("游戏制品未通过 E2E", "GAME ARTIFACT FAILED E2E"),
       reason: text("平台已确认问题来自游戏制品内容，自动 Agent 修复次数已用尽或全局 Agent 当前不可用。", "The platform confirmed a game-artifact issue, but automatic Agent repairs were exhausted or the global Agent is unavailable."),
@@ -1523,14 +1594,14 @@ export function jobFailurePresentation(
       action: text("重新保存 Agent 配置；若问题仍存在，请检查 Core 与 Vault 状态。", "Save the Agent configuration again; if it persists, check Core and Vault."),
     };
   }
-  if (job.kind === "ARTIFACT_BUILD" && /export_presets\.cfg|export preset/i.test(raw)) {
+  if (job.kind === "BUILD" && /export_presets\.cfg|export preset/i.test(raw)) {
     return {
       title,
       reason: text("Builder 缺少受控的 Godot 导出预设，无法生成目标平台制品。", "The Builder did not have a controlled Godot export preset for the target platform."),
       action: text("使用修复后的 Builder 重新构建；无需重新运行 Agent。", "Retry with the corrected Builder; the Agent does not need to run again."),
     };
   }
-  if (job.kind === "E2E_TEST" && /env:\s*node:\s*No such file|ENOENT.*node/i.test(raw)) {
+  if (job.kind === "E2E_PLATFORM_RUN" && /env:\s*node:\s*No such file|ENOENT.*node/i.test(raw)) {
     return {
       title,
       reason: text("E2E 节点未能启动受控测试运行器。", "The E2E node could not start its controlled test runner."),
@@ -1547,7 +1618,7 @@ export function jobFailurePresentation(
   return {
     title,
     reason: text("该阶段在多次重试后仍未完成。", "This stage did not complete after multiple attempts."),
-    action: job.kind === "AGENT_GENERATION"
+    action: job.kind === "AGENT_TURN"
       ? text("可重新生成；技术详情可用于进一步排查。", "Retry the Agent; technical details are available for diagnosis.")
       : text("请展开技术详情排查后再继续。", "Expand the technical details before continuing."),
   };
@@ -1640,10 +1711,10 @@ function groupArtifactsByPipelineStage(
 }
 
 function artifactPipelineStage(kind: ArtifactRecord["kind"]): (typeof PIPELINE)[number][0] {
-  if (kind === "BUILD" || kind === "SIGNED_BUILD") return "ARTIFACT_BUILD";
-  if (kind === "E2E_REPORT" || kind === "CLEAN_INSTALL_REPORT") return "E2E_TEST";
+  if (kind === "BUILD" || kind === "SIGNED_BUILD") return "BUILD";
+  if (kind === "E2E_REPORT" || kind === "CLEAN_INSTALL_REPORT") return "E2E_PLATFORM_RUN";
   if (kind === "PUBLISH_RECEIPT") return "STEAM_PUBLISH";
-  return "AGENT_GENERATION";
+  return "AGENT_TURN";
 }
 
 function formatArtifactSize(sizeBytes: number): string {
@@ -1706,18 +1777,29 @@ function formatConversationTime(value: string, locale: string, text: (chinese: s
 
 function workflowLabel(state: string, text: (chinese: string, english: string) => string): string {
   const labels: Record<string, readonly [string, string]> = {
-    DRAFT: ["需求讨论中", "Requirements discussion"], AGENT_RUNNING: ["Agent 生成中", "Agent running"],
-    ASSET_GENERATING: ["图片素材生成中", "Generating image assets"],
-    ARTIFACT_BUILDING: ["制品构建中", "Building artifacts"], E2E_TESTING: ["跨平台测试中", "Cross-platform testing"],
-    RELEASE_DECISION_PENDING: ["等待发布决策", "Awaiting release decision"],
-    SIGNING: ["平台签名中（历史）", "Signing (legacy)"], RELEASE_APPROVAL_PENDING: ["等待发布批准（历史）", "Awaiting release approval (legacy)"], STEAM_PUBLISHING: ["Steam 发布中", "Publishing to Steam"],
-    CLEAN_INSTALL_VERIFYING: ["干净回装验证中", "Clean-install verification"], SUCCEEDED: ["交付完成", "Delivered"],
+    DRAFT: ["需求讨论中", "Requirements discussion"], ANALYZING: ["项目分析中", "Analyzing project"],
+    DESIGNING: ["游戏设计中", "Designing game"], DEVELOPING: ["游戏生成中", "Developing game"],
+    BUILDING: ["制品构建中", "Building artifacts"], TEST_PLANNING: ["测试规划中", "Planning tests"],
+    TESTING: ["跨平台测试中", "Cross-platform testing"], RELEASE_APPROVAL_PENDING: ["等待发布批准", "Awaiting release approval"],
+    STEAM_PUBLISHING: ["Steam 发布中", "Publishing to Steam"], SUCCEEDED: ["交付完成", "Delivered"],
+    BLOCKED: ["等待配置", "Blocked"], STOPPED: ["已停止", "Stopped"],
     FAILED: ["流程失败", "Failed"], CANCELLED: ["已取消", "Cancelled"],
   };
   const label = labels[state];
   return label ? text(label[0], label[1]) : state;
 }
 
+function runtimeStateLabel(state: string, text: (chinese: string, english: string) => string): string {
+  const labels: Record<string, readonly [string, string]> = {
+    CREATING: ["创建中", "Creating"], RUNNING: ["运行中", "Running"],
+    PAUSING: ["暂停中", "Pausing"], PAUSED: ["已暂停", "Paused"],
+    COMPACTING: ["保存上下文", "Saving context"], DESTROYED: ["已释放", "Released"],
+    STOPPED: ["已停止", "Stopped"], FAILED: ["异常", "Failed"],
+  };
+  const label = labels[state];
+  return label ? text(label[0], label[1]) : state;
+}
+
 function workflowNeedsPolling(state: string): boolean {
-  return ["AGENT_RUNNING", "ASSET_GENERATING", "ARTIFACT_BUILDING", "E2E_TESTING", "STEAM_PUBLISHING"].includes(state);
+  return ["ANALYZING", "DESIGNING", "DEVELOPING", "BUILDING", "TEST_PLANNING", "TESTING", "STEAM_PUBLISHING"].includes(state);
 }

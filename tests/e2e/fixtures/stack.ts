@@ -42,13 +42,13 @@ const NODE_DEFINITIONS: readonly Readonly<{
     poolKind: "CORE",
     operatingSystem: "linux",
     capabilities: [
-      "AUTOMATION_API", "WORKFLOW_SCHEDULER", "AGENT_GENERATION", "ARTIFACT_BUILD", "STEAM_PUBLISH",
+      "AUTOMATION_API", "WORKFLOW_SCHEDULER", "AGENT_TURN", "BUILD", "STEAM_PUBLISH",
       "RESTRICTED_CONTAINER", "NETWORK_POLICY",
     ],
   },
-  { poolKind: "E2E_LINUX", operatingSystem: "linux", capabilities: ["E2E_TEST", "ARTIFACT_SIGN", "STEAM_CLEAN_INSTALL"] },
-  { poolKind: "E2E_WINDOWS", operatingSystem: "windows", capabilities: ["E2E_TEST", "ARTIFACT_SIGN", "STEAM_CLEAN_INSTALL"] },
-  { poolKind: "E2E_MACOS", operatingSystem: "macos", capabilities: ["E2E_TEST", "ARTIFACT_SIGN", "STEAM_CLEAN_INSTALL"] },
+  { poolKind: "E2E_LINUX", operatingSystem: "linux", capabilities: ["E2E_PLATFORM_RUN", "BUILD", "STEAM_PUBLISH"] },
+  { poolKind: "E2E_WINDOWS", operatingSystem: "windows", capabilities: ["E2E_PLATFORM_RUN", "BUILD", "STEAM_PUBLISH"] },
+  { poolKind: "E2E_MACOS", operatingSystem: "macos", capabilities: ["E2E_PLATFORM_RUN", "BUILD", "STEAM_PUBLISH"] },
 ]);
 
 export class StackHarness {
@@ -66,42 +66,48 @@ export class StackHarness {
 
   async reset(): Promise<void> {
     await this.stopLogicalNodes();
-    const runtimeImages = configuredRuntimeImages();
-    await retryDatabaseReset(() => this.executeSql(`
-      BEGIN;
-      SET LOCAL lock_timeout = '5s';
-      TRUNCATE TABLE
-        deviludo.workspace_claim_fairness,
-        deviludo.project_creation_receipts,
-        deviludo.project_source_revisions,
-        deviludo.instance_agent_settings,
-        deviludo.operation_receipts,
-        deviludo.external_signals,
-        deviludo.jobs,
-        deviludo.workflow_events,
-        deviludo.workflow_instances,
-        deviludo.agent_installations,
-        deviludo.conversation_messages,
-        deviludo.project_conversations,
-        deviludo.projects,
-        deviludo.workspaces,
-        deviludo.server_nodes
-      RESTART IDENTITY CASCADE;
-      DELETE FROM deviludo.pool_capacity_intents WHERE reason <> 'P0_BASELINE';
-      DELETE FROM deviludo.runtime_images;
-      INSERT INTO deviludo.runtime_images(runtime_key, image_reference, release_version, verified_at)
-      VALUES ${runtimeImages.map(([key, image]) => `('${key}', '${image}', 'e2e', clock_timestamp())`).join(",\n             ")};
-      COMMIT;
-    `));
-    const publicKeyFile = process.env.DEVILUDO_CORE_EXECUTOR_PUBLIC_KEY_FILE ?? "";
-    const publicKeyBase64 = Buffer.from(await readFile(publicKeyFile, "utf8")).toString("base64");
-    await this.executeSql(`
-      INSERT INTO deviludo.executor_identities(executor_id, identity_kind, public_key_pem)
-      VALUES ('local-core-executor', 'CORE', convert_from(decode('${publicKeyBase64}', 'base64'), 'UTF8'))
-      ON CONFLICT (executor_id) DO UPDATE SET public_key_pem = EXCLUDED.public_key_pem,
-        enabled = true, updated_at = clock_timestamp();
-    `);
-    const instance = await this.web("/api/instance");
+    await this.quiescePersistentServices();
+    try {
+      await this.clearProjectRuntimeState();
+      const runtimeImages = configuredRuntimeImages();
+      await retryDatabaseReset(() => this.executeSql(`
+        BEGIN;
+        SET LOCAL lock_timeout = '5s';
+        TRUNCATE TABLE
+          deviludo.workspace_claim_fairness,
+          deviludo.project_creation_receipts,
+          deviludo.project_source_revisions,
+          deviludo.instance_agent_settings,
+          deviludo.operation_receipts,
+          deviludo.external_signals,
+          deviludo.jobs,
+          deviludo.workflow_events,
+          deviludo.workflow_instances,
+          deviludo.agent_installations,
+          deviludo.conversation_messages,
+          deviludo.project_conversations,
+          deviludo.projects,
+          deviludo.workspaces,
+          deviludo.server_nodes
+        RESTART IDENTITY CASCADE;
+        DELETE FROM deviludo.pool_capacity_intents WHERE reason <> 'P0_BASELINE';
+        DELETE FROM deviludo.runtime_images;
+        INSERT INTO deviludo.runtime_images(runtime_key, image_reference, release_version, verified_at)
+        VALUES ${runtimeImages.map(([key, image]) => `('${key}', '${image}', 'e2e', clock_timestamp())`).join(",\n               ")};
+        COMMIT;
+      `));
+      const publicKeyFile = process.env.DEVILUDO_CORE_EXECUTOR_PUBLIC_KEY_FILE ?? "";
+      const publicKeyBase64 = Buffer.from(await readFile(publicKeyFile, "utf8")).toString("base64");
+      await this.executeSql(`
+        INSERT INTO deviludo.executor_identities(executor_id, identity_kind, public_key_pem)
+        VALUES ('local-core-executor', 'CORE', convert_from(decode('${publicKeyBase64}', 'base64'), 'UTF8'))
+        ON CONFLICT (executor_id) DO UPDATE SET public_key_pem = EXCLUDED.public_key_pem,
+          enabled = true, updated_at = clock_timestamp();
+      `);
+    } finally {
+      await this.resumePersistentServices();
+    }
+    const instance = await this.waitForInstance();
     expect(instance.ok(), await instance.text()).toBeTruthy();
     expect(await instance.json()).toMatchObject({ instance: { mode: "SELF_HOSTED", workspace: { name: "Local workspace" } } });
   }
@@ -138,7 +144,7 @@ export class StackHarness {
       data: { ...input, name },
       headers: { "idempotency-key": `e2e-project:${crypto.randomUUID()}` },
     });
-    expect(response.status()).toBe(201);
+    expect(response.status(), await response.text()).toBe(201);
     const body = await response.json() as { workspace: { id: string }; project: Omit<ProjectDetail, "workspaceId"> };
     return Object.freeze({ ...body.project, workspaceId: body.workspace.id });
   }
@@ -151,7 +157,7 @@ export class StackHarness {
         baseUrl: "https://api.example.com",
         apiKey: "sk-e2e-instance-secret",
         primaryModel: "claude-primary",
-        modelOverrides: { design: null, development: null, test: null },
+        modelOverrides: { intent: null, analysis: null, design: null, development: null, test: null },
         imageModel: null,
       },
     });
@@ -297,6 +303,22 @@ export class StackHarness {
     throw new Error("Core API did not become healthy");
   }
 
+  private async waitForInstance(): Promise<APIResponse> {
+    const deadline = Date.now() + 30_000;
+    let lastError: unknown;
+    while (Date.now() < deadline) {
+      try {
+        const response = await this.web("/api/instance", { timeout: 2_000 });
+        if (response.ok()) return response;
+        lastError = new Error(`Instance endpoint returned ${response.status()}`);
+      } catch (error) {
+        lastError = error;
+      }
+      await delay(200);
+    }
+    throw lastError ?? new Error("Web did not reconnect to Core");
+  }
+
   private composeArgs(): string[] {
     return [
       "compose", "--project-name", this.projectName,
@@ -304,10 +326,65 @@ export class StackHarness {
       "-f", "infra/docker-compose.e2e.yml",
     ];
   }
+
+  private async quiescePersistentServices(): Promise<void> {
+    await execute("docker", [
+      ...this.composeArgs(), "stop",
+      "core-api", "core-scheduler", "core-sandbox", "sandbox-executord",
+    ], { cwd: root, maxBuffer: 10 * 1024 * 1024 });
+  }
+
+  private async resumePersistentServices(): Promise<void> {
+    await execute("docker", [
+      ...this.composeArgs(), "start", "sandbox-executord",
+    ], { cwd: root, maxBuffer: 10 * 1024 * 1024 });
+    await execute("docker", [
+      ...this.composeArgs(), "start", "core-api", "core-scheduler", "core-sandbox",
+    ], { cwd: root, maxBuffer: 10 * 1024 * 1024 });
+    await this.waitForCore();
+  }
+
+  private async clearProjectRuntimeState(): Promise<void> {
+    const projectsVolume = requiredProjectsVolume();
+    const containers = await execute("docker", [
+      "ps", "-aq",
+      "--filter", "label=deviludo.kind=project-runtime",
+      "--filter", `label=deviludo.projects-volume=${projectsVolume}`,
+    ], { cwd: root, maxBuffer: 1024 * 1024 });
+    const ids = containers.stdout.trim().split(/\s+/).filter(Boolean);
+    if (ids.some(id => !/^[a-f0-9]{12,64}$/.test(id))) throw new Error("Unsafe E2E Runtime container id");
+    if (ids.length) await execute("docker", ["rm", "-f", ...ids], { cwd: root, maxBuffer: 10 * 1024 * 1024 });
+
+    const volumes = await execute("docker", [
+      "volume", "ls", "-q",
+      "--filter", "label=deviludo.kind=project-runtime-state",
+      "--filter", `label=deviludo.projects-volume=${projectsVolume}`,
+    ], { cwd: root, maxBuffer: 1024 * 1024 });
+    const names = volumes.stdout.trim().split(/\s+/).filter(Boolean);
+    if (names.some(name => !/^deviludo-runtime-[a-f0-9]{12}-[0-9a-f-]{36}$/.test(name))) {
+      throw new Error("Unsafe E2E Runtime volume name");
+    }
+    if (names.length) {
+      let lastError: unknown;
+      for (let attempt = 1; attempt <= 5; attempt += 1) {
+        try {
+          await execute("docker", ["volume", "rm", "-f", ...names], {
+            cwd: root,
+            maxBuffer: 10 * 1024 * 1024,
+          });
+          return;
+        } catch (error) {
+          lastError = error;
+          if (attempt < 5) await delay(attempt * 100);
+        }
+      }
+      throw lastError;
+    }
+  }
 }
 
 export const test = base.extend<{ stack: StackHarness }>({
-  stack: async ({ request, context }, provide) => {
+  stack: [async ({ request, context }, provide) => {
     const harness = new StackHarness(request);
     await harness.reset();
     const storageState = await request.storageState();
@@ -322,7 +399,7 @@ export const test = base.extend<{ stack: StackHarness }>({
     } finally {
       await harness.stopLogicalNodes();
     }
-  },
+  }, { timeout: 120_000 }],
 });
 
 export { expect };
@@ -337,6 +414,14 @@ function requiredProjectName(): string {
   const value = process.env.DEVILUDO_E2E_PROJECT_NAME ?? "";
   if (!/^deviludo-e2e-[a-z0-9-]+$/.test(value)) {
     throw new Error("Refusing to control a Compose project outside the isolated E2E namespace");
+  }
+  return value;
+}
+
+function requiredProjectsVolume(): string {
+  const value = process.env.DEVILUDO_PROJECTS_VOLUME ?? "";
+  if (!/^deviludo-e2e-[a-z0-9-]+-projects-data$/.test(value)) {
+    throw new Error("Refusing to clean a project volume outside the isolated E2E namespace");
   }
   return value;
 }

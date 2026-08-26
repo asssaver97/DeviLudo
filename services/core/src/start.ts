@@ -5,6 +5,9 @@ import { createDatabase } from "./database";
 import { CoreRepository } from "./repository";
 import { runSandbox } from "./sandbox";
 import { runScheduler } from "./scheduler";
+import { ProjectRuntimeLifecycle } from "./project-runtime-lifecycle";
+import { ProjectRuntimeRepository } from "./project-runtime-repository";
+import { ProjectRuntimeService } from "./project-runtime-service";
 
 export type StartCoreOptions = Readonly<{
   config?: CoreConfig;
@@ -29,11 +32,24 @@ export async function startCore(
     if (config.role === "api") {
       await runApi(repository, database, config, signal, undefined, undefined, hostServices);
     } else if (config.role === "scheduler") {
-      await runScheduler(repository, config, signal, hostServices);
+      const runtimeRepository = new ProjectRuntimeRepository(database);
+      await runScheduler(
+        repository,
+        config,
+        signal,
+        hostServices,
+        new ProjectRuntimeLifecycle(
+          runtimeRepository,
+          new ProjectRuntimeService(runtimeRepository, config.projectsRoot),
+          repository,
+        ),
+      );
     } else {
       const baseWorkerId = process.env.DEVILUDO_SANDBOX_ID ?? `sandbox-${process.pid}`;
+      const runtimeRepository = new ProjectRuntimeRepository(database);
+      const projectRuntime = new ProjectRuntimeService(runtimeRepository, config.projectsRoot);
       await Promise.all(Array.from({ length: config.sandboxConcurrency }, (_, index) => (
-        runSandbox(repository, config, signal, undefined, `${baseWorkerId}-${index + 1}`, hostServices)
+        runSandbox(repository, config, signal, undefined, `${baseWorkerId}-${index + 1}`, hostServices, projectRuntime)
       )));
     }
   } finally {

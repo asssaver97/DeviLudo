@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "deviludo": {
+      "type": "stdio",
+      "command": "/usr/local/bin/deviludo-mcp"
+    }
+  }
+}

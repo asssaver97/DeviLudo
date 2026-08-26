@@ -4,7 +4,7 @@ import { lookup } from "node:dns/promises";
 import { isIP } from "node:net";
 import { homedir, networkInterfaces } from "node:os";
 import { closeSync, mkdirSync, openSync, readFileSync, unlinkSync, writeFileSync } from "node:fs";
-import { access, chmod, lstat, mkdir, readFile, readlink, readdir, writeFile } from "node:fs/promises";
+import { access, chmod, lstat, mkdir, readFile, readlink, writeFile } from "node:fs/promises";
 import { request } from "node:http";
 import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -191,13 +191,16 @@ await runStartupStage("Start PostgreSQL, Vault, and object storage", () => execu
 let credentialConsumersStopped = false;
 const vaultFingerprint = await runStartupStage("Check local credentials and runtime identities", async () => {
   const fingerprint = await fingerprintVaultInit();
-  if (!matchesStartupCache("vaultInit", fingerprint)) {
+  if (!matchesStartupCache("vaultInit", fingerprint) || !await localVaultTokensAreValid(baseEnvironment)) {
     startupProgress("Vault state changed; refreshing service credentials");
     await stopCredentialConsumers(baseEnvironment);
     credentialConsumersStopped = true;
     await refreshLocalVaultTokens(baseEnvironment);
   } else {
     startupProgress("Vault credentials are unchanged; skipping refresh");
+  }
+  if (!await localVaultTokensAreValid(baseEnvironment)) {
+    throw new Error("Local Vault service credentials could not be prepared");
   }
   await import("./local-identity.mjs");
   return fingerprint;
@@ -274,7 +277,9 @@ await persistLocalComposeEnvironment(environment);
 // the bytes it copies in.
 const executorSecretsFingerprint = await runStartupStage("Synchronize executor credentials", async () => {
   const fingerprint = await fingerprintExecutorSecrets();
-  if (!matchesStartupCache("executorSecrets", fingerprint)) {
+  const expectedSocketPermissions = "10001:1001:2770";
+  const socketPermissions = await inspectExecutorSocketPermissions(environment);
+  if (!matchesStartupCache("executorSecrets", fingerprint) || socketPermissions !== expectedSocketPermissions) {
     if (!credentialConsumersStopped) {
       await stopCredentialConsumers(environment);
       credentialConsumersStopped = true;
@@ -282,6 +287,9 @@ const executorSecretsFingerprint = await runStartupStage("Synchronize executor c
     await refreshLocalExecutorSecrets(environment);
   } else {
     startupProgress("Executor credentials are unchanged; skipping synchronization");
+  }
+  if (await inspectExecutorSocketPermissions(environment) !== expectedSocketPermissions) {
+    throw new Error("Sandbox executor socket permissions could not be prepared");
   }
   return fingerprint;
 });
@@ -315,13 +323,13 @@ const storageFingerprints = await runStartupStage("Prepare local persistent stor
 // Their skips are justified by committed database state rather than a recorded
 // fingerprint, so one query replaces two container starts without trusting cache.
 const { migrationRan, initialized } = await runStartupStage("Verify the database and register local runtimes", async () => {
-  const [instanceState, expectedMigrationLedger] = await Promise.all([
+  const [instanceState, expectedBaseline] = await Promise.all([
     readLocalInstanceState(environment),
-    readExpectedMigrationLedger(),
+    readExpectedDatabaseBaseline(),
   ]);
-  const applied = await migrateWithOptionalBaselineReset(environment, instanceState, expectedMigrationLedger);
+  const applied = await migrateWithOptionalBaselineReset(environment, instanceState, expectedBaseline);
   const bootstrap = await bootstrapInstance(environment, runtimeImages, instanceState, applied);
-  startupProgress(applied ? "Database migrations applied" : "Migration ledger is unchanged; skipping the migration container");
+  startupProgress(applied ? "Database baseline initialized" : "Database baseline is unchanged; skipping the migration container");
   startupProgress(bootstrap.reused ? "Local node registration is unchanged; skipping bootstrap" : "Local nodes and runtimes registered");
   return { migrationRan: applied, initialized: bootstrap };
 });
@@ -731,6 +739,38 @@ async function fingerprintVaultInit() {
   return digest(["vault", containerStart, volumes, await readLocalPolicySources()]);
 }
 
+async function localVaultTokensAreValid(environment) {
+  const validation = [
+    "set -eu",
+    "test -s /tokens/api.token",
+    "test -s /tokens/executor.token",
+    "test -s /tokens/unseal.key",
+    "test -s /tokens/root.token",
+    "test \"$(stat -c '%u:%g:%a' /tokens/api.token)\" = '1001:1001:400'",
+    "test \"$(stat -c '%u:%g:%a' /tokens/executor.token)\" = '0:0:600'",
+    "test \"$(stat -c '%u:%g:%a' /tokens/unseal.key)\" = '0:0:600'",
+    "test \"$(stat -c '%u:%g:%a' /tokens/root.token)\" = '0:0:600'",
+  ].join("; ");
+  try {
+    await execute("docker", [
+      "compose", "-f", "infra/docker-compose.yml", "exec", "-T",
+      "core-api", "sh", "-c", validation.replaceAll("/tokens/", "/run/deviludo-vault/"),
+    ], { cwd: root, env: environment, timeout: 10_000, maxBuffer: 64 * 1024 });
+    return true;
+  } catch {
+    try {
+      await execute("docker", [
+        "run", "--rm", "--entrypoint", "sh",
+        "-v", `${composeProject}_vault-tokens:/tokens:ro`,
+        "hashicorp/vault:1.19.0", "-c", validation,
+      ], { cwd: root, env: environment, timeout: 30_000, maxBuffer: 64 * 1024 });
+      return true;
+    } catch {
+      return false;
+    }
+  }
+}
+
 /**
  * The executor init container copies host key material into its volumes, so the
  * fingerprint covers both the volume identities and the bytes being installed.
@@ -753,6 +793,29 @@ async function fingerprintExecutorSecrets() {
   // fingerprint has to invalidate this one too — including when it is unknown,
   // which digest() propagates as an unusable fingerprint.
   return digest(["executor-secrets", volumes, vaultFingerprint, ...sources]);
+}
+
+async function inspectExecutorSocketPermissions(environment) {
+  const format = "%u:%g:%a";
+  try {
+    const { stdout } = await execute("docker", [
+      "compose", "-f", "infra/docker-compose.yml", "exec", "-T",
+      "core-api", "stat", "-c", format, "/run/deviludo-executor",
+    ], { cwd: root, env: environment, timeout: 10_000, maxBuffer: 64 * 1024 });
+    return stdout.trim();
+  } catch {
+    try {
+      const volume = environment.DEVILUDO_EXECUTOR_SOCKET_VOLUME ?? "deviludo-executor-socket";
+      const { stdout } = await execute("docker", [
+        "run", "--rm", "--entrypoint", "stat",
+        "-v", `${volume}:/run/deviludo-executor:ro`,
+        "deviludo-sandbox-executor:local", "-c", format, "/run/deviludo-executor",
+      ], { cwd: root, env: environment, timeout: 30_000, maxBuffer: 64 * 1024 });
+      return stdout.trim();
+    } catch {
+      return null;
+    }
+  }
 }
 
 async function fingerprintProjectSources() {
@@ -1281,15 +1344,14 @@ async function retainActiveJobRuntimeImages(environment) {
 }
 
 /**
- * Runs the idempotent migration ledger on every start. Baseline compatibility is
- * not enough to prove that all later migrations are present, and skipping on that
- * signal was exactly how a persistent local volume could keep stale functions.
+ * Verifies the one immutable database baseline on every start. This release does
+ * not replay historical migrations: any different schema requires an explicit
+ * destructive reset.
  */
-async function migrateWithOptionalBaselineReset(environment, state, expectedLedger) {
-  // This is still a full immutable-ledger verification on every start. It avoids
-  // creating a migration container only when the database reports exactly the
-  // versions and checksums present in this checkout.
-  if (state?.baseline === "001 deviludo-self-hosted-v1" && state.migrations === expectedLedger) {
+async function migrateWithOptionalBaselineReset(environment, state, expectedBaseline) {
+  if (state?.baseline === "003 deviludo-persistent-multi-agent-v3"
+    && state.sourceDigest === expectedBaseline.digest
+    && state.migrations === expectedBaseline.ledger) {
     return false;
   }
   try {
@@ -1308,6 +1370,7 @@ async function migrateWithOptionalBaselineReset(environment, state, expectedLedg
     }
 
     console.warn("Resetting incompatible local PostgreSQL, MinIO, project source, and Vault data. No remote data will be deleted.");
+    await removeLocalProjectRuntimes();
     await execute("docker", [
       "compose", "-f", "infra/docker-compose.yml", "down", "--volumes", "--remove-orphans",
     ], { cwd: root, env: environment, maxBuffer: 10 * 1024 * 1024 });
@@ -1321,6 +1384,20 @@ async function migrateWithOptionalBaselineReset(environment, state, expectedLedg
     console.warn("The self-hosted local data baseline was rebuilt; continuing startup.");
     return true;
   }
+}
+
+async function removeLocalProjectRuntimes() {
+  const containers = await execute("docker", [
+    "ps", "-aq", "--filter", "label=deviludo.kind=project-runtime",
+  ], { cwd: root, maxBuffer: 1024 * 1024 });
+  const ids = containers.stdout.split(/\r?\n/).map(value => value.trim()).filter(Boolean);
+  if (ids.length) await execute("docker", ["rm", "-f", ...ids], { cwd: root, maxBuffer: 4 * 1024 * 1024 });
+  const volumes = await execute("docker", [
+    "volume", "ls", "-q", "--filter", "name=deviludo-runtime-",
+  ], { cwd: root, maxBuffer: 1024 * 1024 });
+  const names = volumes.stdout.split(/\r?\n/).map(value => value.trim())
+    .filter(value => /^deviludo-runtime-[0-9a-f-]{36}$/i.test(value));
+  if (names.length) await execute("docker", ["volume", "rm", "-f", ...names], { cwd: root, maxBuffer: 4 * 1024 * 1024 });
 }
 
 async function runMigration(environment) {
@@ -1347,18 +1424,10 @@ async function bootstrapInstance(environment, runtimeImages, state, migrationRan
   return { ...JSON.parse(bootstrap.stdout), reused: false };
 }
 
-async function readExpectedMigrationLedger() {
-  const migrations = new URL("../infra/postgres/migrations/", import.meta.url);
-  const names = (await readdir(migrations))
-    .filter(name => /^\d{3}_[a-z0-9_]+\.sql$/.test(name))
-    .sort();
-  if (names.length === 0) throw new Error("No versioned database migrations were found");
-  const rows = await Promise.all(names.map(async name => {
-    const source = await readFile(new URL(name, migrations), "utf8");
-    const checksum = `sha256:${createHash("sha256").update(source, "utf8").digest("hex")}`;
-    return `${name.slice(0, -4)}=${checksum}`;
-  }));
-  return rows.join(",");
+async function readExpectedDatabaseBaseline() {
+  const source = await readFile(new URL("../infra/postgres/001_core.sql", import.meta.url), "utf8");
+  const digest = `sha256:${createHash("sha256").update(source, "utf8").digest("hex")}`;
+  return { digest, ledger: `001_persistent_multi_agent=${digest}` };
 }
 
 /**
@@ -1403,6 +1472,7 @@ async function readLocalInstanceState(environment) {
   if (present !== "t") return null;
   const recorded = await queryPostgres(environment, [
     "SELECT (SELECT baseline || ' ' || compatibility FROM deviludo.schema_metadata WHERE singleton = true)",
+    "|| '|' || (SELECT coalesce(source_digest, '') FROM deviludo.schema_metadata WHERE singleton = true)",
     "|| '|' || (SELECT coalesce(string_agg(runtime_key || '=' || image_reference, ',' ORDER BY runtime_key COLLATE \"C\"), '')",
     "FROM deviludo.runtime_images)",
     "|| '|' || coalesce((SELECT string_agg(kind, ',' ORDER BY kind) FROM",
@@ -1415,9 +1485,9 @@ async function readLocalInstanceState(environment) {
     "FROM deviludo.schema_migrations)",
   ].join(" "));
   const fields = recorded?.split("|");
-  if (fields?.length !== 6) return null;
-  const [baseline, images, pools, identities, macNodeId, migrations] = fields;
-  return { baseline, runtimeImages: images, pools, identities, macNodeId, migrations };
+  if (fields?.length !== 7) return null;
+  const [baseline, sourceDigest, images, pools, identities, macNodeId, migrations] = fields;
+  return { baseline, sourceDigest, runtimeImages: images, pools, identities, macNodeId, migrations };
 }
 
 /**

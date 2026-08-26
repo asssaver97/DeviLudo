@@ -52,11 +52,6 @@ import { parseResponseLanguage, type ResponseLanguage } from "@/lib/product/resp
 import { e2eGoalsDigest, initialE2eGoals, mergeE2eGoals } from "./e2e-goals";
 import type { StoredConversationImage } from "./object-store";
 
-function generatedAssetResourcePath(assetKey: string, objectKey: string | null): string | null {
-  const extension = objectKey?.match(/\.(png|jpg|webp)$/i)?.[1]?.toLowerCase();
-  return extension ? `res://assets/generated/${assetKey}.${extension}` : null;
-}
-
 export class CoreRepository {
   constructor(private readonly database: Database) {}
 
@@ -336,7 +331,7 @@ export class CoreRepository {
       );
       const settings = context.rows[0];
       if (!settings) throw new Error("Steam workspace and project configuration is required");
-      if (settings.state !== "RELEASE_DECISION_PENDING") throw new Error("Workflow is not awaiting a release decision");
+      if (settings.state !== "RELEASE_APPROVAL_PENDING") throw new Error("Workflow is not awaiting a release decision");
       const depots = { linux: settings.depot_linux, windows: settings.depot_windows, macos: settings.depot_macos };
       for (const platform of settings.target_platforms) {
         if (!depots[platform]) throw new Error(`Steam depot is missing for ${platform}`);
@@ -347,11 +342,11 @@ export class CoreRepository {
            JOIN deviludo.jobs build ON build.workspace_id = artifact.workspace_id
              AND build.id = artifact.producing_job_id
           WHERE artifact.workspace_id = $1::uuid AND artifact.workflow_id = $2::uuid
-            AND artifact.kind = 'BUILD' AND build.kind = 'ARTIFACT_BUILD' AND build.state = 'SUCCEEDED'
+            AND artifact.kind = 'BUILD' AND build.kind = 'BUILD' AND build.state = 'SUCCEEDED'
             AND build.id = (
               SELECT latest.id FROM deviludo.jobs latest
                WHERE latest.workspace_id = $1::uuid AND latest.workflow_id = $2::uuid
-                 AND latest.kind = 'ARTIFACT_BUILD' AND latest.state = 'SUCCEEDED'
+                 AND latest.kind = 'BUILD' AND latest.state = 'SUCCEEDED'
                ORDER BY latest.updated_at DESC, latest.created_at DESC LIMIT 1
             )`,
         [input.workspaceId, input.workflowId],
@@ -579,7 +574,7 @@ export class CoreRepository {
         [input.workspaceId, input.jobId],
       );
       const row = locked.rows[0];
-      if (!row) throw new Error("E2E Test Agent policy lock could not be created");
+      if (!row) throw new Error("Test Agent policy lock could not be created");
       return Object.freeze({
         settingsRevision: Number(row.settings_revision), runtime: row.runtime, baseUrl: row.base_url,
         model: row.model, credentialSecretRef: row.credential_secret_ref,
@@ -588,192 +583,8 @@ export class CoreRepository {
     });
   }
 
-  async readE2ePlanningContext(input: Readonly<{
-    workspaceId: string;
-    workflowId: string;
-    projectId: string;
-    platform: ServerOperatingSystem;
-    goalRevision: number;
-  }>): Promise<Readonly<Record<string, unknown>>> {
-    return this.database.withWorkspace(input.workspaceId, async client => {
-      const workflow = await client.query<{
-        name: string;
-        iteration_number: number;
-        state_data: Record<string, unknown>;
-        previous_state_data: Record<string, unknown> | null;
-      }>(
-        `SELECT project.name, workflow.iteration_number, workflow.state_data,
-                parent.state_data AS previous_state_data
-           FROM deviludo.workflow_instances workflow
-           JOIN deviludo.projects project
-             ON project.workspace_id = workflow.workspace_id AND project.id = workflow.project_id
-           LEFT JOIN deviludo.workflow_instances parent
-             ON parent.workspace_id = workflow.workspace_id AND parent.id = workflow.parent_workflow_id
-          WHERE workflow.workspace_id = $1::uuid AND workflow.id = $2::uuid
-            AND workflow.project_id = $3::uuid`,
-        [input.workspaceId, input.workflowId, input.projectId],
-      );
-      const row = workflow.rows[0];
-      if (!row) throw new Error("E2E planning workflow is unavailable");
-      const goalSnapshot = await client.query<E2eGoalRevisionRow>(
-        `SELECT revision::text, goals, goals_digest
-           FROM deviludo.workflow_e2e_goal_revisions
-          WHERE workflow_id = $1::uuid AND revision = $2::bigint`,
-        [input.workflowId, input.goalRevision],
-      );
-      if (!goalSnapshot.rows[0]) throw new Error("E2E goal revision is unavailable");
-      const assets = await client.query<{
-        asset_key: string; asset_type: string; description: string; status: string;
-        source_path: string | null; object_key: string | null; sha256: string | null;
-      }>(
-        `SELECT item.asset_key, item.asset_type, item.description, item.status::text,
-                item.source_path, item.object_key, item.sha256
-           FROM deviludo.asset_manifests manifest
-           JOIN deviludo.asset_items item
-             ON item.workspace_id = manifest.workspace_id AND item.manifest_id = manifest.id
-          WHERE manifest.workspace_id = $1::uuid AND manifest.project_id = $2::uuid
-            AND manifest.workflow_id = $3::uuid
-          ORDER BY item.asset_key`,
-        [input.workspaceId, input.projectId, input.workflowId],
-      );
-      const regression = await client.query<{
-        input_profile: string; estimated_duration_ms: number; source_digest: string;
-      }>(
-        `SELECT input_profile, estimated_duration_ms, source_digest
-           FROM deviludo.e2e_regression_traces
-          WHERE workspace_id = $1::uuid AND project_id = $2::uuid
-            AND target_platform = $3::deviludo.server_os`,
-        [input.workspaceId, input.projectId, input.platform],
-      );
-      const state = row.state_data ?? {};
-      const previous = row.previous_state_data ?? {};
-      return Object.freeze({
-        projectName: row.name,
-        responseLanguage: parseResponseLanguage(state.responseLanguage),
-        iterationNumber: row.iteration_number,
-        platform: input.platform,
-        concept: state.concept ?? "",
-        approvedSpecification: state.specification ?? {},
-        previousSpecification: previous.specification ?? null,
-        revisionNotes: (state.specification as Record<string, unknown> | undefined)?.revisionNotes ?? [],
-        e2eGoalRevision: input.goalRevision,
-        e2eGoalDigest: goalSnapshot.rows[0].goals_digest,
-        e2eGoals: parseE2eGoals(goalSnapshot.rows[0].goals),
-        regression: regression.rows[0] ? Object.freeze({
-          available: true,
-          inputProfile: regression.rows[0].input_profile,
-          estimatedDurationMs: regression.rows[0].estimated_duration_ms,
-          sourceDigest: regression.rows[0].source_digest,
-        }) : Object.freeze({ available: false }),
-        assets: Object.freeze(assets.rows.map(asset => Object.freeze({
-          assetKey: asset.asset_key,
-          assetType: asset.asset_type,
-          description: asset.description,
-          status: asset.status,
-          sourcePath: asset.source_path,
-          materialized: asset.object_key !== null || asset.source_path !== null,
-          expectedResourcePath: asset.source_path
-            ? `res://${asset.source_path}`
-            : generatedAssetResourcePath(asset.asset_key, asset.object_key),
-          expectedSha256: asset.sha256,
-        }))),
-      });
-    });
-  }
-
-  async readFrozenE2eTestPlan(input: Readonly<{
-    workspaceId: string;
-    workflowId: string;
-    projectId: string;
-    platform: ServerOperatingSystem;
-    sourceRevision: number;
-    goalRevision: number;
-  }>): Promise<Readonly<{ testManifest: Readonly<Record<string, unknown>>; testManifestDigest: string }> | null> {
-    return this.database.withWorkspace(input.workspaceId, async client => {
-      const result = await client.query<{
-        project_id: string;
-        test_manifest: Record<string, unknown>;
-        test_manifest_digest: string;
-      }>(
-        `SELECT project_id::text, test_manifest, test_manifest_digest
-           FROM deviludo.e2e_test_plans
-          WHERE workspace_id = $1::uuid AND workflow_id = $2::uuid
-            AND source_revision = $3::bigint AND goal_revision = $4::bigint
-            AND target_platform = $5::deviludo.server_os`,
-        [input.workspaceId, input.workflowId, input.sourceRevision, input.goalRevision, input.platform],
-      );
-      const row = result.rows[0];
-      if (!row) return null;
-      if (row.project_id !== input.projectId) throw new Error("Frozen E2E test plan belongs to another project");
-      return Object.freeze({
-        testManifest: Object.freeze(row.test_manifest),
-        testManifestDigest: row.test_manifest_digest,
-      });
-    });
-  }
-
-  async freezeE2eTestPlan(input: Readonly<{
-    workspaceId: string;
-    workflowId: string;
-    projectId: string;
-    platform: ServerOperatingSystem;
-    sourceRevision: number;
-    goalRevision: number;
-    goalDigest: string;
-    testManifest: Readonly<Record<string, unknown>>;
-    testManifestDigest: string;
-  }>): Promise<Readonly<{ testManifest: Readonly<Record<string, unknown>>; testManifestDigest: string }>> {
-    return this.database.withWorkspace(input.workspaceId, async client => {
-      const frozenInputs = await client.query<{ source_matches: boolean; goal_matches: boolean }>(
-        `SELECT
-           EXISTS (
-             SELECT 1 FROM deviludo.project_source_revisions source
-              WHERE source.project_id = $1::uuid AND source.revision = $2::bigint
-           ) AS source_matches,
-           EXISTS (
-             SELECT 1 FROM deviludo.workflow_e2e_goal_revisions goals
-              WHERE goals.workflow_id = $3::uuid AND goals.revision = $4::bigint
-                AND goals.goals_digest = $5
-           ) AS goal_matches`,
-        [input.projectId, input.sourceRevision, input.workflowId, input.goalRevision, input.goalDigest],
-      );
-      if (!frozenInputs.rows[0]?.source_matches || !frozenInputs.rows[0]?.goal_matches) {
-        throw new Error("E2E plan inputs do not match the frozen source and goal revisions");
-      }
-      await client.query(
-        `INSERT INTO deviludo.e2e_test_plans(
-           workspace_id, workflow_id, project_id, target_platform,
-           source_revision, goal_revision, goal_digest, test_manifest, test_manifest_digest
-         ) VALUES ($1::uuid, $2::uuid, $3::uuid, $4::deviludo.server_os,
-                   $5::bigint, $6::bigint, $7, $8::jsonb, $9)
-         ON CONFLICT (workspace_id, workflow_id, source_revision, goal_revision, target_platform) DO NOTHING`,
-        [input.workspaceId, input.workflowId, input.projectId, input.platform,
-          input.sourceRevision, input.goalRevision, input.goalDigest,
-          JSON.stringify(input.testManifest), input.testManifestDigest],
-      );
-      const frozen = await client.query<{
-        project_id: string;
-        test_manifest: Record<string, unknown>;
-        test_manifest_digest: string;
-      }>(
-        `SELECT project_id::text, test_manifest, test_manifest_digest
-           FROM deviludo.e2e_test_plans
-          WHERE workspace_id = $1::uuid AND workflow_id = $2::uuid
-            AND source_revision = $3::bigint AND goal_revision = $4::bigint
-            AND target_platform = $5::deviludo.server_os`,
-        [input.workspaceId, input.workflowId, input.sourceRevision, input.goalRevision, input.platform],
-      );
-      const row = frozen.rows[0];
-      if (!row || row.project_id !== input.projectId) throw new Error("Frozen E2E test plan could not be read back");
-      return Object.freeze({
-        testManifest: Object.freeze(row.test_manifest),
-        testManifestDigest: row.test_manifest_digest,
-      });
-    });
-  }
-
   /** The last successful Agent manifest owns immutable asset-to-control intent
-   * and can also carry a legacy semantic test hint that the planner revalidates. */
+   * and can also carry a semantic test hint that the Test Agent revalidates. */
   async readProjectAgentManifestObject(input: Readonly<{
     workspaceId: string;
     workflowId: string;
@@ -795,7 +606,7 @@ export class CoreRepository {
             AND artifact.workflow_id = $2::uuid
             AND artifact.project_id = $3::uuid
             AND artifact.kind = 'SPECIFICATION'
-            AND producer.kind = 'AGENT_GENERATION'
+            AND producer.kind = 'AGENT_TURN'
             AND producer.state = 'SUCCEEDED'
           ORDER BY artifact.created_at DESC, artifact.id DESC
           LIMIT 1`,
@@ -1143,6 +954,7 @@ export class CoreRepository {
     actorId: string;
     leaseToken: string;
     hosted?: boolean;
+    name: string;
     concept: string;
     specification: Readonly<Record<string, unknown>>;
     document: ProjectDocumentContent;
@@ -1175,6 +987,11 @@ export class CoreRepository {
       );
       const row = workflow.rows[0];
       if (!row || (!input.hosted && !analysisLeaseMatches(row.state_data, input.leaseToken))) return false;
+      await client.query(
+        `UPDATE deviludo.projects SET name = $3, last_activity_at = clock_timestamp()
+          WHERE workspace_id = $1::uuid AND id = $2::uuid`,
+        [input.workspaceId, input.projectId, input.name],
+      );
 
       const currentDocument = await client.query<{ revision: string }>(
         "SELECT revision::text FROM deviludo.project_documents WHERE project_id = $1::uuid FOR UPDATE",
@@ -1183,7 +1000,7 @@ export class CoreRepository {
       const revision = Number(currentDocument.rows[0]?.revision ?? 0) + 1;
       const document = parseProjectDocumentContent(input.document);
       const markdown = projectDocumentMarkdown(
-        row.project_name,
+        input.name,
         document,
         parseResponseLanguage(input.responseLanguage ?? row.state_data.responseLanguage),
       );
@@ -1201,15 +1018,23 @@ export class CoreRepository {
          ) VALUES ($1::uuid, $2::uuid, $3::bigint, $4::jsonb, $5, 'PROJECT_IMPORTED')`,
         [input.workspaceId, input.projectId, revision, JSON.stringify(document), markdown],
       );
-      await client.query(
+      const sourceRevision = await client.query(
         `INSERT INTO deviludo.project_source_revisions(
            workspace_id, project_id, revision, relative_path, content_digest,
            file_count, total_bytes, workflow_id, actor_id
-         ) VALUES ($1::uuid, $2::uuid, $3::bigint, $4, $5, $6, $7, $8::uuid, $9::uuid)`,
+         ) VALUES ($1::uuid, $2::uuid, $3::bigint, $4, $5, $6, $7, $8::uuid, $9::uuid)
+         ON CONFLICT (workspace_id, project_id, revision) DO UPDATE
+           SET workflow_id = EXCLUDED.workflow_id
+         WHERE deviludo.project_source_revisions.relative_path = EXCLUDED.relative_path
+           AND deviludo.project_source_revisions.content_digest = EXCLUDED.content_digest
+           AND deviludo.project_source_revisions.file_count = EXCLUDED.file_count
+           AND deviludo.project_source_revisions.total_bytes = EXCLUDED.total_bytes
+           AND deviludo.project_source_revisions.actor_id = EXCLUDED.actor_id`,
         [input.workspaceId, input.projectId, input.source.revision, input.source.relativePath,
           input.source.sha256, input.source.fileCount, input.source.totalBytes,
           input.workflowId, input.actorId],
       );
+      if (sourceRevision.rowCount !== 1) throw new Error("Imported source revision changed during analysis");
 
       const latestGoal = await client.query<{ revision: string }>(
         `SELECT revision::text FROM deviludo.workflow_e2e_goal_revisions
@@ -1393,6 +1218,75 @@ export class CoreRepository {
     });
   }
 
+  async createProjectConversationShell(input: Readonly<{
+    actorId: string;
+    workspaceId: string;
+    workspaceName: string;
+    projectId: string;
+    workflowId: string;
+    conversationId: string;
+    idempotencyKey: string;
+    name: string;
+    concept: string;
+    specification: Readonly<Record<string, unknown>>;
+    document: ProjectDocumentContent;
+    responseLanguage?: ResponseLanguage;
+    profile: "VALIDATE" | "RELEASE";
+    targetPlatforms: readonly ServerOperatingSystem[];
+  }>): Promise<Readonly<{ project: ProductProjectDetail; conversation: ProductConversation }>> {
+    await this.database.withWorkspace(input.workspaceId, async client => {
+      await client.query(
+        `INSERT INTO deviludo.workspaces(id, name) VALUES ($1::uuid, $2)
+         ON CONFLICT (id) DO NOTHING`,
+        [input.workspaceId, input.workspaceName],
+      );
+      await client.query(
+        `INSERT INTO deviludo.projects(workspace_id, id, created_by_actor_id, name)
+         VALUES ($1::uuid, $2::uuid, $3::uuid, $4)`,
+        [input.workspaceId, input.projectId, input.actorId, input.name],
+      );
+      await insertInitialProjectDocument(client, input);
+      await client.query(
+        `INSERT INTO deviludo.workflow_instances(
+           workspace_id, id, project_id, profile, target_platforms, state_data
+         ) VALUES ($1::uuid, $2::uuid, $3::uuid, $4::deviludo.workflow_profile,
+           $5::deviludo.server_os[], $6::jsonb)`,
+        [input.workspaceId, input.workflowId, input.projectId, input.profile,
+          input.targetPlatforms, JSON.stringify({
+            concept: input.concept,
+            specification: input.specification,
+            e2eGoalRevision: 1,
+            responseLanguage: parseResponseLanguage(input.responseLanguage),
+            iteration: initialIterationState(),
+          })],
+      );
+      await client.query(
+        `INSERT INTO deviludo.workflow_events(
+           workspace_id, workflow_id, event_kind, event_data, idempotency_key
+         ) VALUES ($1::uuid, $2::uuid, 'PROJECT_CREATED', $3::jsonb, 'project-created')`,
+        [input.workspaceId, input.workflowId, JSON.stringify({ concept: input.concept, source: "PROJECT_RUNTIME" })],
+      );
+      await insertInitialE2eGoalRevision(client, input.workspaceId, input.workflowId, input.specification);
+      await client.query(
+        `INSERT INTO deviludo.project_conversations(workspace_id, id, project_id, mode, title)
+         VALUES ($1::uuid, $2::uuid, $3::uuid, 'NEW_GAME', $4)`,
+        [input.workspaceId, input.conversationId, input.projectId, input.name],
+      );
+      await client.query(
+        `INSERT INTO deviludo.project_creation_receipts(
+           idempotency_key, operation_kind, workspace_id, project_id, conversation_id
+         ) VALUES ($1, 'CONVERSATION', $2::uuid, $3::uuid, $4::uuid)`,
+        [input.idempotencyKey, input.workspaceId, input.projectId, input.conversationId],
+      );
+    });
+    const [project, conversation] = await Promise.all([
+      this.readProject(input.workspaceId, input.projectId),
+      this.readConversation(input.workspaceId, input.conversationId),
+    ]);
+    if (!project || !conversation) throw new Error("Created project conversation shell could not be read");
+    return Object.freeze({ project, conversation });
+  }
+
   async createProjectConversation(input: Readonly<{
     actorId: string;
     workspaceId: string;
@@ -1478,7 +1372,7 @@ export class CoreRepository {
           intent: intentDecision.intent,
           explicitExecution: intentDecision.explicitExecution,
           actionable: intentDecision.actionable,
-          responderRoles: intentDecision.responderRoles,
+          targetRole: intentDecision.targetRole,
         }), `intent:${input.conversationId}:${userMessage.rows[0].message_id}`],
       );
       for (const message of input.assistantMessages) {
@@ -1956,7 +1850,7 @@ export class CoreRepository {
   /**
    * Asset manifest reads and mutations. Generation and upload run asynchronously
    * without occupying a delivery worker; the readiness gate then freezes their
-   * exact objects into the next ARTIFACT_BUILD.
+   * exact objects into the next BUILD.
    */
   get assets(): AssetManifestStore {
     return new AssetManifestStore(this.database);
@@ -2286,6 +2180,19 @@ export class CoreRepository {
     });
   }
 
+  async completePersistentAgentTurn(
+    job: JobProtocolV4,
+    output: Readonly<Record<string, unknown>>,
+  ): Promise<boolean> {
+    const result = await this.database.withWorkspace(job.workspaceId, client => client.query(
+      `SELECT deviludo.complete_agent_turn_job(
+         $1::uuid, $2::uuid, $3::uuid, $4::bigint, $5::jsonb
+       ) AS completed`,
+      [job.workspaceId, job.jobId, job.lease.token, job.lease.fencingToken, JSON.stringify(output)],
+    ));
+    return result.rows[0]?.completed === true;
+  }
+
   async readAgentProgress(
     workspaceId: string,
     projectId: string,
@@ -2311,7 +2218,6 @@ export class CoreRepository {
     projectId: string;
     userContent: string;
     userAttachments?: readonly StoredConversationImage[];
-    expectedWorkflowState: string;
     assistantMessages: readonly Readonly<{
       content: string;
       metadata: Readonly<Record<string, unknown>>;
@@ -2370,13 +2276,6 @@ export class CoreRepository {
           WHERE id = $1::uuid`,
         [project.workflowId, responseLanguage],
       );
-      if (project.workflowState !== input.expectedWorkflowState) {
-        throw Object.assign(new Error("项目状态已变化，请重试本次对话"), {
-          statusCode: 409,
-          code: "PROJECT_STATE_CHANGED",
-        });
-      }
-
       if (!conversation) {
         const generatedTitle = input.assistantMessages
           .map(message => objectValue(message.metadata.intentDecision).summary)
@@ -2504,7 +2403,7 @@ export class CoreRepository {
             intent: intentDecision.intent,
             explicitExecution: intentDecision.explicitExecution,
             actionable: intentDecision.actionable,
-            responderRoles: intentDecision.responderRoles,
+            targetRole: intentDecision.targetRole,
           }), `intent:${input.conversationId}:${userMessage.rows[0].message_id}`],
         );
       }
@@ -2850,7 +2749,7 @@ export class CoreRepository {
              workspace_id, id, project_id, iteration_number, parent_workflow_id,
              development_actor_id, profile, target_platforms, state, state_data
            ) VALUES ($1::uuid, $2::uuid, $3::uuid, $4, $5::uuid, $6::uuid,
-                     $7::deviludo.workflow_profile, $8::deviludo.server_os[], 'AGENT_RUNNING', $9::jsonb)`,
+                     $7::deviludo.workflow_profile, $8::deviludo.server_os[], 'DEVELOPING', $9::jsonb)`,
           [input.workspaceId, targetWorkflowId, input.projectId, current.iteration_number + 1,
             current.id, input.actorId, current.profile, current.target_platforms, JSON.stringify(stateData)],
         );
@@ -2872,12 +2771,13 @@ export class CoreRepository {
                   fencing_token = fencing_token + 1,
                   last_error = 'superseded by confirmed implementation change',
                   updated_at = clock_timestamp()
-            WHERE workflow_id = $1::uuid AND kind <> 'STEAM_PUBLISH' AND state <> 'CANCELLED'`,
+            WHERE workflow_id = $1::uuid AND kind <> 'STEAM_PUBLISH'
+              AND state IN ('QUEUED', 'RETRY', 'RUNNING')`,
           [current.id],
         );
         await client.query(
           `UPDATE deviludo.workflow_instances
-              SET state = 'AGENT_RUNNING', version = version + 1,
+              SET state = 'DESIGNING', version = version + 1,
                   development_actor_id = $2::uuid,
                   state_data = state_data || jsonb_build_object(
                     'specification', $3::jsonb, 'responseLanguage', $4::text,
@@ -2924,6 +2824,8 @@ export class CoreRepository {
       );
       const agent = settings.rows[0];
       const payload = agent ? {
+        role: "DESIGN",
+        purpose: "DESIGN",
         changeRequestId: change.id,
         implementationBrief: change.implementation_brief,
         e2eGoalRevision: goalRevision,
@@ -2937,13 +2839,15 @@ export class CoreRepository {
           revision: Number(agent.revision),
         },
       } : {
+        role: "DESIGN",
+        purpose: "DESIGN",
         changeRequestId: change.id,
         implementationBrief: change.implementation_brief,
         e2eGoalRevision: goalRevision,
         e2eGoals: goals,
       };
       await client.query(
-        `SELECT deviludo.enqueue_job($1::uuid, $2::uuid, $3::uuid, 'AGENT_GENERATION', NULL, $4, $5::jsonb)`,
+        `SELECT deviludo.enqueue_job($1::uuid, $2::uuid, $3::uuid, 'AGENT_TURN', NULL, $4, $5::jsonb)`,
         [input.workspaceId, targetWorkflowId, input.projectId,
           `${targetWorkflowId}:agent:change:${change.id}`, JSON.stringify(payload)],
       );
@@ -3104,7 +3008,7 @@ export class CoreRepository {
       const node = await client.query<{ id: string }>(
         `INSERT INTO deviludo.server_nodes(pool_kind, operating_system, state, capabilities)
          VALUES ($1::deviludo.server_pool_kind, $2::deviludo.server_os, 'PROVISIONING',
-                 ARRAY['E2E_TEST'])
+                 ARRAY['E2E_PLATFORM_RUN'])
          RETURNING id::text`,
         [input.poolKind, input.operatingSystem],
       );
@@ -3173,7 +3077,7 @@ export class CoreRepository {
         `INSERT INTO deviludo.server_nodes(
            pool_kind, operating_system, state, capabilities, development_auth_token_hash
          )
-         VALUES ($1::deviludo.server_pool_kind, $2::deviludo.server_os, 'ACTIVE', ARRAY['E2E_TEST'], $3)
+         VALUES ($1::deviludo.server_pool_kind, $2::deviludo.server_os, 'ACTIVE', ARRAY['E2E_PLATFORM_RUN'], $3)
          RETURNING id::text`,
         [input.poolKind, input.operatingSystem, input.nodeAuthTokenHash],
       );
@@ -3383,7 +3287,7 @@ export class CoreRepository {
         ],
       );
       const completed = result.rows[0]?.completed === true;
-      if (completed && job.jobKind === "AGENT_GENERATION") {
+      if (completed && job.jobKind === "AGENT_TURN") {
         await reconcileExistingSourceAssets(
           client,
           job.workspaceId,
@@ -3636,14 +3540,6 @@ export class CoreRepository {
     return Number(result.rows[0]?.removed ?? 0);
   }
 
-  async scheduleIdleProjectDocumentMaintenance(idleSeconds: number): Promise<number> {
-    const result = await this.database.pool.query<{ scheduled: string }>(
-      "SELECT deviludo.schedule_idle_project_document_maintenance($1::integer, 20)::text AS scheduled",
-      [idleSeconds],
-    );
-    return Number(result.rows[0]?.scheduled ?? 0);
-  }
-
   async appendSignal(
     workspaceId: string,
     workflowId: string,
@@ -3883,7 +3779,7 @@ export class CoreRepository {
       payload: Object.freeze({
         ...row.payload,
         responseLanguage: parseResponseLanguage(row.workflow_state_data?.responseLanguage),
-        ...(row.kind === "AGENT_GENERATION" && localDirectoryBindingId ? { localDirectoryBindingId } : {}),
+        ...(row.kind === "AGENT_TURN" && localDirectoryBindingId ? { localDirectoryBindingId } : {}),
       }),
       lease: Object.freeze({
         token: row.lease_token,
@@ -4090,7 +3986,7 @@ function agentSettingsFromRow(row: AgentSettingsRow): StoredInstanceAgentSetting
 }
 
 function buildAssetInputObjects(row: JobRow): readonly ObjectReference[] {
-  if (row.kind !== "ARTIFACT_BUILD") return Object.freeze([]);
+  if (row.kind !== "BUILD") return Object.freeze([]);
   const value = row.payload.assetInputs;
   // Jobs queued before the asset-materialization migration have no snapshot and
   // remain runnable during a rolling deployment.
@@ -4955,17 +4851,6 @@ async function touchProjectActivity(
   await client.query(
     `UPDATE deviludo.projects SET last_activity_at = clock_timestamp()
       WHERE workspace_id = $1::uuid AND id = $2::uuid`,
-    [workspaceId, projectId],
-  );
-  await client.query(
-    `UPDATE deviludo.jobs
-        SET state = 'CANCELLED', lease_owner = NULL, lease_token = NULL,
-            lease_expires_at = NULL, heartbeat_at = NULL,
-            fencing_token = fencing_token + 1, last_error = 'superseded by project activity',
-            updated_at = clock_timestamp()
-      WHERE workspace_id = $1::uuid AND project_id = $2::uuid
-        AND kind = 'PROJECT_DOCUMENT_MAINTENANCE'
-        AND state IN ('QUEUED', 'RETRY', 'RUNNING')`,
     [workspaceId, projectId],
   );
 }

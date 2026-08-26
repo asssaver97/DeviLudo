@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 import { spawn } from "node:child_process";
 import { createHash } from "node:crypto";
-import { appendFile, copyFile, cp, mkdir, readFile, writeFile } from "node:fs/promises";
+import { appendFile, copyFile, mkdir, readFile, writeFile } from "node:fs/promises";
 import { dirname } from "node:path";
 
 await mkdir("/workspace/project", { recursive: true });
@@ -12,8 +12,8 @@ const chinese = plan.job?.payload?.responseLanguage === "zh";
 await progress("PHASE", chinese ? "Fixture Agent 已启动并读取项目需求" : "Fixture Agent started and read the project requirements");
 let taskError = null;
 try {
-  if (!["AGENT_GENERATION", "PROJECT_DOCUMENT_MAINTENANCE", "ARTIFACT_BUILD", "STEAM_PUBLISH"].includes(plan.job?.jobKind)) {
-    throw new Error("Fixture task accepts only the fixed E2E contracts");
+  if (!["BUILD", "STEAM_PUBLISH"].includes(plan.job?.jobKind)) {
+    throw new Error("Fixture task accepts only controlled build and Steam contracts");
   }
   if (plan.job.jobKind === "STEAM_PUBLISH") {
     const operationId = plan.job.payload?.operation?.id;
@@ -30,7 +30,7 @@ try {
       schemaVersion: "deviludo.task-outputs.v1",
       outputs: [{ file: "steam-publish.json", kind: "PUBLISH_RECEIPT", contentType: "application/json" }],
     }));
-  } else if (plan.job.jobKind === "ARTIFACT_BUILD") {
+  } else if (plan.job.jobKind === "BUILD") {
     const platforms = plan.job.payload?.targetPlatforms;
     if (!Array.isArray(platforms) || platforms.length < 1
       || platforms.some(platform => !["linux", "windows", "macos"].includes(platform))) {
@@ -65,42 +65,6 @@ try {
     await writeFile("/workspace/outputs/manifest.json", JSON.stringify({
       schemaVersion: "deviludo.task-outputs.v1",
       outputs,
-    }));
-  } else if (plan.agentConfiguration?.runtime !== "CLAUDE_CODE") {
-    throw new Error("Fixture Agent requires the fixed Claude Code contract");
-  } else if (plan.job.jobKind === "PROJECT_DOCUMENT_MAINTENANCE") {
-    const current = plan.job.payload?.document ?? {};
-    await writeFile("/workspace/outputs/project-document.json", JSON.stringify({
-      schemaVersion: "deviludo.project-document.v1",
-      content: {
-        introduction: String(current.introduction ?? (chinese ? "Fixture 游戏项目" : "Fixture game project")),
-        gameplay: String(current.gameplay ?? (chinese ? "完成固定的自动化游戏循环。" : "Complete the fixed automated gameplay loop.")),
-        categories: Array.isArray(current.categories) ? current.categories : [chinese ? "自动化测试" : "Automated testing"],
-        features: Array.isArray(current.features) ? current.features : [chinese ? "可重复验证" : "Repeatable verification"],
-      },
-    }));
-    await writeFile("/workspace/outputs/manifest.json", JSON.stringify({
-      schemaVersion: "deviludo.task-outputs.v1",
-      outputs: [{ file: "project-document.json", kind: "PROJECT_DOCUMENT", contentType: "application/json" }],
-    }));
-  } else {
-    await progress("AGENT_OUTPUT", chinese ? "正在生成 Godot 项目结构、主场景和自动化测试。" : "Generating the Godot project structure, main scene, and automated tests.");
-    await cp("/opt/deviludo-fixture", "/workspace/project", { recursive: true, force: false });
-    const generatedManifest = JSON.parse(await readFile("/workspace/project/agent.json", "utf8"));
-    delete generatedManifest.testManifest;
-    await writeFile("/workspace/project/agent.json", `${JSON.stringify(generatedManifest, null, 2)}\n`);
-    await progress("AGENT_OUTPUT", chinese ? "项目结构生成完成，正在发布源码 revision。" : "Project structure generated; publishing the source revision.");
-    // Match the real Agent runner: the output contract is the generated
-    // project's agent.json, not diagnostic metadata about the fixture process.
-    await writeFile(
-      "/workspace/outputs/agent.json",
-      await readFile("/workspace/project/agent.json", "utf8"),
-    );
-    await writeFile("/workspace/outputs/manifest.json", JSON.stringify({
-      schemaVersion: "deviludo.task-outputs.v1",
-      outputs: [
-        { file: "agent.json", kind: "SPECIFICATION", contentType: "application/json" },
-      ],
     }));
   }
 } catch (error) {

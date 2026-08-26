@@ -137,7 +137,7 @@ export function ProjectSteamPanel(props: Readonly<{
         </form>
       </details>
 
-      {!props.readOnly && props.workflowState === "RELEASE_DECISION_PENDING" ? (
+      {!props.readOnly && props.workflowState === "RELEASE_APPROVAL_PENDING" ? (
         <div className="product-release-decision">
           <div>
             <strong>{text("真实操作 E2E 已通过", "REAL-INPUT E2E PASSED")}</strong>

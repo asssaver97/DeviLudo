@@ -5,7 +5,7 @@ The Windows E2E golden image contains this repository-built, signed VHF gamepad 
 Build and install from an elevated WDK shell:
 
 ```powershell
-.\build-and-install.ps1 -OutputDirectory C:\DeviLudoBuild -SigningCertificateThumbprint $env:DEVILUDO_DRIVER_SIGNING_CERTIFICATE -RepositoryRoot C:\DeviLudo -GodotPath 'C:\Program Files\Godot\Godot.exe'
+.\build-and-install.ps1 -OutputDirectory C:\DeviLudoBuild -SigningCertificateThumbprint $env:DEVILUDO_DRIVER_BUILDING_CERTIFICATE -RepositoryRoot C:\DeviLudo -GodotPath 'C:\Program Files\Godot\Godot.exe'
 ```
 
 The resulting golden image must pass the real Godot input smoke before its digest can be configured for an E2E node.

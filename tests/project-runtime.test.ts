@@ -1,0 +1,193 @@
+import assert from "node:assert/strict";
+import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import test from "node:test";
+import type { ProjectRuntimeTurnResult } from "@/lib/product/project-runtime";
+import {
+  PROJECT_RUNTIME_IDLE_MS,
+  PROJECT_RUNTIME_PAUSED_DESTROY_MS,
+} from "@/lib/product/project-runtime";
+import {
+  createProjectContext,
+  ProjectContextStore,
+  updateProjectContext,
+} from "@/services/core/src/project-context";
+import {
+  parseProjectRuntimeIntent,
+  parseProjectRuntimeReply,
+  projectRuntimeIntentPrompt,
+} from "@/services/core/src/project-runtime-conversation";
+import {
+  summarizeRuntimeToolCalls,
+  summarizeToolAuditValue,
+} from "@/services/core/src/project-runtime-service";
+
+const workspaceId = "10000000-0000-4000-8000-000000000001";
+const projectId = "10000000-0000-4000-8000-000000000002";
+
+test("persistent Runtime intent selects exactly one role and rejects contradictory mutation flags", () => {
+  const decision = parseProjectRuntimeIntent(result("INTENT", {
+    intent: "CHANGE_REQUEST",
+    targetRole: "DEVELOPMENT",
+    explicitExecution: true,
+    actionable: true,
+    summary: "Fix the input path.",
+  }));
+  assert.equal(decision.targetRole, "DEVELOPMENT");
+  assert.equal(decision.explicitExecution, true);
+  assert.throws(() => parseProjectRuntimeIntent(result("INTENT", {
+    intent: "QUESTION",
+    targetRole: "TEST",
+    explicitExecution: true,
+    actionable: true,
+    summary: "Explain the current evidence.",
+  })), /inconsistent action flags/);
+  assert.match(projectRuntimeIntentPrompt({
+    content: "Could this be changed?",
+    hasAttachments: false,
+    hasPendingChange: false,
+    workflowState: "TESTING",
+    recentMessages: [],
+  }), /targetRole must be exactly one/);
+});
+
+test("specialist output is attributed to the real persistent role session", () => {
+  const reply = parseProjectRuntimeReply(result("TEST", {
+    content: "The current plan covers input and visual evidence.",
+    readyForDevelopment: false,
+    options: [],
+    projectDocumentPatch: null,
+    e2eGoalDelta: { add: [], replace: [], retire: [] },
+  }), "TEST", {
+    agentRuntime: "CODEX_CLI",
+    baseUrl: "https://chatgpt.com",
+    primaryModel: "primary",
+    modelOverrides: { intent: null, analysis: null, design: null, development: null, test: "test-model" },
+    imageModel: null,
+    credentialSecretRef: "vault://instance/agent-runtime/api-key/versions/10000000-0000-4000-8000-000000000004",
+    credentialVersion: "10000000-0000-4000-8000-000000000004",
+    apiKeyMask: "••••",
+    apiKeyFingerprint: "sha256:000000000000",
+    testPolicyReady: true,
+    testPolicyCheckedRevision: 3,
+    revision: 3,
+    updatedBy: "test",
+    updatedAt: new Date(0).toISOString(),
+  });
+  assert.equal(reply.agentRole, "TEST");
+  assert.equal(reply.runtime, "CODEX_CLI");
+  assert.equal(reply.model, "test-model");
+});
+
+test("project context is zstd-compressed, digest-verified, atomic durable state", async () => {
+  const root = await mkdtemp(join(tmpdir(), "deviludo-context-"));
+  try {
+    const store = new ProjectContextStore(root);
+    const initial = createProjectContext({ workspaceId, projectId, concept: "A playable game" });
+    const changed = updateProjectContext(initial, { workflow: { state: "DEVELOPING", stopped: false } });
+    const stored = await store.write(changed);
+    assert.equal(stored.relativePath, `workspaces/${workspaceId}/projects/${projectId}/context/project-context.json.zst`);
+    assert.match(stored.sha256, /^sha256:[0-9a-f]{64}$/);
+    const packed = await readFile(store.path(workspaceId, projectId));
+    assert.notEqual(packed.subarray(0, 1).toString("utf8"), "{");
+    assert.deepEqual((await store.read(workspaceId, projectId, stored.sha256)).context, changed);
+    await assert.rejects(store.read(workspaceId, projectId, `sha256:${"0".repeat(64)}`), /digest/);
+    assert.throws(() => updateProjectContext(initial, {
+      workflow: { state: "DRAFT", apiKey: "must-not-persist" },
+    }), /sensitive field/);
+    let nested: Record<string, unknown> = {};
+    const nestedRoot = nested;
+    for (let depth = 0; depth < 24; depth += 1) {
+      nested.child = {};
+      nested = nested.child as Record<string, unknown>;
+    }
+    assert.doesNotThrow(() => updateProjectContext(initial, { workflow: nestedRoot }));
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("the Runtime lifecycle uses fixed five-minute pause and thirty-minute destruction windows", () => {
+  assert.equal(PROJECT_RUNTIME_IDLE_MS, 5 * 60_000);
+  assert.equal(PROJECT_RUNTIME_PAUSED_DESTROY_MS, 30 * 60_000);
+});
+
+test("MCP audit records summarize large tool results and redact credentials", () => {
+  const result = summarizeToolAuditValue({
+    context: { plan: "x".repeat(70_000), credentialSecretRef: "vault://must-not-persist" },
+  });
+  assert.ok(JSON.stringify(result).length < 8_000);
+  assert.match(String((result.context as Record<string, unknown>).plan), /…$/);
+  assert.equal((result.context as Record<string, unknown>).credentialSecretRef, "[REDACTED]");
+
+  assert.deepEqual(summarizeToolAuditValue({
+    path: "res://main.gd",
+    apiKey: "sensitive",
+  }), { path: "res://main.gd", apiKey: "[REDACTED]" });
+
+  const calls = summarizeRuntimeToolCalls([{
+    name: "context.read",
+    arguments: {},
+    result: { context: { nested: "x".repeat(70_000) } },
+    startedAt: new Date(0).toISOString(),
+    completedAt: new Date(1).toISOString(),
+  }]);
+  assert.ok(JSON.stringify(calls[0]).length < 8_000);
+  assert.equal(summarizeRuntimeToolCalls([{
+    name: "Bash (shell_command)",
+    arguments: {}, result: {},
+    startedAt: new Date(0).toISOString(), completedAt: new Date(1).toISOString(),
+  }])[0]?.name, "bash_shell_command");
+  assert.throws(() => summarizeRuntimeToolCalls([{
+    name: "",
+    arguments: {}, result: {},
+    startedAt: new Date(0).toISOString(), completedAt: new Date(1).toISOString(),
+  }]), /invalid tool call summary/);
+});
+
+test("Core has one Runtime path and controlled task images cannot execute Agent turns", async () => {
+  const [api, runner, fixture, supervisor] = await Promise.all([
+    readFile(new URL("../services/core/src/api.ts", import.meta.url), "utf8"),
+    readFile(new URL("../services/sandbox-executor/task-runner.mjs", import.meta.url), "utf8"),
+    readFile(new URL("../services/sandbox-executor/task-fixture-agent.mjs", import.meta.url), "utf8"),
+    readFile(new URL("../services/sandbox-executor/src/project-runtime-supervisor.ts", import.meta.url), "utf8"),
+  ]);
+  assert.doesNotMatch(api, /generateE2eTestPlan|generateE2ePlayerDecision|classifyConversationIntent|generateProductConversationReply/);
+  assert.doesNotMatch(runner, /AGENT_TURN|runAgent|runProjectDocumentMaintenance/);
+  assert.doesNotMatch(fixture, /AGENT_TURN/);
+  assert.match(supervisor, /--cap-drop=ALL/);
+  assert.match(supervisor, /--security-opt=no-new-privileges/);
+  assert.doesNotMatch(supervisor, /docker\.sock|hypervisor|\/dev\/kvm/);
+});
+
+test("conversation persistence does not reject replies when the workflow advances concurrently", async () => {
+  const repository = await readFile(new URL("../services/core/src/repository.ts", import.meta.url), "utf8");
+  assert.doesNotMatch(repository, /PROJECT_STATE_CHANGED|expectedWorkflowState/);
+});
+
+test("all five signed role Skills exist and define the intended boundary", async () => {
+  for (const role of ["intent", "analysis", "design", "development", "test"]) {
+    const skill = await readFile(new URL(`../services/project-runtime/skills/${role}/SKILL.md`, import.meta.url), "utf8");
+    assert.match(skill, /^---\nname: deviludo-/);
+    assert.match(skill, /\n# /);
+    assert.match(skill, /MCP|tool/i);
+  }
+});
+
+function result(role: ProjectRuntimeTurnResult["role"], structured: Readonly<Record<string, unknown>>): ProjectRuntimeTurnResult {
+  return Object.freeze({
+    schemaVersion: "deviludo.project-runtime.v2",
+    turnId: "10000000-0000-4000-8000-000000000003",
+    role,
+    mode: "PRIMARY",
+    content: JSON.stringify(structured),
+    structured,
+    toolCalls: [],
+    sessionId: "session",
+    branchId: null,
+    sourceRevision: null,
+    startedAt: new Date(0).toISOString(),
+    completedAt: new Date(1).toISOString(),
+  });
+}

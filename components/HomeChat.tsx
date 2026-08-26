@@ -4,7 +4,7 @@ import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { useEffect, useMemo, useState, type FormEvent } from "react";
 import { cachedValue, clientCacheKeys, loadCached, storeCached } from "@/lib/product/client-cache";
-import type { ProductConversation, ProductProjectSummary } from "@/lib/product/contracts";
+import type { ImplementationChangeRequest, ProductConversation, ProductProjectSummary } from "@/lib/product/contracts";
 import {
   appendStreamingConversationReply,
   chronologicalMessages,
@@ -48,6 +48,7 @@ export function HomeChat() {
   const [loadingProjects, setLoadingProjects] = useState(!initialProjects);
   const [sending, setSending] = useState(false);
   const [startingDevelopment, setStartingDevelopment] = useState(false);
+  const [pendingChange, setPendingChange] = useState<ImplementationChangeRequest | null>(null);
   const [streamingReplies, setStreamingReplies] = useState<StreamingConversationReplies>({});
   const [error, setError] = useState<string | null>(null);
 
@@ -126,6 +127,7 @@ export function HomeChat() {
       });
       setConversation(result.conversation);
       setSelectedProjectId(result.conversation.projectId);
+      setPendingChange(result.project.pendingImplementationChange);
       if ((activeProject?.workflowState ?? "DRAFT") === "DRAFT" && result.project.workflowState !== "DRAFT") {
         router.push(`/projects/${result.project.id}`);
       }
@@ -151,7 +153,38 @@ export function HomeChat() {
     setSelectedProjectId("");
     setContent("");
     setAttachments(Object.freeze([]));
+    setPendingChange(null);
     setError(null);
+  }
+
+  async function confirmPendingChange() {
+    if (!activeProject || !pendingChange || startingDevelopment) return;
+    setStartingDevelopment(true);
+    setError(null);
+    try {
+      const response = await fetch(
+        `/api/projects/${encodeURIComponent(activeProject.id)}/change-requests/${encodeURIComponent(pendingChange.id)}/decision`,
+        {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({
+            decision: "CONFIRM",
+            idempotencyKey: `change-decision:${crypto.randomUUID()}`,
+            responseLanguage: locale,
+          }),
+        },
+      );
+      const payload = await response.json().catch(() => ({})) as { project?: ProductProjectSummary; message?: string };
+      if (!response.ok || !payload.project) {
+        throw new Error(errorText(payload.message, `操作失败 (${response.status})`, `Operation failed (${response.status})`));
+      }
+      setPendingChange(null);
+      setProjects(current => current.map(project => project.id === payload.project?.id ? payload.project : project));
+      router.push(`/projects/${activeProject.id}`);
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : text("变更确认失败", "Unable to confirm the change"));
+      setStartingDevelopment(false);
+    }
   }
 
   async function startDevelopment() {
@@ -208,7 +241,11 @@ export function HomeChat() {
     </div>
   );
 
-  const developmentAction = requirementsReady && !sending ? (
+  const developmentAction = pendingChange && !sending ? (
+    <button className="button button-secondary conversation-box-develop" disabled={startingDevelopment} onClick={() => void confirmPendingChange()} type="button">
+      {startingDevelopment ? text("正在开始开发…", "STARTING…") : text("确认修改并重跑", "CONFIRM & RERUN")}
+    </button>
+  ) : requirementsReady && !sending ? (
     <button className="button button-secondary conversation-box-develop" disabled={startingDevelopment} onClick={() => void startDevelopment()} type="button">
       {startingDevelopment ? text("正在开始开发…", "STARTING…") : text("按照当前需求开发", "BUILD CURRENT REQUIREMENTS")}
     </button>
@@ -287,16 +324,17 @@ function conversationImagePayload(images: readonly ConversationImageDraft[]) {
 function workflowLabel(state: string, text: (chinese: string, english: string) => string): string {
   const labels: Record<string, readonly [string, string]> = {
     DRAFT: ["需求讨论中", "Requirements discussion"],
-    AGENT_RUNNING: ["Agent 生成中", "Agent running"],
-    ASSET_GENERATING: ["图片素材生成中", "Generating image assets"],
-    ARTIFACT_BUILDING: ["制品构建中", "Building artifacts"],
-    E2E_TESTING: ["跨平台测试中", "Cross-platform testing"],
-    RELEASE_DECISION_PENDING: ["等待发布决策", "Awaiting release decision"],
-    SIGNING: ["平台签名中", "Signing"],
+    ANALYZING: ["项目分析中", "Analyzing project"],
+    DESIGNING: ["游戏设计中", "Designing game"],
+    DEVELOPING: ["游戏生成中", "Developing game"],
+    BUILDING: ["制品构建中", "Building artifacts"],
+    TEST_PLANNING: ["测试规划中", "Planning tests"],
+    TESTING: ["跨平台测试中", "Cross-platform testing"],
     RELEASE_APPROVAL_PENDING: ["等待发布批准", "Awaiting release approval"],
     STEAM_PUBLISHING: ["Steam 发布中", "Publishing to Steam"],
-    CLEAN_INSTALL_VERIFYING: ["干净回装验证中", "Clean-install verification"],
     SUCCEEDED: ["交付完成", "Delivered"],
+    BLOCKED: ["等待配置", "Blocked"],
+    STOPPED: ["已停止", "Stopped"],
     FAILED: ["流程失败", "Failed"],
     CANCELLED: ["已取消", "Cancelled"],
   };

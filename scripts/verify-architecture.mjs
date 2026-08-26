@@ -69,8 +69,8 @@ const serviceDirectories = [...new Set(
     .filter(file => file.startsWith("services/"))
     .map(file => file.split("/")[1]),
 )].sort();
-if (JSON.stringify(serviceDirectories) !== JSON.stringify(["core", "e2e-node", "sandbox-executor"])) {
-  violations.push(`services: expected core,e2e-node,sandbox-executor; found ${serviceDirectories.join(",")}`);
+if (JSON.stringify(serviceDirectories) !== JSON.stringify(["core", "e2e-node", "project-runtime", "sandbox-executor"])) {
+  violations.push(`services: expected core,e2e-node,project-runtime,sandbox-executor; found ${serviceDirectories.join(",")}`);
 }
 const migrations = (await readdir(new URL("../infra/postgres/", import.meta.url)))
   .filter(file => file.endsWith(".sql"))
@@ -88,6 +88,28 @@ for (const dependency of [
   ["wrang", "ler"].join(""),
 ]) {
   if (dependencyNames.includes(dependency)) violations.push(`package.json: forbidden dependency ${dependency}`);
+}
+
+for (const retired of [
+  "services/core/src/conversation-intent.ts",
+  "services/core/src/e2e-test-plan.ts",
+  "services/core/src/project-naming.ts",
+]) {
+  if (sourceFiles.includes(retired)) violations.push(`${retired}: direct Provider Agent path must not exist`);
+}
+const coreApi = await readFile(join(root, "services/core/src/api.ts"), "utf8");
+if (/generateE2eTestPlan|generateE2ePlayerDecision|classifyConversationIntent|generateProductConversationReply/.test(coreApi)) {
+  violations.push("services/core/src/api.ts: AI work must use the persistent Project Runtime");
+}
+for (const runner of ["services/sandbox-executor/task-runner.mjs", "services/sandbox-executor/task-fixture-agent.mjs"]) {
+  const content = await readFile(join(root, runner), "utf8");
+  if (/AGENT_TURN|runAgent|runProjectDocumentMaintenance/.test(content)) {
+    violations.push(`${runner}: controlled disposable tasks cannot execute Agent turns`);
+  }
+}
+for (const role of ["intent", "analysis", "design", "development", "test"]) {
+  const skill = `services/project-runtime/skills/${role}/SKILL.md`;
+  if (!sourceFiles.includes(skill)) violations.push(`${skill}: signed built-in role Skill is required`);
 }
 
 if (violations.length > 0) {

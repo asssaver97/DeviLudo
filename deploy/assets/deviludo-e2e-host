@@ -5,7 +5,7 @@ for config in /etc/deviludo/e2e/node.env "/Library/Application Support/DeviludoE
 done
 if [[ ${1:-} == preflight ]]; then
   [[ ${DEVILUDO_E2E_NODE_ID:-} =~ ^[0-9a-f-]{36}$ ]]
-  [[ -x ${DEVILUDO_E2E_ISOLATION_EXECUTOR:-} && -x ${DEVILUDO_E2E_TEST_EXECUTOR:-} \
+  [[ -x ${DEVILUDO_E2E_ISOLATION_EXECUTOR:-} && -x ${DEVILUDO_E2E_PLATFORM_RUN_EXECUTOR:-} \
     ]]
   [[ -r ${DEVILUDO_E2E_CLIENT_CERT_FILE:-} && -r ${DEVILUDO_E2E_CLIENT_KEY_FILE:-} \
     && -r ${DEVILUDO_E2E_CORE_CA_FILE:-} && -r ${DEVILUDO_E2E_IDENTITY_KEY_FILE:-} ]]

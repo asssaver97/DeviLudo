@@ -26,10 +26,10 @@ try {
   for (const definition of [
     ["WEB", "linux", ["SELF_HOSTED_WEB", "STREAMING_BFF"]],
     ["CORE", "linux", [
-      "AUTOMATION_API", "WORKFLOW_SCHEDULER", "AGENT_GENERATION", "ARTIFACT_BUILD", "STEAM_PUBLISH",
+      "AUTOMATION_API", "WORKFLOW_SCHEDULER", "AGENT_TURN", "BUILD", "STEAM_PUBLISH",
       "RESTRICTED_CONTAINER", "NETWORK_POLICY",
     ]],
-    ["E2E_MACOS", "macos", ["E2E_TEST"]],
+    ["E2E_MACOS", "macos", ["E2E_PLATFORM_RUN"]],
   ]) {
     await pool.query(
       `INSERT INTO deviludo.server_nodes(pool_kind, operating_system, state, capabilities)

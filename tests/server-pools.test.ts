@@ -26,23 +26,21 @@ test("the application has exactly five fixed server pools", () => {
 });
 
 test("job placement cannot escape its fixed pool", () => {
-  assert.equal(routeJob("AGENT_GENERATION"), "CORE");
-  assert.equal(routeJob("PROJECT_DOCUMENT_MAINTENANCE"), "CORE");
-  assert.equal(routeJob("ARTIFACT_BUILD"), "CORE");
+  assert.equal(routeJob("AGENT_TURN"), "CORE");
+  assert.equal(routeJob("BUILD"), "CORE");
   assert.equal(routeJob("STEAM_PUBLISH"), "CORE");
-  assert.equal(routeJob("E2E_TEST", "linux"), "E2E_LINUX");
-  assert.throws(() => routeJob("ARTIFACT_SIGN", "windows"), /retired historical job kind/);
-  assert.throws(() => routeJob("STEAM_CLEAN_INSTALL", "macos"), /retired historical job kind/);
-  assert.throws(() => routeJob("AGENT_GENERATION", "linux"));
-  assert.throws(() => routeJob("ARTIFACT_SIGN"));
+  assert.equal(routeJob("E2E_PLATFORM_RUN", "linux"), "E2E_LINUX");
+  assert.throws(() => routeJob("BUILD", "windows"), /cannot target/);
+  assert.throws(() => routeJob("STEAM_PUBLISH", "macos"), /cannot target/);
+  assert.throws(() => routeJob("AGENT_TURN", "linux"));
   assert.throws(() => assertJobPlacement({
-    kind: "ARTIFACT_SIGN",
+    kind: "BUILD",
     poolKind: "CORE",
     targetOperatingSystem: "macos",
   }));
   assert.throws(() => assertPoolOperatingSystem("E2E_MACOS", "linux"));
   for (const pool of ["E2E_LINUX", "E2E_WINDOWS", "E2E_MACOS"] as const) {
-    assert.deepEqual(SERVER_POOL_DEFINITIONS[pool].capabilities, ["E2E_TEST"]);
+    assert.deepEqual(SERVER_POOL_DEFINITIONS[pool].capabilities, ["E2E_PLATFORM_RUN"]);
   }
 });
 
@@ -59,7 +57,7 @@ test("a macOS node becomes ready only after its asynchronous preparation complet
     poolKind: "E2E_MACOS",
     operatingSystem: "macos",
     state: "ACTIVE",
-    capabilities: Object.freeze(["E2E_TEST"]),
+    capabilities: Object.freeze(["E2E_PLATFORM_RUN"]),
     isolationGeneration: 1,
     currentWorkspaceId: null,
     lastHeartbeatAt: null,

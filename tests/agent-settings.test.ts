@@ -21,7 +21,7 @@ test("Agent settings accept fixed runtimes and normalize safe provider URLs", ()
     baseUrl: "https://chatgpt.com",
     apiKey: null,
     primaryModel: "account-default",
-    modelOverrides: { design: null, development: null, test: null },
+    modelOverrides: { intent: null, analysis: null, design: null, development: null, test: null },
     imageModel: null,
   });
   assert.deepEqual(parseAgentSettingsInput({
@@ -34,7 +34,7 @@ test("Agent settings accept fixed runtimes and normalize safe provider URLs", ()
     baseUrl: "https://api.example.com/v1",
     apiKey: "custom-secret-key",
     primaryModel: "vendor/model-v1",
-    modelOverrides: { design: null, development: null, test: null },
+    modelOverrides: { intent: null, analysis: null, design: null, development: null, test: null },
     imageModel: null,
   });
   assert.deepEqual(parseAgentSettingsInput({
@@ -55,13 +55,13 @@ test("Agent settings accept fixed runtimes and normalize safe provider URLs", ()
   assert.deepEqual(parseAgentSettingsInput({
     agentRuntime: "CODEX_CLI",
     primaryModel: "gpt-5.6-sol",
-    modelOverrides: { design: "gpt-5.6-terra", development: null, test: "gpt-5.6-luna" },
+    modelOverrides: { intent: null, analysis: null, design: "gpt-5.6-terra", development: null, test: "gpt-5.6-luna" },
   }, "production"), {
     agentRuntime: "CODEX_CLI",
     baseUrl: "https://chatgpt.com",
     apiKey: null,
     primaryModel: "gpt-5.6-sol",
-    modelOverrides: { design: "gpt-5.6-terra", development: null, test: "gpt-5.6-luna" },
+    modelOverrides: { intent: null, analysis: null, design: "gpt-5.6-terra", development: null, test: "gpt-5.6-luna" },
     imageModel: null,
   });
   assert.throws(() => parseAgentSettingsInput({
@@ -124,7 +124,7 @@ test("Claude settings.json accepts only the supported connection fields", () => 
     baseUrl: "https://gateway.example.com/anthropic",
     apiKey: "sk-gateway-secret",
     primaryModel: "claude-fable-5-max",
-    modelOverrides: { design: null, development: null, test: null },
+    modelOverrides: { intent: null, analysis: null, design: null, development: null, test: null },
     imageModel: null,
   });
   assert.throws(() => parseAgentSettingsInput({

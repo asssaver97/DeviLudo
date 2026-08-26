@@ -40,7 +40,7 @@ test("claim, heartbeat, proof validation and lease fencing protect exclusive E2E
   await stack.coreWeb(`/v1/runtime/server-nodes/${mac.id}/activate`, { method: "POST", data: {} });
 
   const job = await claim(stack, mac);
-  expect(job.jobKind).toBe("E2E_TEST");
+  expect(job.jobKind).toBe("E2E_PLATFORM_RUN");
   expect(job.exclusive).toBeTruthy();
   expect(job.targetOperatingSystem).toBe("macos");
 
@@ -87,29 +87,29 @@ test("claim, heartbeat, proof validation and lease fencing protect exclusive E2E
   expect(stored.jobs.find(item => item.id === job.jobId)?.attempt).toBe(1);
 });
 
-test("validated E2E completion reaches release review without scheduling signing authority", async ({ stack }) => {
+test("validated E2E completion reaches release review without scheduling Steam publishing authority", async ({ stack }) => {
   const { project, nodes } = await prepareE2eStage(stack);
   for (const poolKind of ["E2E_LINUX", "E2E_WINDOWS", "E2E_MACOS"] as const) {
     const job = await claim(stack, requiredNode(nodes, poolKind));
-    expect(job.jobKind).toBe("E2E_TEST");
+    expect(job.jobKind).toBe("E2E_PLATFORM_RUN");
     expect((await completeResponse(stack, job)).ok()).toBeTruthy();
   }
-  await stack.waitForProject(project.id, value => value.workflowState === "RELEASE_DECISION_PENDING");
+  await stack.waitForProject(project.id, value => value.workflowState === "RELEASE_APPROVAL_PENDING");
 
-  const authorityRows = await stack.queryRows<{ signing_jobs: number; operations: number }>(`
+  const authorityRows = await stack.queryRows<{ publishing_jobs: number; operations: number }>(`
     SELECT
       (SELECT count(*)::int FROM deviludo.jobs
-        WHERE workflow_id = '${project.workflowId}'::uuid AND kind = 'ARTIFACT_SIGN') AS signing_jobs,
+        WHERE workflow_id = '${project.workflowId}'::uuid AND kind = 'STEAM_PUBLISH') AS publishing_jobs,
       (SELECT count(*)::int FROM deviludo.operation_receipts
         WHERE workflow_id = '${project.workflowId}'::uuid) AS operations
   `);
-  expect(authorityRows).toEqual([{ signing_jobs: 0, operations: 0 }]);
+  expect(authorityRows).toEqual([{ publishing_jobs: 0, operations: 0 }]);
   expect(JSON.stringify(await stack.readProject(project.id))).not.toContain("wrappedToken");
 });
 
-test("job failure retries with a new fence and eventually fails the workflow", async ({ stack }) => {
+test("recoverable E2E infrastructure failure keeps retrying without sending product work to Development", async ({ stack }) => {
   const { project, nodes } = await prepareE2eStage(stack);
-  const queued = projectJob(await stack.readProject(project.id), "E2E_TEST", "macos");
+  const queued = projectJob(await stack.readProject(project.id), "E2E_PLATFORM_RUN", "macos");
   await stack.updateJob(queued.id, "two-attempts");
 
   const first = await claim(stack, requiredNode(nodes, "E2E_MACOS"));
@@ -124,10 +124,13 @@ test("job failure retries with a new fence and eventually fails the workflow", a
   const terminalFailure = await fail(stack, second, "deterministic executor failure again");
   expect(terminalFailure.ok()).toBeTruthy();
 
-  const failed = await stack.waitForProject(project.id, value => value.workflowState === "FAILED");
-  const failedJob = failed.jobs.find(job => job.id === first.jobId);
-  expect(failedJob).toMatchObject({ state: "FAILED", attempt: 2 });
-  expect(failedJob?.lastError).toContain("again");
+  const waiting = await stack.waitForProject(project.id, value => value.jobs.some(job => (
+    job.id === first.jobId && job.state === "RETRY" && job.attempt === 2
+  )));
+  expect(waiting.workflowState).toBe("TESTING");
+  const retryingJob = waiting.jobs.find(job => job.id === first.jobId);
+  expect(retryingJob).toMatchObject({ state: "RETRY", attempt: 2 });
+  expect(retryingJob?.lastError).toContain("again");
 
   const staleCompletion = await completeResponse(stack, first);
   expect(staleCompletion.status()).toBe(400);
@@ -142,7 +145,7 @@ test("the scheduler recovers an expired lease and increments fencing on the next
   const recovered = await stack.waitForProject(project.id, value => value.jobs.some(job => (
     job.id === first.jobId && job.state === "RETRY" && job.lastError === "lease expired"
   )));
-  expect(projectJob(recovered, "E2E_TEST", "macos").attempt).toBe(1);
+  expect(projectJob(recovered, "E2E_PLATFORM_RUN", "macos").attempt).toBe(1);
 
   await stack.updateJob(first.jobId, "available");
   const reclaimed = await claim(stack, mac);
@@ -163,7 +166,7 @@ async function prepareE2eStage(stack: StackHarness): Promise<Readonly<{
   });
   const approved = await stack.web(`/api/projects/${project.id}/approve`, { method: "POST", data: {} });
   expect(approved.status()).toBe(202);
-  const staged = await stack.waitForProject(project.id, value => value.workflowState === "E2E_TESTING", 120_000);
+  const staged = await stack.waitForProject(project.id, value => value.workflowState === "TESTING", 120_000);
   return Object.freeze({ project: staged, nodes });
 }
 
@@ -200,7 +203,7 @@ async function completeResponse(
   let executorReceipt = cachedExecutorReceipts.get(job.jobId);
   if (!executorReceipt) {
     const regressionContractDigest = `sha256:${"c".repeat(64)}`;
-    const outputDefinitions = job.jobKind === "E2E_TEST" ? [
+    const outputDefinitions = job.jobKind === "E2E_PLATFORM_RUN" ? [
       {
         kind: "E2E_REPORT",
         content: Buffer.from(JSON.stringify({
@@ -222,7 +225,7 @@ async function completeResponse(
         })),
       },
     ] : [{
-      kind: job.jobKind === "ARTIFACT_SIGN" ? "SIGNED_BUILD" : "CLEAN_INSTALL_REPORT",
+      kind: job.jobKind === "BUILD" ? "SIGNED_BUILD" : "CLEAN_INSTALL_REPORT",
       content: Buffer.from(JSON.stringify({
         schemaVersion: "deviludo.playwright-protocol-output.v1",
         jobId: job.jobId,
@@ -297,7 +300,7 @@ async function completeResponse(
           outcome: "PASSED",
           failureDomain: null,
           summary: "Playwright protocol completion passed",
-          ...(job.jobKind === "E2E_TEST" ? {
+          ...(job.jobKind === "E2E_PLATFORM_RUN" ? {
             evidence: {
               testManifestDigest: `sha256:${"d".repeat(64)}`,
               regressionContractDigest: `sha256:${"c".repeat(64)}`,

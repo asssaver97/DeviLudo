@@ -24,7 +24,7 @@ test("new executor diagnostics remain visible without progress events", () => {
 
 test("an orphaned source revision is not misreported as an unavailable Provider", () => {
   const presentation = jobFailurePresentation({
-    kind: "AGENT_GENERATION",
+    kind: "AGENT_TURN",
     lastError: "Sandbox executor failed: Source revision is already published with different content",
   } as never, (chinese: string) => chinese);
   assert.match(presentation.reason, /未登记 revision/);

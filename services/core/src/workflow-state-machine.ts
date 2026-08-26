@@ -3,17 +3,17 @@ import type { ServerOperatingSystem } from "@/lib/runtime/server-pools";
 
 export const WORKFLOW_STATES = [
   "DRAFT",
-  "AGENT_RUNNING",
-  "ASSET_GENERATING",
-  "ARTIFACT_BUILDING",
-  "E2E_TESTING",
-  "RELEASE_DECISION_PENDING",
-  // Legacy states are retained so historical workflows remain readable.
-  "SIGNING",
+  "ANALYZING",
+  "DESIGNING",
+  "DEVELOPING",
+  "BUILDING",
+  "TEST_PLANNING",
+  "TESTING",
   "RELEASE_APPROVAL_PENDING",
   "STEAM_PUBLISHING",
-  "CLEAN_INSTALL_VERIFYING",
   "SUCCEEDED",
+  "BLOCKED",
+  "STOPPED",
   "FAILED",
   "CANCELLED",
 ] as const;
@@ -40,6 +40,8 @@ export type WorkflowEvent =
       kind: "JOB_SUCCEEDED";
       jobId: string;
       jobKind: JobKind;
+      agentRole?: "DESIGN" | "DEVELOPMENT" | "TEST";
+      purpose?: "DESIGN" | "DEVELOPMENT" | "TEST_PLAN" | "TEST_VERDICT";
       targetOperatingSystem: ServerOperatingSystem | null;
       /** Agent completion waits here only when this run has auto-generated art. */
       waitForAssets?: boolean;
@@ -52,9 +54,9 @@ export type WorkflowEvent =
  * it, so this order is load-bearing and must match `deviludo.delivery_stages`.
  */
 export const DELIVERY_STAGES = [
-  "AGENT_GENERATION",
-  "ARTIFACT_BUILD",
-  "E2E_TEST",
+  "AGENT_TURN",
+  "BUILD",
+  "E2E_PLATFORM_RUN",
   "STEAM_PUBLISH",
 ] as const;
 export type RerunStage = typeof DELIVERY_STAGES[number];
@@ -66,18 +68,18 @@ export function deliveryStagesFor(profile: "VALIDATE" | "RELEASE"): readonly Rer
 
 // Workflow state a stage occupies while it runs.
 const STAGE_RUNNING_STATE: Readonly<Record<RerunStage, WorkflowState>> = Object.freeze({
-  AGENT_GENERATION: "AGENT_RUNNING",
-  ARTIFACT_BUILD: "ARTIFACT_BUILDING",
-  E2E_TEST: "E2E_TESTING",
+  AGENT_TURN: "DEVELOPING",
+  BUILD: "BUILDING",
+  E2E_PLATFORM_RUN: "TESTING",
   STEAM_PUBLISH: "STEAM_PUBLISHING",
 });
 
 // Stages that fan out one job per target platform.
-const PER_PLATFORM_STAGES: ReadonlySet<RerunStage> = new Set<RerunStage>(["E2E_TEST"]);
+const PER_PLATFORM_STAGES: ReadonlySet<RerunStage> = new Set<RerunStage>(["E2E_PLATFORM_RUN"]);
 
 // Per-platform progress that a rerun of a given stage invalidates.
 const STAGE_PROGRESS_KEY: Readonly<Partial<Record<RerunStage, keyof WorkflowSnapshot>>> = Object.freeze({
-  E2E_TEST: "completedE2e",
+  E2E_PLATFORM_RUN: "completedE2e",
 });
 
 export type EnqueueCommand = Readonly<{
@@ -87,6 +89,8 @@ export type EnqueueCommand = Readonly<{
   requiredCapabilities: readonly string[];
   exclusive: boolean;
   idempotencyKey: string;
+  agentRole: "DESIGN" | "DEVELOPMENT" | "TEST" | null;
+  purpose: "DESIGN" | "DEVELOPMENT" | "TEST_PLAN" | "TEST_VERDICT" | null;
 }>;
 
 export type WorkflowTransition = Readonly<{
@@ -121,24 +125,24 @@ export function transitionWorkflow(snapshot: WorkflowSnapshot, event: WorkflowEv
   // re-enters the asynchronous gate and ASSETS_READY resumes at Builder.
   if (event.kind === "STAGE_RERUN_REQUESTED") return rerunStage(snapshot, event.stage, event.signalId);
   if (event.kind === "ASSET_RERUN_REQUESTED") return rerunAssets(snapshot);
-  if (["SUCCEEDED", "FAILED", "CANCELLED"].includes(snapshot.state)) {
+  if (["SUCCEEDED", "BLOCKED", "STOPPED", "FAILED", "CANCELLED"].includes(snapshot.state)) {
     return Object.freeze({ snapshot, enqueue: Object.freeze([]) });
   }
   if (event.kind === "CANCEL_REQUESTED") return result({ ...snapshot, state: "CANCELLED" }, []);
   if (event.kind === "JOB_FAILED") return result({ ...snapshot, state: "FAILED" }, []);
   if (event.kind === "SPEC_APPROVED" && snapshot.state === "DRAFT") {
-    return result({ ...snapshot, state: "AGENT_RUNNING" }, [command(snapshot, "AGENT_GENERATION", null, "agent")]);
+    return result({ ...snapshot, state: "DESIGNING" }, [command(snapshot, "AGENT_TURN", null, "design", "DESIGN", "DESIGN")]);
   }
-  if (event.kind === "ASSETS_READY" && snapshot.state === "ASSET_GENERATING") {
+  if (event.kind === "ASSETS_READY" && snapshot.state === "DEVELOPING") {
     return result(
-      { ...snapshot, state: "ARTIFACT_BUILDING" },
-      [command(snapshot, "ARTIFACT_BUILD", null, `artifact:after:${event.predecessorJobId}`)],
+      { ...snapshot, state: "BUILDING" },
+      [command(snapshot, "BUILD", null, `artifact:after:${event.predecessorJobId}`)],
     );
   }
-  if (event.kind === "RELEASE_SKIPPED" && snapshot.state === "RELEASE_DECISION_PENDING") {
+  if (event.kind === "RELEASE_SKIPPED" && snapshot.state === "RELEASE_APPROVAL_PENDING") {
     return result({ ...snapshot, state: "SUCCEEDED" }, []);
   }
-  if (event.kind === "RELEASE_APPROVED" && snapshot.state === "RELEASE_DECISION_PENDING") {
+  if (event.kind === "RELEASE_APPROVED" && snapshot.state === "RELEASE_APPROVAL_PENDING") {
     return result(
       { ...snapshot, state: "STEAM_PUBLISHING" },
       [command(snapshot, "STEAM_PUBLISH", null, `publish:approved:${event.approvalId}`)],
@@ -146,25 +150,45 @@ export function transitionWorkflow(snapshot: WorkflowSnapshot, event: WorkflowEv
   }
   if (event.kind !== "JOB_SUCCEEDED") throw new Error(`Event ${event.kind} is invalid for ${snapshot.state}`);
 
-  if (snapshot.state === "AGENT_RUNNING" && event.jobKind === "AGENT_GENERATION") {
-    if (event.waitForAssets) return result({ ...snapshot, state: "ASSET_GENERATING" }, []);
+  if (snapshot.state === "DESIGNING" && event.jobKind === "AGENT_TURN" && event.agentRole === "DESIGN") {
     return result(
-      { ...snapshot, state: "ARTIFACT_BUILDING" },
-      [command(snapshot, "ARTIFACT_BUILD", null, `artifact:after:${event.jobId}`)],
+      { ...snapshot, state: "DEVELOPING" },
+      [command(snapshot, "AGENT_TURN", null, `development:after:${event.jobId}`, "DEVELOPMENT", "DEVELOPMENT")],
     );
   }
-  if (snapshot.state === "ARTIFACT_BUILDING" && event.jobKind === "ARTIFACT_BUILD") {
+  if (snapshot.state === "DEVELOPING" && event.jobKind === "AGENT_TURN" && event.agentRole === "DEVELOPMENT") {
+    if (event.waitForAssets) return result({ ...snapshot, state: "DEVELOPING" }, []);
     return result(
-      { ...snapshot, state: "E2E_TESTING" },
+      { ...snapshot, state: "BUILDING" },
+      [command(snapshot, "BUILD", null, `artifact:after:${event.jobId}`)],
+    );
+  }
+  if (snapshot.state === "BUILDING" && event.jobKind === "BUILD") {
+    return result(
+      { ...snapshot, state: "TEST_PLANNING" },
+      [command(snapshot, "AGENT_TURN", null, `test-plan:after:${event.jobId}`, "TEST", "TEST_PLAN")],
+    );
+  }
+  if (snapshot.state === "TEST_PLANNING" && event.jobKind === "AGENT_TURN"
+    && event.agentRole === "TEST" && event.purpose === "TEST_PLAN") {
+    return result(
+      { ...snapshot, state: "TESTING" },
       snapshot.targetPlatforms.map(platform => command(
-        snapshot, "E2E_TEST", platform, `e2e:${platform}:after:${event.jobId}`,
+        snapshot, "E2E_PLATFORM_RUN", platform, `e2e:${platform}:after:${event.jobId}`,
       )),
     );
   }
-  if (snapshot.state === "E2E_TESTING" && event.jobKind === "E2E_TEST" && event.targetOperatingSystem) {
+  if (snapshot.state === "TESTING" && event.jobKind === "E2E_PLATFORM_RUN" && event.targetOperatingSystem) {
     const completedE2e = appendPlatform(snapshot.completedE2e, event.targetOperatingSystem);
     if (completedE2e.length < snapshot.targetPlatforms.length) return result({ ...snapshot, completedE2e }, []);
-    return result({ ...snapshot, state: "RELEASE_DECISION_PENDING", completedE2e }, []);
+    return result(
+      { ...snapshot, state: "TEST_PLANNING", completedE2e },
+      [command(snapshot, "AGENT_TURN", null, `test-verdict:after:${event.jobId}`, "TEST", "TEST_VERDICT")],
+    );
+  }
+  if (snapshot.state === "TEST_PLANNING" && event.jobKind === "AGENT_TURN"
+    && event.agentRole === "TEST" && event.purpose === "TEST_VERDICT") {
+    return result({ ...snapshot, state: "RELEASE_APPROVAL_PENDING" }, []);
   }
   if (snapshot.state === "STEAM_PUBLISHING" && event.jobKind === "STEAM_PUBLISH") {
     return result({ ...snapshot, state: "SUCCEEDED" }, []);
@@ -173,10 +197,10 @@ export function transitionWorkflow(snapshot: WorkflowSnapshot, event: WorkflowEv
 }
 
 function rerunAssets(snapshot: WorkflowSnapshot): WorkflowTransition {
-  if (!["ASSET_GENERATING", "RELEASE_DECISION_PENDING", "SUCCEEDED", "FAILED", "CANCELLED"].includes(snapshot.state)) {
+  if (!["DEVELOPING", "RELEASE_APPROVAL_PENDING", "SUCCEEDED", "FAILED", "CANCELLED"].includes(snapshot.state)) {
     throw new Error("Asset rerun requires an idle delivery or the active asset gate");
   }
-  return result({ ...snapshot, state: "ASSET_GENERATING", completedE2e: Object.freeze([]) }, []);
+  return result({ ...snapshot, state: "DEVELOPING", completedE2e: Object.freeze([]) }, []);
 }
 
 /**
@@ -214,6 +238,8 @@ function command(
   jobKind: JobKind,
   targetOperatingSystem: ServerOperatingSystem | null,
   stage: string,
+  agentRole: EnqueueCommand["agentRole"] = null,
+  purpose: EnqueueCommand["purpose"] = null,
 ): EnqueueCommand {
   const poolKind = routeJob(jobKind, targetOperatingSystem ?? undefined);
   return Object.freeze({
@@ -223,6 +249,8 @@ function command(
     requiredCapabilities: jobCapabilities(jobKind),
     exclusive: poolKind.startsWith("E2E_"),
     idempotencyKey: `${snapshot.id}:${stage}`,
+    agentRole,
+    purpose,
   });
 }
 

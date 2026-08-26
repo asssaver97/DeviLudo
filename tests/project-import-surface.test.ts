@@ -3,7 +3,7 @@ import { readFile } from "node:fs/promises";
 import test from "node:test";
 
 test("project linking is reachable from Home and separates local and GitHub sources", async () => {
-  const [home, dashboard, studio, bridge, proxy, core, repository, projectImport, configuration, analysisMigration] = await Promise.all([
+  const [home, dashboard, studio, bridge, proxy, core, repository, projectImport, analysisSkill, configuration, baseline] = await Promise.all([
     readFile(new URL("../components/HomeChat.tsx", import.meta.url), "utf8"),
     readFile(new URL("../components/ProductDashboard.tsx", import.meta.url), "utf8"),
     readFile(new URL("../components/ProjectStudio.tsx", import.meta.url), "utf8"),
@@ -12,8 +12,9 @@ test("project linking is reachable from Home and separates local and GitHub sour
     readFile(new URL("../services/core/src/api.ts", import.meta.url), "utf8"),
     readFile(new URL("../services/core/src/repository.ts", import.meta.url), "utf8"),
     readFile(new URL("../services/core/src/project-import.ts", import.meta.url), "utf8"),
+    readFile(new URL("../services/project-runtime/skills/analysis/SKILL.md", import.meta.url), "utf8"),
     readFile(new URL("../app/api/local-git-import/config/route.ts", import.meta.url), "utf8"),
-    readFile(new URL("../infra/postgres/migrations/010_async_project_import_analysis.sql", import.meta.url), "utf8"),
+    readFile(new URL("../infra/postgres/001_core.sql", import.meta.url), "utf8"),
   ]);
   assert.match(home, /<option value=\{IMPORT_PROJECT_VALUE\}>\{text\("导入已有项目…"/);
   assert.match(home, /router\.push\("\/projects\/import"\)/);
@@ -49,14 +50,13 @@ test("project linking is reachable from Home and separates local and GitHub sour
   assert.match(studio, /text\("已有项目分析", "PROJECT ANALYSIS"\)/);
   assert.match(studio, /analysisStatus === "NEEDS_INPUT"/);
   assert.match(projectImport, /completedWork.*remainingWork.*startupFlow.*startupIssues.*recommendedPlan.*questions/s);
-  assert.match(projectImport, /enters an in-progress match, late-game state, test\/debug state/);
+  assert.match(analysisSkill, /startup flow, reproducible startup problems/);
   assert.match(repository, /status: input\.discovery\.questions\.length \? "NEEDS_INPUT" : "READY"/);
   assert.match(repository, /state_data #>> '\{importAnalysis,status\}' = 'NEEDS_INPUT'/);
   assert.match(core, /pending\?\.state === "WAITING_FOR_ANALYSIS"[\s\S]*applyConfirmedConversationChange/);
-  assert.match(analysisMigration, /SECURITY DEFINER[\s\S]*SET row_security = off/);
-  assert.match(analysisMigration, /FOR UPDATE OF workflow SKIP LOCKED/);
-  assert.match(analysisMigration, /GRANT EXECUTE ON FUNCTION deviludo\.claim_project_import_analysis\(integer\) TO deviludo_api/);
-  assert.match(projectImport, /PROJECT_ANALYSIS_TIMEOUT_MS = 10 \* 60 \* 1_000/);
+  assert.match(baseline, /CREATE OR REPLACE FUNCTION deviludo\.claim_project_import_analysis\(p_lease_seconds integer\)/);
+  assert.match(baseline, /FOR UPDATE OF workflow SKIP LOCKED/);
+  assert.match(baseline, /GRANT EXECUTE ON FUNCTION deviludo\.claim_project_import_analysis\(integer\) TO deviludo_api/);
   assert.match(proxy, /PROJECT_BIND_TIMEOUT_MS = 12 \* 60 \* 1_000/);
   assert.match(proxy, /CONVERSATION_STREAM_TIMEOUT_MS = 12 \* 60 \* 1_000/);
   assert.match(proxy, /routePath === "conversations\/messages\/stream"[\s\S]*CONVERSATION_STREAM_TIMEOUT_MS/);

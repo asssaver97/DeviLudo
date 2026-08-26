@@ -42,11 +42,12 @@ const environment = {
   DEVILUDO_DOCKER_GID: dockerSocketGid,
   DEVILUDO_CORE_EXECUTOR_PUBLIC_KEY_FILE: resolve(root, ".deviludo/local/executor-ed25519.pub"),
   DEVILUDO_EXECUTOR_SOCKET_VOLUME: `${projectName}-executor-socket`,
+  DEVILUDO_PROJECTS_VOLUME: `${projectName}-projects-data`,
   DEVILUDO_EXECUTOR_AGENT_NETWORK: `${projectName}-executor-agent`,
   DEVILUDO_EXECUTOR_STEAM_NETWORK: `${projectName}-executor-steam`,
   DEVILUDO_E2E_IDENTITY_KEY_FILE: resolve(root, ".deviludo/local/e2e-macos-ed25519.pem"),
   DEVILUDO_E2E_ISOLATION_EXECUTOR: resolve(root, "scripts/executors/local-macos-isolation.mjs"),
-  DEVILUDO_E2E_TEST_EXECUTOR: resolve(root, "scripts/executors/e2e-fixture-job.mjs"),
+  DEVILUDO_E2E_PLATFORM_RUN_EXECUTOR: resolve(root, "scripts/executors/e2e-fixture-job.mjs"),
   DEVILUDO_E2E_JOB_ROOT: resolve(root, "test-results/e2e-jobs"),
 };
 
@@ -105,6 +106,8 @@ try {
   resultCode = 1;
 } finally {
   if (composeStarted) await captureComposeLogs(compose, environment).catch(() => undefined);
+  await removeProjectRuntimeState(environment.DEVILUDO_PROJECTS_VOLUME, environment)
+    .catch(error => console.error(`E2E Runtime cleanup failed: ${error instanceof Error ? error.message : String(error)}`));
   await runDocker([...compose, "down", "--volumes", "--remove-orphans"], environment, 2 * 60_000)
     .catch(error => console.error(`E2E cleanup failed: ${error instanceof Error ? error.message : String(error)}`));
 }
@@ -151,6 +154,44 @@ async function inspectImage(reference, env) {
   const digest = result.stdout.trim();
   if (!/^sha256:[0-9a-f]{64}$/.test(digest)) throw new Error(`Image ${reference} does not have an immutable digest`);
   return digest;
+}
+
+async function removeProjectRuntimeState(projectsVolume, env) {
+  if (!/^deviludo-e2e-[a-z0-9-]+-projects-data$/.test(projectsVolume)) {
+    throw new Error("Unsafe E2E projects volume name");
+  }
+  const result = await runDocker([
+    "ps", "-aq",
+    "--filter", "label=deviludo.kind=project-runtime",
+    "--filter", `label=deviludo.projects-volume=${projectsVolume}`,
+  ], env, 30_000);
+  const ids = result.stdout.trim().split(/\s+/).filter(Boolean);
+  if (ids.some(id => !/^[a-f0-9]{12,64}$/.test(id))) throw new Error("Unsafe E2E Runtime container id");
+  if (ids.length) await runDocker(["rm", "-f", ...ids], env, 60_000);
+  const volumes = await runDocker([
+    "volume", "ls", "-q",
+    "--filter", "label=deviludo.kind=project-runtime-state",
+    "--filter", `label=deviludo.projects-volume=${projectsVolume}`,
+  ], env, 30_000);
+  const names = volumes.stdout.trim().split(/\s+/).filter(Boolean);
+  if (names.some(name => !/^deviludo-runtime-[a-f0-9]{12}-[0-9a-f-]{36}$/.test(name))) {
+    throw new Error("Unsafe E2E Runtime volume name");
+  }
+  if (names.length) await removeRuntimeVolumes(names, env);
+}
+
+async function removeRuntimeVolumes(names, env) {
+  let lastError;
+  for (let attempt = 1; attempt <= 5; attempt += 1) {
+    try {
+      await runDocker(["volume", "rm", "-f", ...names], env, 60_000);
+      return;
+    } catch (error) {
+      lastError = error;
+      if (attempt < 5) await new Promise(resolveDelay => setTimeout(resolveDelay, attempt * 100));
+    }
+  }
+  throw lastError;
 }
 
 async function waitForJson(url) {

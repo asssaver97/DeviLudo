@@ -42,7 +42,7 @@ export function localizedAgentProgressContent(
     return row.content;
   }
   if (row.kind === "FAILED") return "Agent execution failed. See the delivery failure details.";
-  if (row.kind === "COMPLETED") return "Agent generation completed; registering source artifacts";
+  if (row.kind === "COMPLETED") return "Development Agent completed; registering the source revision";
 
   const count = row.content.match(/(\d+)\s*个/)?.[1];
   const phaseTranslations: readonly (readonly [RegExp, string])[] = [

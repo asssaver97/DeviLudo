@@ -92,11 +92,11 @@ test("the top delivery pipeline distinguishes completed, active and pending stag
   const detail = await detailResponse.json() as { project: Record<string, unknown> };
   detail.project = {
     ...detail.project,
-    workflowState: "ARTIFACT_BUILDING",
+    workflowState: "BUILDING",
     jobs: [
-      { id: randomUUID(), kind: "AGENT_GENERATION", poolKind: "CORE", targetOperatingSystem: null, state: "SUCCEEDED", attempt: 1, lastError: null, createdAt: new Date().toISOString(), updatedAt: new Date().toISOString() },
-      { id: randomUUID(), kind: "ARTIFACT_BUILD", poolKind: "CORE", targetOperatingSystem: null, state: "RUNNING", attempt: 1, lastError: null, createdAt: new Date().toISOString(), updatedAt: new Date().toISOString() },
-      { id: randomUUID(), kind: "E2E_TEST", poolKind: "E2E_MACOS", targetOperatingSystem: "macos", state: "CANCELLED", attempt: 1, lastError: "superseded by stage rerun from ARTIFACT_BUILD", createdAt: new Date(Date.now() - 60_000).toISOString(), updatedAt: new Date().toISOString() },
+      { id: randomUUID(), kind: "AGENT_TURN", poolKind: "CORE", targetOperatingSystem: null, state: "SUCCEEDED", attempt: 1, lastError: null, createdAt: new Date().toISOString(), updatedAt: new Date().toISOString() },
+      { id: randomUUID(), kind: "BUILD", poolKind: "CORE", targetOperatingSystem: null, state: "RUNNING", attempt: 1, lastError: null, createdAt: new Date().toISOString(), updatedAt: new Date().toISOString() },
+      { id: randomUUID(), kind: "E2E_PLATFORM_RUN", poolKind: "E2E_MACOS", targetOperatingSystem: "macos", state: "CANCELLED", attempt: 1, lastError: "superseded by stage rerun from BUILD", createdAt: new Date(Date.now() - 60_000).toISOString(), updatedAt: new Date().toISOString() },
     ],
   };
   await page.route(new RegExp(`/api/projects/${project.id}$`), route => route.fulfill({ json: detail }));
@@ -109,9 +109,9 @@ test("the top delivery pipeline distinguishes completed, active and pending stag
   await expect(page.locator(".product-delivery-stage.status-active")).toHaveCount(1);
   // E2E, Steam, Art, and Music are all waiting while the build is active.
   await expect(page.locator(".product-delivery-stage.status-pending")).toHaveCount(4);
-  await expect(pipeline.locator('[data-stage-kind="ARTIFACT_BUILD"] strong')).toHaveText("进行中");
-  await expect(pipeline.locator('[data-stage-kind="E2E_TEST"] strong')).toHaveText("等待中");
-  await expect(pipeline.locator('[data-stage-kind="E2E_TEST"] small').first()).toHaveText("等待上一步完成");
+  await expect(pipeline.locator('[data-stage-kind="BUILD"] strong')).toHaveText("进行中");
+  await expect(pipeline.locator('[data-stage-kind="E2E_PLATFORM_RUN"] strong')).toHaveText("等待中");
+  await expect(pipeline.locator('[data-stage-kind="E2E_PLATFORM_RUN"] small').first()).toHaveText("等待上一步完成");
   await expect(pipeline.locator('[data-stage-kind="STEAM_PUBLISH"] strong')).toHaveText("等待中");
   await expect(pipeline.getByText("已取消", { exact: true })).toHaveCount(0);
   await expect(page.getByText("游戏规格", { exact: true })).toHaveCount(0);
@@ -153,7 +153,7 @@ test("an Agent runtime failure is explained without exposing raw executor JSON",
     ...detail.project,
     workflowState: "FAILED",
     jobs: [{
-      id: randomUUID(), kind: "AGENT_GENERATION", poolKind: "CORE", targetOperatingSystem: null,
+      id: randomUUID(), kind: "AGENT_TURN", poolKind: "CORE", targetOperatingSystem: null,
       state: "FAILED", attempt: 5,
       lastError: 'Sandbox executor failed: {"code":"EXECUTOR_REJECTED","message":"Runtime image is not in the signed release allowlist"}',
       createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(),
@@ -172,7 +172,7 @@ test("an Agent runtime failure is explained without exposing raw executor JSON",
   await expect(failure.getByText("EXECUTOR_REJECTED: Runtime image is not in the signed release allowlist", { exact: true })).toBeVisible();
 });
 
-test("confirmed requirements update the project document before the streamed turn completes", async ({ page, stack }) => {
+test("a proposed requirement keeps the document unchanged until confirmation", async ({ page, stack }) => {
   await stack.configureAgent();
   const project = await stack.createProject({
     name: "需求同步面板",
@@ -184,6 +184,9 @@ test("confirmed requirements update the project document before the streamed tur
   await input.fill("确认核心循环以资源管理为主，并加入随机事件。项目说明也要同步。");
   await page.getByRole("button", { name: "发送项目消息" }).click();
 
+  await expect(page.getByText("测试设计 Agent 已结合项目上下文生成回复。", { exact: true })).toBeVisible();
+  await expect(page.locator(".product-document-sidebar .revision-badge")).toContainText("R1");
+  await page.getByRole("button", { name: "确认修改并重跑" }).click();
   await expect(page.getByText("测试设计 Agent 已整理当前游戏需求。", { exact: true })).toBeVisible();
   await expect(page.locator(".product-document-sidebar .revision-badge")).toContainText("R2");
   await expect(page.getByText("E2E G2", { exact: true })).toBeVisible();
@@ -197,7 +200,7 @@ test("a Development reply that resolves an uncertain change exposes the confirma
   });
   await stack.executeSql(`
     UPDATE deviludo.workflow_instances
-       SET state = 'RELEASE_DECISION_PENDING', updated_at = clock_timestamp()
+       SET state = 'RELEASE_APPROVAL_PENDING', updated_at = clock_timestamp()
      WHERE id = '${project.workflowId}'::uuid;
   `);
   await page.goto(`/projects/${project.id}`);
@@ -219,7 +222,7 @@ test("the project chat streams Agent progress, answers questions, and confirms i
   const jobId = randomUUID();
   await stack.executeSql(`
     UPDATE deviludo.workflow_instances
-       SET state = 'AGENT_RUNNING', updated_at = clock_timestamp()
+       SET state = 'DEVELOPING', updated_at = clock_timestamp()
      WHERE id = '${project.workflowId}'::uuid;
     INSERT INTO deviludo.jobs(
       workspace_id, id, workflow_id, project_id, kind, pool_kind,
@@ -227,7 +230,7 @@ test("the project chat streams Agent progress, answers questions, and confirms i
       state, idempotency_key, lease_owner, lease_token, lease_expires_at, fencing_token
     ) VALUES (
       '${project.workspaceId}'::uuid, '${jobId}'::uuid, '${project.workflowId}'::uuid, '${project.id}'::uuid,
-      'AGENT_GENERATION', 'CORE', ARRAY['MICROVM','NETWORK_POLICY'], false,
+      'AGENT_TURN', 'CORE', ARRAY['MICROVM','NETWORK_POLICY'], false,
       'sha256:${"b".repeat(64)}', '{"kinds":["SPECIFICATION"],"maxBytes":1073741824}'::jsonb,
       'RUNNING', 'browser-agent-progress', 'browser-held-agent', gen_random_uuid(),
       clock_timestamp() + interval '1 hour', 1
@@ -402,7 +405,7 @@ test("game generation progress is a chronological chat message and resets betwee
       CROSS JOIN generate_series(1, 36) AS entries(entry);
 
     UPDATE deviludo.workflow_instances
-       SET state = 'AGENT_RUNNING', updated_at = clock_timestamp()
+       SET state = 'DEVELOPING', updated_at = clock_timestamp()
      WHERE id = '${project.workflowId}'::uuid;
     INSERT INTO deviludo.jobs(
       workspace_id, id, workflow_id, project_id, kind, pool_kind,
@@ -410,7 +413,7 @@ test("game generation progress is a chronological chat message and resets betwee
       state, idempotency_key, lease_owner, lease_token, lease_expires_at, fencing_token
     ) VALUES (
       '${project.workspaceId}'::uuid, '${firstJobId}'::uuid, '${project.workflowId}'::uuid, '${project.id}'::uuid,
-      'AGENT_GENERATION', 'CORE', ARRAY['MICROVM','NETWORK_POLICY'], false,
+      'AGENT_TURN', 'CORE', ARRAY['MICROVM','NETWORK_POLICY'], false,
       'sha256:${"c".repeat(64)}', '{"kinds":["SPECIFICATION"],"maxBytes":1073741824}'::jsonb,
       'RUNNING', 'browser-progress-lifecycle-first', 'browser-progress-lifecycle-first', gen_random_uuid(),
       clock_timestamp() + interval '1 hour', 1
@@ -460,14 +463,14 @@ test("game generation progress is a chronological chat message and resets betwee
            lease_expires_at = NULL, updated_at = clock_timestamp()
      WHERE id = '${firstJobId}'::uuid;
     UPDATE deviludo.workflow_instances
-       SET state = 'ARTIFACT_BUILDING', updated_at = clock_timestamp()
+       SET state = 'BUILDING', updated_at = clock_timestamp()
      WHERE id = '${project.workflowId}'::uuid;
   `);
   await expect(liveProgress).toHaveCount(0, { timeout: 10_000 });
 
   await stack.executeSql(`
     UPDATE deviludo.workflow_instances
-       SET state = 'AGENT_RUNNING', updated_at = clock_timestamp()
+       SET state = 'DEVELOPING', updated_at = clock_timestamp()
      WHERE id = '${project.workflowId}'::uuid;
     INSERT INTO deviludo.jobs(
       workspace_id, id, workflow_id, project_id, kind, pool_kind,
@@ -475,7 +478,7 @@ test("game generation progress is a chronological chat message and resets betwee
       state, idempotency_key, lease_owner, lease_token, lease_expires_at, fencing_token
     ) VALUES (
       '${project.workspaceId}'::uuid, '${secondJobId}'::uuid, '${project.workflowId}'::uuid, '${project.id}'::uuid,
-      'AGENT_GENERATION', 'CORE', ARRAY['MICROVM','NETWORK_POLICY'], false,
+      'AGENT_TURN', 'CORE', ARRAY['MICROVM','NETWORK_POLICY'], false,
       'sha256:${"d".repeat(64)}', '{"kinds":["SPECIFICATION"],"maxBytes":1073741824}'::jsonb,
       'RUNNING', 'browser-progress-lifecycle-second', 'browser-progress-lifecycle-second', gen_random_uuid(),
       clock_timestamp() + interval '1 hour', 2
@@ -523,12 +526,15 @@ test("intent routing does not invent a Design Agent while the request is still u
     await expect(page.locator(".project-conversation-box .conversation-composer-images")).toHaveCount(0);
     await expect(page.locator('.project-conversation-box .conversation-message-images img[alt="project-feedback.png"]')).toBeVisible();
     await expect(page.locator(".project-conversation-box .conversation-box-message.user .conversation-message-completed-at")).toHaveCount(0);
-    await expect(page.locator(".project-conversation-box .conversation-box-message.is-thinking")).toHaveCount(0);
+    await expect(page.locator(".project-conversation-box .conversation-box-message.role-design.is-thinking")).toHaveCount(0);
+    await expect(page.locator(".project-conversation-box .conversation-box-message.role-intent.is-thinking")).toBeVisible();
+    await expect(page.getByText("正在识别意图", { exact: true })).toBeVisible();
     await expect(page.getByText("正在思考", { exact: true })).toHaveCount(0);
     await page.waitForTimeout(250);
     const pageScrollAfter = await page.evaluate(() => window.scrollY);
     expect(Math.abs(pageScrollAfter - pageScrollBefore)).toBeLessThanOrEqual(1);
     await page.getByRole("button", { name: "English" }).click();
+    await expect(page.getByText("Identifying intent", { exact: true })).toBeVisible();
     await expect(page.getByText("Thinking", { exact: true })).toHaveCount(0);
   } finally {
     releaseRequest();
@@ -577,19 +583,19 @@ test("a creator can refine and deliver a game through every Core and platform st
 
   await page.getByLabel("继续项目会话").fill("玩法目标、操作方式和胜负条件已经确认，请判断是否可以开始开发。");
   await page.getByRole("button", { name: "发送项目消息" }).click();
-  await expect(page.getByRole("button", { name: "按照当前需求开发" })).toBeVisible();
+  await expect(page.getByRole("button", { name: "确认修改并重跑" })).toBeVisible();
   await expect(page.getByText("测试设计 Agent 已结合项目上下文生成回复。", { exact: true })).toBeVisible();
-  await expect(page.getByText("QUESTION", { exact: true })).toBeVisible();
-  await page.getByRole("button", { name: "按照当前需求开发" }).click();
+  await expect(page.getByText("CHANGE_REQUEST", { exact: true })).toBeVisible();
+  await page.getByRole("button", { name: "确认修改并重跑" }).click();
   // Three isolated platform nodes run concurrently but can spend close to a
   // minute preparing their deterministic guest evidence on a cold CI host.
-  await expect(page.getByText("等待发布决策", { exact: true })).toBeVisible({ timeout: 120_000 });
+  await expect(page.getByText("等待发布批准", { exact: true })).toBeVisible({ timeout: 120_000 });
   await page.getByLabel("展开项目交付配置").click();
   await expect(page.getByRole("button", { name: "完成本轮，不发布" })).toBeVisible();
   for (const stage of ["游戏生成", "制品构建", "跨平台 E2E", "Steam 上传"]) {
     await expect(page.getByText(stage, { exact: true })).toBeVisible();
   }
-  for (const stage of ["AGENT_GENERATION", "ARTIFACT_BUILD", "E2E_TEST"]) {
+  for (const stage of ["AGENT_TURN", "BUILD", "E2E_PLATFORM_RUN"]) {
     await expect(page.locator(`[data-stage-kind="${stage}"]`)).toHaveAttribute("data-stage-status", "completed");
   }
   await expect(page.locator('[data-stage-kind="STEAM_PUBLISH"]')).toHaveAttribute("data-stage-status", "pending");
@@ -597,7 +603,7 @@ test("a creator can refine and deliver a game through every Core and platform st
   await expect(page.getByText(/windows · 完成/).first()).toBeVisible();
   await expect(page.getByText(/macos · 完成/).first()).toBeVisible();
 
-  const generationStage = page.locator('[data-stage-kind="AGENT_GENERATION"]');
+  const generationStage = page.locator('[data-stage-kind="AGENT_TURN"]');
   const generationRerun = generationStage.getByRole("button", { name: /从「游戏生成」重新执行/ });
   await generationStage.getByRole("button", { name: "打开需求快照" }).hover();
   await expect(generationRerun).toHaveCSS("opacity", "0");
@@ -616,7 +622,7 @@ test("a creator can refine and deliver a game through every Core and platform st
   );
   await expect(generationRerun).toHaveCSS("opacity", "1");
 
-  const e2eStage = page.locator('[data-stage-kind="E2E_TEST"]');
+  const e2eStage = page.locator('[data-stage-kind="E2E_PLATFORM_RUN"]');
   const e2eRerun = e2eStage.getByRole("button", { name: /从「跨平台 E2E」重新执行/ });
   await e2eStage.getByRole("button", { name: "打开E2E 报告" }).first().hover();
   await expect(e2eRerun).toHaveCSS("opacity", "0");
@@ -634,7 +640,9 @@ test("a creator can refine and deliver a game through every Core and platform st
   await stack.selectWorkspace(browserInstance.instance.workspace.id);
   const project = await stack.readProject(projectId);
   expect(project.workflowState).toBe("SUCCEEDED");
-  expect(project.jobs).toHaveLength(5);
+  // Design, Development, Test planning, and Test verdict are persistent
+  // Runtime turns; Builder and all three platform runs remain controlled jobs.
+  expect(project.jobs).toHaveLength(8);
   expect(project.jobs.every(job => job.state === "SUCCEEDED")).toBeTruthy();
   // A transient executor failure may consume a bounded retry; the product
   // guarantee is successful recovery with no stale failure surfaced.
@@ -655,12 +663,14 @@ test("a creator can refine and deliver a game through every Core and platform st
       FROM deviludo.jobs
      WHERE workflow_id = '${project.workflowId}'::uuid
   `);
-  expect(evidence[0]).toEqual({ total_jobs: 5, exclusive_jobs_with_proofs: 3, core_jobs_with_receipts: 2 });
-  const signingReceipts = await stack.queryRows<{ receipt: unknown }>(`
+  expect(evidence[0]).toEqual({ total_jobs: 8, exclusive_jobs_with_proofs: 3, core_jobs_with_receipts: 5 });
+  const buildReceipts = await stack.queryRows<{ receipt: Readonly<Record<string, unknown>> }>(`
     SELECT receipt FROM deviludo.jobs
-     WHERE workflow_id = '${project.workflowId}'::uuid AND kind = 'ARTIFACT_SIGN'
+     WHERE workflow_id = '${project.workflowId}'::uuid AND kind = 'BUILD'
   `);
-  expect(signingReceipts).toHaveLength(0);
+  expect(buildReceipts).toHaveLength(1);
+  expect(buildReceipts[0]?.receipt).toMatchObject({ outputCount: 3 });
+  expect(buildReceipts[0]?.receipt).not.toHaveProperty("signature");
 
   await page.getByRole("link", { name: "游戏项目" }).first().click();
   await expect(page.getByRole("heading", { name: "游戏项目", exact: true })).toBeVisible();
@@ -686,17 +696,18 @@ test("keyboard creation derives a name and an active delivery can be cancelled",
   await page.getByLabel("游戏构想").press("Control+Enter");
 
   await expect(page).toHaveURL(/\/projects\/[0-9a-f-]{36}$/);
-  await expect(page.getByRole("heading", { name: "时间回廊" })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "月影邮差" })).toBeVisible();
   await page.getByLabel("继续项目会话").fill("需求已经完整，请确认可以按照当前方案开发。");
   await page.getByRole("button", { name: "发送项目消息" }).click();
-  await page.getByRole("button", { name: "按照当前需求开发" }).click();
-  await expect(page.getByRole("button", { name: "取消本次交付" })).toBeVisible();
-  await page.getByRole("button", { name: "取消本次交付" }).click();
-  await expect(page.getByText("已取消", { exact: true }).first()).toBeVisible();
-  await expect(page.getByRole("button", { name: "取消本次交付" })).toHaveCount(0);
+  await page.getByRole("button", { name: "确认修改并重跑" }).click();
+  await expect(page.getByRole("button", { name: "停止自动执行" })).toBeVisible();
+  await page.getByRole("button", { name: "停止自动执行" }).click();
+  await expect(page.getByRole("button", { name: "继续自动执行" })).toBeVisible();
+  const projectId = page.url().split("/").pop() ?? "";
+  expect((await stack.readProject(projectId)).workflowState).toBe("STOPPED");
 
   await page.getByRole("link", { name: "项目", exact: true }).click();
-  await expect(page.getByRole("heading", { name: "时间回廊" })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "月影邮差" })).toBeVisible();
   await page.getByRole("link", { name: "首页", exact: true }).click();
   await expect(page).toHaveURL(/\/$/);
 });
@@ -738,7 +749,7 @@ test("the home chat supports both project feedback and a fresh game conversation
     color: "rgb(8, 127, 167)",
   });
   await page.getByLabel("导入已有项目").selectOption(project.id);
-  const feedbackQuestion = "当前玩法如果增加低视野模式，会对资源管理产生什么影响？";
+  const feedbackQuestion = "当前低视野模式为什么会增加资源管理压力？";
   await page.getByLabel("游戏想法或修改意见").fill(feedbackQuestion);
   const imageTransfer = await page.evaluateHandle(() => {
     const transfer = new DataTransfer();
@@ -827,6 +838,8 @@ test("the home chat supports both project feedback and a fresh game conversation
   expect((await stack.readProject(project.id)).workflowState).toBe("DRAFT");
 
   await suggestedReplies.getByRole("button", { name: "强化资源管理" }).click();
+  await expect(page.getByRole("button", { name: "确认修改并重跑" })).toBeVisible();
+  await page.getByRole("button", { name: "确认修改并重跑" }).click();
   await expect(page).toHaveURL(`/projects/${project.id}`);
   await expect(page.getByRole("heading", { name: "会话记录" })).toBeVisible();
   await expect(page.getByRole("navigation", { name: "历史会话" })).toBeVisible();
@@ -872,7 +885,7 @@ test("home chat enters the thread immediately and shows animated waiting dots", 
     await expect(page.getByText(concept, { exact: true })).toBeVisible();
     const waiting = page.locator(".home-conversation-box .conversation-box-message.is-thinking [aria-label='等待回复']");
     await expect(waiting).toBeVisible();
-    await expect(page.getByText("正在思考", { exact: true })).toBeVisible();
+    await expect(page.getByText("正在识别意图", { exact: true })).toBeVisible();
     await expect(waiting.locator("i")).toHaveCount(3);
   } finally {
     releaseRequest();
@@ -956,7 +969,7 @@ test("a creator can link a local project without uploading it and continue its A
   await expect(page.getByRole("heading", { name: "clock-game" })).toBeVisible();
   await expect(page.getByRole("heading", { name: "会话记录" })).toBeVisible();
   await expect(page.getByText(/现有信息足以进入需求确认；如需调整分析结论/)).toBeVisible();
-  await expect(page.getByText("探索场景、记录线索并重置时间线来改变事件结果。", { exact: true })).toBeVisible();
+  await expect(page.getByText("启动游戏，使用真实玩家输入，并完成现有核心交互循环。", { exact: true })).toBeVisible();
   await expect(page.getByLabel("展开项目交付配置").getByText("main", { exact: true })).toBeVisible();
   await page.getByLabel("展开项目交付配置").click();
   await page.getByRole("button", { name: "修改分支" }).click();

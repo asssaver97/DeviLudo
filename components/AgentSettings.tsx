@@ -340,6 +340,8 @@ export function AgentSettings() {
                   : "Design, Development, and Test inherit the primary model when empty. Image generation uses Codex built-in ImageGen (gpt-image-2) through the current Codex connection.",
               )}</p>
               <div className="agent-model-expanded">
+                <ModelInput disabled={loading || saving} inheritLabel={text("继承主模型", "Inherits primary")} label={text("意图 Agent", "Intent Agent")} onChange={value => updateModelOverride("intent", value)} placeholder={primaryModel} value={modelOverrides.intent ?? ""} />
+                <ModelInput disabled={loading || saving} inheritLabel={text("继承主模型", "Inherits primary")} label={text("项目分析 Agent", "Project Analysis Agent")} onChange={value => updateModelOverride("analysis", value)} placeholder={primaryModel} value={modelOverrides.analysis ?? ""} />
                 <ModelInput disabled={loading || saving} inheritLabel={text("继承主模型", "Inherits primary")} label={text("设计 Agent", "Design Agent")} onChange={value => updateModelOverride("design", value)} placeholder={primaryModel} value={modelOverrides.design ?? ""} />
                 <ModelInput disabled={loading || saving} inheritLabel={text("继承主模型", "Inherits primary")} label={text("开发 Agent", "Development Agent")} onChange={value => updateModelOverride("development", value)} placeholder={primaryModel} value={modelOverrides.development ?? ""} />
                 <ModelInput disabled={loading || saving} inheritLabel={text("继承主模型", "Inherits primary")} label={text("测试 Agent", "Test Agent")} onChange={value => updateModelOverride("test", value)} placeholder={primaryModel} value={modelOverrides.test ?? ""} />
@@ -476,5 +478,5 @@ function connectionFromClaudeSettingsJson(
 }
 
 function emptyModelOverrides(): AgentModelOverrides {
-  return Object.freeze({ design: null, development: null, test: null });
+  return Object.freeze({ intent: null, analysis: null, design: null, development: null, test: null });
 }

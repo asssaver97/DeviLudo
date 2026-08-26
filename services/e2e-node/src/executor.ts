@@ -36,7 +36,7 @@ export async function executeE2eJob(
     poolKind: job.poolKind,
     targetOperatingSystem: job.targetOperatingSystem ?? undefined,
   });
-  if (job.jobKind !== "E2E_TEST") {
+  if (job.jobKind !== "E2E_PLATFORM_RUN") {
     throw new Error("E2E nodes cannot execute Core jobs or install Agent software");
   }
 
@@ -65,7 +65,7 @@ export async function executeE2eJob(
   try {
     const inputs = await client.authorizeObjects(job);
     executionReceipt = await runUnprivileged(
-      job, "test", inputs, process.env.DEVILUDO_E2E_TEST_EXECUTOR ?? "", client, signal,
+      job, "test", inputs, process.env.DEVILUDO_E2E_PLATFORM_RUN_EXECUTOR ?? "", client, signal,
       Object.freeze({ ...generatedPlan.plan, plannedTimeoutSeconds }),
     );
     validateExecutionReceipt(job, executionReceipt);

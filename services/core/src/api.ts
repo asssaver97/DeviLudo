@@ -8,11 +8,11 @@ import {
   MAX_CONVERSATION_IMAGE_TOTAL_BYTES,
   type ConversationIntentDecision,
   type ConversationWorkflowAction,
-  type E2eGoalDelta,
   type ImplementationChangeRequest,
   type ProductConversation,
   type ProductProjectDetail,
   type ProjectAgentRole,
+  type ProjectRuntimeRole,
   type WorkspaceSummary,
 } from "@/lib/product/contracts";
 import {
@@ -51,35 +51,28 @@ import {
 import type { Database } from "./database";
 import { CORE_MODULES } from "./modules";
 import { CoreObjectStore } from "./object-store";
-import { generateProjectName } from "./project-naming";
 import {
-  analyzeImportedProject,
   decodeProjectSourceStream,
   inspectProjectFiles,
   inspectProjectZip,
   normalizeGitBranchName,
   normalizeGitHubRepositoryUrl,
+  parseImportedProjectAnalysis,
   type ImportedSourceSnapshot,
   type SourceFile,
 } from "./project-import";
-import {
-  generateProductConversationGroupReply,
-  streamProductConversationGroupReply,
-  type ConversationAgentProjectContext,
-  type ConversationImageInput,
-  type ProductConversationGroupReply,
-  type ProductConversationStreamCallbacks,
+import type {
+  ConversationImageInput,
+  ProductConversationGroupReply,
+  ProductConversationStreamCallbacks,
 } from "./product-conversation";
 import { generatedImageExtension, sniffContentType } from "./image-generation";
-import { classifyConversationIntent, reconcileConversationIntentReadiness } from "./conversation-intent";
 import {
-  generateE2ePlayerDecision,
   MAX_PLAYER_POLICY_REQUEST_BYTES,
+  parsePlayerPolicyDecision,
   parsePlayerPolicyRequest,
   playerPolicyIdempotencyInput,
-  verifyE2ePlayerVision,
 } from "./e2e-player-policy";
-import { generateE2eTestPlan } from "./e2e-test-plan";
 import type {
   CoreRepository,
   PendingProjectImportAnalysis,
@@ -94,6 +87,15 @@ import {
 } from "@/lib/product/project-document";
 import { parseResponseLanguage, type ResponseLanguage } from "@/lib/product/response-language";
 import { ProjectSourceStore } from "./project-sources";
+import { ProjectRuntimeRepository } from "./project-runtime-repository";
+import { ProjectRuntimeService } from "./project-runtime-service";
+import {
+  implementationBrief as runtimeImplementationBrief,
+  parseProjectRuntimeIntent,
+  parseProjectRuntimeReply,
+  projectRuntimeIntentPrompt,
+  projectRuntimeSpecialistPrompt,
+} from "./project-runtime-conversation";
 import {
   createSteamSecretStore,
   validateSteamBuildToken,
@@ -112,10 +114,10 @@ export async function runApi(
 ): Promise<void> {
   const objectStore = new CoreObjectStore();
   const projectSources = new ProjectSourceStore(config.projectsRoot);
+  const runtimeRepository = new ProjectRuntimeRepository(database);
+  const projectRuntime = new ProjectRuntimeService(runtimeRepository, config.projectsRoot);
   const pki = new E2ePkiIssuer();
   const telemetry = new UsageTelemetry(config);
-  const e2ePlayerPolicyFixture = process.env.NODE_ENV === "test"
-    && process.env.DEVILUDO_E2E_PLAYER_POLICY_FIXTURE === "1";
   const app = Fastify({
     logger: true,
     bodyLimit: 2 * 1024 * 1024,
@@ -207,6 +209,34 @@ export async function runApi(
     return reply.send({ acknowledged: await repository.acknowledgeHostSourceEvents(body.eventIds as string[]) });
   });
 
+  app.post("/v2/runtime/tools/call", async (request, reply) => {
+    const body = objectBody(request.body);
+    const authorization = request.headers.authorization ?? "";
+    const token = authorization.startsWith("Bearer ") ? authorization.slice(7) : "";
+    const role = body.role;
+    if (!UUID.test(String(body.workspaceId)) || !UUID.test(String(body.projectId))
+      || !UUID.test(String(body.turnId))
+      || !["INTENT", "ANALYSIS", "DESIGN", "DEVELOPMENT", "TEST"].includes(String(role))
+      || typeof body.name !== "string" || !/^[a-z][a-z0-9_.]{2,100}$/.test(body.name)
+      || !body.arguments || typeof body.arguments !== "object" || Array.isArray(body.arguments)
+      || !/^[A-Za-z0-9_-]{32,512}$/.test(token)) {
+      return reply.code(400).send({ code: "INVALID_PROJECT_RUNTIME_TOOL_CALL" });
+    }
+    try {
+      const result = await projectRuntime.callTool({
+        workspaceId: String(body.workspaceId), projectId: String(body.projectId),
+        turnId: String(body.turnId), role: role as ProjectRuntimeRole,
+        name: body.name, token, arguments: body.arguments as Record<string, unknown>,
+      });
+      return reply.header("cache-control", "no-store").send(result);
+    } catch (error) {
+      return reply.code(403).send({
+        code: "PROJECT_RUNTIME_TOOL_REJECTED",
+        message: error instanceof Error ? error.message : "Project Runtime tool call was rejected",
+      });
+    }
+  });
+
   app.post(
     "/v1/host/projects/import",
     { bodyLimit: 64 * 1024 * 1024 },
@@ -228,9 +258,8 @@ export async function runApi(
           capabilities: Object.freeze(["project.read", "project.write"] as const),
         }),
         repository,
-        agentSecrets,
-        host,
         projectSources,
+        projectRuntime,
         source: inspectProjectZip({
           bytes: request.body as Buffer,
           sourceKind: "GIT",
@@ -503,7 +532,7 @@ export async function runApi(
       if (!workspace || !project) throw new Error("Project creation receipt is incomplete");
       return reply.send({ workspace, project });
     }
-    const name = suppliedName || await agentProjectName(concept, repository, agentSecrets, responseLanguage);
+    const name = suppliedName || provisionalProjectName(concept, responseLanguage);
     const workspace = currentWorkspace ?? Object.freeze({ id: randomUUID(), name, createdAt: "" });
     const projectId = deterministicProjectId(principal.actorId, idempotencyKey);
     const project = await repository.createProject({
@@ -518,6 +547,15 @@ export async function runApi(
       responseLanguage,
       specification: specificationFromConcept(name, concept, responseLanguage),
       ...defaultWorkflowConfiguration(),
+    });
+    const settings = await repository.readAgentSettings();
+    if (settings) await projectRuntime.initialize({
+      workspaceId: workspace.id,
+      projectId,
+      language: responseLanguage,
+      concept,
+      settings,
+      source: null,
     });
     const selectedWorkspace = currentWorkspace ?? await repository.readWorkspace(workspace.id);
     if (!selectedWorkspace) throw new Error("Created workspace could not be read");
@@ -597,6 +635,54 @@ export async function runApi(
     const workspace = await requireSelectedWorkspace(request, repository, principal);
     const project = await repository.readProject(workspace.id, request.params.projectId);
     return project ? reply.send({ project }) : reply.code(404).send({ code: "PROJECT_NOT_FOUND" });
+  });
+
+  app.get<{ Params: { projectId: string } }>("/v1/projects/:projectId/runtime", async (request, reply) => {
+    const principal = productAccess(request, config);
+    const workspace = await requireSelectedWorkspace(request, repository, principal);
+    const project = await repository.readProject(workspace.id, request.params.projectId);
+    if (!project) return reply.code(404).send({ code: "PROJECT_NOT_FOUND" });
+    const [runtime, contextRecord] = await Promise.all([
+      runtimeRepository.readContainer(workspace.id, project.id),
+      runtimeRepository.readContextRecord(workspace.id, project.id),
+    ]);
+    return reply.header("cache-control", "no-store").send({ runtime, context: contextRecord });
+  });
+
+  app.post<{ Params: { projectId: string } }>("/v1/projects/:projectId/stop", async (request, reply) => {
+    const principal = productAccess(request, config);
+    const workspace = await requireSelectedWorkspace(request, repository, principal);
+    const project = await repository.readProject(workspace.id, request.params.projectId);
+    if (!project) return reply.code(404).send({ code: "PROJECT_NOT_FOUND" });
+    return reply.code(202).send(await projectRuntime.setWorkflowStopped(workspace.id, project.id, true));
+  });
+
+  app.post<{ Params: { projectId: string } }>("/v1/projects/:projectId/continue", async (request, reply) => {
+    const principal = productAccess(request, config);
+    const workspace = await requireSelectedWorkspace(request, repository, principal);
+    const project = await repository.readProject(workspace.id, request.params.projectId);
+    if (!project) return reply.code(404).send({ code: "PROJECT_NOT_FOUND" });
+    return reply.code(202).send(await projectRuntime.setWorkflowStopped(workspace.id, project.id, false));
+  });
+
+  app.get<{ Params: { projectId: string } }>("/v1/projects/:projectId/test-plan", async (request, reply) => {
+    const principal = productAccess(request, config);
+    const workspace = await requireSelectedWorkspace(request, repository, principal);
+    const project = await repository.readProject(workspace.id, request.params.projectId);
+    if (!project) return reply.code(404).send({ code: "PROJECT_NOT_FOUND" });
+    return reply.header("cache-control", "no-store").send({
+      plan: await runtimeRepository.readLatestTestPlan(workspace.id, project.id),
+    });
+  });
+
+  app.get<{ Params: { projectId: string } }>("/v1/projects/:projectId/test-evidence", async (request, reply) => {
+    const principal = productAccess(request, config);
+    const workspace = await requireSelectedWorkspace(request, repository, principal);
+    const project = await repository.readProject(workspace.id, request.params.projectId);
+    if (!project) return reply.code(404).send({ code: "PROJECT_NOT_FOUND" });
+    return reply.header("cache-control", "no-store").send({
+      runs: await runtimeRepository.readTestEvidence(workspace.id, project.id),
+    });
   });
 
   app.post<{ Params: { projectId: string }; Body: { baseWorkflowId?: unknown } }>(
@@ -743,7 +829,7 @@ export async function runApi(
       const workspace = await requireSelectedWorkspace(request, repository, principal);
       const project = await repository.readProject(workspace.id, request.params.projectId);
       if (!project) return reply.code(404).send({ code: "PROJECT_NOT_FOUND" });
-      if (!["ASSET_GENERATING", "RELEASE_DECISION_PENDING", "SUCCEEDED", "FAILED", "CANCELLED"].includes(project.workflowState)) {
+      if (!["DEVELOPING", "RELEASE_APPROVAL_PENDING", "SUCCEEDED", "FAILED", "CANCELLED"].includes(project.workflowState)) {
         return reply.code(409).send({
           code: "ASSET_RERUN_UNAVAILABLE",
           message: "当前交付仍在运行；请等待该阶段完成或先取消交付，再重新生成素材",
@@ -924,6 +1010,20 @@ export async function runApi(
       throw httpError(409, "LOCAL_DIRECTORY_DELETE_UNAVAILABLE", "当前环境不支持删除本地项目目录");
     }
     const localDirectoryBindingId = project.localDirectory?.bindingId ?? null;
+    const runtime = await runtimeRepository.readContainer(workspace.id, project.id);
+    if (runtime?.containerId) {
+      await projectRuntime.destroyRuntime({
+        schemaVersion: "deviludo.project-runtime.v2",
+        workspaceId: workspace.id,
+        projectId: project.id,
+        runtime: runtime.runtime,
+        generation: runtime.generation,
+        fencingToken: runtime.fencingToken,
+      }).catch(error => {
+        throw httpError(503, "PROJECT_RUNTIME_DELETE_FAILED",
+          error instanceof Error ? error.message : "Project Runtime could not be destroyed");
+      });
+    }
     const deleted = await repository.deleteProject(
       workspace.id,
       request.params.projectId,
@@ -1012,7 +1112,7 @@ export async function runApi(
   app.post("/v1/conversations/messages", { bodyLimit: 18 * 1024 * 1024 }, async (request, reply) => {
     const principal = productAccess(request, config);
     const command = conversationMessageCommand(request.body);
-    const result = await processConversationMessage({ request, principal, repository, objectStore, agentSecrets, host, command });
+    const result = await processConversationMessage({ request, principal, repository, objectStore, agentSecrets, host, projectRuntime, command });
     return reply.code(result.statusCode).send(result.payload);
   });
 
@@ -1039,6 +1139,7 @@ export async function runApi(
         objectStore,
         agentSecrets,
         host,
+        projectRuntime,
         command,
         signal: abortController.signal,
         onStage: phase => write({ type: "status", phase }),
@@ -1057,6 +1158,7 @@ export async function runApi(
     } catch (error) {
       const failure = publicStreamError(error);
       request.log.warn({
+        err: error,
         code: failure.code,
         error: failure.message,
       }, "conversation stream failed");
@@ -1111,18 +1213,35 @@ export async function runApi(
       }
       if (decision === "CONFIRM" && changeRequest.state === "PENDING"
         && changeRequest.baseDocumentRevision !== project.document.revision) {
-        const plan = await replanImplementationChange({
-          repository, agentSecrets, workspaceId: workspace.id, project, changeRequest, responseLanguage,
+        const settings = await repository.readAgentSettings();
+        if (!settings) return reply.code(424).send({ code: "AGENT_CONFIG_REQUIRED" });
+        await projectRuntime.initialize({
+          workspaceId: workspace.id, projectId: project.id, language: responseLanguage,
+          concept: project.concept, settings,
+          source: project.source ? { revision: project.source.revision, digest: project.source.digest, relativePath: project.source.relativePath } : null,
         });
+        const replannedResult = await projectRuntime.turn({
+          workspaceId: workspace.id, projectId: project.id, role: "DESIGN", mode: "READ_ONLY_BRANCH",
+          prompt: projectRuntimeSpecialistPrompt({
+            intent: Object.freeze({ intent: "CHANGE_REQUEST", targetRole: "DESIGN", explicitExecution: false,
+              actionable: true, summary: changeRequest.summary }),
+            content: `Re-plan the pending change against the current document. ${changeRequest.implementationBrief}`,
+            confirmed: false,
+          }),
+          responseLanguage, settings,
+          sourceRevision: project.source?.revision ?? null,
+          sourceRelativePath: project.source?.relativePath ?? null,
+        });
+        const replannedReply = parseProjectRuntimeReply(replannedResult, "DESIGN", settings);
         const replacement = await repository.createImplementationChangeRequest({
           workspaceId: workspace.id,
           projectId: project.id,
           workflowId: project.workflowId,
           conversationId: changeRequest.conversationId,
           summary: changeRequest.summary,
-          implementationBrief: plan.implementationBrief,
-          projectDocumentPatch: plan.projectDocumentPatch,
-          e2eGoalDelta: plan.e2eGoalDelta,
+          implementationBrief: runtimeImplementationBrief(replannedResult, changeRequest.implementationBrief),
+          projectDocumentPatch: replannedReply.projectDocumentPatch ?? Object.freeze({}),
+          e2eGoalDelta: replannedReply.e2eGoalDelta,
           explicitExecution: false,
           idempotencyKey: `replan:${changeRequest.id}:${project.document.revision}`,
           supersededChangeRequestId: changeRequest.id,
@@ -1251,7 +1370,7 @@ export async function runApi(
     if (workflowId !== project.workflowId || !SEMVER.test(version) || !channel) {
       return reply.code(400).send({ code: "INVALID_STEAM_RELEASE" });
     }
-    if (project.workflowState !== "RELEASE_DECISION_PENDING") {
+    if (project.workflowState !== "RELEASE_APPROVAL_PENDING") {
       return reply.code(409).send({
         code: "RELEASE_DECISION_UNAVAILABLE",
         message: "当前轮次必须先通过真实操作 E2E，才能上传 Steam",
@@ -1275,7 +1394,7 @@ export async function runApi(
       const workspace = await requireSelectedWorkspace(request, repository, principal);
       const project = await repository.readProject(workspace.id, request.params.projectId);
       if (!project) return reply.code(404).send({ code: "PROJECT_NOT_FOUND" });
-      if (project.workflowId !== request.params.workflowId || project.workflowState !== "RELEASE_DECISION_PENDING") {
+      if (project.workflowId !== request.params.workflowId || project.workflowState !== "RELEASE_APPROVAL_PENDING") {
         return reply.code(409).send({ code: "RELEASE_DECISION_UNAVAILABLE" });
       }
       const accepted = await repository.completeWorkflowIteration({
@@ -1330,7 +1449,7 @@ export async function runApi(
     const idempotencyKey = requestIdempotencyKey(request, `stage-rerun:${stage}`);
     // Superseding downstream jobs would race executors that still hold leases,
     // so a rerun only makes sense once the delivery has come to rest.
-    if (!["RELEASE_DECISION_PENDING", "FAILED", "SUCCEEDED", "CANCELLED"].includes(project.workflowState)) {
+    if (!["RELEASE_APPROVAL_PENDING", "FAILED", "SUCCEEDED", "CANCELLED"].includes(project.workflowState)) {
       if (await repository.workflowSignalExists(workspace.id, project.workflowId, idempotencyKey)) {
         return reply.send({ accepted: false });
       }
@@ -1339,7 +1458,7 @@ export async function runApi(
         message: "流程正在运行中，请先取消当前交付再选择重跑节点",
       });
     }
-    if (stage === "AGENT_GENERATION") {
+    if (stage === "AGENT_TURN") {
       if(host.mode==="managed")await agentConnection(host,principal,"development",repository,agentSecrets);
       else if(!await repository.readAgentSettings())return reply.code(424).send({
           code: "AGENT_CONFIG_REQUIRED",
@@ -1704,64 +1823,15 @@ export async function runApi(
     const nodeId = await authorizeE2e(request, config, repository);
     const body = objectBody(request.body);
     const job = await repository.loadLeasedJob(jobIdentity(request.params.jobId, body), nodeId ? `e2e:${nodeId}` : undefined);
-    if (job.jobKind !== "E2E_TEST") return reply.code(409).send({ code: "PLAYER_POLICY_JOB_INVALID" });
-    const settings = await repository.readAgentSettings();
-    if (!settings) return reply.code(503).send({ code: "PLAYER_POLICY_NOT_CONFIGURED" });
-    const model = resolveAgentModel(settings.primaryModel, settings.modelOverrides, "test");
-    const configurationDigest = jsonDigest({
-      runtime: settings.agentRuntime, baseUrl: settings.baseUrl, model,
-      settingsRevision: settings.revision, credentialVersion: settings.credentialVersion,
-    });
-    const policy = await repository.lockE2ePlayerPolicy({
-      workspaceId: job.workspaceId, jobId: job.jobId, settingsRevision: settings.revision,
-      runtime: settings.agentRuntime, baseUrl: settings.baseUrl, model,
-      credentialSecretRef: settings.credentialSecretRef, configurationDigest,
-    });
-    // Code E2E runs a deterministic guest executor without provider access.
-    // Keep this escape hatch impossible outside an explicit test process.
-    if (e2ePlayerPolicyFixture) {
-      await repository.markTestPolicyReady(policy.settingsRevision);
-      return reply.send({ ready: true, policy: {
-        configurationDigest: policy.configurationDigest,
-        settingsRevision: policy.settingsRevision,
-        model: policy.model,
-      } });
+    if (job.jobKind !== "E2E_PLATFORM_RUN") return reply.code(409).send({ code: "PLAYER_POLICY_JOB_INVALID" });
+    if (!job.payload.testPlan || typeof job.payload.testPlan !== "object"
+      || typeof job.payload.testPlanDigest !== "string") {
+      return reply.code(409).send({ code: "FROZEN_TEST_AGENT_PLAN_MISSING" });
     }
-    if (settings.testPolicyReady && settings.testPolicyCheckedRevision === settings.revision) {
-      return reply.send({ ready: true, policy: {
-        configurationDigest: policy.configurationDigest,
-        settingsRevision: policy.settingsRevision,
-        model: policy.model,
-      } });
-    }
-    const apiKey = await agentSecrets.readApiKey(policy.credentialSecretRef);
-    if (!apiKey) return reply.code(503).send({ code: "PLAYER_POLICY_CREDENTIAL_UNAVAILABLE" });
-    try {
-      await verifyE2ePlayerVision({
-        runtime: policy.runtime, baseUrl: policy.baseUrl, apiKey, model: policy.model,
-      });
-    } catch (error) {
-      await repository.markTestPolicyUnavailable(policy.settingsRevision);
-      const code = error instanceof Error && "code" in error && error.code === "PLAYER_POLICY_VISION_UNAVAILABLE"
-        ? "PLAYER_POLICY_VISION_UNAVAILABLE"
-        : "PLAYER_POLICY_PROVIDER";
-      request.log.warn({
-        event: "e2e_player_vision_failed",
-        code,
-        reason: error instanceof Error ? error.message : "Test Agent visual capability check failed",
-      }, "Test Agent visual capability check failed");
-      return reply.code(503).send({
-        code,
-        message: code === "PLAYER_POLICY_VISION_UNAVAILABLE"
-          ? "Test Agent Provider 未向模型提供图像输入，无法执行真实画面自适应测试"
-          : "Test Agent Provider 视觉能力检查失败",
-      });
-    }
-    await repository.markTestPolicyReady(policy.settingsRevision);
     return reply.send({ ready: true, policy: {
-      configurationDigest: policy.configurationDigest,
-      settingsRevision: policy.settingsRevision,
-      model: policy.model,
+      mode: "PERSISTENT_TEST_AGENT",
+      planRevision: job.payload.testPlanRevision,
+      configurationDigest: job.payload.testPlanDigest,
     } });
   });
 
@@ -1769,8 +1839,8 @@ export async function runApi(
     const nodeId = await authorizeE2e(request, config, repository);
     const body = objectBody(request.body);
     const job = await repository.loadLeasedJob(jobIdentity(request.params.jobId, body), nodeId ? `e2e:${nodeId}` : undefined);
-    if (job.jobKind !== "E2E_TEST" || !job.targetOperatingSystem) {
-      return reply.code(409).send({ code: "E2E_TEST_PLAN_JOB_INVALID" });
+    if (job.jobKind !== "E2E_PLATFORM_RUN" || !job.targetOperatingSystem) {
+      return reply.code(409).send({ code: "E2E_PLATFORM_RUN_PLAN_JOB_INVALID" });
     }
     const sourceRevision = Number(job.payload.sourceRevision);
     const goalRevision = Number(job.payload.e2eGoalRevision);
@@ -1778,127 +1848,21 @@ export async function runApi(
     if (!Number.isSafeInteger(sourceRevision) || sourceRevision < 1
       || !Number.isSafeInteger(goalRevision) || goalRevision < 1
       || typeof goalDigest !== "string" || !/^sha256:[0-9a-f]{64}$/.test(goalDigest)) {
-      return reply.code(409).send({ code: "E2E_TEST_PLAN_REVISION_INVALID" });
+      return reply.code(409).send({ code: "E2E_PLATFORM_RUN_PLAN_REVISION_INVALID" });
     }
-    const settings = await repository.readAgentSettings();
-    if (!settings) return reply.code(503).send({ code: "PLAYER_POLICY_NOT_CONFIGURED" });
-    const model = resolveAgentModel(settings.primaryModel, settings.modelOverrides, "test");
-    const configurationDigest = jsonDigest({
-      runtime: settings.agentRuntime, baseUrl: settings.baseUrl, model,
-      settingsRevision: settings.revision, credentialVersion: settings.credentialVersion,
+    if (!job.payload.testPlan || typeof job.payload.testPlan !== "object"
+      || typeof job.payload.testPlanDigest !== "string"
+      || !/^sha256:[0-9a-f]{64}$/.test(job.payload.testPlanDigest)) {
+      return reply.code(409).send({ code: "FROZEN_TEST_AGENT_PLAN_MISSING" });
+    }
+    return reply.send({
+      plan: job.payload.testPlan,
+      policy: {
+        mode: "PERSISTENT_TEST_AGENT",
+        planRevision: job.payload.testPlanRevision,
+        configurationDigest: job.payload.testPlanDigest,
+      },
     });
-    const policy = await repository.lockE2ePlayerPolicy({
-      workspaceId: job.workspaceId, jobId: job.jobId, settingsRevision: settings.revision,
-      runtime: settings.agentRuntime, baseUrl: settings.baseUrl, model,
-      credentialSecretRef: settings.credentialSecretRef, configurationDigest,
-    });
-    const apiKey = await agentSecrets.readApiKey(policy.credentialSecretRef);
-    if (!apiKey) return reply.code(503).send({ code: "PLAYER_POLICY_CREDENTIAL_UNAVAILABLE" });
-    const [storedContext, frozenTestPlan, contractHintObject, regressionTraceObject] = await Promise.all([
-      repository.readE2ePlanningContext({
-        workspaceId: job.workspaceId,
-        workflowId: job.workflowId,
-        projectId: job.projectId,
-        platform: job.targetOperatingSystem,
-        goalRevision,
-      }),
-      repository.readFrozenE2eTestPlan({
-        workspaceId: job.workspaceId,
-        workflowId: job.workflowId,
-        projectId: job.projectId,
-        platform: job.targetOperatingSystem,
-        sourceRevision,
-        goalRevision,
-      }),
-      repository.readProjectAgentManifestObject({
-        workspaceId: job.workspaceId,
-        workflowId: job.workflowId,
-        projectId: job.projectId,
-      }),
-      repository.readProjectE2eRegressionObject({
-        workspaceId: job.workspaceId,
-        projectId: job.projectId,
-        platform: job.targetOperatingSystem,
-      }),
-    ]);
-    let projectTestContract: Readonly<Record<string, unknown>> | null = frozenTestPlan?.testManifest ?? null;
-    let projectAgentManifest: Readonly<Record<string, unknown>> | null = null;
-    let regressionTrace: Readonly<Record<string, unknown>> | null = null;
-    const [agentManifestResult, regressionTraceResult] = await Promise.allSettled([
-      objectStore.readProjectAgentManifest(contractHintObject),
-      objectStore.readProjectE2eRegressionTrace(regressionTraceObject),
-    ]);
-    if (agentManifestResult.status === "rejected") {
-      request.log.warn({
-        event: "e2e_project_agent_manifest_unavailable",
-        reason: agentManifestResult.reason instanceof Error
-          ? agentManifestResult.reason.message : "Project Agent manifest could not be read",
-      }, "Cross-platform E2E could not read the frozen Agent asset-placement contract");
-      return reply.code(503).send({ code: "E2E_TEST_PLAN_CONTEXT", message: "E2E 无法读取冻结的素材控件规划" });
-    }
-    projectAgentManifest = agentManifestResult.value;
-    const legacyProjectTestContract = projectAgentManifest?.testManifest;
-    if (!projectTestContract && legacyProjectTestContract
-      && typeof legacyProjectTestContract === "object" && !Array.isArray(legacyProjectTestContract)) {
-      projectTestContract = Object.freeze(legacyProjectTestContract as Record<string, unknown>);
-    }
-    if (regressionTraceResult.status === "fulfilled") {
-      regressionTrace = regressionTraceResult.value;
-    } else {
-      request.log.warn({
-        event: "e2e_project_regression_hint_ignored",
-        reason: regressionTraceResult.reason instanceof Error
-          ? regressionTraceResult.reason.message : "Project E2E regression trace could not be read",
-      }, "Ignoring an unreadable historical E2E regression trace");
-    }
-    const context = Object.freeze({
-      ...storedContext,
-      ...(projectTestContract ? { projectTestContract } : {}),
-      ...(projectAgentManifest?.assetManifest ? { assetUsageManifest: projectAgentManifest.assetManifest } : {}),
-      ...(regressionTrace ? { regressionTrace } : {}),
-    });
-    try {
-      let plan = await generateE2eTestPlan({
-        context, runtime: policy.runtime, baseUrl: policy.baseUrl, apiKey, model: policy.model,
-        testFixture: process.env.NODE_ENV === "test" && process.env.DEVILUDO_E2E_TEST_PLAN_FIXTURE === "1",
-      });
-      const frozen = await repository.freezeE2eTestPlan({
-        workspaceId: job.workspaceId,
-        workflowId: job.workflowId,
-        projectId: job.projectId,
-        platform: job.targetOperatingSystem,
-        sourceRevision,
-        goalRevision,
-        goalDigest,
-        testManifest: plan.testManifest,
-        testManifestDigest: plan.testManifestDigest,
-      });
-      if (frozen.testManifestDigest !== plan.testManifestDigest) {
-        plan = await generateE2eTestPlan({
-          context: Object.freeze({ ...context, projectTestContract: frozen.testManifest }),
-          runtime: policy.runtime, baseUrl: policy.baseUrl, apiKey, model: policy.model,
-          testFixture: process.env.NODE_ENV === "test" && process.env.DEVILUDO_E2E_TEST_PLAN_FIXTURE === "1",
-        });
-        if (plan.testManifestDigest !== frozen.testManifestDigest) {
-          throw new Error("Frozen E2E test plan digest is inconsistent");
-        }
-      }
-      return reply.send({ plan, policy: {
-        configurationDigest: policy.configurationDigest,
-        settingsRevision: policy.settingsRevision,
-        model: policy.model,
-      } });
-    } catch (error) {
-      request.log.warn({
-        event: "e2e_test_plan_failed",
-        jobId: job.jobId,
-        reason: error instanceof Error ? error.message : "Test Agent plan generation failed",
-      }, "Cross-platform E2E plan generation failed");
-      return reply.code(503).send({
-        code: "E2E_TEST_PLAN_PROVIDER",
-        message: error instanceof Error ? error.message : "Test Agent 未生成有效 E2E 测试计划",
-      });
-    }
   });
 
   app.post<{ Params: { jobId: string } }>("/v1/e2e/jobs/:jobId/player-policy", {
@@ -1907,7 +1871,7 @@ export async function runApi(
     const nodeId = await authorizeE2e(request, config, repository);
     const body = objectBody(request.body);
     const job = await repository.loadLeasedJob(jobIdentity(request.params.jobId, body), nodeId ? `e2e:${nodeId}` : undefined);
-    if (job.jobKind !== "E2E_TEST") return reply.code(409).send({ code: "PLAYER_POLICY_JOB_INVALID" });
+    if (job.jobKind !== "E2E_PLATFORM_RUN") return reply.code(409).send({ code: "PLAYER_POLICY_JOB_INVALID" });
     const policyRequest = parsePlayerPolicyRequest(body.request);
     const settings = await repository.readAgentSettings();
     if (!settings) return reply.code(503).send({ code: "PLAYER_POLICY_NOT_CONFIGURED" });
@@ -1933,28 +1897,62 @@ export async function runApi(
       if (cached) return reply.send({ decision: cached, policy: {
         configurationDigest: policy.configurationDigest, settingsRevision: policy.settingsRevision, model: policy.model,
       }, cached: true });
-      const apiKey = await agentSecrets.readApiKey(policy.credentialSecretRef);
-      if (!apiKey) return reply.code(503).send({ code: "PLAYER_POLICY_CREDENTIAL_UNAVAILABLE" });
       const startedAt = Date.now();
-      let generated;
+      let generated: Readonly<{ decision: ReturnType<typeof parsePlayerPolicyDecision>; inputTokens: number; outputTokens: number }>;
       try {
-        generated = await generateE2ePlayerDecision({
-          request: policyRequest, runtime: policy.runtime, baseUrl: policy.baseUrl, apiKey, model: policy.model,
+        const project = await repository.readProject(job.workspaceId, job.projectId);
+        if (!project) return reply.code(404).send({ code: "PROJECT_NOT_FOUND" });
+        await projectRuntime.initialize({
+          workspaceId: job.workspaceId,
+          projectId: job.projectId,
+          language: "en",
+          concept: project.concept,
+          settings,
+          source: project.source ? {
+            revision: project.source.revision,
+            digest: project.source.digest,
+            relativePath: project.source.relativePath,
+          } : null,
+        });
+        const runtimeResult = await projectRuntime.turn({
+          workspaceId: job.workspaceId,
+          projectId: job.projectId,
+          role: "TEST",
+          mode: "READ_ONLY_BRANCH",
+          prompt: [
+            "Inspect the attached current game frame and choose the next bounded native input for the frozen test plan.",
+            "Return only the player decision JSON object with screenIntegrity, screenIntegrityReason, status, observation, rationale, and actions.",
+            `Observation contract: ${JSON.stringify({
+              goal: policyRequest.goal,
+              allowedActions: policyRequest.allowedActions,
+              history: policyRequest.history,
+              recovery: policyRequest.recovery,
+              testPlanRevision: job.payload.testPlanRevision,
+            })}`,
+          ].join("\n"),
+          responseLanguage: "en",
+          settings,
+          sourceRevision: project.source?.revision ?? null,
+          sourceRelativePath: project.source?.relativePath ?? null,
+          attachments: Object.freeze([Object.freeze({
+            content: Buffer.from(policyRequest.screenshotBase64, "base64"),
+            extension: "png" as const,
+          })]),
+        });
+        generated = Object.freeze({
+          decision: parsePlayerPolicyDecision(runtimeResult.content, policyRequest.allowedActions),
+          inputTokens: 0,
+          outputTokens: 0,
         });
       } catch (error) {
-        const code = error && typeof error === "object" && "code" in error
-          && error.code === "PLAYER_POLICY_VISION_UNAVAILABLE"
-          ? "PLAYER_POLICY_VISION_UNAVAILABLE"
-          : "PLAYER_POLICY_PROVIDER";
+        const code = "TEST_AGENT_RUNTIME";
         request.log.warn({
           failureCode: code,
-          reason: error instanceof Error ? error.message : "Test Agent policy request failed",
-        }, "Test Agent policy request failed");
+          reason: error instanceof Error ? error.message : "Persistent Test Agent decision failed",
+        }, "Persistent Test Agent decision failed");
         return reply.code(503).send({
           code,
-          message: code === "PLAYER_POLICY_VISION_UNAVAILABLE"
-            ? "Test Agent Provider 未向模型提供图像输入，无法执行真实画面自适应测试"
-            : "Test Agent Provider 请求失败",
+          message: error instanceof Error ? error.message : "Persistent Test Agent decision failed",
         });
       }
       const stored = await repository.saveE2ePlayerDecision({
@@ -1995,7 +1993,9 @@ export async function runApi(
     return reply.code(accepted ? 202 : 200).send({ accepted });
   });
 
-  signal.addEventListener("abort", () => void app.close(), { once: true });
+  const aborted = signal.aborted
+    ? Promise.resolve()
+    : new Promise<void>(resolve => signal.addEventListener("abort", () => resolve(), { once: true }));
   await app.listen({ host: "0.0.0.0", port: config.port });
   const importAnalysisWorker = runProjectImportAnalysisWorker({
     repository,
@@ -2003,12 +2003,12 @@ export async function runApi(
     objectStore,
     projectSources,
     config,
+    projectRuntime,
     signal,
     logFailure: (message, error) => app.log.error({ err: error }, message),
   });
-  await new Promise<void>(resolve => signal.addEventListener("abort", () => resolve(), { once: true }));
-  await importAnalysisWorker;
-  await database.close();
+  await aborted;
+  await Promise.all([app.close(), importAnalysisWorker]);
 }
 
 type ConversationMessageCommand = Readonly<{
@@ -2128,12 +2128,13 @@ async function processConversationMessage(input: Readonly<{
   objectStore: CoreObjectStore;
   agentSecrets: AgentSecretStore;
   host: CoreHostServices;
+  projectRuntime: ProjectRuntimeService;
   command: ConversationMessageCommand;
   signal?: AbortSignal;
   onStage?: (phase: "NAMING" | "RESPONDING" | "SAVING") => void;
   stream?: ProductConversationStreamCallbacks;
 }>): Promise<ConversationMessageResult> {
-  const { request, principal, repository, objectStore, agentSecrets, host, command } = input;
+  const { request, principal, repository, objectStore, command } = input;
   let workspace = await selectedWorkspaceFromRequest(request, repository, principal);
   let projectId = command.projectId;
   let existingConversation: ProductConversation | null = null;
@@ -2174,109 +2175,147 @@ async function processConversationMessage(input: Readonly<{
         }),
       });
     }
-    const initialConnection = await agentConnection(host, principal, "conversation", repository, agentSecrets);
-    const { settings:initialSettings,apiKey:initialApiKey }=initialConnection;
-    const seedSpecification = specificationFromConcept("Untitled", command.content, command.responseLanguage);
-    let intentDecision: ConversationIntentDecision;
-    try {
-      intentDecision = await classifyConversationIntent({
-        content: command.content,
-        images: command.images,
-        history: Object.freeze([]),
-        project: Object.freeze({
-          name: "Untitled",
-          concept: command.content,
-          workflowState: "DRAFT",
-          specification: seedSpecification,
-          document: createInitialProjectDocument("Untitled", command.content, seedSpecification, command.responseLanguage),
-          analysisStatus: "READY",
-          discovery: null,
-        }),
-        pendingChange: null,
-        settings: initialSettings,
-        apiKey: initialApiKey,
-        responseLanguage: command.responseLanguage,
-      });
-    } catch (error) {
-      throw httpError(424, "INTENT_AGENT_FAILED", error instanceof Error ? error.message : "Intent Agent 调用失败");
-    }
+    const settings = await repository.readAgentSettings();
+    if (!settings) throw httpError(424, "AGENT_CONFIG_REQUIRED", "Configure the project Agent Runtime before starting a project");
     input.onStage?.("NAMING");
-    const name = await agentProjectName(command.content, repository, agentSecrets, command.responseLanguage,initialConnection);
+    const name = provisionalProjectName(command.content, command.responseLanguage);
     const specification = specificationFromConcept(name, command.content, command.responseLanguage);
-    input.onStage?.("RESPONDING");
-    const agentReplies = await conversationAgentReplies({
-      userContent: command.content,
-      images: command.images,
-      history: Object.freeze([]),
-      project: Object.freeze({
-        name,
-        concept: command.content,
-        workflowState: "DRAFT",
-        specification,
-        document: createInitialProjectDocument(name, command.content, specification, command.responseLanguage),
-        analysisStatus: "READY",
-        discovery: null,
-      }),
-      allowDraftMutation: intentDecision.intent === "CHANGE_REQUEST" && intentDecision.actionable,
-      responseLanguage: command.responseLanguage,
-      responderRoles: Object.freeze(["DESIGN"]),
-      changePlanning: intentDecision.intent === "CHANGE_REQUEST",
-    }, repository, agentSecrets, input.stream ? { signal: input.signal, callbacks: input.stream } : undefined,initialConnection);
-    intentDecision = reconcileConversationIntentReadiness(intentDecision, agentReplies);
-    input.onStage?.("SAVING");
-    const targetWorkspace = workspace ?? Object.freeze({ id: randomUUID(), name, createdAt: "" });
+    const targetWorkspace = workspace ?? Object.freeze({ id: randomUUID(), name: "Local workspace", createdAt: "" });
     const projectId = deterministicProjectId(principal.actorId, idempotencyKey);
     const conversationId = randomUUID();
-    const userAttachments = await storeConversationImages(objectStore, {
-      workspaceId: targetWorkspace.id,
-      projectId,
-      conversationId,
-    }, command.images);
-    const createdBundle = await repository.createProjectConversation({
+    const workflowId = randomUUID();
+    const shell = await repository.createProjectConversationShell({
       actorId: principal.actorId,
       workspaceId: targetWorkspace.id,
       workspaceName: targetWorkspace.name,
       projectId,
-      workflowId: randomUUID(),
+      workflowId,
       conversationId,
       idempotencyKey,
       name,
       concept: command.content,
       specification,
-      document: agentReplies.find(reply => reply.agentRole === "DESIGN")?.projectDocument
-        ?? createInitialProjectDocument(name, command.content, specification, command.responseLanguage),
+      document: createInitialProjectDocument(name, command.content, specification, command.responseLanguage),
       responseLanguage: command.responseLanguage,
+      ...defaultWorkflowConfiguration(),
+    });
+    await input.projectRuntime.initialize({
+      workspaceId: targetWorkspace.id,
+      projectId,
+      language: command.responseLanguage,
+      concept: command.content,
+      settings,
+      source: null,
+    });
+    const intentResult = await input.projectRuntime.turn({
+      workspaceId: targetWorkspace.id,
+      projectId,
+      role: "INTENT",
+      mode: "PRIMARY",
+      prompt: projectRuntimeIntentPrompt({
+        content: command.content,
+        hasAttachments: command.images.length > 0,
+        hasPendingChange: false,
+        workflowState: "DRAFT",
+        recentMessages: Object.freeze([]),
+      }),
+      responseLanguage: command.responseLanguage,
+      settings,
+      sourceRevision: null,
+      sourceRelativePath: null,
+      attachments: command.images,
+    }).catch(error => { throw httpError(424, "INTENT_AGENT_FAILED", error instanceof Error ? error.message : "Intent Agent failed"); });
+    const intentDecision = parseProjectRuntimeIntent(intentResult);
+    input.onStage?.("RESPONDING");
+    const specialistRole = intentDecision.targetRole;
+    input.stream?.onStart(specialistRole);
+    let streamedSpecialistOutput = false;
+    const specialistResult = await input.projectRuntime.turn({
+      workspaceId: targetWorkspace.id,
+      projectId,
+      role: specialistRole,
+      mode: "READ_ONLY_BRANCH",
+      prompt: projectRuntimeSpecialistPrompt({
+        intent: intentDecision,
+        content: command.content,
+        confirmed: intentDecision.intent === "CHANGE_REQUEST" && intentDecision.explicitExecution,
+      }),
+      responseLanguage: command.responseLanguage,
+      settings,
+      sourceRevision: null,
+      sourceRelativePath: null,
+      attachments: command.images,
+      onEvent: delta => {
+        streamedSpecialistOutput = true;
+        input.stream?.onDelta(specialistRole, delta);
+      },
+    }).catch(error => { throw httpError(424, "AGENT_CONVERSATION_FAILED", error instanceof Error ? error.message : "Project Agent failed"); });
+    const specialistReply = parseProjectRuntimeReply(specialistResult, specialistRole, settings);
+    if (!streamedSpecialistOutput) input.stream?.onDelta(specialistRole, specialistReply.content);
+    input.stream?.onComplete(specialistRole);
+    input.onStage?.("SAVING");
+    const userAttachments = await storeConversationImages(objectStore, {
+      workspaceId: targetWorkspace.id,
+      projectId,
+      conversationId,
+    }, command.images);
+    const conversation = await repository.appendConversationTurn({
+      workspaceId: targetWorkspace.id,
+      projectId,
+      conversationId,
       userContent: command.content,
       userAttachments,
-      assistantMessages: agentReplies.map(reply => Object.freeze({
-        content: reply.content,
-        metadata: Object.freeze({ ...conversationAgentMetadata(reply), intentDecision }),
-      })),
-      ...defaultWorkflowConfiguration(),
+      assistantMessages: [Object.freeze({
+        content: specialistReply.content,
+        metadata: Object.freeze({ ...conversationAgentMetadata(specialistReply), intentDecision,
+          runtimeTurnId: specialistResult.turnId, runtimeSessionId: specialistResult.sessionId }),
+      })],
+      assistantApplyToDraft: false,
+      assistantProjectDocument: null,
+      resolveImportAnalysis: false,
+      responseLanguage: command.responseLanguage,
     });
     const selectedWorkspace = workspace ?? await repository.readWorkspace(targetWorkspace.id);
     if (!selectedWorkspace) throw new Error("Created workspace could not be read");
-    let createdProject = createdBundle.project;
+    let createdProject = await repository.readProject(targetWorkspace.id, projectId) ?? shell.project;
+    let changeRequest: ImplementationChangeRequest | undefined;
+    let initialWorkflowAction: ConversationWorkflowAction = "NONE";
+    if (intentDecision.intent === "CHANGE_REQUEST" && intentDecision.actionable) {
+      changeRequest = await repository.createImplementationChangeRequest({
+        workspaceId: targetWorkspace.id,
+        projectId,
+        workflowId,
+        conversationId,
+        summary: intentDecision.summary,
+        implementationBrief: runtimeImplementationBrief(specialistResult, specialistReply.content),
+        projectDocumentPatch: specialistReply.projectDocumentPatch ?? Object.freeze({}),
+        e2eGoalDelta: specialistReply.e2eGoalDelta,
+        explicitExecution: intentDecision.explicitExecution,
+        idempotencyKey: requestIdempotencyKey(request, "implementation-change"),
+      });
+    }
     if (createdProject.workflowState === "DRAFT" && createdProject.analysisStatus === "READY"
       && intentDecision.intent === "CHANGE_REQUEST" && intentDecision.explicitExecution
-      && intentDecision.actionable && agentReplies.every(reply => reply.readyForDevelopment)) {
-      await approveProjectDevelopment({
-        repository,
-        objectStore,
-        workspaceId: targetWorkspace.id,
-        project: createdProject,
-        requestedByActorId: principal.actorId,
-        responseLanguage: command.responseLanguage,
+      && intentDecision.actionable && specialistReply.readyForDevelopment && changeRequest) {
+      initialWorkflowAction = await applyConfirmedConversationChange({
+        repository, objectStore, workspaceId: targetWorkspace.id, project: createdProject,
+        changeRequest, actorId: principal.actorId, responseLanguage: command.responseLanguage,
+        decisionIdempotencyKey: requestIdempotencyKey(request, "change-decision"),
       });
       createdProject = await repository.readProject(targetWorkspace.id, projectId) ?? createdProject;
+      changeRequest = (await repository.readImplementationChangeDecision(
+        targetWorkspace.id, projectId, changeRequest.id,
+      ))?.request ?? changeRequest;
     }
     return Object.freeze({
       statusCode: 201,
       setWorkspaceCookie: true,
       payload: Object.freeze({
-        workspace: selectedWorkspace, ...createdBundle, project: createdProject,
+        workspace: selectedWorkspace, project: createdProject, conversation,
         intentDecision,
-        workflowAction: createdProject.workflowState === "AGENT_RUNNING" ? "AGENT_STARTED" as const : "NONE" as const,
+        ...(changeRequest ? { changeRequest } : {}),
+        workflowAction: initialWorkflowAction !== "NONE" ? initialWorkflowAction
+          : changeRequest ? "AWAITING_CONFIRMATION" as const : "NONE" as const,
       }),
     });
   }
@@ -2285,24 +2324,40 @@ async function processConversationMessage(input: Readonly<{
   if (!projectId) throw new Error("Conversation project is required");
   const project = await repository.readProject(workspace.id, projectId);
   if (!project) throw httpError(404, "PROJECT_NOT_FOUND", "项目已不存在");
-  const connection=await agentConnection(host,principal,"conversation",repository,agentSecrets);
-  const {settings,apiKey}=connection;
+  const settings = await repository.readAgentSettings();
+  if (!settings) throw httpError(424, "AGENT_CONFIG_REQUIRED", "Configure the project Agent Runtime before using the project conversation");
+  await input.projectRuntime.initialize({
+    workspaceId: workspace.id,
+    projectId,
+    language: command.responseLanguage,
+    concept: project.concept,
+    settings,
+    source: project.source ? {
+      revision: project.source.revision,
+      digest: project.source.digest,
+      relativePath: project.source.relativePath,
+    } : null,
+  });
   input.onStage?.("RESPONDING");
-  let intentDecision: ConversationIntentDecision;
-  try {
-    intentDecision = await classifyConversationIntent({
+  const intentResult = await input.projectRuntime.turn({
+    workspaceId: workspace.id,
+    projectId,
+    role: "INTENT",
+    mode: "PRIMARY",
+    prompt: projectRuntimeIntentPrompt({
       content: command.content,
-      images: command.images,
-      history: existingConversation?.messages ?? Object.freeze([]),
-      project: conversationProjectContext(project),
-      pendingChange: project.pendingImplementationChange,
-      settings,
-      apiKey,
-      responseLanguage: command.responseLanguage,
-    });
-  } catch (error) {
-    throw httpError(424, "INTENT_AGENT_FAILED", error instanceof Error ? error.message : "Intent Agent 调用失败");
-  }
+      hasAttachments: command.images.length > 0,
+      hasPendingChange: project.pendingImplementationChange !== null,
+      workflowState: project.workflowState,
+      recentMessages: existingConversation?.messages ?? Object.freeze([]),
+    }),
+    responseLanguage: command.responseLanguage,
+    settings,
+    sourceRevision: project.source?.revision ?? null,
+    sourceRelativePath: project.source?.relativePath ?? null,
+    attachments: command.images,
+  }).catch(error => { throw httpError(424, "INTENT_AGENT_FAILED", error instanceof Error ? error.message : "Intent Agent failed"); });
+  const intentDecision = parseProjectRuntimeIntent(intentResult);
   const conversationId = command.conversationId ?? randomUUID();
   let userAttachments: ReturnType<typeof storeConversationImages> | null = null;
   const storedUserAttachments = () => {
@@ -2319,11 +2374,22 @@ async function processConversationMessage(input: Readonly<{
     const rejected = intentDecision.intent === "REJECT_CHANGE";
     if (!rejected && pending.state === "PENDING"
       && pending.baseDocumentRevision !== project.document.revision) {
-      const plan = await replanImplementationChange({
-        repository, agentSecrets, workspaceId: workspace.id, project, changeRequest: pending,
-        connection,
+      const replannedResult = await input.projectRuntime.turn({
+        workspaceId: workspace.id,
+        projectId,
+        role: "DESIGN",
+        mode: "READ_ONLY_BRANCH",
+        prompt: projectRuntimeSpecialistPrompt({
+          intent: Object.freeze({ ...intentDecision, intent: "CHANGE_REQUEST", targetRole: "DESIGN", explicitExecution: false, actionable: true }),
+          content: `Re-plan the pending change against the current document. Pending change: ${pending.summary}`,
+          confirmed: false,
+        }),
         responseLanguage: command.responseLanguage,
+        settings,
+        sourceRevision: project.source?.revision ?? null,
+        sourceRelativePath: project.source?.relativePath ?? null,
       });
+      const replannedReply = parseProjectRuntimeReply(replannedResult, "DESIGN", settings);
       input.onStage?.("SAVING");
       const conversation = await repository.appendConversationTurn({
         workspaceId: workspace.id,
@@ -2331,11 +2397,11 @@ async function processConversationMessage(input: Readonly<{
         projectId,
         userContent: command.content,
         userAttachments: await storedUserAttachments(),
-        expectedWorkflowState: project.workflowState,
-        assistantMessages: plan.replies.map(reply => Object.freeze({
-          content: reply.content,
-          metadata: Object.freeze({ ...conversationAgentMetadata(reply), intentDecision }),
-        })),
+        assistantMessages: [Object.freeze({
+          content: replannedReply.content,
+          metadata: Object.freeze({ ...conversationAgentMetadata(replannedReply), intentDecision,
+            runtimeTurnId: replannedResult.turnId, runtimeSessionId: replannedResult.sessionId }),
+        })],
         assistantApplyToDraft: false,
         assistantProjectDocument: null,
         resolveImportAnalysis: false,
@@ -2347,9 +2413,9 @@ async function processConversationMessage(input: Readonly<{
         workflowId: project.workflowId,
         conversationId,
         summary: pending.summary,
-        implementationBrief: plan.implementationBrief,
-        projectDocumentPatch: plan.projectDocumentPatch,
-        e2eGoalDelta: plan.e2eGoalDelta,
+        implementationBrief: runtimeImplementationBrief(replannedResult, pending.implementationBrief),
+        projectDocumentPatch: replannedReply.projectDocumentPatch ?? Object.freeze({}),
+        e2eGoalDelta: replannedReply.e2eGoalDelta,
         explicitExecution: false,
         idempotencyKey: `replan:${pending.id}:${project.document.revision}`,
         supersededChangeRequestId: pending.id,
@@ -2371,11 +2437,12 @@ async function processConversationMessage(input: Readonly<{
       projectId,
       userContent: command.content,
       userAttachments: await storedUserAttachments(),
-      expectedWorkflowState: project.workflowState,
       assistantMessages: [Object.freeze({
         content: rejected
           ? (command.responseLanguage === "zh" ? "已保持当前实现，本次变更不会执行。" : "The current implementation is unchanged; the proposed change was rejected.")
-          : (command.responseLanguage === "zh" ? "已确认变更，正在切换到新的 Agent 生成轮次。" : "Change confirmed. A new Agent generation round is starting."),
+          : (command.responseLanguage === "zh"
+              ? "修改已确认，设计 Agent 将按新需求修订设计与完整验收目标。"
+              : "Change confirmed. The Design Agent will revise the design and complete acceptance goals."),
         metadata: Object.freeze({ source: "INTENT_AGENT", intentDecision }),
       })],
       assistantApplyToDraft: false,
@@ -2410,18 +2477,55 @@ async function processConversationMessage(input: Readonly<{
       workspace.id, projectId, pending.id, requestIdempotencyKey(request, "change-abandon"),
     );
   }
+  if (intentDecision.intent === "STOP" || intentDecision.intent === "CONTINUE") {
+    if (intentDecision.intent === "STOP") {
+      await input.projectRuntime.setWorkflowStopped(workspace.id, projectId, true);
+    } else {
+      await input.projectRuntime.setWorkflowStopped(workspace.id, projectId, false);
+    }
+    const content = command.responseLanguage === "zh"
+      ? (intentDecision.intent === "STOP" ? "已停止当前任务并保存项目上下文。" : "已从最近的源码与上下文检查点继续。")
+      : (intentDecision.intent === "STOP" ? "The current work has stopped and the project context is saved." : "Work is continuing from the latest source and context checkpoint.");
+    const conversation = await repository.appendConversationTurn({
+      workspaceId: workspace.id, conversationId, projectId,
+      userContent: command.content, userAttachments: await storedUserAttachments(),
+      assistantMessages: [Object.freeze({ content, metadata: Object.freeze({ source: "INTENT_AGENT", intentDecision }) })],
+      assistantApplyToDraft: false, assistantProjectDocument: null,
+      resolveImportAnalysis: false, responseLanguage: command.responseLanguage,
+    });
+    const updatedProject = await repository.readProject(workspace.id, projectId) ?? project;
+    return Object.freeze({
+      statusCode: created ? 201 : 200, setWorkspaceCookie: false,
+      payload: Object.freeze({ workspace, project: updatedProject, conversation, intentDecision, workflowAction: "NONE" as const }),
+    });
+  }
 
-  const agentReplies = await conversationAgentReplies({
-    userContent: command.content,
-    images: command.images,
-    history: existingConversation?.messages ?? Object.freeze([]),
-    project: conversationProjectContext(project),
-    allowDraftMutation: intentDecision.intent === "CHANGE_REQUEST" && intentDecision.actionable,
+  const specialistRole = intentDecision.targetRole;
+  input.stream?.onStart(specialistRole);
+  let streamedSpecialistOutput = false;
+  const specialistResult = await input.projectRuntime.turn({
+    workspaceId: workspace.id,
+    projectId,
+    role: specialistRole,
+    mode: "READ_ONLY_BRANCH",
+    prompt: projectRuntimeSpecialistPrompt({
+      intent: intentDecision,
+      content: command.content,
+      confirmed: intentDecision.intent === "CHANGE_REQUEST" && intentDecision.explicitExecution,
+    }),
     responseLanguage: command.responseLanguage,
-    responderRoles: intentDecision.responderRoles,
-    changePlanning: intentDecision.intent === "CHANGE_REQUEST",
-  }, repository, agentSecrets, input.stream ? { signal: input.signal, callbacks: input.stream } : undefined,connection);
-  intentDecision = reconcileConversationIntentReadiness(intentDecision, agentReplies);
+    settings,
+    sourceRevision: project.source?.revision ?? null,
+    sourceRelativePath: project.source?.relativePath ?? null,
+    attachments: command.images,
+    onEvent: delta => {
+      streamedSpecialistOutput = true;
+      input.stream?.onDelta(specialistRole, delta);
+    },
+  }).catch(error => { throw httpError(424, "AGENT_CONVERSATION_FAILED", error instanceof Error ? error.message : "Project Agent failed"); });
+  const specialistReply = parseProjectRuntimeReply(specialistResult, specialistRole, settings);
+  if (!streamedSpecialistOutput) input.stream?.onDelta(specialistRole, specialistReply.content);
+  input.stream?.onComplete(specialistRole);
   input.onStage?.("SAVING");
   const conversation = await repository.appendConversationTurn({
     workspaceId: workspace.id,
@@ -2429,11 +2533,11 @@ async function processConversationMessage(input: Readonly<{
     projectId,
     userContent: command.content,
     userAttachments: await storedUserAttachments(),
-    expectedWorkflowState: project.workflowState,
-    assistantMessages: agentReplies.map(reply => Object.freeze({
-      content: reply.content,
-      metadata: Object.freeze({ ...conversationAgentMetadata(reply), intentDecision }),
-    })),
+    assistantMessages: [Object.freeze({
+      content: specialistReply.content,
+      metadata: Object.freeze({ ...conversationAgentMetadata(specialistReply), intentDecision,
+        runtimeTurnId: specialistResult.turnId, runtimeSessionId: specialistResult.sessionId }),
+    })],
     assistantApplyToDraft: false,
     assistantProjectDocument: null,
     resolveImportAnalysis: false,
@@ -2447,36 +2551,15 @@ async function processConversationMessage(input: Readonly<{
     });
   }
 
-  const design = agentReplies.find(reply => reply.agentRole === "DESIGN");
-  if (!design?.projectDocumentPatch && project.workflowState === "DRAFT"
-    && project.analysisStatus === "READY" && intentDecision.explicitExecution
-    && agentReplies.every(reply => reply.readyForDevelopment)) {
-    await approveProjectDevelopment({
-      repository,
-      objectStore,
-      workspaceId: workspace.id,
-      project,
-      requestedByActorId: principal.actorId,
-      responseLanguage: command.responseLanguage,
-    });
-    const updatedProject = await repository.readProject(workspace.id, projectId) ?? project;
-    return Object.freeze({
-      statusCode: created ? 201 : 200, setWorkspaceCookie: false,
-      payload: Object.freeze({ workspace, project: updatedProject, conversation, intentDecision, workflowAction: "AGENT_STARTED" as const }),
-    });
-  }
-
-  const test = agentReplies.find(reply => reply.agentRole === "TEST");
-  const development = agentReplies.find(reply => reply.agentRole === "DEVELOPMENT");
   const changeRequest = await repository.createImplementationChangeRequest({
     workspaceId: workspace.id,
     projectId,
     workflowId: project.workflowId,
     conversationId,
     summary: intentDecision.summary,
-    implementationBrief: development?.content ?? intentDecision.summary,
-    projectDocumentPatch: design?.projectDocumentPatch ?? Object.freeze({}),
-    e2eGoalDelta: test?.e2eGoalDelta ?? Object.freeze({ add: [], replace: [], retire: [] }),
+    implementationBrief: runtimeImplementationBrief(specialistResult, specialistReply.content),
+    projectDocumentPatch: specialistReply.projectDocumentPatch ?? Object.freeze({}),
+    e2eGoalDelta: specialistReply.e2eGoalDelta,
     explicitExecution: intentDecision.explicitExecution,
     idempotencyKey: requestIdempotencyKey(request, "implementation-change"),
   });
@@ -2746,25 +2829,6 @@ function decodedRequestHeader(request: FastifyRequest, name: string, fallback: s
   }
 }
 
-async function agentProjectName(
-  concept: string,
-  repository: CoreRepository,
-  agentSecrets: AgentSecretStore,
-  responseLanguage: ResponseLanguage,
-  resolved?:Readonly<{settings:StoredInstanceAgentSettings;apiKey:string}>,
-): Promise<string> {
-  const settings = resolved?.settings??await repository.readAgentSettings();
-  if (!settings) throw httpError(424, "AGENT_CONFIG_REQUIRED", "请先配置全局 Agent 连接");
-  const apiKey = resolved?.apiKey??await agentSecrets.readApiKey(settings.credentialSecretRef);
-  if (!apiKey) throw httpError(424, "AGENT_CONFIG_REQUIRED", "无法读取全局 Agent 凭据，请重新保存配置");
-  try {
-    return await generateProjectName({ concept, settings, apiKey, responseLanguage });
-  } catch (error) {
-    const message = error instanceof Error ? error.message : "Agent 项目命名失败";
-    throw httpError(424, "AGENT_NAMING_FAILED", message);
-  }
-}
-
 async function agentConnection(
   host:CoreHostServices,
   principal:CorePrincipal,
@@ -2959,9 +3023,8 @@ async function processHostedProjectImport(input: Readonly<{
   request: FastifyRequest;
   principal: CorePrincipal;
   repository: CoreRepository;
-  agentSecrets: AgentSecretStore;
-  host:CoreHostServices;
   projectSources: ProjectSourceStore;
+  projectRuntime: ProjectRuntimeService;
   source: ImportedSourceSnapshot;
 }>): Promise<Readonly<{ created: boolean; project: ProductProjectDetail }>> {
   const idempotencyKey = requestIdempotencyKey(input.request, "host-project-import");
@@ -2972,23 +3035,11 @@ async function processHostedProjectImport(input: Readonly<{
     if (!project) throw new Error("Hosted project import receipt is incomplete");
     return Object.freeze({ created: false, project });
   }
-  const {settings,apiKey}=await agentConnection(input.host,input.principal,"development",input.repository,input.agentSecrets);
+  const settings = await input.repository.readAgentSettings();
+  if (!settings) throw httpError(424, "AGENT_NOT_CONFIGURED", "Configure the project Agent Runtime before importing a project");
   const responseLanguage = parseResponseLanguage(requestHeader(input.request, "x-deviludo-response-language"));
-  let analysis;
-  try {
-    analysis = await analyzeImportedProject({ source: input.source, settings, apiKey, responseLanguage });
-  } catch (error) {
-    throw httpError(424, "AGENT_IMPORT_FAILED", error instanceof Error ? error.message : "Project analysis failed");
-  }
-
   const projectId = deterministicProjectId(input.principal.actorId, idempotencyKey);
   const workflowId = randomUUID();
-  const stored = await input.projectSources.publishFiles({
-    workspaceId: input.principal.workspace.id,
-    projectId,
-    revision: 1,
-    files: input.source.files,
-  });
   try {
     await input.repository.createPendingImportedProject({
       actorId: input.principal.actorId,
@@ -2997,7 +3048,7 @@ async function processHostedProjectImport(input: Readonly<{
       projectId,
       workflowId,
       idempotencyKey,
-      name: analysis.name,
+      name: input.source.displayName,
       responseLanguage,
       source: {
         kind: "GIT",
@@ -3008,11 +3059,56 @@ async function processHostedProjectImport(input: Readonly<{
       },
       ...defaultWorkflowConfiguration(),
     });
+    const stored = await input.projectSources.publishFiles({
+      workspaceId: input.principal.workspace.id,
+      projectId,
+      revision: 1,
+      files: input.source.files,
+    });
+    await input.projectRuntime.recordSourceRevision({
+      workspaceId: input.principal.workspace.id,
+      projectId,
+      revision: stored.revision,
+      relativePath: stored.relativePath,
+      digest: stored.digest,
+      fileCount: stored.fileCount,
+      totalBytes: stored.totalBytes,
+    });
+    await input.projectRuntime.initialize({
+      workspaceId: input.principal.workspace.id,
+      projectId,
+      language: responseLanguage,
+      concept: `Analyze imported project ${input.source.displayName}`,
+      settings,
+      source: { revision: stored.revision, digest: stored.digest, relativePath: stored.relativePath },
+    });
+    const analysisTurn = await input.projectRuntime.turn({
+      workspaceId: input.principal.workspace.id,
+      projectId,
+      role: "ANALYSIS",
+      mode: "PRIMARY",
+      prompt: "Analyze the imported game source completely. Inspect the startup path and current implementation, record the durable analysis, and return the required JSON report.",
+      responseLanguage,
+      settings,
+      sourceRevision: stored.revision,
+      sourceRelativePath: stored.relativePath,
+    });
+    const parsedAnalysis = parseImportedProjectAnalysis(
+      Object.keys(analysisTurn.structured).length ? JSON.stringify(analysisTurn.structured) : analysisTurn.content,
+      responseLanguage,
+    );
+    const analysis = Object.freeze({
+      ...parsedAnalysis,
+      runtime: settings.agentRuntime,
+      model: resolveAgentModel(settings.primaryModel, settings.modelOverrides, "analysis"),
+      settingsRevision: settings.revision,
+    });
     const completed = await input.repository.completeProjectImportAnalysis({
       workspaceId: input.principal.workspace.id,
       projectId,
       workflowId,
       actorId: input.principal.actorId,
+      name: analysis.name,
       leaseToken: "hosted",
       hosted: true,
       concept: analysis.concept,
@@ -3056,6 +3152,7 @@ async function runProjectImportAnalysisWorker(input: Readonly<{
   objectStore: CoreObjectStore;
   projectSources: ProjectSourceStore;
   config: CoreConfig;
+  projectRuntime: ProjectRuntimeService;
   signal: AbortSignal;
   logFailure: (message: string, error: unknown) => void;
 }>): Promise<void> {
@@ -3083,25 +3180,56 @@ async function runProjectImportAnalysisWorker(input: Readonly<{
       });
       const settings = await input.repository.readAgentSettings();
       if (!settings) throw new Error("请先在设置中配置全局 Agent 连接");
-      const apiKey = await input.agentSecrets.readApiKey(settings.credentialSecretRef);
-      if (!apiKey) throw new Error("无法读取全局 Agent 凭据，请重新保存配置");
-      const analysis = await analyzeImportedProject({
-        source,
-        settings,
-        apiKey,
-        responseLanguage: claimed.responseLanguage,
-      });
       const stored = await input.projectSources.publishFiles({
         workspaceId: claimed.workspaceId,
         projectId: claimed.projectId,
         revision: 1,
         files: source.files,
       });
+      await input.projectRuntime.recordSourceRevision({
+        workspaceId: claimed.workspaceId,
+        projectId: claimed.projectId,
+        revision: stored.revision,
+        relativePath: stored.relativePath,
+        digest: stored.digest,
+        fileCount: stored.fileCount,
+        totalBytes: stored.totalBytes,
+      });
+      await input.projectRuntime.initialize({
+        workspaceId: claimed.workspaceId,
+        projectId: claimed.projectId,
+        language: claimed.responseLanguage,
+        concept: `Analyze imported project ${claimed.displayName}`,
+        settings,
+        source: { revision: stored.revision, digest: stored.digest, relativePath: stored.relativePath },
+      });
+      const analysisTurn = await input.projectRuntime.turn({
+        workspaceId: claimed.workspaceId,
+        projectId: claimed.projectId,
+        role: "ANALYSIS",
+        mode: "PRIMARY",
+        prompt: "Analyze the imported game source completely. Inspect the startup path and current implementation, record the durable analysis, and return the required JSON report.",
+        responseLanguage: claimed.responseLanguage,
+        settings,
+        sourceRevision: stored.revision,
+        sourceRelativePath: stored.relativePath,
+      });
+      const parsedAnalysis = parseImportedProjectAnalysis(
+        Object.keys(analysisTurn.structured).length ? JSON.stringify(analysisTurn.structured) : analysisTurn.content,
+        claimed.responseLanguage,
+      );
+      const analysis = Object.freeze({
+        ...parsedAnalysis,
+        runtime: settings.agentRuntime,
+        model: resolveAgentModel(settings.primaryModel, settings.modelOverrides, "analysis"),
+        settingsRevision: settings.revision,
+      });
       const completed = await input.repository.completeProjectImportAnalysis({
         workspaceId: claimed.workspaceId,
         projectId: claimed.projectId,
         workflowId: claimed.workflowId,
         actorId: claimed.actorId,
+        name: analysis.name,
         leaseToken: claimed.leaseToken,
         concept: analysis.concept,
         specification: analysis.specification,
@@ -3179,125 +3307,6 @@ async function abortableDelay(milliseconds: number, signal: AbortSignal): Promis
 }
 
 
-async function conversationAgentReplies(
-  input: Readonly<{
-    userContent: string;
-    images?: readonly ConversationImageInput[];
-    history: readonly Pick<ProductConversation["messages"][number], "role" | "content">[];
-    project: ConversationAgentProjectContext;
-    allowDraftMutation: boolean;
-    responseLanguage: ResponseLanguage;
-    responderRoles?: readonly ProjectAgentRole[];
-    changePlanning?: boolean;
-  }>,
-  repository: CoreRepository,
-  agentSecrets: AgentSecretStore,
-  stream?: Readonly<{
-    signal?: AbortSignal;
-    callbacks: ProductConversationStreamCallbacks;
-  }>,
-  resolved?:Readonly<{settings:StoredInstanceAgentSettings;apiKey:string}>,
-): Promise<readonly ProductConversationGroupReply[]> {
-  const settings = resolved?.settings??await repository.readAgentSettings();
-  if (!settings) throw httpError(424, "AGENT_CONFIG_REQUIRED", "请先配置全局 Agent 连接");
-  const apiKey = resolved?.apiKey??await agentSecrets.readApiKey(settings.credentialSecretRef);
-  if (!apiKey) throw httpError(424, "AGENT_CONFIG_REQUIRED", "无法读取全局 Agent 凭据，请重新保存配置");
-  try {
-    if (stream) {
-      return await streamProductConversationGroupReply(
-        { ...input, settings, apiKey, signal: stream.signal },
-        stream.callbacks,
-      );
-    }
-    return await generateProductConversationGroupReply({ ...input, settings, apiKey });
-  } catch (error) {
-    const message = error instanceof Error ? error.message : "项目群聊 Agent 调用失败";
-    throw httpError(424, "AGENT_CONVERSATION_FAILED", message);
-  }
-}
-
-async function replanImplementationChange(input: Readonly<{
-  repository: CoreRepository;
-  agentSecrets: AgentSecretStore;
-  workspaceId: string;
-  project: ProductProjectDetail;
-  changeRequest: ImplementationChangeRequest;
-  responseLanguage: ResponseLanguage;
-  connection?:Readonly<{settings:StoredInstanceAgentSettings;apiKey:string}>;
-}>): Promise<Readonly<{
-  replies: readonly ProductConversationGroupReply[];
-  implementationBrief: string;
-  projectDocumentPatch: Readonly<Record<string, unknown>>;
-  e2eGoalDelta: E2eGoalDelta;
-}>> {
-  if (Object.keys(input.changeRequest.documentPatch).length === 0) {
-    return Object.freeze({
-      replies: Object.freeze([]),
-      implementationBrief: input.changeRequest.implementationBrief,
-      projectDocumentPatch: input.changeRequest.documentPatch,
-      e2eGoalDelta: input.changeRequest.e2eGoalDelta,
-    });
-  }
-  const conversation = await input.repository.readConversation(
-    input.workspaceId, input.changeRequest.conversationId,
-  );
-  if (!conversation) throw httpError(409, "CHANGE_REQUEST_STALE", "变更所属会话已不存在");
-  const originalRequest = [...conversation.messages].reverse().find(message => message.role === "USER")?.content
-    ?? input.changeRequest.summary;
-  const replies = await conversationAgentReplies({
-    userContent: [
-      "Re-plan this implementation change against the current project document.",
-      `Original request: ${originalRequest}`,
-      `Previous implementation brief: ${input.changeRequest.implementationBrief}`,
-    ].join("\n"),
-    history: conversation.messages,
-    project: conversationProjectContext(input.project),
-    allowDraftMutation: true,
-    responseLanguage: input.responseLanguage,
-    responderRoles: Object.freeze(["DESIGN"]),
-  }, input.repository, input.agentSecrets,undefined,input.connection);
-  const design = replies.find(reply => reply.agentRole === "DESIGN");
-  if (!design?.projectDocumentPatch) {
-    throw httpError(409, "CHANGE_REPLAN_INCOMPLETE", "项目说明已变化，Design Agent 未能生成新的变更提案");
-  }
-  return Object.freeze({
-    replies,
-    implementationBrief: input.changeRequest.implementationBrief,
-    projectDocumentPatch: design.projectDocumentPatch,
-    e2eGoalDelta: input.changeRequest.e2eGoalDelta,
-  });
-}
-
-function conversationProjectContext(project: ProductProjectDetail): ConversationAgentProjectContext {
-  return Object.freeze({
-    name: project.name,
-    concept: project.concept,
-    workflowState: project.workflowState,
-    specification: project.specification,
-    document: project.document.content,
-    analysisStatus: project.analysisStatus,
-    discovery: project.discovery,
-    e2eGoals: project.e2eGoals,
-    workflowStatus: Object.freeze({
-      workflowId: project.workflowId,
-      iterationNumber: project.iterationNumber,
-      state: project.workflowState,
-      targetPlatforms: project.targetPlatforms,
-      jobs: project.jobs.map(job => Object.freeze({
-        kind: job.kind,
-        platform: job.targetOperatingSystem,
-        state: job.state,
-        attempt: job.attempt,
-        failure: job.lastError?.slice(0, 1_800) ?? null,
-      })),
-      recentEvents: project.events.slice(0, 12).map(event => Object.freeze({
-        kind: event.kind,
-        data: event.data,
-      })),
-    }),
-  });
-}
-
 function conversationIntentDecision(conversation: ProductConversation): ConversationIntentDecision {
   const value = conversation.messages.find(message => (
     message.role === "ASSISTANT" && message.metadata.intentDecision !== undefined
@@ -3306,10 +3315,9 @@ function conversationIntentDecision(conversation: ProductConversation): Conversa
     throw new Error("Persisted conversation is missing its Intent Agent decision");
   }
   const decision = value as Record<string, unknown>;
-  if (!["QUESTION", "CHANGE_REQUEST", "CONFIRM_CHANGE", "REJECT_CHANGE"].includes(String(decision.intent))
+  if (!["QUESTION", "CHANGE_REQUEST", "CONFIRM_CHANGE", "REJECT_CHANGE", "STOP", "CONTINUE"].includes(String(decision.intent))
     || typeof decision.explicitExecution !== "boolean" || typeof decision.actionable !== "boolean"
-    || !Array.isArray(decision.responderRoles)
-    || decision.responderRoles.some(role => !["DESIGN", "DEVELOPMENT", "TEST"].includes(String(role)))
+    || !["DESIGN", "DEVELOPMENT", "TEST"].includes(String(decision.targetRole))
     || typeof decision.summary !== "string" || !decision.summary.trim()) {
     throw new Error("Persisted Intent Agent decision is invalid");
   }
@@ -3317,7 +3325,7 @@ function conversationIntentDecision(conversation: ProductConversation): Conversa
     intent: decision.intent as ConversationIntentDecision["intent"],
     explicitExecution: decision.explicitExecution,
     actionable: decision.actionable,
-    responderRoles: Object.freeze(decision.responderRoles as ProjectAgentRole[]),
+    targetRole: decision.targetRole as ProjectAgentRole,
     summary: decision.summary,
   });
 }
@@ -3360,6 +3368,8 @@ function publicAgentSettings(
     baseUrl: settings?.baseUrl ?? "https://api.anthropic.com",
     primaryModel: settings?.primaryModel ?? "claude-sonnet-4-5",
     modelOverrides: settings?.modelOverrides ?? Object.freeze({
+      intent: null,
+      analysis: null,
       design: null,
       development: null,
       test: null,
@@ -3438,6 +3448,14 @@ function steamNumericId(value: unknown, label: string): string {
     throw new Error(`${label} is invalid`);
   }
   return normalized;
+}
+
+function provisionalProjectName(content: string, language: ResponseLanguage): string {
+  const normalized = content.replace(/\s+/g, " ").trim();
+  if (!normalized) return language === "zh" ? "新游戏" : "New Game";
+  const firstSentence = normalized.split(/[。！？.!?\n]/u)[0]?.trim() ?? "";
+  const clipped = [...firstSentence].slice(0, 48).join("").trim();
+  return clipped || (language === "zh" ? "新游戏" : "New Game");
 }
 
 function specificationFromConcept(

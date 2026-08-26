@@ -5,12 +5,14 @@ import type { CoreConfig } from "./config";
 import { CoreObjectStore } from "./object-store";
 import { ProjectSourceStore } from "./project-sources";
 import type { CoreRepository } from "./repository";
+import type { ProjectRuntimeLifecycle } from "./project-runtime-lifecycle";
 
 export async function runScheduler(
   repository: CoreRepository,
   config: CoreConfig,
   signal: AbortSignal,
   hostServices?: CoreHostServices,
+  projectRuntimeLifecycle?: ProjectRuntimeLifecycle,
 ): Promise<void> {
   // Built once and shared across ticks, but only if this deployment configured an
   // object store. `ObjectStore` requires a bucket, and asset generation is the
@@ -35,10 +37,10 @@ export async function runScheduler(
     const startedAt = Date.now();
     try {
       const recovered = await repository.recoverExpiredJobs();
+      const projectRuntimeLifecycleResult = projectRuntimeLifecycle
+        ? await projectRuntimeLifecycle.runOnce()
+        : null;
       await repository.reconcileCapacity();
-      const projectDocumentsScheduled = await repository.scheduleIdleProjectDocumentMaintenance(
-        config.projectDocumentIdleSeconds,
-      );
       const expiredAuthRecordsRemoved = await repository.cleanupExpiredAuthState();
       const localGitCommit = await runLocalGitCommit(repository, config, signal);
       const expiredUploadsEnqueued = hostServices?.mode === "managed"
@@ -67,7 +69,7 @@ export async function runScheduler(
         level: "info",
         event: "scheduler_tick",
         recovered,
-        projectDocumentsScheduled,
+        ...(projectRuntimeLifecycleResult ? { projectRuntimeLifecycle: projectRuntimeLifecycleResult } : {}),
         expiredAuthRecordsRemoved,
         expiredUploadsEnqueued,
         expiredArtifactsEnqueued,

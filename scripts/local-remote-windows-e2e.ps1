@@ -81,7 +81,7 @@ function Invoke-Run {
   $env:DEVILUDO_E2E_JOB_ROOT=$Jobs
   $env:DEVILUDO_E2E_GUEST_CREDENTIAL_FILE=(Join-Path $State 'guest-credential.xml')
   $env:DEVILUDO_E2E_ISOLATION_EXECUTOR=(Join-Path $State 'isolation.cmd')
-  $env:DEVILUDO_E2E_TEST_EXECUTOR=(Join-Path $RepositoryPath 'deploy\assets\e2e-job-executor.mjs')
+  $env:DEVILUDO_E2E_PLATFORM_RUN_EXECUTOR=(Join-Path $RepositoryPath 'deploy\assets\e2e-job-executor.mjs')
   $env:DEVILUDO_E2E_GUEST_RUNNER=(Join-Path $State 'guest-runner.cmd')
   $env:DEVILUDO_GOLDEN_VM_ARCHIVE=$configuration.runtimeImageFile
   $env:DEVILUDO_GOLDEN_VM_FILE=$goldenConfiguration

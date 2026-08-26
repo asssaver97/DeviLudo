@@ -1,4 +1,6 @@
 import { readFile, rm } from "node:fs/promises";
+import { execFile } from "node:child_process";
+import { promisify } from "node:util";
 import { resolve, sep } from "node:path";
 import { DeleteObjectsCommand, ListObjectsV2Command, S3Client } from "@aws-sdk/client-s3";
 import pg from "pg";
@@ -17,10 +19,27 @@ const databaseUrl = (await readFile(process.env.DEVILUDO_MIGRATION_DATABASE_URL_
 const vaultToken = (await readFile(process.env.DEVILUDO_VAULT_ADMIN_TOKEN_FILE, "utf8")).trim();
 const vaultAddress = new URL(process.env.DEVILUDO_VAULT_ADDR);
 const projectsRoot = resolve(process.env.DEVILUDO_PROJECTS_ROOT);
+const execute = promisify(execFile);
 if (!projectsRoot.startsWith(sep) || projectsRoot === sep || projectsRoot.split(sep).filter(Boolean).length < 3) {
   throw new Error("DEVILUDO_PROJECTS_ROOT is too broad for destructive reset");
 }
 if (process.env.NODE_ENV === "production" && vaultAddress.protocol !== "https:") throw new Error("Production Vault must use HTTPS");
+
+// Runtime containers and their native session volumes are deliberately outside
+// the project data volume. Remove only objects carrying DeviLudo's exact labels
+// and volume prefix before resetting the durable context/source store.
+const { stdout: runtimeContainers } = await execute("docker", [
+  "ps", "-aq", "--filter", "label=deviludo.kind=project-runtime",
+], { maxBuffer: 1024 * 1024 });
+const containerIds = runtimeContainers.split(/\r?\n/).map(value => value.trim()).filter(Boolean);
+if (containerIds.length) await execute("docker", ["rm", "-f", ...containerIds], { maxBuffer: 4 * 1024 * 1024 });
+const { stdout: runtimeVolumes } = await execute("docker", [
+  "volume", "ls", "-q", "--filter", "name=deviludo-runtime-",
+], { maxBuffer: 1024 * 1024 });
+const volumeNames = runtimeVolumes.split(/\r?\n/)
+  .map(value => value.trim())
+  .filter(value => /^deviludo-runtime-[0-9a-f-]{36}$/i.test(value));
+if (volumeNames.length) await execute("docker", ["volume", "rm", "-f", ...volumeNames], { maxBuffer: 4 * 1024 * 1024 });
 
 const s3 = new S3Client({
   region: process.env.DEVILUDO_S3_REGION ?? "us-east-1",

@@ -449,12 +449,12 @@ function formatDate(value: string, locale: string): string {
 
 function workflowLabel(state: string, text: (chinese: string, english: string) => string): string {
   const labels: Record<string, readonly [string, string]> = {
-    DRAFT: ["需求讨论中", "Requirements discussion"], AGENT_RUNNING: ["Agent 生成中", "Agent running"],
-    ASSET_GENERATING: ["图片素材生成中", "Generating image assets"],
-    ARTIFACT_BUILDING: ["制品构建中", "Building artifacts"], E2E_TESTING: ["跨平台测试中", "Cross-platform testing"],
-    RELEASE_DECISION_PENDING: ["等待发布决策", "Awaiting release decision"],
-    SIGNING: ["平台签名中（历史）", "Signing (legacy)"], RELEASE_APPROVAL_PENDING: ["等待发布批准（历史）", "Awaiting release approval (legacy)"], STEAM_PUBLISHING: ["Steam 发布中", "Publishing to Steam"],
-    CLEAN_INSTALL_VERIFYING: ["干净回装验证中", "Clean-install verification"], SUCCEEDED: ["交付完成", "Delivered"],
+    DRAFT: ["需求讨论中", "Requirements discussion"], ANALYZING: ["项目分析中", "Analyzing project"],
+    DESIGNING: ["游戏设计中", "Designing game"], DEVELOPING: ["游戏生成中", "Developing game"],
+    BUILDING: ["制品构建中", "Building artifacts"], TEST_PLANNING: ["测试规划中", "Planning tests"],
+    TESTING: ["跨平台测试中", "Cross-platform testing"], RELEASE_APPROVAL_PENDING: ["等待发布批准", "Awaiting release approval"],
+    STEAM_PUBLISHING: ["Steam 发布中", "Publishing to Steam"], SUCCEEDED: ["交付完成", "Delivered"],
+    BLOCKED: ["等待配置", "Blocked"], STOPPED: ["已停止", "Stopped"],
     FAILED: ["流程失败", "Failed"], CANCELLED: ["已取消", "Cancelled"],
   };
   const label = labels[state];

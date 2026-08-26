@@ -6,7 +6,19 @@ RUN apt-get update \
 COPY fixtures/godot-smoke /opt/deviludo-fixture
 COPY services/sandbox-executor/task-fixture-agent.mjs /usr/local/bin/deviludo-task
 COPY services/sandbox-executor/task-io.mjs /usr/local/bin/deviludo-task-io
-RUN chmod 0555 /usr/local/bin/deviludo-task /usr/local/bin/deviludo-task-io \
+COPY services/project-runtime/runtime.mjs /usr/local/bin/deviludo-project-runtime
+COPY services/project-runtime/fixture-turn.mjs /usr/local/bin/deviludo-project-turn
+COPY services/project-runtime/io.mjs /usr/local/bin/deviludo-runtime-io
+COPY services/project-runtime/volume-init.mjs /usr/local/bin/deviludo-runtime-volume-init
+COPY services/project-runtime/mcp-server.mjs /usr/local/bin/deviludo-mcp
+COPY services/project-runtime/mcp.json /opt/deviludo/mcp.json
+COPY services/project-runtime/skills /opt/deviludo/skills
+RUN find /opt/deviludo/skills -type f -name SKILL.md -print0 \
+      | sort -z \
+      | xargs -0 sha256sum > /opt/deviludo/skills.sha256 \
+ && chmod 0555 /usr/local/bin/deviludo-task /usr/local/bin/deviludo-task-io \
+      /usr/local/bin/deviludo-project-runtime /usr/local/bin/deviludo-project-turn \
+      /usr/local/bin/deviludo-runtime-io /usr/local/bin/deviludo-runtime-volume-init /usr/local/bin/deviludo-mcp \
  && chown -R 10001:10001 /opt/deviludo-fixture
 USER 10001:10001
 ENTRYPOINT ["/usr/local/bin/deviludo-task"]

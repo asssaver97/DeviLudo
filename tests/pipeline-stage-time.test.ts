@@ -11,7 +11,7 @@ import type { ProductEvent, ProductJob } from "../lib/product/contracts";
 function job(state: string, updatedAt: string, targetOperatingSystem: string | null = null): ProductJob {
   return Object.freeze({
     id: `${state}-${targetOperatingSystem ?? "core"}`,
-    kind: "E2E_TEST",
+    kind: "E2E_PLATFORM_RUN",
     poolKind: "E2E_MACOS",
     targetOperatingSystem,
     state,
@@ -48,18 +48,18 @@ test("failed and cancelled terminal stages retain their finish time", () => {
 test("superseded attempts are excluded from the current pipeline stage", () => {
   const superseded = {
     ...job("CANCELLED", "2026-08-16T01:03:04.000Z", "macos"),
-    lastError: "superseded by stage rerun from ARTIFACT_BUILD",
+    lastError: "superseded by stage rerun from BUILD",
   };
   const explicitlyCancelled = job("CANCELLED", "2026-08-16T01:04:05.000Z", "linux");
   assert.deepEqual(currentPipelineJobs([superseded, explicitlyCancelled]), [explicitlyCancelled]);
 });
 
 test("stages after the active delivery stage wait for their predecessor", () => {
-  assert.equal(pipelineStageWaitsForPredecessor("E2E_TEST", "ARTIFACT_BUILDING"), true);
-  assert.equal(pipelineStageWaitsForPredecessor("STEAM_PUBLISH", "ARTIFACT_BUILDING"), true);
-  assert.equal(pipelineStageWaitsForPredecessor("ARTIFACT_BUILD", "ARTIFACT_BUILDING"), false);
-  assert.equal(pipelineStageWaitsForPredecessor("E2E_TEST", "E2E_TESTING"), false);
-  assert.equal(pipelineStageWaitsForPredecessor("E2E_TEST", "FAILED"), false);
+  assert.equal(pipelineStageWaitsForPredecessor("E2E_PLATFORM_RUN", "BUILDING"), true);
+  assert.equal(pipelineStageWaitsForPredecessor("STEAM_PUBLISH", "BUILDING"), true);
+  assert.equal(pipelineStageWaitsForPredecessor("BUILD", "BUILDING"), false);
+  assert.equal(pipelineStageWaitsForPredecessor("E2E_PLATFORM_RUN", "TESTING"), false);
+  assert.equal(pipelineStageWaitsForPredecessor("E2E_PLATFORM_RUN", "FAILED"), false);
 });
 
 test("the requirements or analysis node uses the latest approval event as its finish time", () => {

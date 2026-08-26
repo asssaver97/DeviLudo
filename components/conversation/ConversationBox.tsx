@@ -287,6 +287,18 @@ export function ConversationBox({
             </div>
           ) : null}
           {agentProgress?.running ? <AgentProgressPanel progress={agentProgress} /> : null}
+          {sending && showSendingReply && !PROJECT_AGENT_ROLES.some(role => Boolean(streamingReplies[role])) ? (
+            <article className="conversation-box-message assistant is-thinking role-intent">
+              <span className="message-avatar">IN</span>
+              <div>
+                <header>
+                  <b>{text("Intent Agent", "Intent Agent")}</b>
+                  <span className="conversation-agent-working">{text("正在识别意图", "Identifying intent")}</span>
+                </header>
+                <p><TypingDots /></p>
+              </div>
+            </article>
+          ) : null}
           {sending && showSendingReply ? (
             PROJECT_AGENT_ROLES.filter(role => Boolean(streamingReplies[role])).map(role => {
                 const identity = agentIdentity(role, text);

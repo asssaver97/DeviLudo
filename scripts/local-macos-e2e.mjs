@@ -44,7 +44,7 @@ if (prepared && !preparationController.signal.aborted) {
   process.env.DEVILUDO_E2E_TOOL_PATH = "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin";
   process.env.DEVILUDO_E2E_JOB_ROOT = saved.jobRoot;
   process.env.DEVILUDO_E2E_ISOLATION_EXECUTOR = new URL("./executors/local-tart-isolation.mjs", import.meta.url).pathname;
-  process.env.DEVILUDO_E2E_TEST_EXECUTOR = new URL("../deploy/assets/e2e-job-executor.mjs", import.meta.url).pathname;
+  process.env.DEVILUDO_E2E_PLATFORM_RUN_EXECUTOR = new URL("../deploy/assets/e2e-job-executor.mjs", import.meta.url).pathname;
   process.env.DEVILUDO_E2E_GUEST_RUNNER = new URL("./executors/local-tart-guest-runner.mjs", import.meta.url).pathname;
   const { main } = await import("../services/e2e-node/src/main.ts");
   await main();

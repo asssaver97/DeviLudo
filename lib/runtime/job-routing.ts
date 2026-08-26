@@ -6,18 +6,15 @@ import {
 } from "./server-pools";
 
 export const JOB_KINDS = [
-  "AGENT_GENERATION",
-  "PROJECT_DOCUMENT_MAINTENANCE",
-  "ARTIFACT_BUILD",
+  "AGENT_TURN",
+  "BUILD",
+  "E2E_PLATFORM_RUN",
   "STEAM_PUBLISH",
-  "E2E_TEST",
-  "ARTIFACT_SIGN",
-  "STEAM_CLEAN_INSTALL",
 ] as const;
 
 export type JobKind = typeof JOB_KINDS[number];
-export type CoreJobKind = Extract<JobKind, "AGENT_GENERATION" | "PROJECT_DOCUMENT_MAINTENANCE" | "ARTIFACT_BUILD" | "STEAM_PUBLISH">;
-export type E2eJobKind = "E2E_TEST";
+export type CoreJobKind = Extract<JobKind, "AGENT_TURN" | "BUILD" | "STEAM_PUBLISH">;
+export type E2eJobKind = "E2E_PLATFORM_RUN";
 
 const E2E_POOL_BY_OS: Readonly<Record<ServerOperatingSystem, ServerPoolKind>> = Object.freeze({
   linux: "E2E_LINUX",
@@ -30,10 +27,7 @@ export function isJobKind(value: unknown): value is JobKind {
 }
 
 export function routeJob(kind: JobKind, targetOperatingSystem?: ServerOperatingSystem): ServerPoolKind {
-  if (kind === "ARTIFACT_SIGN" || kind === "STEAM_CLEAN_INSTALL") {
-    throw new Error(`${kind} is a retired historical job kind`);
-  }
-  if (kind === "AGENT_GENERATION" || kind === "PROJECT_DOCUMENT_MAINTENANCE" || kind === "ARTIFACT_BUILD" || kind === "STEAM_PUBLISH") {
+  if (kind === "AGENT_TURN" || kind === "BUILD" || kind === "STEAM_PUBLISH") {
     if (targetOperatingSystem !== undefined) throw new Error(`${kind} cannot target an E2E operating system`);
     return "CORE";
   }
@@ -52,18 +46,14 @@ export function assertJobPlacement(input: Readonly<{
 }
 
 export function jobCapabilities(kind: JobKind): readonly string[] {
-  if (kind === "ARTIFACT_SIGN" || kind === "STEAM_CLEAN_INSTALL") {
-    throw new Error(`${kind} is a retired historical job kind`);
-  }
-  if (kind === "E2E_TEST") return Object.freeze(["GAME_RUNTIME", "TRUSTED_REIMAGE"]);
-  if (kind === "AGENT_GENERATION") return Object.freeze(["MICROVM", "NETWORK_POLICY"]);
-  if (kind === "PROJECT_DOCUMENT_MAINTENANCE") return Object.freeze(["MICROVM", "NETWORK_POLICY"]);
-  if (kind === "ARTIFACT_BUILD") return Object.freeze(["RESTRICTED_CONTAINER", "BUILD_TOOLCHAIN"]);
+  if (kind === "E2E_PLATFORM_RUN") return Object.freeze(["GAME_RUNTIME", "TRUSTED_REIMAGE"]);
+  if (kind === "AGENT_TURN") return Object.freeze(["PROJECT_RUNTIME", "ROLE_SCOPED_MCP"]);
+  if (kind === "BUILD") return Object.freeze(["RESTRICTED_CONTAINER", "BUILD_TOOLCHAIN"]);
   return Object.freeze(["RESTRICTED_CONTAINER", "STEAMCMD"]);
 }
 
 export function isExclusiveJob(kind: JobKind): boolean {
-  return kind === "E2E_TEST";
+  return kind === "E2E_PLATFORM_RUN";
 }
 
 export function poolOperatingSystem(poolKind: ServerPoolKind): ServerOperatingSystem {

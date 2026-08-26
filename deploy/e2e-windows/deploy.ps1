@@ -89,7 +89,7 @@ function Get-ServiceEnvironment {
   return @(
     'NODE_ENV=production',"DEVILUDO_E2E_NODE_ID=$NodeId",'DEVILUDO_E2E_POOL_KIND=E2E_WINDOWS',"DEVILUDO_CORE_API_URL=$($Config.coreUrl)","DEVILUDO_E2E_TOOL_PATH=$($Config.toolPath)",
     "DEVILUDO_E2E_CLIENT_CERT_FILE=$credentials\node.crt","DEVILUDO_E2E_CLIENT_KEY_FILE=$credentials\node-tls.key","DEVILUDO_E2E_CORE_CA_FILE=$credentials\core-ca.crt","DEVILUDO_E2E_IDENTITY_KEY_FILE=$credentials\receipt-ed25519.pem","DEVILUDO_E2E_CREDENTIAL_DIRECTORY=$credentials",
-    "DEVILUDO_E2E_ISOLATION_EXECUTOR=$current\e2e-windows-isolation.cmd","DEVILUDO_E2E_TEST_EXECUTOR=$current\e2e-windows-job-executor.cmd","DEVILUDO_E2E_GUEST_RUNNER=$current\e2e-windows-guest-runner.cmd",
+    "DEVILUDO_E2E_ISOLATION_EXECUTOR=$current\e2e-windows-isolation.cmd","DEVILUDO_E2E_PLATFORM_RUN_EXECUTOR=$current\e2e-windows-job-executor.cmd","DEVILUDO_E2E_GUEST_RUNNER=$current\e2e-windows-guest-runner.cmd",
     "DEVILUDO_E2E_JOB_ROOT=$State\jobs","DEVILUDO_E2E_GUEST_CREDENTIAL_FILE=$credentials\guest-credential.xml","DEVILUDO_GOLDEN_VM_ARCHIVE=$GoldenVmArchive","DEVILUDO_GOLDEN_VM_FILE=$GoldenVmConfiguration","DEVILUDO_COSIGN_IDENTITY_REGEXP=$($Config.cosignIdentityRegexp)","DEVILUDO_COSIGN_ISSUER=$($Config.cosignIssuer)"
   )
 }

@@ -9,7 +9,7 @@ test("instance Agent settings persist safely and freeze into workspace jobs", as
       agentRuntime: "CLAUDE_CODE",
       baseUrl: "https://api.anthropic.com",
       primaryModel: "claude-sonnet-4-5",
-      modelOverrides: { design: null, development: null, test: null },
+      modelOverrides: { intent: null, analysis: null, design: null, development: null, test: null },
       imageModel: null,
       imageGenerationBackend: null,
       apiKeyConfigured: false,
@@ -96,7 +96,7 @@ test("instance Agent settings persist safely and freeze into workspace jobs", as
       FROM deviludo.jobs
      WHERE workspace_id = '${project.workspaceId}'::uuid
        AND workflow_id = '${project.workflowId}'::uuid
-       AND kind = 'AGENT_GENERATION'
+       AND kind = 'AGENT_TURN'
   `);
   expect(locked[0]?.payload.agentConfiguration).toMatchObject({
     runtime: "CLAUDE_CODE",
@@ -109,7 +109,13 @@ test("instance Agent settings persist safely and freeze into workspace jobs", as
   );
 
   expect(createdBody.settings.primaryModel).toBe("claude-fable-5-max");
-  expect(createdBody.settings.modelOverrides).toEqual({ design: null, development: null, test: null });
+  expect(createdBody.settings.modelOverrides).toEqual({
+    intent: null,
+    analysis: null,
+    design: null,
+    development: null,
+    test: null,
+  });
   expect(createdBody.settings.imageModel).toBe("gpt-image-1");
 
   const rows = await stack.queryRows<{
@@ -137,7 +143,7 @@ test("custom Codex Responses settings persist as one protected connection", asyn
       baseUrl: "https://api.x.ai/v1/",
       apiKey,
       primaryModel: "xai/grok-4.6",
-      modelOverrides: { design: null, development: "xai/grok-code-fast-1", test: null },
+      modelOverrides: { intent: null, analysis: null, design: null, development: "xai/grok-code-fast-1", test: null },
     },
   });
   const text = await response.text();
@@ -147,7 +153,7 @@ test("custom Codex Responses settings persist as one protected connection", asyn
     agentRuntime: "CODEX_CLI",
     baseUrl: "https://api.x.ai/v1",
     primaryModel: "xai/grok-4.6",
-    modelOverrides: { design: null, development: "xai/grok-code-fast-1", test: null },
+    modelOverrides: { intent: null, analysis: null, design: null, development: "xai/grok-code-fast-1", test: null },
     apiKeyConfigured: true,
     apiKeyMasked: "xai********cret",
     imageGenerationBackend: "CODEX_IMAGEGEN",

@@ -109,12 +109,15 @@ services:
       DEVILUDO_VAULT_ADDR: http://vault:8200
       DEVILUDO_VAULT_TOKEN_FILE: /run/deviludo-vault/api.token
       DEVILUDO_VAULT_TOKEN_RENEW_INTERVAL_SECONDS: "3600"
+      DEVILUDO_SANDBOX_EXECUTOR: /usr/local/bin/sandbox-executor-client
+      DEVILUDO_EXECUTOR_SOCKET: /run/deviludo-executor/executor.sock
       PORT: "8080"
     volumes:
       - vault-tokens:/run/deviludo-vault:ro
       - projects-data:/var/lib/deviludo-projects
       - ../.deviludo/local/codex-auth.json:/run/deviludo-codex/auth.json:ro
       - ../.deviludo/local/codex-models-cache.json:/run/deviludo-codex/models_cache.json:ro
+      - executor-socket:/run/deviludo-executor
     depends_on:
       postgres:
         condition: service_healthy
@@ -135,6 +138,7 @@ services:
       - core
       - data
       - provider-egress
+      - executor-agent
 
   core-scheduler:
     <<: *core
@@ -142,7 +146,6 @@ services:
       <<: *core-environment
       DEVILUDO_CORE_ROLE: scheduler
       DEVILUDO_CORE_SCHEDULER_DATABASE_URL: postgresql://deviludo:deviludo-local@postgres:5432/deviludo
-      DEVILUDO_PROJECT_DOCUMENT_IDLE_SECONDS: "${DEVILUDO_PROJECT_DOCUMENT_IDLE_SECONDS:-86400}"
       # Asynchronous asset generation writes generated images into the asset
       # bucket, so the scheduler needs the same object store as the sandbox.
       DEVILUDO_S3_ENDPOINT: http://minio:9000
@@ -156,9 +159,13 @@ services:
       DEVILUDO_VAULT_ADDR: http://vault:8200
       DEVILUDO_VAULT_TOKEN_FILE: /run/deviludo-vault/api.token
       DEVILUDO_VAULT_TOKEN_RENEW_INTERVAL_SECONDS: "3600"
+      DEVILUDO_SANDBOX_EXECUTOR: /usr/local/bin/sandbox-executor-client
+      DEVILUDO_EXECUTOR_SOCKET: /run/deviludo-executor/executor.sock
+      DEVILUDO_EXECUTOR_SOCKET_GID: "1001"
     volumes:
       - projects-data:/var/lib/deviludo-projects
       - vault-tokens:/run/deviludo-vault:ro
+      - executor-socket:/run/deviludo-executor
       - ../.deviludo/local/codex-models-cache.json:/run/deviludo-codex/models_cache.json:ro
     depends_on:
       postgres:
@@ -271,6 +278,8 @@ services:
       DEVILUDO_S3_PATH_STYLE: "1"
       DEVILUDO_ARTIFACT_BUCKET: deviludo-artifacts
       DEVILUDO_PROJECTS_ROOT: /var/lib/deviludo-projects
+      DEVILUDO_PROJECTS_VOLUME: ${DEVILUDO_PROJECTS_VOLUME:-deviludo-projects}
+      DEVILUDO_PROJECT_RUNTIME_MCP_GATEWAY: http://core-api:8080
       DEVILUDO_LOCAL_PROJECT_BRIDGE_INTERNAL_URL: ${DEVILUDO_LOCAL_PROJECT_BRIDGE_INTERNAL_URL:-}
       DEVILUDO_LOCAL_PROJECT_BRIDGE_TOKEN: ${DEVILUDO_LOCAL_PROJECT_BRIDGE_TOKEN:-}
       AWS_SHARED_CREDENTIALS_FILE: /run/service-secrets/s3.credentials
@@ -533,4 +542,5 @@ volumes:
     name: ${DEVILUDO_EXECUTOR_SOCKET_VOLUME:-deviludo-executor-socket}
   executor-work: {}
   executor-service-secrets: {}
-  projects-data: {}
+  projects-data:
+    name: ${DEVILUDO_PROJECTS_VOLUME:-deviludo-projects}

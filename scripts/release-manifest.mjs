@@ -34,7 +34,7 @@ await writeFile(output, JSON.stringify({
   version,
   createdAt: new Date().toISOString(),
   roles,
-  database: { baseline: "001", schemaCompatibility: "deviludo-core-v4" },
+  database: { baseline: "003", schemaCompatibility: "deviludo-persistent-multi-agent-v3" },
   protocols: ["deviludo.job.v4", "deviludo.sandbox-plan.v2", "deviludo.executor-receipt.v2"],
   images,
   plugins: {

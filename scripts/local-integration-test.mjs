@@ -34,11 +34,11 @@ const created = await request("/api/projects", {
 });
 await request(`/api/projects/${created.project.id}/approve`, { method: "POST", body: {} });
 const project = await waitForProject(created.project.id, 20 * 60_000);
-for (const kind of ["AGENT_GENERATION", "ARTIFACT_BUILD", "E2E_TEST"]) {
+for (const kind of ["AGENT_TURN", "BUILD", "E2E_PLATFORM_RUN"]) {
   const job = project.jobs.find(candidate => candidate.kind === kind);
   if (!job || job.state !== "SUCCEEDED") throw new Error(`Real ${kind} stage did not succeed: ${JSON.stringify(project.jobs)}`);
 }
-console.log(JSON.stringify({ tested: true, projectId: project.id, workspaceId: created.workspace.id, workflowState: project.workflowState, stages: ["AGENT_GENERATION", "ARTIFACT_BUILD", "E2E_TEST"] }));
+console.log(JSON.stringify({ tested: true, projectId: project.id, workspaceId: created.workspace.id, workflowState: project.workflowState, stages: ["AGENT_TURN", "BUILD", "E2E_PLATFORM_RUN"] }));
 
 async function waitForProject(projectId, timeout) {
   const deadline = Date.now() + timeout;

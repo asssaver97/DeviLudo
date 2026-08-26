@@ -193,7 +193,7 @@ test("new-game conversations validate, persist and keep their context locked", a
   const first = startedBody.conversation;
   expect(first.mode).toBe("NEW_GAME");
   expect(first.projectId).toBe(startedBody.project.id);
-  expect(startedBody.project.name).toBe("时间回廊");
+  expect(startedBody.project.name).toBe("我想做一款以时间循环为核心的像素冒险游戏");
   expect(startedBody.workspace.name).toBe("Local workspace");
   expect(first.messages.map(message => message.role)).toEqual([
     "USER", "ASSISTANT",
@@ -204,8 +204,8 @@ test("new-game conversations validate, persist and keep their context locked", a
     agentRuntime: "CLAUDE_CODE",
     model: "claude-primary",
     settingsRevision: 1,
-    appliedToDraft: true,
-    projectDocumentUpdated: true,
+    appliedToDraft: false,
+    projectDocumentUpdated: false,
   });
 
   const continued = await stack.web("/api/conversations/messages", {
@@ -277,7 +277,7 @@ test("project conversations apply explicit feedback, defer tentative changes, an
   });
   await stack.executeSql(`
     UPDATE deviludo.workflow_instances
-       SET state = 'E2E_TESTING', updated_at = clock_timestamp()
+       SET state = 'TESTING', updated_at = clock_timestamp()
      WHERE id = '${lockedProject.workflowId}'::uuid;
   `);
   const beforeLockedFeedback = await stack.readProject(lockedProject.id);
@@ -354,7 +354,7 @@ test("an explicit source fix routes only to Development and starts the workflow 
   });
   await stack.executeSql(`
     UPDATE deviludo.workflow_instances
-       SET state = 'RELEASE_DECISION_PENDING', updated_at = clock_timestamp()
+       SET state = 'RELEASE_APPROVAL_PENDING', updated_at = clock_timestamp()
      WHERE id = '${project.workflowId}'::uuid;
   `);
 
@@ -366,16 +366,16 @@ test("an explicit source fix routes only to Development and starts the workflow 
   const body = await response.json() as {
     conversation: Conversation;
     changeRequest: { state: string };
-    intentDecision: { responderRoles: string[] };
+    intentDecision: { targetRole: string };
     workflowAction: string;
   };
-  expect(body.intentDecision.responderRoles).toEqual(["DEVELOPMENT"]);
+  expect(body.intentDecision.targetRole).toBe("DEVELOPMENT");
   expect(body.conversation.messages.map(message => (
     message.role === "USER" ? "USER" : message.metadata.agentRole
   ))).toEqual(["USER", "DEVELOPMENT"]);
   expect(body.changeRequest.state).toBe("APPLIED");
   expect(body.workflowAction).toBe("AGENT_RERUN_STARTED");
-  expect((await stack.readProject(project.id)).jobs.filter(job => job.kind === "AGENT_GENERATION")).toHaveLength(1);
+  expect((await stack.readProject(project.id)).jobs.filter(job => job.kind === "AGENT_TURN")).toHaveLength(1);
 });
 
 test("Development readiness turns an initially uncertain change into a confirmable rerun", async ({ stack }) => {
@@ -386,7 +386,7 @@ test("Development readiness turns an initially uncertain change into a confirmab
   });
   await stack.executeSql(`
     UPDATE deviludo.workflow_instances
-       SET state = 'RELEASE_DECISION_PENDING', updated_at = clock_timestamp()
+       SET state = 'RELEASE_APPROVAL_PENDING', updated_at = clock_timestamp()
      WHERE id = '${project.workflowId}'::uuid;
   `);
   const response = await stack.web("/api/conversations/messages", {
@@ -413,7 +413,7 @@ test("Development readiness turns an initially uncertain change into a confirmab
     intent: "CHANGE_REQUEST",
     actionable: true,
     explicitExecution: false,
-    responderRoles: ["DEVELOPMENT"],
+    targetRole: "DEVELOPMENT",
     summary: "Update the implementation according to the player's request.",
   });
   expect(body.conversation.messages.at(-1)?.metadata).toMatchObject({
@@ -434,7 +434,7 @@ test("messages during Agent generation are intent-routed and confirmed changes s
   const leaseToken = randomUUID();
   await stack.executeSql(`
     UPDATE deviludo.workflow_instances
-       SET state = 'AGENT_RUNNING', updated_at = clock_timestamp()
+       SET state = 'DEVELOPING', updated_at = clock_timestamp()
      WHERE id = '${project.workflowId}'::uuid;
     INSERT INTO deviludo.jobs(
       workspace_id, id, workflow_id, project_id, kind, pool_kind,
@@ -442,7 +442,7 @@ test("messages during Agent generation are intent-routed and confirmed changes s
       state, idempotency_key, lease_owner, lease_token, lease_expires_at, fencing_token
     ) VALUES (
       '${project.workspaceId}'::uuid, '${jobId}'::uuid, '${project.workflowId}'::uuid, '${project.id}'::uuid,
-      'AGENT_GENERATION', 'CORE', ARRAY['MICROVM','NETWORK_POLICY'], false,
+      'AGENT_TURN', 'CORE', ARRAY['MICROVM','NETWORK_POLICY'], false,
       'sha256:${"a".repeat(64)}', '{"kinds":["SPECIFICATION"],"maxBytes":1073741824}'::jsonb,
       'RUNNING', 'intent-routing-e2e', 'e2e-held-agent', '${leaseToken}'::uuid,
       clock_timestamp() + interval '1 hour', 1
@@ -462,7 +462,7 @@ test("messages during Agent generation are intent-routed and confirmed changes s
       intentDecision: { intent: string; responderRoles: string[] };
       workflowAction: string;
     };
-  expect(questionResult.intentDecision).toMatchObject({ intent: "QUESTION", responderRoles: ["DESIGN"] });
+  expect(questionResult.intentDecision).toMatchObject({ intent: "QUESTION", targetRole: "DESIGN" });
   expect(questionResult.workflowAction).toBe("NONE");
   expect(questionResult.conversation.messages).toHaveLength(2);
   expect((await stack.readProject(project.id)).document.revision).toBe(documentBefore);
@@ -513,7 +513,7 @@ test("messages during Agent generation are intent-routed and confirmed changes s
   `)).toEqual([{ event_kind: "SUPERSEDED" }]);
   expect((await stack.readProject(project.id)).e2eGoalRevision).toBe(2);
   expect((await stack.readProject(project.id)).jobs.filter(job => (
-    job.kind === "AGENT_GENERATION" && job.id !== jobId
+    job.kind === "AGENT_TURN" && job.id !== jobId
   ))).toHaveLength(1);
   const replay = await stack.web(decisionUrl, {
     method: "POST",
@@ -530,6 +530,8 @@ test("messages during Agent generation are intent-routed and confirmed changes s
 test("a successful replacement Manifest retires generated objects but preserves user uploads", async ({ stack }) => {
   test.setTimeout(90_000);
   await stack.configureAgent();
+  const nodes = await stack.registerFixedNodes();
+  await stack.startLogicalNodes(nodes);
   const project = await stack.createProject({
     name: "素材回收验证",
     concept: "验证游戏界面改版后只回收废弃生成素材，并保留用户上传的美术。",
@@ -543,37 +545,19 @@ test("a successful replacement Manifest retires generated objects but preserves 
     SELECT count(*)::int AS count
       FROM deviludo.jobs
      WHERE project_id = '${project.id}'::uuid
-       AND kind = 'AGENT_GENERATION' AND state = 'SUCCEEDED'
-  `))[0]?.count ?? 0, { timeout: 30_000 }).toBe(1);
-
-  const digest = `sha256:${"b".repeat(64)}`;
-  await stack.executeSql(`
-    INSERT INTO deviludo.asset_items(
-      workspace_id, manifest_id, asset_key, asset_type, description,
-      generation_prompt, status, bucket, object_key, sha256, size_bytes
-    )
-    SELECT '${project.workspaceId}'::uuid, manifest.id, asset.asset_key, 'ui', asset.description,
-           'A prior UI asset', asset.status, 'retired-bucket',
-           'workspaces/${project.workspaceId}/projects/${project.id}/assets/' || asset.filename,
-           '${digest}', 16
-      FROM deviludo.asset_manifests manifest
-      CROSS JOIN (VALUES
-        ('ui/obsolete-panel', 'Obsolete generated panel', 'generated', 'obsolete-panel.png'),
-        ('ui/user-banner', 'User supplied banner', 'uploaded', 'user-banner.png')
-      ) AS asset(asset_key, description, status, filename)
-     WHERE manifest.workspace_id = '${project.workspaceId}'::uuid
-       AND manifest.project_id = '${project.id}'::uuid;
-  `);
-  const current = await stack.readProject(project.id);
-  const revised = await stack.web(`/api/projects/${project.id}/document`, {
-    method: "PUT",
-    data: {
-      expectedRevision: current.document.revision,
-      content: { ...current.document.content, introduction: "旧面板仍在项目说明中，等待本轮删除。" },
-      responseLanguage: "zh",
-    },
-  });
-  expect(revised.status()).toBe(200);
+       AND kind = 'AGENT_TURN' AND payload->>'role' = 'DEVELOPMENT'
+       AND state = 'SUCCEEDED'
+  `))[0]?.count ?? 0, { timeout: 45_000 }).toBe(1);
+  await expect.poll(async () => (await stack.readProject(project.id)).workflowState,
+    { timeout: 45_000 }).toBe("RELEASE_APPROVAL_PENDING");
+  await expect.poll(async () => (await stack.queryRows<{ retired: number; uploads: number }>(`
+    SELECT (result_summary->>'retiredAssets')::int AS retired,
+           (result_summary->>'retainedUploads')::int AS uploads
+     FROM deviludo.agent_tool_calls
+     WHERE project_id = '${project.id}'::uuid AND tool_name = 'assets.plan'
+       AND state = 'SUCCEEDED'
+     ORDER BY completed_at DESC LIMIT 1
+  `))[0] ?? null).toEqual({ retired: 0, uploads: 0 });
 
   const changed = await stack.web("/api/conversations/messages", {
     method: "POST",
@@ -581,33 +565,33 @@ test("a successful replacement Manifest retires generated objects but preserves 
   });
   expect(changed.status()).toBe(201);
   expect((await changed.json() as { workflowAction: string }).workflowAction).toBe("AGENT_RERUN_STARTED");
-  await expect.poll(async () => (await stack.queryRows<{ total: number; succeeded: number }>(`
-    SELECT count(*)::int AS total,
-           count(*) FILTER (WHERE state = 'SUCCEEDED')::int AS succeeded
+  await expect.poll(async () => (await stack.queryRows<{ succeeded: number }>(`
+    SELECT count(*) FILTER (WHERE state = 'SUCCEEDED')::int AS succeeded
       FROM deviludo.jobs
      WHERE project_id = '${project.id}'::uuid
-       AND kind = 'AGENT_GENERATION'
-  `))[0] ?? null, { timeout: 30_000 }).toEqual({ total: 2, succeeded: 1 });
+       AND kind = 'AGENT_TURN' AND payload->>'role' = 'DEVELOPMENT'
+  `))[0]?.succeeded ?? 0, { timeout: 45_000 }).toBe(2);
+  await expect.poll(async () => (await stack.readProject(project.id)).workflowState,
+    { timeout: 45_000 }).toBe("RELEASE_APPROVAL_PENDING");
 
-  expect(await stack.queryRows<{ asset_key: string; status: string }>(`
-    SELECT asset_key, status
-      FROM deviludo.asset_items item
-      JOIN deviludo.asset_manifests manifest
-        ON manifest.workspace_id = item.workspace_id AND manifest.id = item.manifest_id
-     WHERE manifest.project_id = '${project.id}'::uuid
-       AND item.asset_key IN ('ui/obsolete-panel', 'ui/user-banner')
-     ORDER BY item.asset_key
-  `)).toEqual([{ asset_key: "ui/user-banner", status: "uploaded" }]);
-  await expect.poll(async () => (await stack.queryRows<{ reason: string }>(`
-    SELECT reason FROM deviludo.object_cleanup_queue
-     WHERE workspace_id = '${project.workspaceId}'::uuid
-       AND object_key LIKE '%/obsolete-panel.png'
-  `))[0]?.reason ?? null).toBe("retired generated asset after Agent manifest re-plan");
-  expect(await stack.queryRows<{ count: number }>(`
-    SELECT count(*)::int AS count FROM deviludo.object_cleanup_queue
-     WHERE workspace_id = '${project.workspaceId}'::uuid
-       AND object_key LIKE '%/user-banner.png'
-  `)).toEqual([{ count: 0 }]);
+  await expect.poll(async () => (await stack.queryRows<{ retired: number; uploads: number }>(`
+    SELECT (result_summary->>'retiredAssets')::int AS retired,
+           (result_summary->>'retainedUploads')::int AS uploads
+      FROM deviludo.agent_tool_calls
+     WHERE project_id = '${project.id}'::uuid AND tool_name = 'assets.plan'
+       AND state = 'SUCCEEDED' AND (result_summary->>'retiredAssets')::int > 0
+     ORDER BY completed_at DESC LIMIT 1
+  `))[0] ?? null).toEqual({ retired: 1, uploads: 1 });
+  const plans = await stack.queryRows<{ planned_asset_keys: string[] }>(`
+    SELECT ARRAY(
+      SELECT jsonb_array_elements_text(plan->'assetPlacementPlan'->'plannedAssetKeys')
+      ORDER BY 1
+    ) AS planned_asset_keys
+      FROM deviludo.test_plans_v2
+     WHERE project_id = '${project.id}'::uuid
+     ORDER BY source_revision DESC, plan_revision DESC LIMIT 1
+  `);
+  expect(plans).toEqual([{ planned_asset_keys: ["ui/user-banner"] }]);
 });
 
 test("a stale pending change is replanned once and confirmation retries remain idempotent", async ({ stack }) => {
@@ -765,7 +749,7 @@ test("project conversations are listed by recency and project deletion removes t
   });
 
   const deleted = await stack.web(`/api/projects/${project.id}`, { method: "DELETE" });
-  expect(deleted.status()).toBe(204);
+  expect(deleted.status(), await deleted.text()).toBe(204);
   expect((await stack.web(`/api/projects/${project.id}`)).status()).toBe(404);
   expect((await stack.web(`/api/projects/${project.id}/conversations`)).status()).toBe(404);
   expect((await stack.web(`/api/conversations/${firstConversation.id}`)).status()).toBe(404);

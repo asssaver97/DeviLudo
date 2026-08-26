@@ -34,7 +34,7 @@ test("bound local directory creates immediately, then finishes its source snapsh
   expect(analyzed.name).toBe("clock-game");
   expect(analyzed.document).toMatchObject({
     maintainedBy: "AGENT",
-    content: { categories: ["解谜", "冒险"] },
+    content: { categories: ["puzzle", "adventure"] },
   });
   expect(analyzed.localDirectory).toEqual({
     bindingId,
@@ -67,7 +67,7 @@ test("bound local directory creates immediately, then finishes its source snapsh
     data: { conversationId: conversation.id, content: "接下来增加一个可以保留线索的日志面板。" },
   });
   expect(continued.status(), await continued.text()).toBe(200);
-  expect((await continued.json() as { conversation: { messages: unknown[] } }).conversation.messages).toHaveLength(6);
+  expect((await continued.json() as { conversation: { messages: unknown[] } }).conversation.messages).toHaveLength(4);
 
   const replay = await stack.web(localBindingUrl, {
     method: "POST",
@@ -96,16 +96,14 @@ test("bound local directory creates immediately, then finishes its source snapsh
     data: {},
   });
   expect(approved.status(), await approved.text()).toBe(202);
-  const generationInputs = await stack.queryRows<{ kind: string;source_revision:number }>(`
-    SELECT artifact.kind::text AS kind,(job.payload->>'sourceRevision')::int source_revision
+  const generationJobs = await stack.queryRows<{ kind: string;source_revision:number }>(`
+    SELECT job.kind::text AS kind,(job.payload->>'sourceRevision')::int source_revision
       FROM deviludo.jobs job
-      JOIN deviludo.artifact_inputs input ON job.workspace_id=input.workspace_id AND job.id=input.job_id
-      JOIN deviludo.artifacts artifact ON artifact.workspace_id=input.workspace_id AND artifact.id=input.artifact_id
      WHERE job.project_id = '${body.project.id}'::uuid
-       AND job.kind = 'AGENT_GENERATION'
-     ORDER BY artifact.kind
+       AND job.kind = 'AGENT_TURN'
+     ORDER BY job.created_at
   `);
-  expect(generationInputs).toEqual([{kind:"SPECIFICATION",source_revision:1}]);
+  expect(generationJobs).toEqual([{kind:"AGENT_TURN",source_revision:1}]);
 });
 
 test("project linking still creates immediately and records an asynchronous failure when Agent is not configured", async ({ stack }) => {

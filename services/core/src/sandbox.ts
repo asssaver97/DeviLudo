@@ -1,18 +1,14 @@
 import { spawn } from "node:child_process";
 import { isAbsolute } from "node:path";
 import { StringDecoder } from "node:string_decoder";
-import {
-  AGENT_RUNTIME_KINDS,
-  type AgentRuntimeKind,
-} from "@/lib/product/contracts";
-import { normalizeAgentModel, normalizeBaseUrl } from "./agent-settings";
-import { resolveCodexExecutionModel } from "./codex-cli";
 import type { CoreConfig } from "./config";
 import type { JobProtocolV4, ObjectReference } from "./contracts";
 import type { CoreRepository } from "./repository";
 import { CoreObjectStore } from "./object-store";
 import { ProjectSourceStore } from "./project-sources";
 import type { CoreHostServices } from "./access";
+import type { ProjectRuntimeService } from "./project-runtime-service";
+import type { ProjectRuntimeRole } from "@/lib/product/contracts";
 
 export type SandboxMode = "MICROVM" | "RESTRICTED_CONTAINER";
 export type SandboxPlan = Readonly<{
@@ -22,16 +18,7 @@ export type SandboxPlan = Readonly<{
   workspace: string;
   objectPrefix: string;
   vaultPath: string;
-  agentConfiguration: Readonly<{
-    runtime: AgentRuntimeKind;
-    baseUrl: string;
-    model: string;
-    credentialRef: string;
-    credentialEnvironmentVariable: "ANTHROPIC_AUTH_TOKEN" | "CODEX_PROVIDER_CREDENTIAL";
-    environment: Readonly<Record<string, string>>;
-    revision: number;
-  }> | null;
-  networkPolicy: "AGENT_EGRESS_ALLOWLIST" | "BUILD_EGRESS_DENY" | "STEAM_ONLY";
+  networkPolicy: "BUILD_EGRESS_DENY" | "STEAM_ONLY";
 }>;
 
 export type SandboxReceipt = Readonly<{
@@ -94,9 +81,6 @@ export class ProcessSandboxBackend implements SandboxBackend {
   ): Promise<SandboxReceipt> {
     if (!this.executable) throw new Error("A trusted sandbox executor is required");
     if (!isAbsolute(this.executable)) throw new Error("Sandbox executor path must be absolute");
-    if (["AGENT_GENERATION", "PROJECT_DOCUMENT_MAINTENANCE"].includes(plan.job.jobKind) && !plan.agentConfiguration) {
-      throw new Error("Instance Agent settings are required");
-    }
     return await executeBackend(this.executable, plan, signal, onProgress);
   }
 
@@ -109,6 +93,7 @@ export async function runSandbox(
   backend: SandboxBackend = new ProcessSandboxBackend(),
   requestedWorkerId?: string,
   _hostServices?: CoreHostServices,
+  projectRuntime?: ProjectRuntimeService,
 ): Promise<void> {
   const hostServices = _hostServices;
   const workerId = requestedWorkerId ?? process.env.DEVILUDO_SANDBOX_ID ?? `sandbox-${process.pid}`;
@@ -181,12 +166,73 @@ export async function runSandbox(
             admissionReservationId = null;
           }
         }
-        if (job.jobKind === "AGENT_GENERATION") {
-          const discarded = await discardOrphanedAgentSource(repository, projectSources, job);
-          if (discarded) {
-            await repository.appendJobProgress(job, "PHASE", "已清理上次未完成登记的源码 revision，正在安全重试");
+        if (job.jobKind === "AGENT_TURN") {
+          if (!projectRuntime) throw new Error("Persistent Project Runtime service is unavailable");
+          const [project, settings] = await Promise.all([
+            projectRuntime.readProjectInput(job.workspaceId, job.projectId),
+            repository.readAgentSettings(),
+          ]);
+          if (!project || !settings) throw new Error("Project or Agent Runtime settings are unavailable");
+          const role = runtimeJobRole(job.payload);
+          await repository.appendJobProgress(job, "PHASE", `${role} Agent is resuming its persistent project session`);
+          await projectRuntime.initialize({
+            workspaceId: job.workspaceId, projectId: job.projectId,
+            language: responseLanguageFromJob(job), concept: project.concept, settings,
+            source: project.source ? {
+              revision: project.source.revision, digest: project.source.digest,
+              relativePath: project.source.relativePath,
+            } : null,
+          });
+          const runtimeResult = await projectRuntime.turn({
+            workspaceId: job.workspaceId, projectId: job.projectId, role, mode: "PRIMARY",
+            prompt: runtimeJobPrompt(job, role), responseLanguage: responseLanguageFromJob(job), settings,
+            sourceRevision: project.source?.revision ?? null,
+            sourceRelativePath: project.source?.relativePath ?? null,
+            onEvent: content => {
+              progressWrites = progressWrites
+                .then(() => repository.appendJobProgress(job as JobProtocolV4, "AGENT_OUTPUT", content))
+                .then(() => undefined)
+                .catch(() => undefined);
+            },
+          });
+          await progressWrites;
+          await repository.appendJobProgress(job, "AGENT_OUTPUT", runtimeResult.content);
+          const context = await projectRuntime.readContext(job.workspaceId, job.projectId);
+          if (role === "DEVELOPMENT") {
+            const inputRevision = Number(job.payload.sourceRevision ?? 0);
+            if (!context.source || context.source.revision <= inputRevision) {
+              throw new Error("Development Agent completed without creating a new source checkpoint");
+            }
+            if (context.workflow.buildRequestedByTurnId !== runtimeResult.turnId) {
+              throw new Error("Development Agent completed without requesting the controlled build");
+            }
           }
-          await repository.appendJobProgress(job, "PHASE", "Agent 任务已领取，正在准备隔离环境");
+          if (role === "TEST" && job.payload.purpose === "TEST_PLAN"
+            && (!context.e2e.planRevision || !context.e2e.plan)) {
+            throw new Error("Test Agent completed without persisting a complete test plan");
+          }
+          const completed = await repository.completePersistentAgentTurn(job, Object.freeze({
+            turnId: runtimeResult.turnId,
+            sessionId: runtimeResult.sessionId,
+            role,
+            purpose: typeof job.payload.purpose === "string" ? job.payload.purpose : null,
+            content: runtimeResult.content,
+            structured: runtimeResult.structured,
+            contextRevision: context.revision,
+            sourceRevision: context.source?.revision ?? null,
+            planRevision: context.e2e.planRevision ?? null,
+            verdict: runtimeResult.structured.verdict ?? null,
+            handoff: runtimeResult.structured.handoff ?? null,
+          }));
+          if (!completed) throw new Error("Persistent Agent turn completion was rejected by fencing");
+          await projectRuntime.recordWorkflowJobResult({
+            workspaceId: job.workspaceId,
+            projectId: job.projectId,
+            jobId: job.jobId,
+            jobKind: job.jobKind,
+          });
+          await repository.appendJobProgress(job, "COMPLETED", `${role} Agent completed the persistent turn`).catch(() => undefined);
+          continue;
         }
         const operationId = job.jobKind === "STEAM_PUBLISH"
           ? await repository.beginOperation(job, "STEAM_UPLOAD")
@@ -203,36 +249,24 @@ export async function runSandbox(
         );
         await progressWrites;
         await objectStore.verifyOutputs(job, receipt.outputObjects);
-        const projectDocument = job.jobKind === "PROJECT_DOCUMENT_MAINTENANCE"
-          ? await objectStore.readProjectDocument(job, receipt.outputObjects)
-          : null;
-        const agentCompletion = job.jobKind === "AGENT_GENERATION"
-          ? await readAgentCompletion(objectStore, job, receipt)
-          : null;
         if (operationId) await repository.finishOperation(job, operationId, receipt.details);
-        if (job.jobKind === "AGENT_GENERATION") {
-          await repository.appendJobProgress(job, "COMPLETED", "Agent 生成完成，正在登记源码制品");
-        }
         const completed = await repository.complete(job, {
           leaseToken: job.lease.token,
           fencingToken: job.lease.fencingToken,
           isolationGeneration: job.isolationGeneration,
           receipt: Object.freeze({
             ...receipt.details,
-            ...(projectDocument ? { projectDocument } : {}),
-            ...(agentCompletion ?? {}),
           }),
           executorReceipt: receipt,
         });
         if (!completed) throw new Error("Sandbox completion was rejected by fencing");
-        if (job.jobKind === "AGENT_GENERATION") {
-          await projectSources.deleteCheckpoint(job.workspaceId, job.projectId, job.workflowId).catch(error => {
-            console.error(JSON.stringify({
-              level: "error",
-              event: "sandbox_checkpoint_cleanup_failed",
-              jobId: job?.jobId,
-              message: error instanceof Error ? error.message : String(error),
-            }));
+        if (projectRuntime) {
+          await projectRuntime.recordWorkflowJobResult({
+            workspaceId: job.workspaceId,
+            projectId: job.projectId,
+            jobId: job.jobId,
+            jobKind: job.jobKind,
+            outputCount: receipt.outputObjects.length,
           });
         }
       } finally {
@@ -258,7 +292,7 @@ export async function runSandbox(
           admissionReservationId = null;
         }
         const message = error instanceof Error ? error.message : String(error);
-        if (job.jobKind === "AGENT_GENERATION") {
+        if (job.jobKind === "AGENT_TURN") {
           await discardOrphanedAgentSource(repository, projectSources, job).catch(cleanupError => {
             console.error(JSON.stringify({
               level: "error",
@@ -270,21 +304,61 @@ export async function runSandbox(
           await repository.appendJobProgress(job, "FAILED", message).catch(() => undefined);
         }
         await repository.fail(job, message).catch(() => undefined);
+        if (projectRuntime) {
+          await projectRuntime.recordWorkflowJobFailure({
+            workspaceId: job.workspaceId,
+            projectId: job.projectId,
+            jobId: job.jobId,
+            jobKind: job.jobKind,
+            error: message,
+          }).catch(() => undefined);
+        }
       }
     }
   }
 }
 
+function runtimeJobRole(payload: Readonly<Record<string, unknown>>): ProjectRuntimeRole {
+  const role = payload.role ?? "DEVELOPMENT";
+  if (!["DESIGN", "DEVELOPMENT", "TEST"].includes(String(role))) {
+    throw new Error("AGENT_TURN job role is invalid");
+  }
+  return role as ProjectRuntimeRole;
+}
+
+function responseLanguageFromJob(job: JobProtocolV4): "en" | "zh" {
+  return job.payload.responseLanguage === "zh" ? "zh" : "en";
+}
+
+function runtimeJobPrompt(job: JobProtocolV4, role: ProjectRuntimeRole): string {
+  const purpose = typeof job.payload.purpose === "string" ? job.payload.purpose : role;
+  const handoff = job.payload.testHandoff ?? job.payload.implementationBrief ?? null;
+  if (role === "DESIGN") {
+    return `Apply the approved requirement revision and create a complete DEVELOPMENT handoff. Purpose: ${purpose}.`;
+  }
+  if (role === "DEVELOPMENT") {
+    return [
+      "Implement the complete current requirement and E2E goal snapshot in the project worktree.",
+      "Run source checks, checkpoint the resulting source, and request a controlled build.",
+      handoff ? `Handoff: ${JSON.stringify(handoff).slice(0, 40_000)}` : "",
+    ].filter(Boolean).join("\n");
+  }
+  if (purpose === "TEST_VERDICT") {
+    return "Read all platform evidence for the current source and plan revisions. Return PASS only if every deterministic, visual, performance, crash, input-response, requirement, and asset-binding gate passes. Otherwise return FAIL with one structured DEVELOPMENT handoff, or BLOCKED only for unrecoverable configuration.";
+  }
+  return "Create and persist the complete test plan for the current requirement and source revisions, covering every target platform, real input, planned asset binding, screenshots, video, crashes, and performance. Start all platform runs with the identical frozen plan.";
+}
+
 function admissionOperation(jobKind:JobProtocolV4["jobKind"]):"AGENT"|"SANDBOX"|"E2E"|"BUILD"|"STEAM_PUBLISH"{
-  if(jobKind==="AGENT_GENERATION"||jobKind==="PROJECT_DOCUMENT_MAINTENANCE")return"AGENT";
-  if(jobKind==="ARTIFACT_BUILD"||jobKind==="ARTIFACT_SIGN")return"BUILD";
+  if(jobKind==="AGENT_TURN")return"AGENT";
+  if(jobKind==="BUILD")return"BUILD";
   if(jobKind==="STEAM_PUBLISH")return"STEAM_PUBLISH";
-  if(jobKind==="E2E_TEST")return"E2E";
+  if(jobKind==="E2E_PLATFORM_RUN")return"E2E";
   return"SANDBOX";
 }
 
 function admissionEstimatedUnits(job: JobProtocolV4): number {
-  return job.jobKind === "AGENT_GENERATION" && job.timeoutSeconds < 5_400
+  return job.jobKind === "AGENT_TURN" && job.timeoutSeconds < 5_400
     ? 5_400
     : job.timeoutSeconds;
 }
@@ -294,7 +368,7 @@ async function discardOrphanedAgentSource(
   projectSources: ProjectSourceStore,
   job: JobProtocolV4,
 ): Promise<boolean> {
-  if (job.jobKind !== "AGENT_GENERATION") return false;
+  if (job.jobKind !== "AGENT_TURN") return false;
   const revision = Number(job.payload.publishSourceRevision);
   if (!Number.isSafeInteger(revision) || revision < 1) return false;
   const registered = await repository.projectSourceRevisionExists(job.workspaceId, job.projectId, revision);
@@ -303,32 +377,17 @@ async function discardOrphanedAgentSource(
     : projectSources.discardUnregisteredRevision(job.workspaceId, job.projectId, revision);
 }
 
-async function readAgentCompletion(
-  objectStore: CoreObjectStore,
-  _job: JobProtocolV4,
-  receipt: SandboxReceipt,
-): Promise<Readonly<{ assetManifest: unknown }>> {
-  return objectStore.readAgentCompletion(receipt.outputObjects);
-}
-
 export function sandboxPlan(job: JobProtocolV4, operationId: string | null = null): SandboxPlan {
   if (job.poolKind !== "CORE" || job.exclusive) throw new Error("Sandbox only accepts non-exclusive Core jobs");
-  const effectiveJob = job.jobKind === "AGENT_GENERATION" && job.timeoutSeconds < 5_400
-    ? Object.freeze({ ...job, timeoutSeconds: 5_400 })
-    : job;
+  if (job.jobKind === "AGENT_TURN") {
+    throw new Error("AGENT_TURN jobs must use the persistent Project Runtime");
+  }
+  const effectiveJob = job;
   const plannedJob = operationId
     ? Object.freeze({ ...effectiveJob, payload: Object.freeze({ ...effectiveJob.payload, operation: Object.freeze({ id: operationId }) }) })
     : effectiveJob;
-  const developmentContainer = (process.env.NODE_ENV ?? "development") !== "production"
-    && process.env.DEVILUDO_SANDBOX_ISOLATION_MODE === "RESTRICTED_CONTAINER";
-  const agentJob = job.jobKind === "AGENT_GENERATION" || job.jobKind === "PROJECT_DOCUMENT_MAINTENANCE";
-  const mode: SandboxMode = agentJob && !developmentContainer
-    ? "MICROVM"
-    : "RESTRICTED_CONTAINER";
-  const networkPolicy = agentJob
-    ? "AGENT_EGRESS_ALLOWLIST"
-    : job.jobKind === "STEAM_PUBLISH" ? "STEAM_ONLY"
-      : "BUILD_EGRESS_DENY";
+  const mode: SandboxMode = "RESTRICTED_CONTAINER";
+  const networkPolicy = job.jobKind === "STEAM_PUBLISH" ? "STEAM_ONLY" : "BUILD_EGRESS_DENY";
   return Object.freeze({
     schemaVersion: "deviludo.sandbox-plan.v2",
     mode,
@@ -336,58 +395,7 @@ export function sandboxPlan(job: JobProtocolV4, operationId: string | null = nul
     workspace: `/var/lib/deviludo/workspaces/${job.workspaceId}/${job.projectId}/${job.jobId}/g${job.isolationGeneration}`,
     objectPrefix: `workspaces/${job.workspaceId}/projects/${job.projectId}/jobs/${job.jobId}`,
     vaultPath: `workspaces/${job.workspaceId}/projects/${job.projectId}/jobs/${job.jobId}`,
-    agentConfiguration: agentJob
-      ? agentConfigurationFromPayload(job.payload)
-      : null,
     networkPolicy,
-  });
-}
-
-function agentConfigurationFromPayload(
-  payload: Readonly<Record<string, unknown>>,
-): SandboxPlan["agentConfiguration"] {
-  const value = payload.agentConfiguration;
-  if (value === undefined) return null;
-  if (!value || typeof value !== "object" || Array.isArray(value)) {
-    throw new Error("Agent configuration lock is invalid");
-  }
-  const input = value as Record<string, unknown>;
-  const baseUrl = typeof input.baseUrl === "string"
-    ? normalizeBaseUrl(input.baseUrl, process.env.NODE_ENV ?? "development")
-    : "";
-  const model = normalizeAgentModel(input.model);
-  if (!(AGENT_RUNTIME_KINDS as readonly unknown[]).includes(input.runtime)
-    || !baseUrl
-    || typeof input.credentialRef !== "string"
-    || !input.credentialRef.startsWith("vault://instance/agent-runtime/api-key/versions/")
-    || !Number.isSafeInteger(input.revision)
-    || Number(input.revision) < 1) {
-    throw new Error("Agent configuration lock is invalid");
-  }
-  return Object.freeze({
-    runtime: input.runtime as AgentRuntimeKind,
-    baseUrl,
-    model,
-    credentialRef: input.credentialRef,
-    credentialEnvironmentVariable: input.runtime === "CLAUDE_CODE" ? "ANTHROPIC_AUTH_TOKEN" : "CODEX_PROVIDER_CREDENTIAL",
-    environment: input.runtime === "CLAUDE_CODE"
-      ? claudeCodeEnvironment(baseUrl, model)
-      : Object.freeze({ DEVILUDO_CODEX_MODEL: resolveCodexExecutionModel(model) }),
-    revision: Number(input.revision),
-  });
-}
-
-function claudeCodeEnvironment(
-  baseUrl: string,
-  model: string,
-): Readonly<Record<string, string>> {
-  return Object.freeze({
-    ANTHROPIC_BASE_URL: baseUrl,
-    ANTHROPIC_MODEL: model,
-    ANTHROPIC_DEFAULT_OPUS_MODEL: model,
-    ANTHROPIC_DEFAULT_SONNET_MODEL: model,
-    ANTHROPIC_DEFAULT_HAIKU_MODEL: model,
-    CLAUDE_CODE_SUBAGENT_MODEL: model,
   });
 }
 

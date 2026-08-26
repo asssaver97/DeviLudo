@@ -2,20 +2,14 @@ import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import test from "node:test";
 
-test("workflow iterations migrate existing projects into one linear immutable history", async () => {
-  const [baseline, migration] = await Promise.all([
-    readFile(new URL("../infra/postgres/001_core.sql", import.meta.url), "utf8"),
-    readFile(new URL("../infra/postgres/migrations/011_project_workflow_iterations.sql", import.meta.url), "utf8"),
-  ]);
+test("fresh workflow iterations form one linear immutable history", async () => {
+  const baseline = await readFile(new URL("../infra/postgres/001_core.sql", import.meta.url), "utf8");
   assert.match(baseline, /iteration_number integer NOT NULL DEFAULT 1 CHECK \(iteration_number > 0\)/);
   assert.match(baseline, /parent_workflow_id uuid/);
   assert.match(baseline, /UNIQUE \(workspace_id, project_id, iteration_number\)/);
   assert.match(baseline, /UNIQUE \(workspace_id, parent_workflow_id\)/);
   assert.match(baseline, /FOREIGN KEY \(workspace_id, parent_workflow_id\)[\s\S]*workflow_instances\(workspace_id, id\)/);
-  assert.match(migration, /row_number\(\) OVER \([\s\S]*PARTITION BY workspace_id, project_id[\s\S]*ORDER BY created_at, id/);
-  assert.match(migration, /lag\(id\) OVER \([\s\S]*PARTITION BY workspace_id, project_id[\s\S]*ORDER BY created_at, id/);
-  assert.match(migration, /ALTER COLUMN iteration_number SET NOT NULL/);
-  assert.match(migration, /workflow_iteration_parent_unique UNIQUE \(workspace_id, parent_workflow_id\)/);
+  assert.doesNotMatch(baseline, /row_number\(\) OVER|ALTER COLUMN iteration_number/);
 });
 
 test("the iteration API is terminal-only, latest-only, and idempotent under duplicate creation", async () => {
@@ -51,15 +45,11 @@ test("the iteration API is terminal-only, latest-only, and idempotent under dupl
   assert.match(openapi, /\/v1\/projects\/\{projectId\}\/iterations\/\{workflowId\}:/);
 });
 
-test("iteration base revisions are repaired using numeric source order at creation time", async () => {
-  const migration = await readFile(
-    new URL("../infra/postgres/migrations/022_correct_iteration_base_source_revision.sql", import.meta.url),
-    "utf8",
-  );
-  assert.match(migration, /max\(source\.revision\)/);
-  assert.match(migration, /source\.created_at <= child\.created_at/);
-  assert.match(migration, /\{iteration,baseSourceRevision\}/);
-  assert.match(migration, /event\.event_kind = 'ITERATION_STARTED'/);
+test("iteration base revisions are captured from the current source at creation time", async () => {
+  const repository = await readFile(new URL("../services/core/src/repository.ts", import.meta.url), "utf8");
+  assert.match(repository, /baseSourceRevision: latestSource/);
+  assert.match(repository, /baseDocumentRevision: Number\(document/);
+  assert.doesNotMatch(repository, /source\.created_at <= child\.created_at/);
 });
 
 test("the project page separates continuing requirements from rerunning a completed stage", async () => {

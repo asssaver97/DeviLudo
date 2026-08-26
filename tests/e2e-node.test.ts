@@ -15,7 +15,7 @@ const baseJob: JobProtocolV4 = Object.freeze({
   workspaceId: "20000000-0000-4000-8000-000000000003",
   projectId: "20000000-0000-4000-8000-000000000004",
   poolKind: "E2E_MACOS",
-  jobKind: "E2E_TEST",
+  jobKind: "E2E_PLATFORM_RUN",
   targetOperatingSystem: "macos",
   requiredCapabilities: Object.freeze(["GAME_RUNTIME", "TRUSTED_REIMAGE"]),
   exclusive: true,
@@ -215,8 +215,8 @@ test("ordinary E2E tests never receive signing authority", async () => {
 test("retired signing jobs are rejected before isolation", async () => {
   const job: JobProtocolV4 = Object.freeze({
     ...baseJob,
-    jobKind: "ARTIFACT_SIGN",
-    requiredCapabilities: Object.freeze(["SIGNING", "HSM", "TRUSTED_REIMAGE"]),
+    jobKind: "BUILD",
+    requiredCapabilities: Object.freeze(["BUILDING", "HSM", "TRUSTED_REIMAGE"]),
   });
   const calls: string[] = [];
   await assert.rejects(() => executeE2eJob(
@@ -225,7 +225,7 @@ test("retired signing jobs are rejected before isolation", async () => {
     {} as CoreE2eClient,
     fakeIsolation(calls),
     new AbortController().signal,
-  ), /retired historical job kind/);
+  ), /fixed job contract/);
   assert.deepEqual(calls, []);
 });
 

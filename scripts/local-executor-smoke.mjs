@@ -73,7 +73,7 @@ try {
     networkPolicy: "AGENT_EGRESS_ALLOWLIST",
     job: job({
       jobId: agentJobId,
-      jobKind: "AGENT_GENERATION",
+      jobKind: "AGENT_TURN",
       runtimeImage: fixtureImage,
       requiredCapabilities: ["MICROVM", "NETWORK_POLICY"],
       inputObjects: [specificationObject],
@@ -118,7 +118,7 @@ try {
     networkPolicy: "BUILD_EGRESS_DENY",
     job: job({
       jobId: buildJobId,
-      jobKind: "ARTIFACT_BUILD",
+      jobKind: "BUILD",
       runtimeImage: await imageId("deviludo-godot-builder:local"),
       requiredCapabilities: ["RESTRICTED_CONTAINER", "BUILD_TOOLCHAIN"],
       inputObjects: [...agentReceipt.outputObjects, {

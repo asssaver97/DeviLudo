@@ -100,7 +100,6 @@ async function runDatabaseSmoke(url) {
       "fail_asset_generation", "fail_host_admission_event", "fail_local_git_commit", "fail_object_cleanup", "fail_project_cleanup",
       "pull_host_source_events", "reconcile_expired_uploads", "reconcile_host_admission_events", "recover_expired_jobs",
       "retain_latest_e2e_report",
-      "schedule_idle_project_document_maintenance",
     ];
     if (JSON.stringify(definers.rows.map(row => row.proname)) !== JSON.stringify(expectedDefiners)
       || !artifactOwner
@@ -164,7 +163,7 @@ async function runDatabaseSmoke(url) {
         `INSERT INTO deviludo.workflow_instances(
            workspace_id, id, project_id, profile, target_platforms, state, development_actor_id
          ) VALUES ($1::uuid, $2::uuid, $3::uuid, 'VALIDATE', ARRAY['macos']::deviludo.server_os[],
-           'AGENT_RUNNING', $4::uuid)`,
+           'DEVELOPING', $4::uuid)`,
         [workspaceIds[index], workflowIds[index], projectIds[index], actorId],
       );
     }
@@ -262,7 +261,7 @@ async function runDatabaseSmoke(url) {
            workspace_id, id, workflow_id, project_id, kind, pool_kind,
            required_capabilities, exclusive, runtime_image, output_contract, idempotency_key,
            payload
-         ) VALUES ($1::uuid, $2::uuid, $3::uuid, $4::uuid, 'AGENT_GENERATION', 'CORE',
+         ) VALUES ($1::uuid, $2::uuid, $3::uuid, $4::uuid, 'AGENT_TURN', 'CORE',
            ARRAY['MICROVM','NETWORK_POLICY'], false, $5,
            '{"kinds":["SPECIFICATION"],"maxBytes":134217728}'::jsonb, $6,
            jsonb_build_object('publishSourceRevision', 1))`,
@@ -332,7 +331,7 @@ async function runDatabaseSmoke(url) {
     if (admissionCompleted.rows[0]?.completed !== true) {
       throw new Error("Host admission settlement event was not completed");
     }
-    await owner.query(`UPDATE deviludo.workflow_instances SET state = 'ASSET_GENERATING'
+    await owner.query(`UPDATE deviludo.workflow_instances SET state = 'DEVELOPING'
        WHERE workspace_id = $1::uuid AND id = $2::uuid`, [workspaceIds[0], workflowIds[0]]);
     await owner.query(`
       INSERT INTO deviludo.artifacts(
@@ -366,7 +365,7 @@ async function runDatabaseSmoke(url) {
     const held = await owner.query(`
       SELECT workflow.state::text,
              count(job.id) FILTER (
-               WHERE job.kind = 'ARTIFACT_BUILD' AND job.state = 'QUEUED'
+               WHERE job.kind = 'BUILD' AND job.state = 'QUEUED'
              )::integer AS queued_builds
         FROM deviludo.workflow_instances workflow
         LEFT JOIN deviludo.jobs job
@@ -374,7 +373,7 @@ async function runDatabaseSmoke(url) {
        WHERE workflow.workspace_id = $1::uuid AND workflow.id = $2::uuid
        GROUP BY workflow.state
     `, [workspaceIds[0], workflowIds[0]]);
-    if (held.rows[0]?.state !== "ASSET_GENERATING" || held.rows[0]?.queued_builds !== 0) {
+    if (held.rows[0]?.state !== "DEVELOPING" || held.rows[0]?.queued_builds !== 0) {
       throw new Error("A planned image did not hold the artifact build gate");
     }
     await owner.query(`
@@ -388,20 +387,20 @@ async function runDatabaseSmoke(url) {
     if (Number(advanced.rows[0]?.count) !== 1) throw new Error("Uploaded art did not release the artifact build gate");
     const gated = await owner.query(`
       SELECT workflow.state::text,
-             count(job.id) FILTER (WHERE job.kind = 'ARTIFACT_BUILD' AND job.state = 'QUEUED')::integer AS builds
+             count(job.id) FILTER (WHERE job.kind = 'BUILD' AND job.state = 'QUEUED')::integer AS builds
         FROM deviludo.workflow_instances workflow
         LEFT JOIN deviludo.jobs job ON job.workspace_id = workflow.workspace_id AND job.workflow_id = workflow.id
        WHERE workflow.workspace_id = $1::uuid AND workflow.id = $2::uuid
        GROUP BY workflow.state
     `, [workspaceIds[0], workflowIds[0]]);
-    if (gated.rows[0]?.state !== "ARTIFACT_BUILDING" || gated.rows[0]?.builds !== 1) {
+    if (gated.rows[0]?.state !== "BUILDING" || gated.rows[0]?.builds !== 1) {
       throw new Error("Asset-ready workflow did not enqueue one artifact build");
     }
     const buildAssets = await owner.query(`
       SELECT payload->'assetInputs' AS inputs
         FROM deviludo.jobs
        WHERE workspace_id = $1::uuid AND workflow_id = $2::uuid
-         AND kind = 'ARTIFACT_BUILD' AND state = 'QUEUED'
+         AND kind = 'BUILD' AND state = 'QUEUED'
     `, [workspaceIds[0], workflowIds[0]]);
     const frozenAsset = buildAssets.rows[0]?.inputs?.[0];
     if (buildAssets.rows[0]?.inputs?.length !== 1
@@ -438,7 +437,7 @@ async function runDatabaseSmoke(url) {
     }
     const reopened = await owner.query(`
       SELECT workflow.state::text,
-             count(job.id) FILTER (WHERE job.kind = 'ARTIFACT_BUILD' AND job.state = 'CANCELLED')::integer AS cancelled_builds,
+             count(job.id) FILTER (WHERE job.kind = 'BUILD' AND job.state = 'CANCELLED')::integer AS cancelled_builds,
              max(item.generation_attempt)::integer AS generation_attempt
         FROM deviludo.workflow_instances workflow
         JOIN deviludo.asset_manifests manifest
@@ -450,7 +449,7 @@ async function runDatabaseSmoke(url) {
        WHERE workflow.workspace_id = $1::uuid AND workflow.id = $2::uuid
        GROUP BY workflow.state
     `, [workspaceIds[0], workflowIds[0]]);
-    if (reopened.rows[0]?.state !== "ASSET_GENERATING"
+    if (reopened.rows[0]?.state !== "DEVELOPING"
       || reopened.rows[0]?.cancelled_builds !== 1
       || reopened.rows[0]?.generation_attempt !== 0) {
       throw new Error("Asset rerun did not reopen the gate and supersede the old build");
@@ -473,7 +472,7 @@ async function runDatabaseSmoke(url) {
       SELECT count(*) FILTER (WHERE state = 'QUEUED')::integer AS queued,
              bool_or(idempotency_key LIKE '%:artifact:assets:%') AS scoped_to_assets
         FROM deviludo.jobs
-       WHERE workspace_id = $1::uuid AND workflow_id = $2::uuid AND kind = 'ARTIFACT_BUILD'
+       WHERE workspace_id = $1::uuid AND workflow_id = $2::uuid AND kind = 'BUILD'
     `, [workspaceIds[0], workflowIds[0]]);
     if (rebuilt.rows[0]?.queued !== 1 || rebuilt.rows[0]?.scoped_to_assets !== true) {
       throw new Error("Asset rerun did not enqueue one fresh asset-scoped build");
@@ -484,18 +483,18 @@ async function runDatabaseSmoke(url) {
       UPDATE deviludo.jobs
          SET state = 'SUCCEEDED', updated_at = clock_timestamp()
        WHERE workspace_id = $1::uuid AND workflow_id = $2::uuid
-         AND kind = 'ARTIFACT_BUILD' AND state = 'QUEUED'
+         AND kind = 'BUILD' AND state = 'QUEUED'
     `, [workspaceIds[0], workflowIds[0]]);
     await owner.query(`
       UPDATE deviludo.workflow_instances
          SET profile = 'RELEASE', target_platforms = ARRAY['linux','windows','macos']::deviludo.server_os[],
-             state = 'RELEASE_DECISION_PENDING'
+             state = 'RELEASE_APPROVAL_PENDING'
        WHERE workspace_id = $1::uuid AND id = $2::uuid
     `, [workspaceIds[0], workflowIds[0]]);
     const releasePendingRerun = await withWorkspace(api, workspaceIds[0], client => client.query(`
       SELECT deviludo.request_stage_rerun(
         $1::uuid, $2,
-        jsonb_build_object('stage', 'ARTIFACT_BUILD', 'requestedByActorId', $3::text)
+        jsonb_build_object('stage', 'BUILD', 'requestedByActorId', $3::text)
       ) AS accepted
     `, [workflowIds[0], `release-pending-build-rerun:${workflowIds[0]}`, actorId]));
     if (releasePendingRerun.rows[0]?.accepted !== true) {
@@ -504,7 +503,7 @@ async function runDatabaseSmoke(url) {
     const releasePendingRebuild = await owner.query(`
       SELECT workflow.state::text,
              count(job.id) FILTER (
-               WHERE job.kind = 'ARTIFACT_BUILD' AND job.state = 'QUEUED'
+               WHERE job.kind = 'BUILD' AND job.state = 'QUEUED'
              )::integer AS queued_builds
         FROM deviludo.workflow_instances workflow
         LEFT JOIN deviludo.jobs job
@@ -512,7 +511,7 @@ async function runDatabaseSmoke(url) {
        WHERE workflow.workspace_id = $1::uuid AND workflow.id = $2::uuid
        GROUP BY workflow.state
     `, [workspaceIds[0], workflowIds[0]]);
-    if (releasePendingRebuild.rows[0]?.state !== "ARTIFACT_BUILDING"
+    if (releasePendingRebuild.rows[0]?.state !== "BUILDING"
       || releasePendingRebuild.rows[0]?.queued_builds !== 1) {
       throw new Error("Build rerun did not reopen the release-pending workflow");
     }
@@ -520,11 +519,11 @@ async function runDatabaseSmoke(url) {
       UPDATE deviludo.jobs
          SET state = 'SUCCEEDED', updated_at = clock_timestamp()
        WHERE workspace_id = $1::uuid AND workflow_id = $2::uuid
-         AND kind = 'ARTIFACT_BUILD' AND state = 'QUEUED'
+         AND kind = 'BUILD' AND state = 'QUEUED'
     `, [workspaceIds[0], workflowIds[0]]);
     await owner.query(`
       UPDATE deviludo.workflow_instances
-         SET state = 'RELEASE_DECISION_PENDING'
+         SET state = 'RELEASE_APPROVAL_PENDING'
        WHERE workspace_id = $1::uuid AND id = $2::uuid
     `, [workspaceIds[0], workflowIds[0]]);
     await owner.query(`
@@ -540,7 +539,7 @@ async function runDatabaseSmoke(url) {
              256,
              (SELECT id FROM deviludo.jobs
                WHERE workspace_id = $1::uuid AND workflow_id = $3::uuid
-                 AND kind = 'ARTIFACT_BUILD' AND state = 'SUCCEEDED'
+                 AND kind = 'BUILD' AND state = 'SUCCEEDED'
                ORDER BY updated_at DESC LIMIT 1)
         FROM unnest(ARRAY['linux','windows','macos']::deviludo.server_os[]) platform
     `, [workspaceIds[0], projectIds[0], workflowIds[0]]);

@@ -4,19 +4,23 @@ import test from "node:test";
 
 const readStartup = () => readFile(new URL("../scripts/local-up.mjs", import.meta.url), "utf8");
 
-test("cacheable local initialisation is gated while the migration ledger is always verified", async () => {
+test("cacheable local initialisation verifies the immutable database baseline", async () => {
   const startup = await readStartup();
   // Each of these steps costs a container creation, so a repeat start must be able
   // to skip the ones whose inputs are unchanged.
-  assert.match(startup, /if \(!matchesStartupCache\("vaultInit", fingerprint\)\) \{[\s\S]*?await refreshLocalVaultTokens/);
-  assert.match(startup, /if \(!matchesStartupCache\("executorSecrets", fingerprint\)\) \{[\s\S]*?await refreshLocalExecutorSecrets/);
+  assert.match(startup, /if \(!matchesStartupCache\("vaultInit", fingerprint\) \|\| !await localVaultTokensAreValid\(baseEnvironment\)\) \{[\s\S]*?await refreshLocalVaultTokens/);
+  assert.match(startup, /if \(!matchesStartupCache\("executorSecrets", fingerprint\) \|\| socketPermissions !== expectedSocketPermissions\) \{[\s\S]*?await refreshLocalExecutorSecrets/);
+  assert.match(startup, /if \(!await localVaultTokensAreValid\(baseEnvironment\)\) \{[\s\S]*?Local Vault service credentials could not be prepared/);
+  assert.match(startup, /if \(await inspectExecutorSocketPermissions\(environment\) !== expectedSocketPermissions\) \{[\s\S]*?Sandbox executor socket permissions could not be prepared/);
   assert.match(startup, /cachedStartupValue\("dockerSocketGid", dockerIdentity, \/\^\\d\+\$\/\)[\s\S]*return await resolveDockerSocketGid\(\)/);
-  // Baseline compatibility cannot prove that later versioned migrations are
-  // present, so every start compares the complete immutable ledger before it
-  // decides whether creating a migration container is necessary.
-  assert.match(startup, /readExpectedMigrationLedger\(\)/);
-  assert.match(startup, /migrateWithOptionalBaselineReset\(environment, instanceState, expectedMigrationLedger\)/);
-  assert.match(startup, /state\?\.baseline === "001 deviludo-self-hosted-v1" && state\.migrations === expectedLedger/);
+  // The complete v3 baseline digest and its sole ledger row are checked before
+  // deciding whether the migration container can be skipped.
+  assert.match(startup, /readExpectedDatabaseBaseline\(\)/);
+  assert.match(startup, /migrateWithOptionalBaselineReset\(environment, instanceState, expectedBaseline\)/);
+  assert.match(startup, /state\.sourceDigest === expectedBaseline\.digest/);
+  assert.match(startup, /state\.migrations === expectedBaseline\.ledger/);
+  assert.match(startup, /001_persistent_multi_agent=\$\{digest\}/);
+  assert.doesNotMatch(startup, /infra\/postgres\/migrations/);
   assert.match(startup, /bootstrapInstance\(environment, runtimeImages, instanceState, applied\)/);
   assert.match(startup, /await runMigration\(environment\)/);
   assert.match(startup, /if \(!migrationRan && !baselineReset\)/);
@@ -38,18 +42,19 @@ test("an unchanged checkout reuses verified images and never runs two local star
   assert.match(startup, /for \(const \[index, entry\] of localImageBuilds\.entries\(\)\)/);
   // Healthy services are retained. A stop is reserved for rotated credentials,
   // whose in-memory consumers must reload their token files.
-  assert.match(startup, /if \(!matchesStartupCache\("vaultInit", fingerprint\)\) \{[\s\S]*await stopCredentialConsumers/);
+  assert.match(startup, /if \(!matchesStartupCache\("vaultInit", fingerprint\) \|\| !await localVaultTokensAreValid\(baseEnvironment\)\) \{[\s\S]*await stopCredentialConsumers/);
   assert.doesNotMatch(startup, /const startupCache = await readStartupCache\(dockerIdentity\);[\s\S]{0,500}await stopLocalE2e\(\)/);
 });
 
-test("local project directories use a reusable host bridge without exposing Git credentials to task containers", async () => {
-  const [startup, bridge, bridgeDaemon, executorDaemon, proxy, compose] = await Promise.all([
+test("local project import stays outside Runtime containers and source is injected through project storage", async () => {
+  const [startup, bridge, bridgeDaemon, executorDaemon, proxy, compose, supervisor] = await Promise.all([
     readStartup(),
     readFile(new URL("../scripts/local-git-import-server.mjs", import.meta.url), "utf8"),
     readFile(new URL("../scripts/local-git-import-daemon.mjs", import.meta.url), "utf8"),
     readFile(new URL("../services/sandbox-executor/src/daemon.ts", import.meta.url), "utf8"),
     readFile(new URL("../scripts/local-project-bridge-proxy.mjs", import.meta.url), "utf8"),
     readFile(new URL("../infra/docker-compose.yml", import.meta.url), "utf8"),
+    readFile(new URL("../services/sandbox-executor/src/project-runtime-supervisor.ts", import.meta.url), "utf8"),
   ]);
   assert.match(startup, /startLocalGitImport\(\)/);
   assert.match(startup, /gitImportConfiguration: gitImportConfigurationFingerprint/);
@@ -68,8 +73,10 @@ test("local project directories use a reusable host bridge without exposing Git 
   assert.match(bridge, /"switch", "-c", branchName/);
   assert.match(bridge, /request\.headers\.origin/);
   assert.match(bridgeDaemon, /if \(await healthReady\(port\)\) return started/);
-  assert.match(executorDaemon, /base\.hostname !== "local-project-bridge-proxy"/);
-  assert.doesNotMatch(executorDaemon, /base\.hostname !== "host\.docker\.internal"/);
+  assert.doesNotMatch(executorDaemon, /localProjectBridge|localBindingId|syncLocalProjectSource/);
+  assert.match(supervisor, /prepareWorktree/);
+  assert.match(supervisor, /volume-subpath=/);
+  assert.doesNotMatch(supervisor, /host\.docker\.internal|local-project-bridge-proxy/);
   assert.match(proxy, /allowedPaths = new Set\([\s\S]*"\/internal\/directory\/source"[\s\S]*"\/internal\/directory\/sync"[\s\S]*"\/internal\/directory\/git\/commit"/);
   assert.match(proxy, /equalToken/);
   assert.match(proxy, /target\.hostname !== "host\.docker\.internal"/);

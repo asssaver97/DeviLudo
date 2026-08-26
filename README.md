@@ -35,7 +35,7 @@ flowchart LR
 
 | Capability | What it provides |
 | --- | --- |
-| Specialized agents | Design, Development, and Test agents with separate roles and model settings |
+| Persistent agents | Intent, Analysis, Design, Development, and Test Runtime sessions with separate role permissions and model settings |
 | Existing-project support | Direct access to a local directory or a GitHub clone using the host's Git credentials |
 | Iterative development | A separate, reviewable workflow for each round without losing previous artifacts or evidence |
 | Asset and build pipeline | Image generation, Godot validation, and desktop build artifacts |
@@ -81,7 +81,7 @@ For a custom Codex Provider, enter its Base URL, API key, and model in the UI, s
 1. Add a local Godot project directory or clone a GitHub repository.
 2. Describe the feature, change, or game goal in the project chat.
 3. Review the Design agent's specification, then give an explicit development instruction to start implementation.
-4. Follow the build and E2E results. Product failures can return to Development for up to five repair rounds.
+4. Follow the build and E2E results. Product failures return to the same Development session, then rebuild and rerun every target platform until all gates pass or you stop the workflow.
 5. Review the evidence, start another iteration, or approve Steam delivery.
 
 Local-directory projects are edited in place. GitHub projects use the host's credential helper or SSH agent. A successful E2E run creates a commit on the selected branch but does not push it automatically.

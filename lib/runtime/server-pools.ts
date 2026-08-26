@@ -49,8 +49,8 @@ export const SERVER_POOL_DEFINITIONS: Readonly<Record<ServerPoolKind, ServerPool
     capabilities: Object.freeze([
       "BUSINESS_API",
       "WORKFLOW_SCHEDULER",
-      "AGENT_GENERATION",
-      "ARTIFACT_BUILD",
+      "AGENT_TURN",
+      "BUILD",
       "STEAM_PUBLISH",
     ]),
     publicIngress: false,
@@ -61,7 +61,7 @@ export const SERVER_POOL_DEFINITIONS: Readonly<Record<ServerPoolKind, ServerPool
     minimumNodes: 1,
     maximumNodes: 1,
     desiredNodes: 1,
-    capabilities: Object.freeze(["E2E_TEST"]),
+    capabilities: Object.freeze(["E2E_PLATFORM_RUN"]),
     publicIngress: false,
   }),
   E2E_WINDOWS: Object.freeze({
@@ -70,7 +70,7 @@ export const SERVER_POOL_DEFINITIONS: Readonly<Record<ServerPoolKind, ServerPool
     minimumNodes: 1,
     maximumNodes: 1,
     desiredNodes: 1,
-    capabilities: Object.freeze(["E2E_TEST"]),
+    capabilities: Object.freeze(["E2E_PLATFORM_RUN"]),
     publicIngress: false,
   }),
   E2E_MACOS: Object.freeze({
@@ -79,7 +79,7 @@ export const SERVER_POOL_DEFINITIONS: Readonly<Record<ServerPoolKind, ServerPool
     minimumNodes: 0,
     maximumNodes: 1,
     desiredNodes: 0,
-    capabilities: Object.freeze(["E2E_TEST"]),
+    capabilities: Object.freeze(["E2E_PLATFORM_RUN"]),
     publicIngress: false,
   }),
 });
