@@ -3824,6 +3824,12 @@ textarea {
   opacity: .5;
 }
 
+.conversation-box-options button.is-manual-answer {
+  background: transparent;
+  border-style: dashed;
+  color: var(--muted);
+}
+
 .conversation-box-empty {
   align-items: center;
   color: var(--muted);

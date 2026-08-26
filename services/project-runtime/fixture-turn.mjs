@@ -201,7 +201,9 @@ function specialistReply(role, language) {
       ? `${names[role]} 已结合项目上下文生成回复。`
       : `${names[role]} answered from the current project context.`,
     readyForDevelopment: true,
-    options: language === "zh" ? ["强化资源管理", "增加随机事件"] : ["Strengthen resource management", "Add random events"],
+    options: language === "zh"
+      ? ["采用强化资源管理方案（推荐）", "采用随机事件驱动方案"]
+      : ["Use the resource-management direction (Recommended)", "Use the random-event-driven direction"],
     implementationBrief: language === "zh" ? "按玩家请求更新完整实现并保留全部验收目标。" : "Update the complete implementation while preserving every acceptance goal.",
     projectDocumentPatch: {
       introduction: language === "zh" ? "测试设计 Agent 已整理当前游戏需求。" : "The Design Agent organized the current game requirements.",

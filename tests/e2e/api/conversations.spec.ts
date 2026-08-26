@@ -262,7 +262,7 @@ test("project conversations apply explicit feedback, defer tentative changes, an
     appliedToDraft: false,
     readyForDevelopment: true,
     projectDocumentUpdated: false,
-    options: ["强化资源管理", "增加随机事件"],
+    options: ["采用强化资源管理方案（推荐）", "采用随机事件驱动方案", "自己输入意见"],
   });
   expect(draftConversation.messages[1].content).toContain("测试设计 Agent");
   expect(draftedBody.project.document).toMatchObject({

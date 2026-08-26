@@ -16,6 +16,7 @@ import {
   MAX_CONVERSATION_IMAGES,
   MAX_CONVERSATION_IMAGE_BYTES,
   MAX_CONVERSATION_IMAGE_TOTAL_BYTES,
+  isManualConversationReplyOption,
   PROJECT_AGENT_ROLES,
   type AgentProgressEvent,
   type ProductConversationMessage,
@@ -273,7 +274,19 @@ export function ConversationBox({
                 {options.length && onOptionSelect ? (
                   <div aria-label={text("可选回复", "Suggested replies")} className="conversation-box-options" role="group">
                     {options.map(option => (
-                      <button disabled={sending || disabled} key={option} onClick={() => onOptionSelect(option)} type="button">{option}</button>
+                      <button
+                        className={isManualConversationReplyOption(option) ? "is-manual-answer" : undefined}
+                        disabled={sending || disabled}
+                        key={option}
+                        onClick={() => {
+                          if (isManualConversationReplyOption(option)) {
+                            textarea.current?.focus();
+                            return;
+                          }
+                          onOptionSelect(option);
+                        }}
+                        type="button"
+                      >{option}</button>
                     ))}
                   </div>
                 ) : null}

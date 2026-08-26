@@ -1,14 +1,18 @@
 export function runtimeEventText(value) {
   if (!value || typeof value !== "object" || Array.isArray(value)) return null;
   const event = value;
+  const nestedEvent = event.event && typeof event.event === "object" && !Array.isArray(event.event)
+    ? event.event
+    : null;
   const item = event.item && typeof event.item === "object" && !Array.isArray(event.item)
     ? event.item
     : null;
   const message = event.message && typeof event.message === "object" && !Array.isArray(event.message)
     ? event.message
     : null;
-  const delta = event.delta && typeof event.delta === "object" && !Array.isArray(event.delta)
-    ? event.delta
+  const deltaValue = event.delta ?? nestedEvent?.delta;
+  const delta = deltaValue && typeof deltaValue === "object" && !Array.isArray(deltaValue)
+    ? deltaValue
     : null;
   if (item?.type === "agent_message" && typeof item.text === "string") return item.text;
   if (typeof event.result === "string") return event.result;
@@ -20,6 +24,22 @@ export function runtimeEventText(value) {
     ? part.text
     : "").join("");
   return text || null;
+}
+
+export function createRuntimeEventLineBuffer(onLine) {
+  let buffer = "";
+  return Object.freeze({
+    push(chunk) {
+      buffer += chunk;
+      const lines = buffer.split(/\r?\n/);
+      buffer = lines.pop() ?? "";
+      for (const line of lines) if (line) onLine(line);
+    },
+    flush() {
+      if (buffer) onLine(buffer);
+      buffer = "";
+    },
+  });
 }
 
 export function finalRuntimeContent(stdout) {

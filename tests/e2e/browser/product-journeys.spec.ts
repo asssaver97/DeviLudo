@@ -839,7 +839,7 @@ test("the home chat supports both project feedback and a fresh game conversation
   ]);
   const suggestedReplies = page.getByRole("group", { name: "可选回复" });
   await expect(suggestedReplies).toBeVisible();
-  await expect(suggestedReplies.getByRole("button")).toHaveText(["强化资源管理", "增加随机事件"]);
+  await expect(suggestedReplies.getByRole("button")).toHaveText(["采用强化资源管理方案（推荐）", "采用随机事件驱动方案", "自己输入意见"]);
 
   let releaseManualReply: () => void = () => {};
   const manualReplyGate = new Promise<void>(resolve => { releaseManualReply = resolve; });
@@ -848,6 +848,8 @@ test("the home chat supports both project feedback and a fresh game conversation
     await route.continue();
   }, { times: 1 });
   const followUpQuestion = "请说明车灯亮度会如何影响幽灵出现频率。";
+  await suggestedReplies.getByRole("button", { name: "自己输入意见" }).click();
+  await expect(page.getByLabel("游戏想法或修改意见")).toBeFocused();
   await page.getByLabel("游戏想法或修改意见").fill(followUpQuestion);
   await page.getByRole("button", { name: "发送消息" }).click();
   await expect(page.locator(".home-conversation-box .conversation-box-message.is-thinking")).toBeVisible();
@@ -873,14 +875,14 @@ test("the home chat supports both project feedback and a fresh game conversation
   await expect(page.getByRole("link", { name: "打开项目" })).toHaveAttribute("href", `/projects/${project.id}`);
   expect((await stack.readProject(project.id)).workflowState).toBe("DRAFT");
 
-  await suggestedReplies.getByRole("button", { name: "强化资源管理" }).click();
+  await suggestedReplies.getByRole("button", { name: "采用强化资源管理方案（推荐）" }).click();
   await expect(page.getByRole("button", { name: "确认修改并重跑" })).toBeVisible();
   await page.getByRole("button", { name: "确认修改并重跑" }).click();
   await expect(page).toHaveURL(`/projects/${project.id}`);
   await expect(page.getByRole("heading", { name: "会话记录" })).toBeVisible();
   await expect(page.getByRole("navigation", { name: "历史会话" })).toBeVisible();
   await expect(page.getByText(feedbackQuestion, { exact: true }).first()).toBeVisible();
-  await expect(page.getByText("强化资源管理", { exact: true }).first()).toBeVisible();
+  await expect(page.getByText("采用强化资源管理方案（推荐）", { exact: true }).first()).toBeVisible();
   await expect(page.getByText("测试设计 Agent 已整理当前游戏需求。", { exact: true })).toBeVisible();
   await expect(page.getByText("E2E G2", { exact: true })).toBeVisible();
   await expect(page.getByRole("button", { name: "删除项目" })).toBeVisible();

@@ -89,6 +89,16 @@ export type AgentRuntimeAvailability = Readonly<{
 export const PROJECT_AGENT_ROLES = ["DESIGN", "DEVELOPMENT", "TEST"] as const;
 export type ProjectAgentRole = typeof PROJECT_AGENT_ROLES[number];
 
+export const MANUAL_CONVERSATION_REPLY_OPTIONS = Object.freeze({
+  zh: "自己输入意见",
+  en: "Enter my own answer",
+} as const);
+
+export function isManualConversationReplyOption(option: string): boolean {
+  return option === MANUAL_CONVERSATION_REPLY_OPTIONS.zh
+    || option === MANUAL_CONVERSATION_REPLY_OPTIONS.en;
+}
+
 /**
  * Runtime roles are deliberately separate from the three members rendered in
  * the project group chat. Intent is a transient router and Analysis owns the

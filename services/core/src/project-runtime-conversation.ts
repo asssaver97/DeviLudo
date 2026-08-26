@@ -1,8 +1,10 @@
-import type {
-  ConversationIntentDecision,
-  E2eGoalDelta,
-  ProductConversationMessage,
-  ProjectAgentRole,
+import {
+  MANUAL_CONVERSATION_REPLY_OPTIONS,
+  isManualConversationReplyOption,
+  type ConversationIntentDecision,
+  type E2eGoalDelta,
+  type ProductConversationMessage,
+  type ProjectAgentRole,
 } from "@/lib/product/contracts";
 import type { ProjectRuntimeTurnResult } from "@/lib/product/project-runtime";
 import { resolveAgentModel } from "./agent-settings";
@@ -144,6 +146,9 @@ export function projectRuntimeSpecialistPrompt(input: Readonly<{
     "Return one JSON object with content, readyForDevelopment, options, implementationBrief, projectDocumentPatch, and e2eGoalDelta.",
     "projectDocumentPatch is an object. e2eGoalDelta contains add, replace, and retire arrays. Use empty values when not applicable.",
     "Set readyForDevelopment=false and keep the patch and goal delta empty whenever material product decisions remain unresolved.",
+    input.intent.targetRole === "DESIGN"
+      ? "Design choice UX: prefer one material decision per reply. When its plausible answers are foreseeable, put 2-4 mutually exclusive, directly sendable answers in options instead of asking the player to type. Put the recommended answer first and mark it （推荐） in Chinese or (Recommended) in English; keep every substantive option within 160 characters. Always append exactly one final manual-answer option: 自己输入意见 in Chinese or Enter my own answer in English. Use options=[] only when no choice is requested or useful presets are genuinely impossible."
+      : "Use options only for concise replies the player can select and send unchanged.",
     input.confirmed
       ? "If this is a ready Design reply, end its content with 开始开发 for Chinese or Start development for English. Do not ask for confirmation again."
       : "If this is a ready Design proposal, end its content with 是否按照当前计划开发？ for Chinese or Shall we develop according to the current plan? for English.",
@@ -188,7 +193,10 @@ export function parseProjectRuntimeReply(
   return Object.freeze({
     agentRole: role,
     content,
-    options: stringArray(value.options, 5),
+    options: selectableReplyOptions(
+      value.options,
+      role === "DESIGN" ? replyLanguage(rawContent, responseLanguage) : null,
+    ),
     applyToDraft: false,
     readyForDevelopment,
     projectDocument: null,
@@ -218,23 +226,41 @@ function readyDesignContent(
   );
   const planHeading = responseLanguage === "zh" ? "开发计划" : "Development plan";
   const headingPattern = responseLanguage === "zh"
-    ? /^\s*(?:#{1,6}\s*)?(?:\*{1,2}|_{1,2})?\s*开发计划(?:\s*[（(][^\n）)]*[）)])?(?:\s*[:：]\s*[^\n]{0,80})?\s*(?:\*{1,2}|_{1,2})?\s*$/u
-    : /^\s*(?:#{1,6}\s*)?(?:\*{1,2}|_{1,2})?\s*Development plan(?:\s*[（(][^\n）)]*[）)])?(?:\s*[:：]\s*[^\n]{0,80})?\s*(?:\*{1,2}|_{1,2})?\s*$/iu;
+    ? /^\s*(?:#{1,6}\s*)?(?:\*{1,2}|_{1,2})?\s*(?:开发|实施|实现|执行|落地)计划(?:\s*[（(][^\n）)]*[）)])?(?:\s*[:：]\s*[^\n]{0,80})?\s*(?:\*{1,2}|_{1,2})?\s*$/u
+    : /^\s*(?:#{1,6}\s*)?(?:\*{1,2}|_{1,2})?\s*(?:Development|Implementation|Execution|Delivery) plan(?:\s*[（(][^\n）)]*[）)])?(?:\s*[:：]\s*[^\n]{0,80})?\s*(?:\*{1,2}|_{1,2})?\s*$/iu;
+  const planNamePattern = responseLanguage === "zh"
+    ? /(?:开发|实施|实现|执行|落地)计划/u
+    : /(?:Development|Implementation|Execution|Delivery) plan/iu;
+  const sectionHeadingPattern = /^\s*(?:#{1,6}\s+\S.*|(?:\*{1,2}|_{1,2})\s*\S.*(?:\*{1,2}|_{1,2}))\s*$/u;
   let hasPlan = false;
-  const withoutDuplicateHeadings = withoutOldAction.split("\n").filter(line => {
-    if (!headingPattern.test(line)) return true;
-    if (hasPlan) return false;
-    hasPlan = true;
-    return true;
-  }).join("\n").trim();
+  let skippingDuplicatePlan = false;
+  const normalizedLines: string[] = [];
+  for (const line of withoutOldAction.split("\n")) {
+    if (headingPattern.test(line)) {
+      if (hasPlan) {
+        skippingDuplicatePlan = true;
+        continue;
+      }
+      hasPlan = true;
+      skippingDuplicatePlan = false;
+      normalizedLines.push(line.replace(planNamePattern, planHeading));
+      continue;
+    }
+    if (skippingDuplicatePlan) {
+      if (!sectionHeadingPattern.test(line)) continue;
+      skippingDuplicatePlan = false;
+    }
+    normalizedLines.push(line);
+  }
+  const withoutDuplicatePlans = normalizedLines.join("\n").trim();
   const brief = typeof value.implementationBrief === "string" && value.implementationBrief.trim()
     ? value.implementationBrief.trim()
     : responseLanguage === "zh"
       ? "按照上述已确认的玩法、范围和验收目标完成实现、构建与测试。"
       : "Implement, build, and test the confirmed gameplay, scope, and acceptance goals above.";
   const planned = hasPlan
-    ? withoutDuplicateHeadings
-    : `${withoutDuplicateHeadings}\n\n${planHeading}\n${brief}`;
+    ? withoutDuplicatePlans
+    : `${withoutDuplicatePlans}\n\n${planHeading}\n${brief}`;
   return `${planned}\n\n${finalAction}`;
 }
 
@@ -265,6 +291,26 @@ function objectOrNull(value: unknown): Readonly<Record<string, unknown>> | null 
 function stringArray(value: unknown, maximum: number): readonly string[] {
   if (!Array.isArray(value)) return Object.freeze([]);
   return Object.freeze(value.filter(item => typeof item === "string" && item.trim()).slice(0, maximum).map(item => item.trim().slice(0, 500)));
+}
+
+function selectableReplyOptions(value: unknown, manualLanguage: "en" | "zh" | null): readonly string[] {
+  const seen = new Set<string>();
+  const options: string[] = [];
+  if (!Array.isArray(value)) return Object.freeze(options);
+  for (const item of value) {
+    if (typeof item !== "string") continue;
+    const option = item.trim().slice(0, 160).trim();
+    if (!option || seen.has(option) || isManualConversationReplyOption(option)) continue;
+    seen.add(option);
+    options.push(option);
+    if (options.length === (manualLanguage ? 4 : 5)) break;
+  }
+  if (manualLanguage && options.length > 0) options.push(MANUAL_CONVERSATION_REPLY_OPTIONS[manualLanguage]);
+  return Object.freeze(options);
+}
+
+function replyLanguage(content: string, fallback: "en" | "zh"): "en" | "zh" {
+  return /\p{Script=Han}/u.test(content) ? "zh" : fallback;
 }
 
 function e2eGoalDelta(value: unknown): E2eGoalDelta {

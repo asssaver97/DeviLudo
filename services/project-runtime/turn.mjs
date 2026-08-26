@@ -3,6 +3,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { cp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { spawn } from "node:child_process";
 import {
+  createRuntimeEventLineBuffer,
   finalRuntimeContent,
   runtimeEventText,
   structuredRuntimeOutput,
@@ -187,16 +188,23 @@ async function run(executable, args, env, stdin) {
   const content = [];
   const toolCalls = [];
   let sessionId = null;
+  const runtimeEvents = createRuntimeEventLineBuffer(line => {
+    process.stderr.write(`DEVILUDO_RUNTIME_EVENT:${line}\n`);
+  });
   child.stdout.on("data", chunk => {
     const text = decoder.decode(chunk, { stream: true });
     stdout += text;
-    process.stderr.write(text.split(/\r?\n/).filter(Boolean).map(line => `DEVILUDO_RUNTIME_EVENT:${line}\n`).join(""));
+    runtimeEvents.push(text);
   });
   child.stderr.on("data", chunk => { stderr += chunk.toString("utf8"); });
   const exitCode = await new Promise((resolve, reject) => {
     child.once("error", reject);
     child.once("close", resolve);
   });
+  const trailing = decoder.decode();
+  stdout += trailing;
+  runtimeEvents.push(trailing);
+  runtimeEvents.flush();
   for (const line of stdout.split(/\r?\n/).filter(Boolean)) {
     let event;
     try { event = JSON.parse(line); } catch { continue; }

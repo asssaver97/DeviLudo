@@ -20,15 +20,19 @@ import {
   parseProjectRuntimeIntent,
   parseProjectRuntimeReply,
   projectRuntimeIntentPrompt,
+  projectRuntimeSpecialistPrompt,
 } from "@/services/core/src/project-runtime-conversation";
 import {
   summarizeRuntimeToolCalls,
   summarizeToolAuditValue,
 } from "@/services/core/src/project-runtime-service";
 import {
+  createRuntimeEventLineBuffer,
   finalRuntimeContent,
+  runtimeEventText,
   structuredRuntimeOutput,
 } from "@/services/project-runtime/runtime-events.mjs";
+import { runtimeEventContent } from "@/services/sandbox-executor/src/project-runtime-supervisor";
 import {
   canonicalToolName,
   nativeToolName,
@@ -63,6 +67,17 @@ test("persistent Runtime intent selects exactly one role and rejects contradicto
     workflowState: "TESTING",
     recentMessages: [],
   }), /targetRole must be exactly one/);
+  assert.match(projectRuntimeSpecialistPrompt({
+    intent: Object.freeze({
+      intent: "CHANGE_REQUEST",
+      targetRole: "DESIGN",
+      explicitExecution: false,
+      actionable: true,
+      summary: "Choose the core-loop direction.",
+    }),
+    content: "帮我设计玩法",
+    confirmed: false,
+  }), /2-4 mutually exclusive, directly sendable answers in options/);
 });
 
 test("lightweight Intent routes common messages without a Runtime turn", () => {
@@ -169,6 +184,19 @@ test("ready Design replies end with a development plan and localized confirmatio
     updatedBy: "test",
     updatedAt: new Date(0).toISOString(),
   };
+  const discovery = parseProjectRuntimeReply(result("DESIGN", {
+    content: "请选择核心循环方向。",
+    readyForDevelopment: false,
+    options: [" 采用探索驱动方案（推荐） ", "采用战斗驱动方案", "采用战斗驱动方案", "很".repeat(200)],
+    implementationBrief: "",
+    projectDocumentPatch: {},
+    e2eGoalDelta: { add: [], replace: [], retire: [] },
+  }), "DESIGN", settings, "zh");
+  assert.deepEqual(discovery.options.slice(0, 2), ["采用探索驱动方案（推荐）", "采用战斗驱动方案"]);
+  assert.equal(discovery.options.length, 4);
+  assert.equal(discovery.options[2]?.length, 160);
+  assert.equal(discovery.options[3], "自己输入意见");
+
   const reply = parseProjectRuntimeReply(result("DESIGN", {
     content: "玩法和验收目标已经明确。",
     readyForDevelopment: true,
@@ -181,16 +209,43 @@ test("ready Design replies end with a development plan and localized confirmatio
   assert.ok(reply.content.endsWith("是否按照当前计划开发？"));
 
   const authorized = parseProjectRuntimeReply(result("DESIGN", {
-    content: "玩法和验收目标已经明确。\n\n## 开发计划（按风险排序）\n先完成核心循环。\n\n**开发计划**\n再完成验收测试。\n\n是否按照当前计划开发？",
+    content: "玩法和验收目标已经明确。\n\n## 实施计划（按风险排序）\n先完成核心循环。\n\n**开发计划**\n这段重复计划不应出现。\n\n是否按照当前计划开发？",
     readyForDevelopment: true,
     options: [],
     implementationBrief: "先完成核心循环，再接入界面与验收测试。",
     projectDocumentPatch: {},
     e2eGoalDelta: { add: [], replace: [], retire: [] },
   }), "DESIGN", settings, "zh", "START_DEVELOPMENT");
-  assert.equal(authorized.content.match(/开发计划/gu)?.length, 1);
+  assert.equal(authorized.content.match(/(?:开发|实施|实现|执行|落地)计划/gu)?.length, 1);
+  assert.match(authorized.content, /## 开发计划（按风险排序）/u);
+  assert.doesNotMatch(authorized.content, /这段重复计划不应出现/u);
   assert.ok(authorized.content.endsWith("开始开发"));
   assert.doesNotMatch(authorized.content, /是否按照当前计划开发？/u);
+});
+
+test("Runtime progress preserves split JSONL events and exposes live tool activity", () => {
+  const lines: string[] = [];
+  const buffer = createRuntimeEventLineBuffer(line => lines.push(line));
+  buffer.push('{"delta":{"te');
+  buffer.push('xt":"正在实现核心循环"}}\n{"type":"turn.completed"');
+  buffer.push("}\n");
+  buffer.flush();
+  assert.deepEqual(lines, [
+    '{"delta":{"text":"正在实现核心循环"}}',
+    '{"type":"turn.completed"}',
+  ]);
+  assert.equal(runtimeEventText({
+    type: "stream_event",
+    event: { type: "content_block_delta", delta: { type: "text_delta", text: "实时文本" } },
+  }), "实时文本");
+  assert.match(runtimeEventContent(`DEVILUDO_RUNTIME_EVENT:${JSON.stringify({
+    type: "item.started",
+    item: { type: "command_execution", command: "/bin/bash -lc 'API_KEY=secret npm test'" },
+  })}`, "zh") ?? "", /正在执行命令：API_KEY=•••• npm test/u);
+  assert.match(runtimeEventContent(`DEVILUDO_RUNTIME_EVENT:${JSON.stringify({
+    type: "item.completed",
+    item: { type: "mcp_tool_call", tool: "source_checkpoint_create" },
+  })}`, "zh") ?? "", /项目工具调用完成：source_checkpoint_create/u);
 });
 
 test("incomplete design discovery cannot stage or execute an implementation change", () => {

@@ -8,6 +8,7 @@ import type {
   ProjectRuntimeTurnRequest,
   ProjectRuntimeTurnResult,
 } from "@/lib/product/project-runtime";
+import { runtimeEventText } from "@/services/project-runtime/runtime-events.mjs";
 
 type DockerOptions = Readonly<{
   signal?: AbortSignal;
@@ -267,7 +268,7 @@ export class ProjectRuntimeSupervisor {
           const lines = stderr.split(/\r?\n/);
           stderr = lines.pop() ?? "";
           for (const line of lines) {
-            const content = runtimeEventContent(line);
+            const content = runtimeEventContent(line, request.responseLanguage);
             if (content) onEvent?.(content);
           }
         },
@@ -345,26 +346,69 @@ export class ProjectRuntimeSupervisor {
   }
 }
 
-function runtimeEventContent(line: string): string | null {
+export function runtimeEventContent(line: string, language: "en" | "zh" = "en"): string | null {
   const prefix = "DEVILUDO_RUNTIME_EVENT:";
   if (!line.startsWith(prefix)) return null;
   try {
     const event = JSON.parse(line.slice(prefix.length)) as Record<string, unknown>;
-    const message = event.message as Record<string, unknown> | undefined;
     const item = event.item as Record<string, unknown> | undefined;
-    const delta = event.delta as Record<string, unknown> | undefined;
-    const content = Array.isArray(message?.content) ? message.content : Array.isArray(item?.content) ? item.content : [];
-    const text = typeof item?.text === "string" ? item.text
-      : typeof delta?.text === "string" ? delta.text
-      : content.map(part => {
-        const value = part as Record<string, unknown>;
-        return typeof value.text === "string" ? value.text : "";
-      }).join("")
-        || (typeof event.result === "string" ? event.result : "");
-    return text || null;
+    const text = runtimeEventText(event);
+    if (text) return text;
+    const eventType = typeof event.type === "string" ? event.type : "";
+    const itemType = typeof item?.type === "string" ? item.type : "";
+    const started = eventType.endsWith(".started") || eventType.endsWith("_start");
+    const completed = eventType.endsWith(".completed") || eventType.endsWith("_stop");
+    if (itemType === "command_execution" || itemType === "shell_command") {
+      const command = safeCommandSummary(typeof item?.command === "string" ? item.command : "");
+      if (started) return language === "zh"
+        ? `\n[开发日志] 正在执行命令${command ? `：${command}` : ""}\n`
+        : `\n[Development log] Running command${command ? `: ${command}` : ""}\n`;
+      if (completed) {
+        const rawExitCode = item?.exit_code;
+        const exitCode = Number.isInteger(rawExitCode) ? ` ${String(rawExitCode)}` : "";
+        return language === "zh"
+          ? `[开发日志] 命令执行完成${exitCode ? `（退出码${exitCode}）` : ""}\n`
+          : `[Development log] Command completed${exitCode ? ` (exit code${exitCode})` : ""}\n`;
+      }
+    }
+    if (itemType === "mcp_tool_call" || itemType === "tool_use") {
+      const tool = safeActivityName(item?.tool ?? item?.name);
+      if (started) return language === "zh"
+        ? `[开发日志] 正在调用项目工具${tool ? `：${tool}` : ""}\n`
+        : `[Development log] Calling project tool${tool ? `: ${tool}` : ""}\n`;
+      if (completed) return language === "zh"
+        ? `[开发日志] 项目工具调用完成${tool ? `：${tool}` : ""}\n`
+        : `[Development log] Project tool completed${tool ? `: ${tool}` : ""}\n`;
+    }
+    if (itemType === "file_change" && completed) {
+      return language === "zh" ? "[开发日志] 已应用源码修改\n" : "[Development log] Applied source changes\n";
+    }
+    const nested = event.event as Record<string, unknown> | undefined;
+    const contentBlock = nested?.content_block as Record<string, unknown> | undefined;
+    if (nested?.type === "content_block_start" && contentBlock?.type === "tool_use") {
+      const tool = safeActivityName(contentBlock.name);
+      return language === "zh"
+        ? `[开发日志] 正在调用开发工具${tool ? `：${tool}` : ""}\n`
+        : `[Development log] Calling development tool${tool ? `: ${tool}` : ""}\n`;
+    }
+    return null;
   } catch {
     return null;
   }
+}
+
+function safeActivityName(value: unknown): string {
+  return typeof value === "string" ? value.replaceAll(/[^A-Za-z0-9_.:/-]/g, "").slice(0, 100) : "";
+}
+
+function safeCommandSummary(value: string): string {
+  let command = value.trim().split(/\r?\n/, 1)[0] ?? "";
+  const shell = command.match(/^\/bin\/(?:ba|z)?sh\s+-lc\s+(.+)$/u)?.[1];
+  if (shell) command = shell.replace(/^(['"])(.*)\1$/u, "$2");
+  return command
+    .replace(/\b([A-Za-z_][A-Za-z0-9_]*=)(?:"[^"]*"|'[^']*'|\S+)/gu, "$1••••")
+    .replace(/(--?(?:api[-_]?key|token|password|secret))(?:=|\s+)\S+/giu, "$1=••••")
+    .slice(0, 180);
 }
 
 function validateEnsure(value: ProjectRuntimeEnsureRequest, images: ReadonlySet<string>): void {

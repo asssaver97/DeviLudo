@@ -8,6 +8,7 @@ COPY package.json package-lock.json tsconfig.json ./
 RUN --mount=type=cache,target=/root/.npm npm ci --omit=dev --no-audit --no-fund
 COPY lib ./lib
 COPY services/core/src/contracts.ts services/core/src/sandbox.ts services/core/src/agent-settings.ts services/core/src/codex-cli.ts services/core/src/project-import.ts services/core/src/project-sources.ts ./services/core/src/
+COPY services/project-runtime/runtime-events.mjs ./services/project-runtime/runtime-events.mjs
 COPY services/sandbox-executor ./services/sandbox-executor
 RUN install -d -m 0555 /run/service-secrets
 USER 10001:10001
