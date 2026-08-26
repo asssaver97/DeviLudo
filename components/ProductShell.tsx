@@ -24,21 +24,32 @@ export function ProductShell({ children }: { children: ReactNode }) {
 
   useEffect(() => {
     const controller = new AbortController();
-    void loadCached(clientCacheKeys.instance, 30_000, async () => {
-      const response = await fetch("/api/instance", { cache: "no-store", signal: controller.signal });
-      if (!response.ok) throw new Error("INSTANCE_UNAVAILABLE");
-      return (await response.json() as { instance: LocalInstance }).instance;
-    })
-      .then(value => { if (!controller.signal.aborted) setInstance(value); })
-      .catch(() => undefined)
-      .finally(() => { if (!controller.signal.aborted) setInstanceLoaded(true); });
+    let reconnectTimer: ReturnType<typeof setTimeout> | undefined;
+    const connectInstance = async (force = false): Promise<void> => {
+      try {
+        const value = await loadCached(clientCacheKeys.instance, 30_000, async () => {
+          const response = await fetch("/api/instance", { cache: "no-store", signal: controller.signal });
+          if (!response.ok) throw new Error("INSTANCE_UNAVAILABLE");
+          return (await response.json() as { instance: LocalInstance }).instance;
+        }, { force });
+        if (!controller.signal.aborted) setInstance(value);
+      } catch {
+        if (!controller.signal.aborted) reconnectTimer = setTimeout(() => void connectInstance(true), 2_000);
+      } finally {
+        if (!controller.signal.aborted) setInstanceLoaded(true);
+      }
+    };
+    void connectInstance();
     void loadCached<HealthState>(clientCacheKeys.health, 30_000, async () => {
       const response = await fetch("/api/health/live", { signal: controller.signal });
       return response.ok ? "ok" : "degraded";
     })
       .then(value => { if (!controller.signal.aborted) setHealth(value); })
       .catch(() => { if (!controller.signal.aborted) setHealth("degraded"); });
-    return () => controller.abort();
+    return () => {
+      controller.abort();
+      if (reconnectTimer) clearTimeout(reconnectTimer);
+    };
   }, []);
 
   useEffect(() => {

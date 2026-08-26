@@ -23,6 +23,8 @@ test("cacheable local initialisation verifies the immutable database baseline", 
   assert.doesNotMatch(startup, /infra\/postgres\/migrations/);
   assert.match(startup, /bootstrapInstance\(environment, runtimeImages, instanceState, applied\)/);
   assert.match(startup, /await runMigration\(environment\)/);
+  assert.match(startup, /if \(baselineReset\) await reinitializeLocalStateAfterBaselineReset\(environment\)/);
+  assert.match(startup, /async function reinitializeLocalStateAfterBaselineReset\(environment\)[\s\S]*?await refreshLocalVaultTokens\(environment\)[\s\S]*?refreshLocalExecutorSecrets\(environment\)/);
   assert.match(startup, /if \(!migrationRan && !baselineReset\)/);
 });
 

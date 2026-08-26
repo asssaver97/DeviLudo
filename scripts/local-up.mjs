@@ -328,6 +328,7 @@ const { migrationRan, initialized } = await runStartupStage("Verify the database
     readExpectedDatabaseBaseline(),
   ]);
   const applied = await migrateWithOptionalBaselineReset(environment, instanceState, expectedBaseline);
+  if (baselineReset) await reinitializeLocalStateAfterBaselineReset(environment);
   const bootstrap = await bootstrapInstance(environment, runtimeImages, instanceState, applied);
   startupProgress(applied ? "Database baseline initialized" : "Database baseline is unchanged; skipping the migration container");
   startupProgress(bootstrap.reused ? "Local node registration is unchanged; skipping bootstrap" : "Local nodes and runtimes registered");
@@ -1398,6 +1399,28 @@ async function removeLocalProjectRuntimes() {
   const names = volumes.stdout.split(/\r?\n/).map(value => value.trim())
     .filter(value => /^deviludo-runtime-[0-9a-f-]{36}$/i.test(value));
   if (names.length) await execute("docker", ["volume", "rm", "-f", ...names], { cwd: root, maxBuffer: 4 * 1024 * 1024 });
+}
+
+async function reinitializeLocalStateAfterBaselineReset(environment) {
+  await execute("docker", [
+    "compose", "-f", "infra/docker-compose.yml", "up", "-d", "--wait", "postgres", "vault", "minio",
+  ], { cwd: root, env: environment, maxBuffer: 10 * 1024 * 1024 });
+  await refreshLocalVaultTokens(environment);
+  await Promise.all([
+    refreshLocalExecutorSecrets(environment),
+    execute("docker", [
+      "compose", "-f", "infra/docker-compose.yml", "run", "--rm", "--no-deps", "minio-init",
+    ], { cwd: root, env: environment, maxBuffer: 2 * 1024 * 1024 }),
+    execute("docker", [
+      "compose", "-f", "infra/docker-compose.yml", "run", "--rm", "--no-deps", "project-sources-init",
+    ], { cwd: root, env: environment, maxBuffer: 2 * 1024 * 1024 }),
+  ]);
+  if (!await localVaultTokensAreValid(environment)) {
+    throw new Error("Local Vault service credentials could not be restored after the baseline reset");
+  }
+  if (await inspectExecutorSocketPermissions(environment) !== "10001:1001:2770") {
+    throw new Error("Sandbox executor socket permissions could not be restored after the baseline reset");
+  }
 }
 
 async function runMigration(environment) {
