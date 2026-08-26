@@ -190,9 +190,9 @@ export async function runSandbox(
             prompt: runtimeJobPrompt(job, role), responseLanguage, settings,
             sourceRevision: project.source?.revision ?? null,
             sourceRelativePath: project.source?.relativePath ?? null,
-            onEvent: content => {
+            onEvent: event => {
               progressWrites = progressWrites
-                .then(() => repository.appendJobProgress(job as JobProtocolV4, "AGENT_OUTPUT", content))
+                .then(() => repository.appendJobProgress(job as JobProtocolV4, "AGENT_OUTPUT", event.content))
                 .then(() => undefined)
                 .catch(() => undefined);
             },

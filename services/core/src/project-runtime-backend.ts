@@ -3,6 +3,7 @@ import { isAbsolute } from "node:path";
 import type {
   ProjectRuntimeControlRequest,
   ProjectRuntimeEnsureRequest,
+  ProjectRuntimeProgressEvent,
   ProjectRuntimeStatus,
   ProjectRuntimeTurnRequest,
   ProjectRuntimeTurnResult,
@@ -13,7 +14,7 @@ export interface ProjectRuntimeBackend {
   turn(
     request: ProjectRuntimeTurnRequest,
     signal?: AbortSignal,
-    onEvent?: (content: string) => void,
+    onEvent?: (event: ProjectRuntimeProgressEvent) => void,
   ): Promise<ProjectRuntimeTurnResult>;
   pause(request: ProjectRuntimeControlRequest, signal?: AbortSignal): Promise<ProjectRuntimeStatus>;
   resume(request: ProjectRuntimeControlRequest, signal?: AbortSignal): Promise<ProjectRuntimeStatus>;
@@ -26,7 +27,7 @@ export class ProcessProjectRuntimeBackend implements ProjectRuntimeBackend {
   constructor(private readonly executable = process.env.DEVILUDO_SANDBOX_EXECUTOR ?? "") {}
 
   ensure(request: ProjectRuntimeEnsureRequest, signal?: AbortSignal) { return this.call<ProjectRuntimeStatus>("runtime-ensure", request, signal); }
-  turn(request: ProjectRuntimeTurnRequest, signal?: AbortSignal, onEvent?: (content: string) => void) {
+  turn(request: ProjectRuntimeTurnRequest, signal?: AbortSignal, onEvent?: (event: ProjectRuntimeProgressEvent) => void) {
     return this.call<ProjectRuntimeTurnResult>("runtime-turn", request, signal, onEvent);
   }
   pause(request: ProjectRuntimeControlRequest, signal?: AbortSignal) { return this.call<ProjectRuntimeStatus>("runtime-pause", request, signal); }
@@ -35,7 +36,7 @@ export class ProcessProjectRuntimeBackend implements ProjectRuntimeBackend {
   status(request: ProjectRuntimeControlRequest, signal?: AbortSignal) { return this.call<ProjectRuntimeStatus>("runtime-status", request, signal); }
   list(signal?: AbortSignal) { return this.call<readonly Readonly<Record<string, unknown>>[]>("runtime-list", undefined, signal); }
 
-  private async call<T>(action: string, body: unknown, signal?: AbortSignal, onEvent?: (content: string) => void): Promise<T> {
+  private async call<T>(action: string, body: unknown, signal?: AbortSignal, onEvent?: (event: ProjectRuntimeProgressEvent) => void): Promise<T> {
     if (!this.executable || !isAbsolute(this.executable)) throw new Error("A trusted Project Runtime supervisor is required");
     const child = spawn(this.executable, [action], {
       shell: false,
@@ -62,8 +63,11 @@ export class ProcessProjectRuntimeBackend implements ProjectRuntimeBackend {
         const prefix = "DEVILUDO_RUNTIME_PROGRESS:";
         if (!line.startsWith(prefix)) continue;
         try {
-          const event = JSON.parse(line.slice(prefix.length)) as { content?: unknown };
-          if (typeof event.content === "string") onEvent?.(event.content);
+          const event = JSON.parse(line.slice(prefix.length)) as { kind?: unknown; content?: unknown };
+          if ((event.kind === "ACTIVITY" || event.kind === "DEVELOPMENT_LOG")
+            && typeof event.content === "string") {
+            onEvent?.(Object.freeze({ kind: event.kind, content: event.content }));
+          }
         } catch {
           // Malformed progress is ignored; the final signed result remains authoritative.
         }

@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import {
   appendStreamingConversationReply,
+  appendStreamingDevelopmentLog,
   chronologicalMessages,
   completeStreamingConversationReply,
   failedOptimisticConversation,
@@ -9,6 +10,7 @@ import {
   optimisticConversation,
   startStreamingConversationReply,
   streamingConversationReplyIsActive,
+  updateStreamingConversationActivity,
 } from "../lib/product/conversation-stream";
 import { MAX_CONVERSATION_IMAGE_BYTES } from "../lib/product/contracts";
 
@@ -21,26 +23,50 @@ test("streaming reply activity moves from thinking to typing and then clears its
   assert.deepEqual(initial, {});
 
   const developmentStarted = startStreamingConversationReply(initial, "DEVELOPMENT");
-  assert.deepEqual(developmentStarted, { DEVELOPMENT: { content: "", phase: "THINKING" } });
+  assert.deepEqual(developmentStarted, {
+    DEVELOPMENT: { content: "", phase: "THINKING", activity: null, developmentLogs: [] },
+  });
 
-  const typing = appendStreamingConversationReply(developmentStarted, "DEVELOPMENT", "先检查控制器。");
-  assert.deepEqual(typing, { DEVELOPMENT: { content: "先检查控制器。", phase: "TYPING" } });
+  const withLog = appendStreamingDevelopmentLog(developmentStarted, "DEVELOPMENT", "正在执行测试");
+  assert.deepEqual(withLog, {
+    DEVELOPMENT: { content: "", phase: "TYPING", activity: null, developmentLogs: ["正在执行测试"] },
+  });
+
+  const typing = appendStreamingConversationReply(withLog, "DEVELOPMENT", "先检查控制器。");
+  assert.deepEqual(typing, {
+    DEVELOPMENT: { content: "先检查控制器。", phase: "TYPING", activity: null, developmentLogs: ["正在执行测试"] },
+  });
   assert.equal(streamingConversationReplyIsActive(typing.DEVELOPMENT!), true);
 
   const complete = completeStreamingConversationReply(typing, "DEVELOPMENT");
-  assert.deepEqual(complete, { DEVELOPMENT: { content: "先检查控制器。", phase: "COMPLETE" } });
+  assert.deepEqual(complete, {
+    DEVELOPMENT: { content: "先检查控制器。", phase: "COMPLETE", activity: null, developmentLogs: ["正在执行测试"] },
+  });
   assert.equal(streamingConversationReplyIsActive(complete.DEVELOPMENT!), false);
 });
 
 test("completed Agent replies remain visible without a status while the next Agent thinks", () => {
   const designComplete = completeStreamingConversationReply(
-    appendStreamingConversationReply(initialStreamingConversationReplies(), "DESIGN", "设计结论"),
+    appendStreamingConversationReply(
+      updateStreamingConversationActivity(initialStreamingConversationReplies(), "DESIGN", "正在读取项目上下文"),
+      "DESIGN",
+      "设计结论",
+    ),
     "DESIGN",
   );
   assert.deepEqual(startStreamingConversationReply(designComplete, "TEST"), {
-    DESIGN: { content: "设计结论", phase: "COMPLETE" },
-    TEST: { content: "", phase: "THINKING" },
+    DESIGN: { content: "设计结论", phase: "COMPLETE", activity: null, developmentLogs: [] },
+    TEST: { content: "", phase: "THINKING", activity: null, developmentLogs: [] },
   });
+});
+
+test("development logs cannot be attached to a Design Agent reply", () => {
+  const design = appendStreamingDevelopmentLog(
+    startStreamingConversationReply(initialStreamingConversationReplies(), "DESIGN"),
+    "DESIGN",
+    "不应显示的开发日志",
+  );
+  assert.deepEqual(design.DESIGN?.developmentLogs, []);
 });
 
 test("conversation messages are ordered oldest first even when timestamps are equal", () => {

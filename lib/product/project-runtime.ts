@@ -24,6 +24,11 @@ export type ProjectRuntimeStatus = ProjectRuntimeIdentity & Readonly<{
 
 export type ProjectRuntimeTurnMode = "PRIMARY" | "READ_ONLY_BRANCH" | "COMPACT";
 
+export type ProjectRuntimeProgressEvent = Readonly<{
+  kind: "ACTIVITY" | "DEVELOPMENT_LOG";
+  content: string;
+}>;
+
 export type ProjectRuntimeTurnRequest = ProjectRuntimeIdentity & Readonly<{
   schemaVersion: typeof PROJECT_RUNTIME_SCHEMA;
   turnId: string;

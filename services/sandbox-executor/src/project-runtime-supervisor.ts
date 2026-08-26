@@ -1,14 +1,15 @@
 import { createHash } from "node:crypto";
 import { cp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { dirname, join, resolve, sep } from "node:path";
+import type { ProjectRuntimeRole } from "@/lib/product/contracts";
 import type {
   ProjectRuntimeControlRequest,
   ProjectRuntimeEnsureRequest,
+  ProjectRuntimeProgressEvent,
   ProjectRuntimeStatus,
   ProjectRuntimeTurnRequest,
   ProjectRuntimeTurnResult,
 } from "@/lib/product/project-runtime";
-import { runtimeEventText } from "@/services/project-runtime/runtime-events.mjs";
 
 type DockerOptions = Readonly<{
   signal?: AbortSignal;
@@ -119,7 +120,7 @@ export class ProjectRuntimeSupervisor {
 
   async turn(
     request: ProjectRuntimeTurnRequest,
-    onEvent?: (content: string) => void,
+    onEvent?: (event: ProjectRuntimeProgressEvent) => void,
     signal?: AbortSignal,
   ): Promise<ProjectRuntimeTurnResult> {
     validateTurn(request, this.options.allowlistedImages);
@@ -250,7 +251,7 @@ export class ProjectRuntimeSupervisor {
     request: ProjectRuntimeTurnRequest,
     input: Buffer,
     signal: AbortSignal,
-    onEvent?: (content: string) => void,
+    onEvent?: (event: ProjectRuntimeProgressEvent) => void,
   ): Promise<string> {
     let stderr = "";
     try {
@@ -268,8 +269,8 @@ export class ProjectRuntimeSupervisor {
           const lines = stderr.split(/\r?\n/);
           stderr = lines.pop() ?? "";
           for (const line of lines) {
-            const content = runtimeEventContent(line, request.responseLanguage);
-            if (content) onEvent?.(content);
+            const event = runtimeProgressEvent(line, request.role, request.responseLanguage);
+            if (event) onEvent?.(event);
           }
         },
       });
@@ -346,55 +347,90 @@ export class ProjectRuntimeSupervisor {
   }
 }
 
-export function runtimeEventContent(line: string, language: "en" | "zh" = "en"): string | null {
+export function runtimeProgressEvent(
+  line: string,
+  role: ProjectRuntimeRole,
+  language: "en" | "zh" = "en",
+): ProjectRuntimeProgressEvent | null {
   const prefix = "DEVILUDO_RUNTIME_EVENT:";
   if (!line.startsWith(prefix)) return null;
   try {
     const event = JSON.parse(line.slice(prefix.length)) as Record<string, unknown>;
     const item = event.item as Record<string, unknown> | undefined;
-    const text = runtimeEventText(event);
-    if (text) return text;
     const eventType = typeof event.type === "string" ? event.type : "";
     const itemType = typeof item?.type === "string" ? item.type : "";
     const started = eventType.endsWith(".started") || eventType.endsWith("_start");
     const completed = eventType.endsWith(".completed") || eventType.endsWith("_stop");
     if (itemType === "command_execution" || itemType === "shell_command") {
+      if (role !== "DEVELOPMENT") return activityEvent(role, "work", completed, language);
       const command = safeCommandSummary(typeof item?.command === "string" ? item.command : "");
-      if (started) return language === "zh"
-        ? `\n[开发日志] 正在执行命令${command ? `：${command}` : ""}\n`
-        : `\n[Development log] Running command${command ? `: ${command}` : ""}\n`;
+      if (started) return progressEvent("DEVELOPMENT_LOG", language === "zh"
+        ? `正在执行命令${command ? `：${command}` : ""}`
+        : `Running command${command ? `: ${command}` : ""}`);
       if (completed) {
         const rawExitCode = item?.exit_code;
         const exitCode = Number.isInteger(rawExitCode) ? ` ${String(rawExitCode)}` : "";
-        return language === "zh"
-          ? `[开发日志] 命令执行完成${exitCode ? `（退出码${exitCode}）` : ""}\n`
-          : `[Development log] Command completed${exitCode ? ` (exit code${exitCode})` : ""}\n`;
+        return progressEvent("DEVELOPMENT_LOG", language === "zh"
+          ? `命令执行完成${exitCode ? `（退出码${exitCode}）` : ""}`
+          : `Command completed${exitCode ? ` (exit code${exitCode})` : ""}`);
       }
     }
     if (itemType === "mcp_tool_call" || itemType === "tool_use") {
       const tool = safeActivityName(item?.tool ?? item?.name);
-      if (started) return language === "zh"
-        ? `[开发日志] 正在调用项目工具${tool ? `：${tool}` : ""}\n`
-        : `[Development log] Calling project tool${tool ? `: ${tool}` : ""}\n`;
-      if (completed) return language === "zh"
-        ? `[开发日志] 项目工具调用完成${tool ? `：${tool}` : ""}\n`
-        : `[Development log] Project tool completed${tool ? `: ${tool}` : ""}\n`;
+      if (role !== "DEVELOPMENT") return activityEvent(role, tool === "context_read" ? "context" : "work", completed, language);
+      if (started) return progressEvent("DEVELOPMENT_LOG", language === "zh"
+        ? `正在调用项目工具${tool ? `：${tool}` : ""}`
+        : `Calling project tool${tool ? `: ${tool}` : ""}`);
+      if (completed) return progressEvent("DEVELOPMENT_LOG", language === "zh"
+        ? `项目工具调用完成${tool ? `：${tool}` : ""}`
+        : `Project tool completed${tool ? `: ${tool}` : ""}`);
     }
-    if (itemType === "file_change" && completed) {
-      return language === "zh" ? "[开发日志] 已应用源码修改\n" : "[Development log] Applied source changes\n";
+    if (itemType === "file_change" && completed && role === "DEVELOPMENT") {
+      return progressEvent("DEVELOPMENT_LOG", language === "zh" ? "已应用源码修改" : "Applied source changes");
     }
     const nested = event.event as Record<string, unknown> | undefined;
     const contentBlock = nested?.content_block as Record<string, unknown> | undefined;
     if (nested?.type === "content_block_start" && contentBlock?.type === "tool_use") {
       const tool = safeActivityName(contentBlock.name);
-      return language === "zh"
-        ? `[开发日志] 正在调用开发工具${tool ? `：${tool}` : ""}\n`
-        : `[Development log] Calling development tool${tool ? `: ${tool}` : ""}\n`;
+      if (role !== "DEVELOPMENT") return activityEvent(role, tool === "context_read" ? "context" : "work", false, language);
+      return progressEvent("DEVELOPMENT_LOG", language === "zh"
+        ? `正在调用开发工具${tool ? `：${tool}` : ""}`
+        : `Calling development tool${tool ? `: ${tool}` : ""}`);
     }
+    // Provider commentary and reasoning are deliberately not forwarded. The
+    // authoritative player-facing content is emitted from the validated final
+    // structured reply by Core after the Runtime turn completes.
     return null;
   } catch {
     return null;
   }
+}
+
+function progressEvent(kind: ProjectRuntimeProgressEvent["kind"], content: string): ProjectRuntimeProgressEvent {
+  return Object.freeze({ kind, content });
+}
+
+function activityEvent(
+  role: ProjectRuntimeRole,
+  activity: "context" | "work",
+  completed: boolean,
+  language: "en" | "zh",
+): ProjectRuntimeProgressEvent | null {
+  if (role === "INTENT" || role === "DEVELOPMENT") return null;
+  if (language === "zh") {
+    if (role === "DESIGN" && activity === "context") {
+      return progressEvent("ACTIVITY", completed ? "项目上下文已读取" : "正在读取项目上下文");
+    }
+    if (role === "DESIGN") return progressEvent("ACTIVITY", completed ? "项目资料检查完成" : "正在检查项目资料");
+    if (role === "TEST") return progressEvent("ACTIVITY", completed ? "项目与验收证据检查完成" : "正在检查项目与验收证据");
+    return progressEvent("ACTIVITY", completed ? "项目分析完成" : "正在分析项目");
+  }
+  if (role === "DESIGN" && activity === "context") {
+    return progressEvent("ACTIVITY", completed ? "Project context loaded" : "Reading project context");
+  }
+  if (role === "DESIGN") return progressEvent("ACTIVITY", completed ? "Project review complete" : "Reviewing project materials");
+  if (role === "TEST") return progressEvent("ACTIVITY", completed ? "Project and acceptance evidence reviewed" : "Reviewing project and acceptance evidence");
+  return progressEvent("ACTIVITY", completed ? "Project analysis complete" : "Analyzing project");
 }
 
 function safeActivityName(value: unknown): string {

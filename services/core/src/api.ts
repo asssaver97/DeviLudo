@@ -1210,6 +1210,8 @@ export async function runApi(
         stream: {
           onStart: agentRole => write({ type: "agent_start", agentRole }),
           onDelta: (agentRole, delta) => write({ type: "agent_delta", agentRole, delta }),
+          onActivity: (agentRole, activity) => write({ type: "agent_activity", agentRole, activity }),
+          onDevelopmentLog: (agentRole, line) => write({ type: "agent_log", agentRole, line }),
           onComplete: agentRole => write({ type: "agent_complete", agentRole }),
         },
       });
@@ -2302,7 +2304,6 @@ async function processConversationMessage(input: Readonly<{
     input.onStage?.("RESPONDING");
     const specialistRole = intentDecision.targetRole;
     input.stream?.onStart(specialistRole);
-    let streamedSpecialistOutput = false;
     const specialistResult = await input.projectRuntime.turn({
       workspaceId: targetWorkspace.id,
       projectId,
@@ -2318,9 +2319,9 @@ async function processConversationMessage(input: Readonly<{
       sourceRevision: null,
       sourceRelativePath: null,
       attachments: command.images,
-      onEvent: delta => {
-        streamedSpecialistOutput = true;
-        input.stream?.onDelta(specialistRole, delta);
+      onEvent: event => {
+        if (event.kind === "ACTIVITY") input.stream?.onActivity(specialistRole, event.content);
+        else input.stream?.onDevelopmentLog(specialistRole, event.content);
       },
     }).catch(error => { throw httpError(424, "AGENT_CONVERSATION_FAILED", error instanceof Error ? error.message : "Project Agent failed"); });
     const specialistReply = parseProjectRuntimeReply(
@@ -2330,7 +2331,7 @@ async function processConversationMessage(input: Readonly<{
       command.responseLanguage,
       designReplyAction(intentDecision, specialistRole),
     );
-    if (!streamedSpecialistOutput) input.stream?.onDelta(specialistRole, specialistReply.content);
+    input.stream?.onDelta(specialistRole, specialistReply.content);
     input.stream?.onComplete(specialistRole);
     input.onStage?.("SAVING");
     const userAttachments = await storeConversationImages(objectStore, {
@@ -2590,7 +2591,6 @@ async function processConversationMessage(input: Readonly<{
 
   const specialistRole = intentDecision.targetRole;
   input.stream?.onStart(specialistRole);
-  let streamedSpecialistOutput = false;
   const specialistResult = await input.projectRuntime.turn({
     workspaceId: workspace.id,
     projectId,
@@ -2606,9 +2606,9 @@ async function processConversationMessage(input: Readonly<{
     sourceRevision: project.source?.revision ?? null,
     sourceRelativePath: project.source?.relativePath ?? null,
     attachments: command.images,
-    onEvent: delta => {
-      streamedSpecialistOutput = true;
-      input.stream?.onDelta(specialistRole, delta);
+    onEvent: event => {
+      if (event.kind === "ACTIVITY") input.stream?.onActivity(specialistRole, event.content);
+      else input.stream?.onDevelopmentLog(specialistRole, event.content);
     },
   }).catch(error => { throw httpError(424, "AGENT_CONVERSATION_FAILED", error instanceof Error ? error.message : "Project Agent failed"); });
   const specialistReply = parseProjectRuntimeReply(
@@ -2618,7 +2618,7 @@ async function processConversationMessage(input: Readonly<{
     command.responseLanguage,
     designReplyAction(intentDecision, specialistRole),
   );
-  if (!streamedSpecialistOutput) input.stream?.onDelta(specialistRole, specialistReply.content);
+  input.stream?.onDelta(specialistRole, specialistReply.content);
   input.stream?.onComplete(specialistRole);
   input.onStage?.("SAVING");
   const conversation = await repository.appendConversationTurn({

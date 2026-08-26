@@ -25,6 +25,7 @@ import { readAgentProgressStream } from "@/lib/product/agent-progress-stream";
 import { useLocalInstance } from "./ProductShell";
 import {
   appendStreamingConversationReply,
+  appendStreamingDevelopmentLog,
   chronologicalMessages,
   completeStreamingConversationReply,
   ConversationStreamError,
@@ -33,6 +34,7 @@ import {
   optimisticConversation,
   sendConversationMessageStream,
   startStreamingConversationReply,
+  updateStreamingConversationActivity,
   type ConversationImageDraft,
   type StreamingConversationReplies,
 } from "@/lib/product/conversation-stream";
@@ -566,6 +568,8 @@ export function ProjectStudio({ projectId }: { projectId: string }) {
         {
           onAgentStart: agentRole => setStreamingReplies(current => startStreamingConversationReply(current, agentRole)),
           onAgentDelta: (agentRole, delta) => setStreamingReplies(current => appendStreamingConversationReply(current, agentRole, delta)),
+          onAgentActivity: (agentRole, activity) => setStreamingReplies(current => updateStreamingConversationActivity(current, agentRole, activity)),
+          onAgentDevelopmentLog: (agentRole, line) => setStreamingReplies(current => appendStreamingDevelopmentLog(current, agentRole, line)),
           onAgentComplete: agentRole => setStreamingReplies(current => completeStreamingConversationReply(current, agentRole)),
           onProjectDocument: updatedProject => setProject(current => {
             const next = newestProjectSnapshot(current, updatedProject);

@@ -32,7 +32,7 @@ import {
   runtimeEventText,
   structuredRuntimeOutput,
 } from "@/services/project-runtime/runtime-events.mjs";
-import { runtimeEventContent } from "@/services/sandbox-executor/src/project-runtime-supervisor";
+import { runtimeProgressEvent } from "@/services/sandbox-executor/src/project-runtime-supervisor";
 import {
   canonicalToolName,
   nativeToolName,
@@ -193,6 +193,7 @@ test("ready Design replies end with a development plan and localized confirmatio
       { label: "采用战斗驱动方案", description: "重复项应被忽略。" },
       { label: "很".repeat(200), description: "长".repeat(400) },
       { label: "自己输入意见", description: "说明你希望采用的核心循环。" },
+      { label: "Enter my own answer", description: "Legacy English manual option." },
     ],
     implementationBrief: "",
     projectDocumentPatch: {},
@@ -202,13 +203,11 @@ test("ready Design replies end with a development plan and localized confirmatio
     { label: "采用探索驱动方案（推荐）", description: "通过探索发现持续改变后续路线的机会。" },
     { label: "采用战斗驱动方案", description: "" },
   ]);
-  assert.equal(discovery.options.length, 4);
+  assert.equal(discovery.options.length, 3);
   assert.equal(discovery.options[2]?.label.length, 160);
   assert.equal(discovery.options[2]?.description.length, 300);
-  assert.deepEqual(discovery.options[3], {
-    label: "自己输入意见",
-    description: "说明你希望采用的核心循环。",
-  });
+  assert.equal(discovery.options.some(option => option.label === "自己输入意见"), false);
+  assert.equal(discovery.options.some(option => option.label === "Enter my own answer"), false);
 
   const reply = parseProjectRuntimeReply(result("DESIGN", {
     content: "玩法和验收目标已经明确。",
@@ -251,14 +250,31 @@ test("Runtime progress preserves split JSONL events and exposes live tool activi
     type: "stream_event",
     event: { type: "content_block_delta", delta: { type: "text_delta", text: "实时文本" } },
   }), "实时文本");
-  assert.match(runtimeEventContent(`DEVILUDO_RUNTIME_EVENT:${JSON.stringify({
+  assert.deepEqual(runtimeProgressEvent(`DEVILUDO_RUNTIME_EVENT:${JSON.stringify({
     type: "item.started",
     item: { type: "command_execution", command: "/bin/bash -lc 'API_KEY=secret npm test'" },
-  })}`, "zh") ?? "", /正在执行命令：API_KEY=•••• npm test/u);
-  assert.match(runtimeEventContent(`DEVILUDO_RUNTIME_EVENT:${JSON.stringify({
+  })}`, "DEVELOPMENT", "zh"), {
+    kind: "DEVELOPMENT_LOG",
+    content: "正在执行命令：API_KEY=•••• npm test",
+  });
+  assert.deepEqual(runtimeProgressEvent(`DEVILUDO_RUNTIME_EVENT:${JSON.stringify({
     type: "item.completed",
     item: { type: "mcp_tool_call", tool: "source_checkpoint_create" },
-  })}`, "zh") ?? "", /项目工具调用完成：source_checkpoint_create/u);
+  })}`, "DEVELOPMENT", "zh"), {
+    kind: "DEVELOPMENT_LOG",
+    content: "项目工具调用完成：source_checkpoint_create",
+  });
+  assert.deepEqual(runtimeProgressEvent(`DEVILUDO_RUNTIME_EVENT:${JSON.stringify({
+    type: "item.started",
+    item: { type: "mcp_tool_call", tool: "context_read" },
+  })}`, "DESIGN", "zh"), {
+    kind: "ACTIVITY",
+    content: "正在读取项目上下文",
+  });
+  assert.equal(runtimeProgressEvent(`DEVILUDO_RUNTIME_EVENT:${JSON.stringify({
+    type: "item.completed",
+    item: { type: "agent_message", text: "I'm using the mandatory design skill." },
+  })}`, "DESIGN", "zh"), null);
 });
 
 test("incomplete design discovery cannot stage or execute an implementation change", () => {

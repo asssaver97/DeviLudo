@@ -557,10 +557,20 @@ test("streaming Agent text keeps animated dots visible until the reply completes
           start(controller) {
             controller.enqueue(encoder.encode(`${JSON.stringify({ type: "agent_start", agentRole: "DESIGN" })}\n`));
             controller.enqueue(encoder.encode(`${JSON.stringify({
+              type: "agent_activity",
+              agentRole: "DESIGN",
+              activity: "正在读取项目上下文",
+            })}\n`));
+            controller.enqueue(encoder.encode(`${JSON.stringify({
+              type: "agent_log",
+              agentRole: "DESIGN",
+              line: "不应显示的设计 Agent 开发日志",
+            })}\n`));
+            window.setTimeout(() => controller.enqueue(encoder.encode(`${JSON.stringify({
               type: "agent_delta",
               agentRole: "DESIGN",
               delta: "正在整理完整的玩法与开发计划",
-            })}\n`));
+            })}\n`)), 300);
           },
         }), { status: 200, headers: { "content-type": "application/x-ndjson" } });
       }
@@ -572,7 +582,10 @@ test("streaming Agent text keeps animated dots visible until the reply completes
   await page.getByLabel("继续项目会话").fill("请完善当前玩法设计。");
   await page.getByRole("button", { name: "发送项目消息" }).click();
   const streamingReply = page.locator(".project-conversation-box .conversation-box-message.role-design.is-typing");
+  await expect(streamingReply).toContainText("正在读取项目上下文");
+  await expect(streamingReply).not.toContainText("不应显示的设计 Agent 开发日志");
   await expect(streamingReply).toContainText("正在整理完整的玩法与开发计划");
+  await expect(streamingReply).not.toContainText("正在读取项目上下文");
   const dots = streamingReply.locator("[aria-label='等待回复']");
   await expect(dots).toBeVisible();
   await expect(dots.locator("i")).toHaveCount(3);
@@ -842,28 +855,25 @@ test("the home chat supports both project feedback and a fresh game conversation
   await expect(suggestedReplies.getByRole("button").locator("b")).toHaveText([
     "采用强化资源管理方案（推荐）",
     "采用随机事件驱动方案",
-    "自己输入意见",
   ]);
   await expect(suggestedReplies.getByRole("button").locator("small")).toHaveText([
     "强调资源来源、消耗与风险之间的持续取舍。",
     "用可读的随机事件推动局势变化与临场决策。",
-    "输入你自己的选择或补充意见。",
   ]);
+  await expect(suggestedReplies.getByRole("button", { name: "自己输入意见" })).toHaveCount(0);
 
-  let releaseManualReply: () => void = () => {};
-  const manualReplyGate = new Promise<void>(resolve => { releaseManualReply = resolve; });
+  let releaseFreeformReply: () => void = () => {};
+  const freeformReplyGate = new Promise<void>(resolve => { releaseFreeformReply = resolve; });
   await page.route("**/api/conversations/messages/stream", async route => {
-    await manualReplyGate;
+    await freeformReplyGate;
     await route.continue();
   }, { times: 1 });
   const followUpQuestion = "请说明车灯亮度会如何影响幽灵出现频率。";
-  await suggestedReplies.getByRole("button", { name: "自己输入意见" }).click();
-  await expect(page.getByLabel("游戏想法或修改意见")).toBeFocused();
   await page.getByLabel("游戏想法或修改意见").fill(followUpQuestion);
   await page.getByRole("button", { name: "发送消息" }).click();
   await expect(page.locator(".home-conversation-box .conversation-box-message.is-thinking")).toBeVisible();
   await expect(suggestedReplies).toHaveCount(0);
-  releaseManualReply();
+  releaseFreeformReply();
   await expect(suggestedReplies).toBeVisible();
   await expect(page.getByText(followUpQuestion, { exact: true })).toBeVisible();
 

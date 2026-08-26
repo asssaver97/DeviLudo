@@ -4255,10 +4255,7 @@ function publicConversationMetadata(metadata: Readonly<Record<string, unknown>>)
   const result = { ...metadata };
   delete result[CONVERSATION_IMAGES_METADATA_KEY];
   if ("options" in result) {
-    const manualLanguage = result.agentRole === "DESIGN" && Array.isArray(result.options) && result.options.length > 0
-      ? /\p{Script=Han}/u.test(JSON.stringify(result.options)) ? "zh" : "en"
-      : null;
-    result.options = normalizeConversationReplyOptions(result.options, manualLanguage);
+    result.options = normalizeConversationReplyOptions(result.options);
   }
   return Object.freeze(result);
 }

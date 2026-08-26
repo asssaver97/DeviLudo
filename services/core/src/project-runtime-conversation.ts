@@ -146,7 +146,7 @@ export function projectRuntimeSpecialistPrompt(input: Readonly<{
     "projectDocumentPatch is an object. e2eGoalDelta contains add, replace, and retire arrays. Use empty values when not applicable.",
     "Set readyForDevelopment=false and keep the patch and goal delta empty whenever material product decisions remain unresolved.",
     input.intent.targetRole === "DESIGN"
-      ? "Design choice UX: prefer one material decision per reply. When its plausible answers are foreseeable, put 2-4 mutually exclusive answers in options instead of asking the player to type. Each option object needs a concise label and one short description of its impact/tradeoff. Put the recommended answer first and mark its label （推荐） in Chinese or (Recommended) in English; keep labels within 160 characters and descriptions within 300 characters. Always append exactly one final manual-answer object whose label is 自己输入意见 in Chinese or Enter my own answer in English. Use options=[] only when no choice is requested or useful presets are genuinely impossible."
+      ? "Design choice UX: prefer one material decision per reply. When its plausible answers are foreseeable, put 2-4 mutually exclusive answers in options instead of asking the player to type. Each option object needs a concise label and one short description of its impact/tradeoff. Put the recommended answer first and mark its label （推荐） in Chinese or (Recommended) in English; keep labels within 160 characters and descriptions within 300 characters. Never add a manual-answer option such as 自己输入意见 or Enter my own answer: any text the player types and sends through the composer is already their own answer. Use options=[] only when no choice is requested or useful presets are genuinely impossible."
       : "Use options only for concise replies the player can select and send unchanged.",
     input.confirmed
       ? "If this is a ready Design reply, end its content with 开始开发 for Chinese or Start development for English. Do not ask for confirmation again."
@@ -192,10 +192,7 @@ export function parseProjectRuntimeReply(
   return Object.freeze({
     agentRole: role,
     content,
-    options: normalizeConversationReplyOptions(
-      value.options,
-      role === "DESIGN" ? replyLanguage(rawContent, responseLanguage) : null,
-    ),
+    options: normalizeConversationReplyOptions(value.options),
     applyToDraft: false,
     readyForDevelopment,
     projectDocument: null,
@@ -290,10 +287,6 @@ function objectOrNull(value: unknown): Readonly<Record<string, unknown>> | null 
 function stringArray(value: unknown, maximum: number): readonly string[] {
   if (!Array.isArray(value)) return Object.freeze([]);
   return Object.freeze(value.filter(item => typeof item === "string" && item.trim()).slice(0, maximum).map(item => item.trim().slice(0, 500)));
-}
-
-function replyLanguage(content: string, fallback: "en" | "zh"): "en" | "zh" {
-  return /\p{Script=Han}/u.test(content) ? "zh" : fallback;
 }
 
 function e2eGoalDelta(value: unknown): E2eGoalDelta {

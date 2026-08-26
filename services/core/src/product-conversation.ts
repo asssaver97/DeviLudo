@@ -54,6 +54,8 @@ export type ProductConversationGroupReply = ProductConversationAgentReply & Read
 export type ProductConversationStreamCallbacks = Readonly<{
   onStart: (role: ProjectAgentRole) => void;
   onDelta: (role: ProjectAgentRole, delta: string) => void;
+  onActivity: (role: ProjectAgentRole, activity: string) => void;
+  onDevelopmentLog: (role: ProjectAgentRole, line: string) => void;
   onComplete: (role: ProjectAgentRole) => void;
 }>;
 

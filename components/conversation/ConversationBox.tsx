@@ -16,7 +16,6 @@ import {
   MAX_CONVERSATION_IMAGES,
   MAX_CONVERSATION_IMAGE_BYTES,
   MAX_CONVERSATION_IMAGE_TOTAL_BYTES,
-  isManualConversationReplyOption,
   normalizeConversationReplyOptions,
   PROJECT_AGENT_ROLES,
   type AgentProgressEvent,
@@ -277,17 +276,10 @@ export function ConversationBox({
                   <div aria-label={text("可选回复", "Suggested replies")} className="conversation-box-options" role="group">
                     {options.map(option => (
                       <button
-                        className={isManualConversationReplyOption(option) ? "is-manual-answer" : undefined}
                         disabled={sending || disabled}
                         key={option.label}
                         aria-label={option.label}
-                        onClick={() => {
-                          if (isManualConversationReplyOption(option)) {
-                            textarea.current?.focus();
-                            return;
-                          }
-                          onOptionSelect(option.label);
-                        }}
+                        onClick={() => onOptionSelect(option.label)}
                         type="button"
                       >
                         <span>
@@ -338,8 +330,17 @@ export function ConversationBox({
                       <header><b>{identity.name}</b>{status ? <span className="conversation-agent-working">{status}</span> : null}</header>
                       <p>
                         {reply.content}
+                        {!reply.content && reply.activity ? (
+                          <span className="conversation-agent-activity">{reply.activity}</span>
+                        ) : null}
                         {streamingConversationReplyIsActive(reply) ? <TypingDots /> : null}
                       </p>
+                      {role === "DEVELOPMENT" && reply.developmentLogs.length ? (
+                        <div className="conversation-development-logs">
+                          <b>{text("开发日志", "Development log")}</b>
+                          {reply.developmentLogs.map((line, index) => <small key={`${index}:${line}`}>{line}</small>)}
+                        </div>
+                      ) : null}
                     </div>
                   </article>
                 );

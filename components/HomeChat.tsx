@@ -7,6 +7,7 @@ import { cachedValue, clientCacheKeys, loadCached, storeCached } from "@/lib/pro
 import type { ImplementationChangeRequest, ProductConversation, ProductProjectSummary } from "@/lib/product/contracts";
 import {
   appendStreamingConversationReply,
+  appendStreamingDevelopmentLog,
   chronologicalMessages,
   completeStreamingConversationReply,
   ConversationStreamError,
@@ -15,6 +16,7 @@ import {
   optimisticConversation,
   sendConversationMessageStream,
   startStreamingConversationReply,
+  updateStreamingConversationActivity,
   type ConversationImageDraft,
   type StreamingConversationReplies,
 } from "@/lib/product/conversation-stream";
@@ -115,6 +117,8 @@ export function HomeChat() {
         {
           onAgentStart: agentRole => setStreamingReplies(current => startStreamingConversationReply(current, agentRole)),
           onAgentDelta: (agentRole, delta) => setStreamingReplies(current => appendStreamingConversationReply(current, agentRole, delta)),
+          onAgentActivity: (agentRole, activity) => setStreamingReplies(current => updateStreamingConversationActivity(current, agentRole, activity)),
+          onAgentDevelopmentLog: (agentRole, line) => setStreamingReplies(current => appendStreamingDevelopmentLog(current, agentRole, line)),
           onAgentComplete: agentRole => setStreamingReplies(current => completeStreamingConversationReply(current, agentRole)),
         },
       );

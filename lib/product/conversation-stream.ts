@@ -30,6 +30,8 @@ export type ConversationImageDraft = Readonly<{
 export type StreamingConversationReply = Readonly<{
   content: string;
   phase: "THINKING" | "TYPING" | "COMPLETE";
+  activity: string | null;
+  developmentLogs: readonly string[];
 }>;
 
 export type StreamingConversationReplies = Readonly<Partial<Record<ProjectAgentRole, StreamingConversationReply>>>;
@@ -37,6 +39,8 @@ export type StreamingConversationReplies = Readonly<Partial<Record<ProjectAgentR
 export type ConversationStreamCallbacks = Readonly<{
   onAgentStart: (agentRole: ProjectAgentRole) => void;
   onAgentDelta: (agentRole: ProjectAgentRole, delta: string) => void;
+  onAgentActivity: (agentRole: ProjectAgentRole, activity: string) => void;
+  onAgentDevelopmentLog: (agentRole: ProjectAgentRole, line: string) => void;
   onAgentComplete: (agentRole: ProjectAgentRole) => void;
   onProjectDocument?: (project: ProductProjectDetail) => void;
 }>;
@@ -99,6 +103,16 @@ export async function sendConversationMessageStream(
       callbacks.onAgentDelta(event.agentRole, event.delta);
       return;
     }
+    if (event.type === "agent_activity" && typeof event.activity === "string"
+      && isProjectAgentRole(event.agentRole)) {
+      callbacks.onAgentActivity(event.agentRole, event.activity);
+      return;
+    }
+    if (event.type === "agent_log" && typeof event.line === "string"
+      && event.agentRole === "DEVELOPMENT") {
+      callbacks.onAgentDevelopmentLog(event.agentRole, event.line);
+      return;
+    }
     if (event.type === "agent_complete" && isProjectAgentRole(event.agentRole)) {
       callbacks.onAgentComplete(event.agentRole);
       return;
@@ -148,7 +162,12 @@ export function startStreamingConversationReply(
 ): StreamingConversationReplies {
   return Object.freeze({
     ...current,
-    [agentRole]: Object.freeze({ content: current[agentRole]?.content ?? "", phase: "THINKING" }),
+    [agentRole]: Object.freeze({
+      content: current[agentRole]?.content ?? "",
+      phase: "THINKING",
+      activity: null,
+      developmentLogs: current[agentRole]?.developmentLogs ?? Object.freeze([]),
+    }),
   });
 }
 
@@ -160,7 +179,49 @@ export function appendStreamingConversationReply(
   const reply = current[agentRole];
   return Object.freeze({
     ...current,
-    [agentRole]: Object.freeze({ content: `${reply?.content ?? ""}${delta}`, phase: "TYPING" }),
+    [agentRole]: Object.freeze({
+      content: `${reply?.content ?? ""}${delta}`,
+      phase: "TYPING",
+      activity: null,
+      developmentLogs: reply?.developmentLogs ?? Object.freeze([]),
+    }),
+  });
+}
+
+export function updateStreamingConversationActivity(
+  current: StreamingConversationReplies,
+  agentRole: ProjectAgentRole,
+  activity: string,
+): StreamingConversationReplies {
+  const reply = current[agentRole];
+  return Object.freeze({
+    ...current,
+    [agentRole]: Object.freeze({
+      content: reply?.content ?? "",
+      phase: "TYPING",
+      activity,
+      developmentLogs: reply?.developmentLogs ?? Object.freeze([]),
+    }),
+  });
+}
+
+export function appendStreamingDevelopmentLog(
+  current: StreamingConversationReplies,
+  agentRole: ProjectAgentRole,
+  line: string,
+): StreamingConversationReplies {
+  const reply = current[agentRole];
+  const logs = agentRole === "DEVELOPMENT"
+    ? [...(reply?.developmentLogs ?? []), line].slice(-40)
+    : reply?.developmentLogs ?? [];
+  return Object.freeze({
+    ...current,
+    [agentRole]: Object.freeze({
+      content: reply?.content ?? "",
+      phase: "TYPING",
+      activity: reply?.activity ?? null,
+      developmentLogs: Object.freeze(logs),
+    }),
   });
 }
 
@@ -172,7 +233,7 @@ export function completeStreamingConversationReply(
   if (!reply) return current;
   return Object.freeze({
     ...current,
-    [agentRole]: Object.freeze({ ...reply, phase: "COMPLETE" }),
+    [agentRole]: Object.freeze({ ...reply, phase: "COMPLETE", activity: null }),
   });
 }
 

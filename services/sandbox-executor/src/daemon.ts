@@ -90,9 +90,9 @@ const server = createServer(async (request, response) => {
           "cache-control": "no-store, no-transform",
           "x-accel-buffering": "no",
         });
-        const result = await projectRuntimes.turn(body, content => {
+        const result = await projectRuntimes.turn(body, event => {
           if (!response.destroyed && !response.writableEnded) {
-            response.write(`${JSON.stringify({ type: "progress", content })}\n`);
+            response.write(`${JSON.stringify({ type: "progress", event })}\n`);
           }
         }, execution.signal);
         response.end(`${JSON.stringify({ type: "complete", result })}\n`);

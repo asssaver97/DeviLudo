@@ -3676,6 +3676,31 @@ textarea {
 
 .conversation-agent-working { color: var(--blue); }
 
+.conversation-agent-activity {
+  color: var(--muted);
+}
+
+.conversation-development-logs {
+  display: grid;
+  gap: 0.3rem;
+  margin-top: 0.75rem;
+  padding: 0.7rem 0.8rem;
+  border: 1px solid color-mix(in srgb, var(--blue) 35%, transparent);
+  background: color-mix(in srgb, var(--blue) 7%, transparent);
+  font-family: var(--font-mono);
+}
+
+.conversation-development-logs b {
+  color: var(--blue);
+  font-size: 0.72rem;
+  text-transform: uppercase;
+}
+
+.conversation-development-logs small {
+  color: var(--muted);
+  overflow-wrap: anywhere;
+}
+
 .agent-role-model-description {
   color: var(--muted);
   font: 11px/1.6 var(--font-geist-mono), monospace;
@@ -3840,16 +3865,6 @@ textarea {
 .conversation-box-options button:disabled {
   cursor: default;
   opacity: .5;
-}
-
-.conversation-box-options button.is-manual-answer {
-  background: transparent;
-  border-style: dashed;
-  color: var(--muted);
-}
-
-.conversation-box-options button.is-manual-answer small {
-  color: inherit;
 }
 
 .conversation-box-empty {

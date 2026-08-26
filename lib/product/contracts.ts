@@ -89,53 +89,31 @@ export type AgentRuntimeAvailability = Readonly<{
 export const PROJECT_AGENT_ROLES = ["DESIGN", "DEVELOPMENT", "TEST"] as const;
 export type ProjectAgentRole = typeof PROJECT_AGENT_ROLES[number];
 
-export const MANUAL_CONVERSATION_REPLY_OPTIONS = Object.freeze({
-  zh: "自己输入意见",
-  en: "Enter my own answer",
-} as const);
-
-const MANUAL_CONVERSATION_REPLY_DESCRIPTIONS = Object.freeze({
-  zh: "输入你自己的选择或补充意见。",
-  en: "Enter your own choice or additional guidance.",
-} as const);
+const LEGACY_MANUAL_CONVERSATION_REPLY_LABELS = new Set([
+  "自己输入意见",
+  "Enter my own answer",
+]);
 
 export type ConversationReplyOption = Readonly<{
   label: string;
   description: string;
 }>;
 
-export function isManualConversationReplyOption(option: string | ConversationReplyOption): boolean {
-  const label = typeof option === "string" ? option : option.label;
-  return label === MANUAL_CONVERSATION_REPLY_OPTIONS.zh
-    || label === MANUAL_CONVERSATION_REPLY_OPTIONS.en;
-}
-
 export function normalizeConversationReplyOptions(
   value: unknown,
-  manualLanguage: "en" | "zh" | null = null,
 ): readonly ConversationReplyOption[] {
   if (!Array.isArray(value)) return Object.freeze([]);
   const seen = new Set<string>();
-  const substantive: ConversationReplyOption[] = [];
-  let manual: ConversationReplyOption | null = null;
+  const options: ConversationReplyOption[] = [];
   for (const candidate of value) {
     const option = conversationReplyOption(candidate);
     if (!option || seen.has(option.label)) continue;
     seen.add(option.label);
-    if (isManualConversationReplyOption(option)) {
-      manual ??= option;
-      continue;
-    }
-    substantive.push(option);
-  }
-  const includeManual = manualLanguage !== null ? substantive.length > 0 : manual !== null;
-  const options = substantive.slice(0, includeManual ? 4 : 5);
-  if (includeManual) {
-    const language = manualLanguage ?? (manual?.label === MANUAL_CONVERSATION_REPLY_OPTIONS.zh ? "zh" : "en");
-    options.push(Object.freeze({
-      label: MANUAL_CONVERSATION_REPLY_OPTIONS[language],
-      description: manual?.description || MANUAL_CONVERSATION_REPLY_DESCRIPTIONS[language],
-    }));
+    // Retire the old manual-answer button even for historical Runtime turns.
+    // Free-form composer text is now the sole custom-answer path.
+    if (LEGACY_MANUAL_CONVERSATION_REPLY_LABELS.has(option.label)) continue;
+    options.push(option);
+    if (options.length === 4) break;
   }
   return Object.freeze(options);
 }

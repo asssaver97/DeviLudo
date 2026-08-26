@@ -266,10 +266,6 @@ test("project conversations apply explicit feedback, defer tentative changes, an
       label: "采用随机事件驱动方案",
       description: "用可读的随机事件推动局势变化与临场决策。",
     },
-    {
-      label: "自己输入意见",
-      description: "输入你自己的选择或补充意见。",
-    },
   ];
   expect(draftConversation.messages[1].metadata).toMatchObject({
     source: "AI_AGENT",

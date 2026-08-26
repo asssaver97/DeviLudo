@@ -5,6 +5,7 @@ import type { ProjectRuntimeRole } from "@/lib/product/contracts";
 import {
   PROJECT_RUNTIME_SCHEMA,
   type ProjectRuntimeControlRequest,
+  type ProjectRuntimeProgressEvent,
   type ProjectRuntimeTurnMode,
   type ProjectRuntimeTurnResult,
 } from "@/lib/product/project-runtime";
@@ -103,7 +104,7 @@ export class ProjectRuntimeService {
     sourceRelativePath: string | null;
     lifecycleLeaseToken?: string;
     attachments?: readonly Readonly<{ content: Buffer; extension: "png" | "jpg" | "webp" }>[];
-    onEvent?: (content: string) => void;
+    onEvent?: (event: ProjectRuntimeProgressEvent) => void;
   }>): Promise<ProjectRuntimeTurnResult> {
     const registered = await this.readRegisteredContext(input.workspaceId, input.projectId);
     let metadata = registered.metadata;
