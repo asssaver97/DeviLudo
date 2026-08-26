@@ -820,18 +820,48 @@ textarea {
   text-transform: none;
 }
 
-.agent-api-key-input {
-  -webkit-text-security: disc;
+.agent-local-default {
+  background: #0b1720;
+  border: 1px solid #2e5262;
+  color: #78bfd5;
+  font: 8px/1.5 var(--font-geist-mono), monospace;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 5px 16px;
+  margin: 0;
+  overflow-wrap: anywhere;
+  padding: 8px 10px;
 }
 
-.agent-api-key-input:placeholder-shown {
-  -webkit-text-security: none;
+.agent-local-default b { flex-basis: 100%; }
+.agent-local-default span { color: #8296a8; }
+
+.agent-secret-input {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 40px;
 }
 
-.agent-api-key-input::placeholder {
-  color: #7a8798;
-  opacity: .55;
+.agent-secret-input > input {
+  border-right: 0;
+  border-radius: 0;
+  min-width: 0;
 }
+
+.agent-secret-input > button {
+  align-items: center;
+  background: #101a27;
+  border: 1px solid #334157;
+  color: #8594a8;
+  cursor: pointer;
+  display: flex;
+  justify-content: center;
+  padding: 0;
+}
+
+.agent-secret-input > button:hover { color: var(--blue); }
+.agent-secret-input > button:focus-visible { outline: 2px solid var(--acid); outline-offset: 2px; }
+.agent-secret-input > button:disabled { cursor: wait; opacity: .55; }
+.agent-secret-input svg { height: 17px; width: 17px; }
 
 .agent-model-fieldset {
   display: grid;
@@ -848,6 +878,7 @@ textarea {
 }
 
 .agent-model-single > span,
+.agent-model-top-level label > span,
 .agent-model-expanded label > span {
   color: #8d99a8;
   font: 800 8px var(--font-geist-mono), monospace;
@@ -856,6 +887,7 @@ textarea {
 }
 
 .agent-model-single,
+.agent-model-top-level label,
 .agent-model-expanded label {
   display: grid;
   gap: 6px;
@@ -916,14 +948,39 @@ textarea {
   transform: none;
 }
 
+.agent-model-top-level,
 .agent-model-expanded {
   display: grid;
   gap: 10px;
   grid-template-columns: repeat(2, minmax(0, 1fr));
 }
 
-.agent-model-expanded label:first-child {
-  grid-column: 1 / -1;
+.agent-role-model-details {
+  border: 1px solid #334157;
+}
+
+.agent-role-model-details > summary {
+  align-items: center;
+  color: #9aa7b8;
+  cursor: pointer;
+  display: flex;
+  font: 800 8px var(--font-geist-mono), monospace;
+  justify-content: space-between;
+  letter-spacing: .08em;
+  padding: 12px;
+  text-transform: uppercase;
+}
+
+.agent-role-model-details > summary:hover { color: var(--blue); }
+.agent-role-model-details > summary:focus-visible { outline: 2px solid var(--acid); outline-offset: 2px; }
+.agent-role-model-details > summary span { border: 1px solid currentColor; padding: 2px 5px; }
+.agent-role-model-details[open] > summary { border-bottom: 1px solid #334157; }
+.agent-role-model-details .agent-model-expanded { padding: 12px; }
+
+.agent-config-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
 }
 
 .agent-model-expanded small {

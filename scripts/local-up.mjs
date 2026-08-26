@@ -140,13 +140,23 @@ const {
     ]).then(() => resolveDockerIdentity()),
     resolveMachineInstallationId(),
   ]);
+  const resolvedCodexAccountDefaultModel = await resolveLocalCodexAccountDefaultModel(
+    detectedCodexLoginMethod,
+    detectedCodexVersion,
+  );
   await prepareLocalCodexOfficialLogin(detectedCodexLoginMethod);
   await prepareLocalCodexModelsCache(detectedCodexLoginMethod);
+  await prepareLocalAgentRuntimeDefaults({
+    claudeVersion: detectedClaudeVersion,
+    codexVersion: detectedCodexVersion,
+    codexLoginMethod: detectedCodexLoginMethod,
+    codexAccountDefaultModel: resolvedCodexAccountDefaultModel,
+  });
   return {
     claudeVersion: detectedClaudeVersion,
     codexVersion: detectedCodexVersion,
     codexLoginMethod: detectedCodexLoginMethod,
-    codexAccountDefaultModel: await resolveLocalCodexAccountDefaultModel(detectedCodexLoginMethod, detectedCodexVersion),
+    codexAccountDefaultModel: resolvedCodexAccountDefaultModel,
     npmRegistry: detectedNpmRegistry,
     dockerIdentity: resolvedDockerIdentity,
     providerUpstreamProxy: await detectLocalProviderUpstreamProxy(),
@@ -996,6 +1006,169 @@ async function resolveLocalCodexAccountDefaultModel(loginMethod, cliVersion) {
     if (error?.code !== "ENOENT" && !(error instanceof SyntaxError)) throw error;
     return null;
   }
+}
+
+async function prepareLocalAgentRuntimeDefaults({
+  claudeVersion,
+  codexVersion,
+  codexLoginMethod,
+  codexAccountDefaultModel,
+}) {
+  const runtimes = [];
+  if (claudeVersion) {
+    const claudeDefault = await readLocalClaudeDefault();
+    if (claudeDefault) runtimes.push(claudeDefault);
+  }
+  if (codexVersion) {
+    const codexDefault = await readLocalCodexDefault(codexLoginMethod, codexAccountDefaultModel);
+    if (codexDefault) runtimes.push(codexDefault);
+  }
+  const target = fileURLToPath(new URL("../.deviludo/local/agent-runtime-defaults.json", import.meta.url));
+  await mkdir(dirname(target), { recursive: true, mode: 0o700 });
+  await writeFile(target, `${JSON.stringify({ version: 1, runtimes }, null, 2)}\n`, { mode: 0o600 });
+  await chmod(target, 0o600);
+}
+
+async function readLocalClaudeDefault() {
+  const configuredRoot = process.env.CLAUDE_CONFIG_DIR?.trim();
+  const root = configuredRoot && isAbsolute(configuredRoot)
+    ? configuredRoot
+    : join(homedir(), ".claude");
+  const source = join(root, "settings.json");
+  let parsed;
+  try {
+    parsed = JSON.parse(await readFile(source, "utf8"));
+  } catch (error) {
+    if (error?.code === "ENOENT") return null;
+    startupProgress("Claude Code settings.json is invalid; skipping its local defaults");
+    return null;
+  }
+  const env = parsed && typeof parsed === "object" && !Array.isArray(parsed)
+    && parsed.env && typeof parsed.env === "object" && !Array.isArray(parsed.env)
+    ? parsed.env
+    : null;
+  if (!env) return null;
+  const apiKey = stringValue(env.ANTHROPIC_API_KEY) || stringValue(env.ANTHROPIC_AUTH_TOKEN);
+  const primaryModel = stringValue(env.ANTHROPIC_MODEL)
+    || stringValue(env.ANTHROPIC_DEFAULT_SONNET_MODEL);
+  if (!apiKey || !primaryModel) return null;
+  return {
+    agentRuntime: "CLAUDE_CODE",
+    baseUrl: providerUrlForContainer(stringValue(env.ANTHROPIC_BASE_URL) || "https://api.anthropic.com"),
+    apiKey,
+    primaryModel,
+    source: configuredRoot ? `${configuredRoot}/settings.json` : "~/.claude/settings.json",
+  };
+}
+
+async function readLocalCodexDefault(loginMethod, accountDefaultModel) {
+  const configuredRoot = process.env.CODEX_HOME?.trim();
+  const root = configuredRoot && isAbsolute(configuredRoot)
+    ? configuredRoot
+    : join(homedir(), ".codex");
+  const configSource = join(root, "config.toml");
+  let config = "";
+  try {
+    config = await readFile(configSource, "utf8");
+  } catch (error) {
+    if (error?.code !== "ENOENT") {
+      startupProgress("Codex CLI config.toml is unreadable; using login defaults only");
+    }
+  }
+  const parsed = parseCodexConnectionToml(config);
+  const sourceLabel = configuredRoot ? `${configuredRoot}/config.toml` : "~/.codex/config.toml";
+  if (loginMethod === "CHATGPT" && !parsed.provider) {
+    return {
+      agentRuntime: "CODEX_CLI",
+      baseUrl: "https://chatgpt.com",
+      apiKey: null,
+      primaryModel: parsed.model || accountDefaultModel || "account-default",
+      source: sourceLabel,
+    };
+  }
+  const envKey = parsed.envKey || "OPENAI_API_KEY";
+  let apiKey = stringValue(process.env[envKey]);
+  if (!apiKey && envKey === "OPENAI_API_KEY") {
+    try {
+      const auth = JSON.parse(await readFile(join(root, "auth.json"), "utf8"));
+      apiKey = stringValue(auth?.OPENAI_API_KEY);
+    } catch (error) {
+      if (error?.code !== "ENOENT" && !(error instanceof SyntaxError)) throw error;
+    }
+  }
+  if (!apiKey || !parsed.model) return null;
+  return {
+    agentRuntime: "CODEX_CLI",
+    baseUrl: providerUrlForContainer(parsed.baseUrl || "https://api.openai.com/v1"),
+    apiKey,
+    primaryModel: parsed.model,
+    source: sourceLabel,
+  };
+}
+
+function parseCodexConnectionToml(source) {
+  let section = "";
+  let model = "";
+  let provider = "";
+  const providerValues = new Map();
+  for (const rawLine of source.split(/\r?\n/)) {
+    const line = stripTomlComment(rawLine).trim();
+    if (!line) continue;
+    const sectionMatch = line.match(/^\[([^\]]+)\]$/);
+    if (sectionMatch) {
+      section = sectionMatch[1].trim().replace(/^model_providers\./, "").replace(/^['\"]|['\"]$/g, "");
+      continue;
+    }
+    const assignment = line.match(/^([A-Za-z0-9_-]+)\s*=\s*(.+)$/);
+    if (!assignment) continue;
+    const value = parseTomlString(assignment[2].trim());
+    if (value === null) continue;
+    if (!section && assignment[1] === "model") model = value;
+    if (!section && assignment[1] === "model_provider") provider = value;
+    if (section) providerValues.set(`${section}.${assignment[1]}`, value);
+  }
+  return {
+    model,
+    provider,
+    baseUrl: provider ? providerValues.get(`${provider}.base_url`) || "" : "",
+    envKey: provider ? providerValues.get(`${provider}.env_key`) || "" : "",
+  };
+}
+
+function stripTomlComment(line) {
+  let quote = "";
+  let escaped = false;
+  for (let index = 0; index < line.length; index += 1) {
+    const character = line[index];
+    if (escaped) { escaped = false; continue; }
+    if (character === "\\" && quote === "\"") { escaped = true; continue; }
+    if ((character === "\"" || character === "'") && (!quote || quote === character)) {
+      quote = quote ? "" : character;
+      continue;
+    }
+    if (character === "#" && !quote) return line.slice(0, index);
+  }
+  return line;
+}
+
+function parseTomlString(value) {
+  if (value.startsWith("\"") && value.endsWith("\"")) {
+    try { return JSON.parse(value); } catch { return null; }
+  }
+  if (value.startsWith("'") && value.endsWith("'")) return value.slice(1, -1);
+  return null;
+}
+
+function providerUrlForContainer(value) {
+  const url = new URL(value);
+  if (["localhost", "127.0.0.1", "[::1]"].includes(url.hostname) || url.hostname.endsWith(".localhost")) {
+    url.hostname = "host.docker.internal";
+  }
+  return url.href.replace(/\/$/, "");
+}
+
+function stringValue(value) {
+  return typeof value === "string" && value.trim() ? value.trim() : "";
 }
 
 async function prepareLocalHost() {

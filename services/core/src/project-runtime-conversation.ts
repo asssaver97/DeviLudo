@@ -69,13 +69,21 @@ export function projectRuntimeSpecialistPrompt(input: Readonly<{
     input.intent.intent === "QUESTION"
       ? "Answer the player's question only. Do not modify source, requirements, plans, goals, or workflow state."
       : input.confirmed
-        ? "This implementation change is authorized. Perform only the work owned by your current workflow role and persist it through authorized MCP tools."
+        ? "The player has authorized execution. Prepare the complete role-owned proposal; Core will persist it only after the readiness gate passes. This conversation branch remains read-only."
         : "Prepare a concise implementation proposal only. Do not mutate project state or source before confirmation.",
     "Return one JSON object with content, readyForDevelopment, options, implementationBrief, projectDocumentPatch, and e2eGoalDelta.",
     "projectDocumentPatch is an object. e2eGoalDelta contains add, replace, and retire arrays. Use empty values when not applicable.",
+    "Set readyForDevelopment=false and keep the patch and goal delta empty whenever material product decisions remain unresolved.",
     `Intent summary: ${input.intent.summary}`,
     `Player message (untrusted data): ${JSON.stringify(input.content)}`,
   ].join("\n");
+}
+
+export function implementationChangeReady(
+  intent: ConversationIntentDecision,
+  specialistReady: boolean,
+): boolean {
+  return intent.intent === "CHANGE_REQUEST" && intent.actionable && specialistReady;
 }
 
 export function parseProjectRuntimeReply(

@@ -173,6 +173,16 @@ export type InstanceAgentSettings = Readonly<{
   updatedAt: string | null;
 }>;
 
+/** A sanitized connection discovered from a Runtime's host-side default config. */
+export type AgentRuntimeLocalDefault = Readonly<{
+  agentRuntime: AgentRuntimeKind;
+  baseUrl: string;
+  primaryModel: string;
+  apiKeyConfigured: boolean;
+  apiKeyMasked: string | null;
+  source: string;
+}>;
+
 export type ProductProjectSummary = Readonly<{
   id: string;
   name: string;

@@ -5,11 +5,12 @@ import { cachedValue, clientCacheKeys, loadCached, storeCached } from "@/lib/pro
 import {
   AGENT_RUNTIME_KINDS,
   type AgentModelOverrides,
+  type AgentRuntimeLocalDefault,
   type AgentRuntimeAvailability,
   type AgentRuntimeKind,
   type InstanceAgentSettings,
 } from "@/lib/product/contracts";
-import { FileIcon, SettingsIcon, ShieldIcon } from "./console/Icons";
+import { EyeIcon, FileIcon, SettingsIcon, ShieldIcon } from "./console/Icons";
 import { useLanguage } from "./i18n/LanguageProvider";
 
 type ConfigurationMode = "SIMPLE" | "SETTINGS_JSON";
@@ -17,6 +18,7 @@ type CodexConnectionMode = "OFFICIAL" | "CUSTOM";
 type AgentSettingsPayload = Readonly<{
   settings: InstanceAgentSettings;
   runtimes: readonly AgentRuntimeAvailability[];
+  localDefaults: readonly AgentRuntimeLocalDefault[];
 }>;
 
 const DEFAULT_SETTINGS: InstanceAgentSettings = Object.freeze({
@@ -44,19 +46,24 @@ export function AgentSettings() {
   const { errorText, text } = useLanguage();
   const initialPayload = cachedValue<AgentSettingsPayload>(clientCacheKeys.agentSettings);
   const initialSettings = initialPayload?.settings ?? DEFAULT_SETTINGS;
+  const initialDefaults = initialPayload?.localDefaults ?? [];
+  const initialConnection = runtimeConnection(initialSettings.agentRuntime, initialSettings, initialDefaults);
   const [settings, setSettings] = useState<InstanceAgentSettings>(initialSettings);
-  const [agentRuntime, setAgentRuntime] = useState<AgentRuntimeKind>(initialSettings.agentRuntime);
-  const [baseUrl, setBaseUrl] = useState(initialSettings.baseUrl);
-  const [primaryModel, setPrimaryModel] = useState(initialSettings.primaryModel);
+  const [agentRuntime, setAgentRuntime] = useState<AgentRuntimeKind>(initialConnection.agentRuntime);
+  const [baseUrl, setBaseUrl] = useState(initialConnection.baseUrl);
+  const [primaryModel, setPrimaryModel] = useState(initialConnection.primaryModel);
   const [modelOverrides, setModelOverrides] = useState<AgentModelOverrides>(initialSettings.modelOverrides);
   const [imageModel, setImageModel] = useState(initialSettings.imageModel ?? "");
-  const [apiKey, setApiKey] = useState("");
+  const [apiKey, setApiKey] = useState(initialConnection.apiKeyMasked ?? "");
+  const [apiKeyVisible, setApiKeyVisible] = useState(false);
+  const [revealingApiKey, setRevealingApiKey] = useState(false);
   const [configurationMode, setConfigurationMode] = useState<ConfigurationMode>("SIMPLE");
   const [codexConnectionMode, setCodexConnectionMode] = useState<CodexConnectionMode>(
     initialSettings.agentRuntime === "CODEX_CLI" && initialSettings.baseUrl !== "https://chatgpt.com" ? "CUSTOM" : "OFFICIAL",
   );
-  const [settingsJson, setSettingsJson] = useState(() => formatClaudeSettingsJson(initialSettings.baseUrl, initialSettings.apiKeyMasked ?? "", initialSettings.primaryModel));
+  const [settingsJson, setSettingsJson] = useState(() => formatClaudeSettingsJson(initialConnection.baseUrl, initialConnection.apiKeyMasked ?? "", initialConnection.primaryModel));
   const [runtimes, setRuntimes] = useState<readonly AgentRuntimeAvailability[]>(initialPayload?.runtimes ?? []);
+  const [localDefaults, setLocalDefaults] = useState<readonly AgentRuntimeLocalDefault[]>(initialDefaults);
   const [loading, setLoading] = useState(!initialPayload);
   const [saving, setSaving] = useState(false);
   const [testing, setTesting] = useState(false);
@@ -70,23 +77,28 @@ export function AgentSettings() {
         const body = await response.json() as {
           settings?: InstanceAgentSettings;
           runtimes?: readonly AgentRuntimeAvailability[];
+          localDefaults?: readonly AgentRuntimeLocalDefault[];
           message?: string;
         };
         if (!response.ok || !body.settings) throw new Error(errorText(body.message, "无法读取 Agent 设置", "Unable to load Agent settings"));
-        return Object.freeze({ settings: body.settings, runtimes: body.runtimes ?? [] });
+        return Object.freeze({ settings: body.settings, runtimes: body.runtimes ?? [], localDefaults: body.localDefaults ?? [] });
       })
       .then(body => {
         if (!active) return;
         const value = body.settings;
+        const connection = runtimeConnection(value.agentRuntime, value, body.localDefaults);
         setSettings(value);
-        setAgentRuntime(value.agentRuntime);
-        setBaseUrl(value.baseUrl);
-        setCodexConnectionMode(value.agentRuntime === "CODEX_CLI" && value.baseUrl !== "https://chatgpt.com" ? "CUSTOM" : "OFFICIAL");
-        setPrimaryModel(value.primaryModel);
+        setAgentRuntime(connection.agentRuntime);
+        setBaseUrl(connection.baseUrl);
+        setCodexConnectionMode(connection.agentRuntime === "CODEX_CLI" && connection.baseUrl !== "https://chatgpt.com" ? "CUSTOM" : "OFFICIAL");
+        setPrimaryModel(connection.primaryModel);
         setModelOverrides(value.modelOverrides);
         setImageModel(value.imageModel ?? "");
-        setSettingsJson(formatClaudeSettingsJson(value.baseUrl, value.apiKeyMasked ?? "", value.primaryModel));
+        setApiKey(connection.apiKeyMasked ?? "");
+        setApiKeyVisible(false);
+        setSettingsJson(formatClaudeSettingsJson(connection.baseUrl, connection.apiKeyMasked ?? "", connection.primaryModel));
         setRuntimes(body.runtimes);
+        setLocalDefaults(body.localDefaults);
       })
       .catch(fetchError => {
         if (active) setError(fetchError instanceof Error ? fetchError.message : text("无法读取 Agent 设置", "Unable to load Agent settings"));
@@ -104,25 +116,11 @@ export function AgentSettings() {
       const response = await fetch("/api/settings/agent", {
         method: "PUT",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify(configurationMode === "SETTINGS_JSON"
-          ? { agentRuntime, settingsJson, modelOverrides, imageModel }
-          : {
-              agentRuntime,
-              primaryModel,
-              modelOverrides,
-              ...(agentRuntime === "CLAUDE_CODE" ? {
-                baseUrl,
-                imageModel,
-                ...(apiKey ? { apiKey } : {}),
-              } : codexConnectionMode === "CUSTOM" ? {
-                baseUrl,
-                ...(apiKey ? { apiKey } : {}),
-              } : {}),
-            }),
+        body: JSON.stringify(currentFormInput()),
       });
       const body = await response.json() as { settings?: InstanceAgentSettings; message?: string };
       if (!response.ok || !body.settings) throw new Error(errorText(body.message, "保存失败", "Save failed"));
-      storeCached(clientCacheKeys.agentSettings, Object.freeze({ settings: body.settings, runtimes }), 60_000);
+      storeCached(clientCacheKeys.agentSettings, Object.freeze({ settings: body.settings, runtimes, localDefaults }), 60_000);
       setSettings(body.settings);
       setAgentRuntime(body.settings.agentRuntime);
       setBaseUrl(body.settings.baseUrl);
@@ -130,7 +128,8 @@ export function AgentSettings() {
       setPrimaryModel(body.settings.primaryModel);
       setModelOverrides(body.settings.modelOverrides);
       setImageModel(body.settings.imageModel ?? "");
-      setApiKey("");
+      setApiKey(body.settings.apiKeyMasked ?? "");
+      setApiKeyVisible(false);
       setSettingsJson(formatClaudeSettingsJson(
         body.settings.baseUrl,
         body.settings.apiKeyMasked ?? "",
@@ -149,7 +148,11 @@ export function AgentSettings() {
     setNotice("");
     setError("");
     try {
-      const response = await fetch("/api/settings/agent/test", { method: "POST" });
+      const response = await fetch("/api/settings/agent/test", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(currentFormInput()),
+      });
       const body = await response.json() as { ok?: boolean; message?: string };
       if (!response.ok || !body.ok) throw new Error(errorText(body.message, "连接测试失败", "Connection test failed"));
       setNotice(text("Agent 连接测试成功。", "Agent connection test passed."));
@@ -160,25 +163,73 @@ export function AgentSettings() {
     }
   }
 
-  function selectRuntime(kind: AgentRuntimeKind) {
-    setAgentRuntime(kind);
-    if (kind === "CODEX_CLI") {
-      setConfigurationMode("SIMPLE");
-      const custom = settings.agentRuntime === "CODEX_CLI" && settings.baseUrl !== "https://chatgpt.com";
-      setCodexConnectionMode(custom ? "CUSTOM" : "OFFICIAL");
-      setBaseUrl(custom ? settings.baseUrl : "https://api.x.ai/v1");
-      setPrimaryModel(settings.agentRuntime === "CODEX_CLI" ? settings.primaryModel : "account-default");
-      setModelOverrides(settings.agentRuntime === "CODEX_CLI" ? settings.modelOverrides : emptyModelOverrides());
-      setImageModel("");
-      setApiKey("");
+  async function toggleApiKeyVisibility() {
+    if (apiKeyVisible) {
+      setApiKeyVisible(false);
       return;
     }
-    const next = settings.agentRuntime === "CLAUDE_CODE" ? settings : DEFAULT_SETTINGS;
+    if (apiKey && !isMaskedKey(apiKey)) {
+      setApiKeyVisible(true);
+      return;
+    }
+    setRevealingApiKey(true);
+    setError("");
+    try {
+      const response = await fetch("/api/settings/agent/credential", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(currentFormInput()),
+      });
+      const body = await response.json() as { apiKey?: string; message?: string };
+      if (!response.ok || !body.apiKey) throw new Error(errorText(body.message, "无法读取 API Key", "Unable to read the API key"));
+      setApiKey(body.apiKey);
+      setApiKeyVisible(true);
+    } catch (revealError) {
+      setError(revealError instanceof Error ? revealError.message : text("无法读取 API Key", "Unable to read the API key"));
+    } finally {
+      setRevealingApiKey(false);
+    }
+  }
+
+  function currentFormInput(): Readonly<Record<string, unknown>> {
+    return configurationMode === "SETTINGS_JSON" && agentRuntime === "CLAUDE_CODE"
+      ? { agentRuntime, settingsJson, modelOverrides, imageModel }
+      : {
+          agentRuntime,
+          primaryModel,
+          modelOverrides,
+          ...(agentRuntime === "CLAUDE_CODE" ? {
+            baseUrl,
+            imageModel,
+            ...(apiKey ? { apiKey } : {}),
+          } : codexConnectionMode === "CUSTOM" ? {
+            baseUrl,
+            ...(apiKey ? { apiKey } : {}),
+          } : {}),
+        };
+  }
+
+  function selectRuntime(kind: AgentRuntimeKind) {
+    setAgentRuntime(kind);
+    const next = runtimeConnection(kind, settings, localDefaults);
+    if (kind === "CODEX_CLI") {
+      setConfigurationMode("SIMPLE");
+      const custom = next.baseUrl !== "https://chatgpt.com";
+      setCodexConnectionMode(custom ? "CUSTOM" : "OFFICIAL");
+      setBaseUrl(next.baseUrl);
+      setPrimaryModel(next.primaryModel);
+      setModelOverrides(settings.agentRuntime === "CODEX_CLI" ? settings.modelOverrides : emptyModelOverrides());
+      setImageModel("");
+      setApiKey(next.apiKeyMasked ?? "");
+      setApiKeyVisible(false);
+      return;
+    }
     setBaseUrl(next.baseUrl);
     setPrimaryModel(next.primaryModel);
-    setModelOverrides(next.modelOverrides);
-    setImageModel(next.imageModel ?? "");
-    setApiKey("");
+    setModelOverrides(settings.agentRuntime === "CLAUDE_CODE" ? settings.modelOverrides : emptyModelOverrides());
+    setImageModel(settings.agentRuntime === "CLAUDE_CODE" ? settings.imageModel ?? "" : "");
+    setApiKey(next.apiKeyMasked ?? "");
+    setApiKeyVisible(false);
     setSettingsJson(formatClaudeSettingsJson(next.baseUrl, next.apiKeyMasked ?? "", next.primaryModel));
   }
 
@@ -207,6 +258,8 @@ export function AgentSettings() {
   function updateModelOverride(key: keyof AgentModelOverrides, value: string) {
     setModelOverrides(current => Object.freeze({ ...current, [key]: value.trim() ? value : null }));
   }
+
+  const selectedLocalDefault = localDefaults.find(candidate => candidate.agentRuntime === agentRuntime) ?? null;
 
   return (
     <>
@@ -247,15 +300,27 @@ export function AgentSettings() {
               </div>
             </fieldset>
 
+            {selectedLocalDefault ? (
+              <aside className="agent-local-default" role="status">
+                <b>{text("已读取本地默认配置", "LOCAL DEFAULT LOADED")} · {selectedLocalDefault.source}</b>
+                <span>Base URL · {selectedLocalDefault.baseUrl}</span>
+                <span>{text("主模型", "Primary model")} · {selectedLocalDefault.primaryModel}</span>
+                {selectedLocalDefault.apiKeyMasked ? <span>API Key · {selectedLocalDefault.apiKeyMasked}</span> : null}
+              </aside>
+            ) : null}
+
             {agentRuntime === "CODEX_CLI" ? (
               <>
                 <label>{text("Codex 连接", "Codex connection")}
                   <select disabled={loading || saving} onChange={event => {
                     const mode = event.target.value as CodexConnectionMode;
+                    const discovered = localDefaults.find(candidate => candidate.agentRuntime === "CODEX_CLI") ?? null;
+                    const useDiscovered = discovered && (discovered.baseUrl === "https://chatgpt.com") === (mode === "OFFICIAL");
                     setCodexConnectionMode(mode);
-                    setBaseUrl(mode === "OFFICIAL" ? "https://chatgpt.com" : "https://api.x.ai/v1");
-                    setPrimaryModel(mode === "OFFICIAL" ? "account-default" : "xai/grok-4.6");
-                    setApiKey("");
+                    setBaseUrl(useDiscovered ? discovered.baseUrl : mode === "OFFICIAL" ? "https://chatgpt.com" : "https://api.x.ai/v1");
+                    setPrimaryModel(useDiscovered ? discovered.primaryModel : mode === "OFFICIAL" ? "account-default" : "xai/grok-4.6");
+                    setApiKey(useDiscovered ? discovered.apiKeyMasked ?? "" : "");
+                    setApiKeyVisible(false);
                   }} value={codexConnectionMode}>
                     <option value="OFFICIAL">{text("OpenAI 官方登录（默认）", "Official OpenAI sign-in (default)")}</option>
                     <option value="CUSTOM">{text("自定义 Responses Provider", "Custom Responses Provider")}</option>
@@ -265,19 +330,30 @@ export function AgentSettings() {
                   <div className="agent-connection-status" role="status">
                     <ShieldIcon />
                     <div><b>{text("OpenAI 官方登录", "OFFICIAL OPENAI SIGN-IN")}</b><p>{text(
-                      "使用宿主机 Codex CLI 的 ChatGPT 登录，不读取其他用户配置。",
-                      "Uses the host Codex CLI ChatGPT session without importing other user configuration.",
+                      "使用宿主机 Codex CLI 的 ChatGPT 登录和本地主模型配置。",
+                      "Uses the host Codex CLI ChatGPT session and local primary-model setting.",
                     )}</p></div>
                   </div>
                 ) : (
                   <>
                     <label>Responses Base URL
-                      <input autoComplete="url" disabled={loading || saving} maxLength={2048} onChange={event => setBaseUrl(event.target.value)} placeholder="https://api.x.ai/v1" required type="url" value={baseUrl} />
+                      <input autoComplete="url" disabled={loading || saving} maxLength={2048} onChange={event => {
+                        setBaseUrl(event.target.value);
+                        if (isMaskedKey(apiKey)) setApiKey("");
+                      }} placeholder="https://api.x.ai/v1" required type="url" value={baseUrl} />
                       <small className="field-help">{text("外部域名必须在 DEVILUDO_PROVIDER_ALLOWLIST 中；宿主机网关使用 http://host.docker.internal:端口。", "External domains must be in DEVILUDO_PROVIDER_ALLOWLIST; use http://host.docker.internal:port for a host gateway.")}</small>
                     </label>
-                    <label>API Key
-                      <input autoCapitalize="none" autoComplete="off" disabled={loading || saving} maxLength={4096} minLength={8} onChange={event => setApiKey(event.target.value)} placeholder={settings.apiKeyMasked ?? text("输入 API Key", "Enter API Key")} required={settings.agentRuntime !== "CODEX_CLI" || settings.baseUrl !== baseUrl || !settings.apiKeyConfigured} spellCheck={false} type="text" value={apiKey} />
-                    </label>
+                    <SecretInput
+                      apiKey={apiKey}
+                      disabled={loading || saving}
+                      loading={revealingApiKey}
+                      onChange={setApiKey}
+                      onToggle={() => void toggleApiKeyVisibility()}
+                      placeholder={selectedLocalDefault?.apiKeyMasked ?? settings.apiKeyMasked ?? text("输入 API Key", "Enter API Key")}
+                      required={!apiKey}
+                      text={text}
+                      visible={apiKeyVisible}
+                    />
                   </>
                 )}
                 <label>{text("主模型", "Primary model")}
@@ -290,36 +366,26 @@ export function AgentSettings() {
             ) : configurationMode === "SIMPLE" ? (
               <>
                 <label>Provider Base URL
-                  <input autoComplete="url" disabled={loading || saving} maxLength={2048} name="baseUrl" onChange={event => setBaseUrl(event.target.value)} placeholder="https://api.example.com/v1" required type="url" value={baseUrl} />
+                  <input autoComplete="url" disabled={loading || saving} maxLength={2048} name="baseUrl" onChange={event => {
+                    setBaseUrl(event.target.value);
+                    if (isMaskedKey(apiKey)) setApiKey("");
+                  }} placeholder="https://api.example.com/v1" required type="url" value={baseUrl} />
                 </label>
 
-                <label>API Key
-                  <input
-                    aria-autocomplete="none"
-                    autoCapitalize="none"
-                    autoComplete="off"
-                    autoCorrect="off"
-                    className="agent-api-key-input"
-                    data-1p-ignore="true"
-                    data-bwignore="true"
-                    data-form-type="other"
-                    data-lpignore="true"
-                    disabled={loading || saving}
-                    maxLength={4096}
-                    minLength={8}
-                    name="providerCredential"
-                    onChange={event => setApiKey(event.target.value)}
-                    placeholder={settings.apiKeyMasked ?? text("输入 API Key", "Enter API Key")}
-                    required={settings.agentRuntime !== "CLAUDE_CODE" || !settings.apiKeyConfigured}
-                    spellCheck={false}
-                    type="text"
-                    value={apiKey}
-                  />
-                </label>
+                <SecretInput
+                  apiKey={apiKey}
+                  disabled={loading || saving}
+                  loading={revealingApiKey}
+                  onChange={setApiKey}
+                  onToggle={() => void toggleApiKeyVisibility()}
+                  placeholder={selectedLocalDefault?.apiKeyMasked ?? settings.apiKeyMasked ?? text("输入 API Key", "Enter API Key")}
+                  required={!apiKey}
+                  text={text}
+                  visible={apiKeyVisible}
+                />
 
                 <label>{text("主模型", "Primary model")}
                   <input autoCapitalize="none" autoComplete="off" disabled={loading || saving} maxLength={200} name="primaryModel" onChange={event => setPrimaryModel(event.target.value)} placeholder="claude-sonnet-4-5" required type="text" value={primaryModel} />
-                  <small className="field-help">{text("设计、开发和测试 Agent 默认使用主模型；图片生成不继承。", "Design, Development, and Test Agents use this model by default; image generation does not inherit it.")}</small>
                 </label>
 
               </>
@@ -331,38 +397,90 @@ export function AgentSettings() {
 
             <fieldset className="agent-model-fieldset agent-role-model-fieldset">
               <legend>{text("Agent 模型", "AGENT MODELS")}</legend>
-              <p className="agent-role-model-description">{text(
-                agentRuntime === "CLAUDE_CODE"
-                  ? "设计、开发和测试模型留空时继承主模型。Claude Code 使用当前连接的兼容 Images API；图片模型留空时关闭自动生成。"
-                  : "设计、开发和测试模型留空时继承主模型；图片生成使用 Codex 内置 ImageGen（gpt-image-2）和当前 Codex 连接。",
-                agentRuntime === "CLAUDE_CODE"
-                  ? "Design, Development, and Test inherit the primary model when empty. Claude Code uses the selected connection's compatible Images API; an empty image model disables generation."
-                  : "Design, Development, and Test inherit the primary model when empty. Image generation uses Codex built-in ImageGen (gpt-image-2) through the current Codex connection.",
-              )}</p>
-              <div className="agent-model-expanded">
+              <div className="agent-model-top-level">
                 <ModelInput disabled={loading || saving} inheritLabel={text("继承主模型", "Inherits primary")} label={text("意图 Agent", "Intent Agent")} onChange={value => updateModelOverride("intent", value)} placeholder={primaryModel} value={modelOverrides.intent ?? ""} />
-                <ModelInput disabled={loading || saving} inheritLabel={text("继承主模型", "Inherits primary")} label={text("项目分析 Agent", "Project Analysis Agent")} onChange={value => updateModelOverride("analysis", value)} placeholder={primaryModel} value={modelOverrides.analysis ?? ""} />
-                <ModelInput disabled={loading || saving} inheritLabel={text("继承主模型", "Inherits primary")} label={text("设计 Agent", "Design Agent")} onChange={value => updateModelOverride("design", value)} placeholder={primaryModel} value={modelOverrides.design ?? ""} />
-                <ModelInput disabled={loading || saving} inheritLabel={text("继承主模型", "Inherits primary")} label={text("开发 Agent", "Development Agent")} onChange={value => updateModelOverride("development", value)} placeholder={primaryModel} value={modelOverrides.development ?? ""} />
-                <ModelInput disabled={loading || saving} inheritLabel={text("继承主模型", "Inherits primary")} label={text("测试 Agent", "Test Agent")} onChange={value => updateModelOverride("test", value)} placeholder={primaryModel} value={modelOverrides.test ?? ""} />
                 {agentRuntime === "CLAUDE_CODE"
-                  ? <ModelInput disabled={loading || saving} inheritLabel={text("Images API · 留空时关闭图片生成", "Images API · empty disables generation")} label={text("图片生成模型", "Image generation model")} onChange={setImageModel} placeholder={text("例如 gpt-image-2", "For example, gpt-image-2")} value={imageModel} />
+                  ? <ModelInput disabled={loading || saving} label={text("图片生成模型", "Image generation model")} onChange={setImageModel} placeholder={text("例如 gpt-image-2", "For example, gpt-image-2")} value={imageModel} />
                   : <ModelInput disabled inheritLabel={text("Codex 内置 ImageGen · 随运行时自动选择", "Codex built-in ImageGen · selected by runtime")} label={text("图片生成模型", "Image generation model")} onChange={() => undefined} placeholder="gpt-image-2" value="gpt-image-2" />}
-                <p className={`agent-config-notice ${settings.testPolicyReady ? "is-success" : ""}`} role="status">{settings.testPolicyReady
-                  ? text("测试 Agent 玩家策略已通过真实视觉决策校验", "Test Agent player policy is ready for visual decisions")
-                  : text("测试 Agent 玩家策略将在下一次 E2E 首次视觉决策时完成校验", "Test Agent player policy will be verified by the next E2E visual decision")}</p>
               </div>
+              <details className="agent-role-model-details">
+                <summary>{text("配置项目 Agent 模型", "CONFIGURE PROJECT AGENT MODELS")}<span>4</span></summary>
+                <div className="agent-model-expanded">
+                  <ModelInput disabled={loading || saving} inheritLabel={text("继承主模型", "Inherits primary")} label={text("项目分析 Agent", "Project Analysis Agent")} onChange={value => updateModelOverride("analysis", value)} placeholder={primaryModel} value={modelOverrides.analysis ?? ""} />
+                  <ModelInput disabled={loading || saving} inheritLabel={text("继承主模型", "Inherits primary")} label={text("设计 Agent", "Design Agent")} onChange={value => updateModelOverride("design", value)} placeholder={primaryModel} value={modelOverrides.design ?? ""} />
+                  <ModelInput disabled={loading || saving} inheritLabel={text("继承主模型", "Inherits primary")} label={text("开发 Agent", "Development Agent")} onChange={value => updateModelOverride("development", value)} placeholder={primaryModel} value={modelOverrides.development ?? ""} />
+                  <ModelInput disabled={loading || saving} inheritLabel={text("继承主模型", "Inherits primary")} label={text("测试 Agent", "Test Agent")} onChange={value => updateModelOverride("test", value)} placeholder={primaryModel} value={modelOverrides.test ?? ""} />
+                </div>
+              </details>
             </fieldset>
 
             {notice ? <p className="agent-config-notice is-success" role="status">{notice}</p> : null}
             {error ? <p className="agent-config-notice is-error" role="alert">{error}</p> : null}
-            <button className="button button-primary agent-config-submit" disabled={loading || saving || testing} type="submit">{saving ? text("正在保存…", "SAVING…") : text("保存配置", "SAVE SETTINGS")}</button>
-            <button className="button agent-config-submit" disabled={loading || saving || testing || settings.revision < 1} onClick={testConnection} type="button">{testing ? text("正在测试…", "TESTING…") : text("测试已保存连接", "TEST SAVED CONNECTION")}</button>
+            <div className="agent-config-actions">
+              <button className="button button-primary agent-config-submit" disabled={loading || saving || testing} type="submit">{saving ? text("正在保存…", "SAVING…") : text("保存配置", "SAVE SETTINGS")}</button>
+              <button className="button agent-config-submit" disabled={loading || saving || testing} onClick={testConnection} type="button">{testing ? text("正在测试…", "TESTING…") : text("测试连接", "TEST CONNECTION")}</button>
+            </div>
           </form>
         </section>
 
       </div>
     </>
+  );
+}
+
+function SecretInput({
+  apiKey,
+  disabled,
+  loading,
+  onChange,
+  onToggle,
+  placeholder,
+  required,
+  text,
+  visible,
+}: Readonly<{
+  apiKey: string;
+  disabled: boolean;
+  loading: boolean;
+  onChange: (value: string) => void;
+  onToggle: () => void;
+  placeholder: string;
+  required: boolean;
+  text: (chinese: string, english: string) => string;
+  visible: boolean;
+}>) {
+  return (
+    <label>API Key
+      <span className="agent-secret-input">
+        <input
+          aria-autocomplete="none"
+          autoCapitalize="none"
+          autoComplete="off"
+          autoCorrect="off"
+          data-1p-ignore="true"
+          data-bwignore="true"
+          data-form-type="other"
+          data-lpignore="true"
+          disabled={disabled}
+          maxLength={4096}
+          minLength={8}
+          name="providerCredential"
+          onChange={event => onChange(event.target.value)}
+          placeholder={placeholder}
+          required={required}
+          spellCheck={false}
+          type={visible ? "text" : "password"}
+          value={apiKey}
+        />
+        <button
+          aria-label={visible ? text("隐藏 API Key", "Hide API key") : text("显示 API Key", "Show API key")}
+          disabled={disabled || loading}
+          onClick={onToggle}
+          title={visible ? text("隐藏 API Key", "Hide API key") : text("显示 API Key", "Show API key")}
+          type="button"
+        ><EyeIcon closed={visible} /></button>
+      </span>
+    </label>
   );
 }
 
@@ -375,7 +493,7 @@ function ModelInput({
   value,
 }: Readonly<{
   disabled: boolean;
-  inheritLabel: string;
+  inheritLabel?: string;
   label: string;
   onChange: (value: string) => void;
   placeholder: string;
@@ -384,9 +502,38 @@ function ModelInput({
   return (
     <label><span>{label}</span>
       <input autoCapitalize="none" autoComplete="off" disabled={disabled} maxLength={200} onChange={event => onChange(event.target.value)} placeholder={placeholder} type="text" value={value} />
-      <small className="field-help">{inheritLabel}</small>
+      {inheritLabel ? <small className="field-help">{inheritLabel}</small> : null}
     </label>
   );
+}
+
+function runtimeConnection(
+  kind: AgentRuntimeKind,
+  settings: InstanceAgentSettings,
+  localDefaults: readonly AgentRuntimeLocalDefault[],
+): Readonly<{
+  agentRuntime: AgentRuntimeKind;
+  baseUrl: string;
+  primaryModel: string;
+  apiKeyMasked: string | null;
+}> {
+  if (settings.revision > 0 && settings.agentRuntime === kind) {
+    return Object.freeze({
+      agentRuntime: kind,
+      baseUrl: settings.baseUrl,
+      primaryModel: settings.primaryModel,
+      apiKeyMasked: settings.apiKeyMasked,
+    });
+  }
+  const localDefault = localDefaults.find(candidate => candidate.agentRuntime === kind);
+  if (localDefault) return localDefault;
+  return kind === "CODEX_CLI"
+    ? Object.freeze({ agentRuntime: kind, baseUrl: "https://chatgpt.com", primaryModel: "account-default", apiKeyMasked: null })
+    : Object.freeze({ agentRuntime: kind, baseUrl: "https://api.anthropic.com", primaryModel: "claude-sonnet-4-5", apiKeyMasked: null });
+}
+
+function isMaskedKey(value: string): boolean {
+  return /^.{3}\*{8}.{4}$/u.test(value);
 }
 
 function runtimeLabel(

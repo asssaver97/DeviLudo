@@ -1,11 +1,16 @@
 import { resolveAgentModel } from "./agent-settings";
 import { runCodexPrompt, type CodexPromptRunner } from "./codex-cli";
-import type { StoredInstanceAgentSettings } from "./repository";
+import type { AgentModelOverrides, AgentRuntimeKind } from "@/lib/product/contracts";
 
 const PROBE = "DEVILUDO_CONNECTION_OK";
 
 export async function testAgentConnection(
-  settings: StoredInstanceAgentSettings,
+  settings: Readonly<{
+    agentRuntime: AgentRuntimeKind;
+    baseUrl: string;
+    primaryModel: string;
+    modelOverrides: AgentModelOverrides;
+  }>,
   credential: string,
   fetchImpl: typeof fetch = fetch,
   codexRunner: CodexPromptRunner = runCodexPrompt,

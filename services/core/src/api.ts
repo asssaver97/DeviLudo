@@ -25,6 +25,7 @@ import {
 import {
   createAgentSecretStore,
   isMaskedApiKey,
+  maskApiKey,
   parseAgentSettingsInput,
   resolveAgentModel,
   usesCodexOfficialLogin,
@@ -32,6 +33,12 @@ import {
 } from "./agent-settings";
 import { detectAgentRuntimes } from "./agent-runtime-detection";
 import { testAgentConnection } from "./agent-connection";
+import {
+  matchingLocalAgentRuntimeDefault,
+  publicLocalAgentRuntimeDefault,
+  readLocalAgentRuntimeDefaults,
+  type LocalAgentRuntimeDefault,
+} from "./agent-local-defaults";
 import type { CoreConfig } from "./config";
 import {
   createLocalHostServices,
@@ -90,6 +97,7 @@ import { ProjectSourceStore } from "./project-sources";
 import { ProjectRuntimeRepository } from "./project-runtime-repository";
 import { ProjectRuntimeService } from "./project-runtime-service";
 import {
+  implementationChangeReady,
   implementationBrief as runtimeImplementationBrief,
   parseProjectRuntimeIntent,
   parseProjectRuntimeReply,
@@ -361,6 +369,7 @@ export async function runApi(
 
   app.get("/v1/settings/agent", async (request, reply) => {
     productAccess(request, config);
+    const localDefaults = readLocalAgentRuntimeDefaults();
     const [settings, runtimes] = await Promise.all([
       repository.readAgentSettings(),
       detectAgentRuntimes(),
@@ -372,38 +381,45 @@ export async function runApi(
     return reply.header("cache-control", "no-store").send({
       settings: publicAgentSettings(settings, apiKeyMask),
       runtimes,
+      localDefaults: localDefaults.map(publicLocalAgentRuntimeDefault),
     });
   });
 
   app.put("/v1/settings/agent", async (request, reply) => {
     const principal = productAccess(request, config);
     const input = parseAgentSettingsInput(request.body);
+    const localDefaults = readLocalAgentRuntimeDefaults();
     const current = await repository.readAgentSettings();
     const currentMask = current && !usesOfficialLogin(current.agentRuntime, current.baseUrl)
       ? current.apiKeyMask
         ?? await agentSecrets.readApiKeyMask(current.credentialSecretRef)
       : null;
-    if (input.apiKey && isMaskedApiKey(input.apiKey) && input.apiKey !== currentMask) {
-      throw new Error("API Key 掩码与已保存凭据不匹配");
-    }
-    const replacementApiKey = input.apiKey && input.apiKey !== currentMask ? input.apiKey : null;
     const official = usesOfficialLogin(input.agentRuntime, input.baseUrl);
     const sameCredential = current?.agentRuntime === input.agentRuntime
       && current.baseUrl === input.baseUrl
       && !usesOfficialLogin(current.agentRuntime, current.baseUrl);
-    if (!official && !replacementApiKey && !sameCredential) {
-      throw new Error("切换 Agent 连接时必须提供 Provider API Key");
-    }
+    const localDefault = matchingLocalAgentRuntimeDefault(localDefaults, input.agentRuntime, input.baseUrl);
+    const replacementApiKey = official ? null : await resolveDisplayedAgentCredential({
+      agentRuntime: input.agentRuntime,
+      baseUrl: input.baseUrl,
+      inputApiKey: input.apiKey,
+      current,
+      currentMask,
+      localDefault,
+      agentSecrets,
+    });
+    const reuseCurrentCredential = sameCredential
+      && (!input.apiKey || input.apiKey === currentMask);
     const credential = official
       ? await agentSecrets.writeApiKey(readCodexOfficialLogin())
-      : replacementApiKey
-        ? await agentSecrets.writeApiKey(replacementApiKey)
-        : {
+      : reuseCurrentCredential
+        ? {
             secretRef: current?.credentialSecretRef ?? "",
             mask: currentMask ?? "",
             fingerprint: current?.apiKeyFingerprint ?? "",
             version: current?.credentialVersion ?? "",
-          };
+          }
+        : await agentSecrets.writeApiKey(replacementApiKey ?? "");
     if (!credential.mask) throw new Error("已保存 API Key 的掩码不可用，请重新填写 API Key");
     const saved = await repository.saveAgentSettings({
       agentRuntime: input.agentRuntime,
@@ -431,12 +447,27 @@ export async function runApi(
 
   app.post("/v1/settings/agent/test", async (request, reply) => {
     const principal = productAccess(request, config);
-    const settings = await repository.readAgentSettings();
-    if (!settings) throw new Error("请先保存 Agent 配置");
-    const credential = await agentSecrets.readApiKey(settings.credentialSecretRef);
-    if (!credential) throw new Error("无法读取 Agent 凭据，请重新保存配置");
+    const input = parseAgentSettingsInput(request.body);
+    const [current, localDefaults] = await Promise.all([
+      repository.readAgentSettings(),
+      Promise.resolve(readLocalAgentRuntimeDefaults()),
+    ]);
+    const currentMask = current && !usesOfficialLogin(current.agentRuntime, current.baseUrl)
+      ? current.apiKeyMask ?? await agentSecrets.readApiKeyMask(current.credentialSecretRef)
+      : null;
+    const credential = usesOfficialLogin(input.agentRuntime, input.baseUrl)
+      ? readCodexOfficialLogin()
+      : await resolveDisplayedAgentCredential({
+          agentRuntime: input.agentRuntime,
+          baseUrl: input.baseUrl,
+          inputApiKey: input.apiKey,
+          current,
+          currentMask,
+          localDefault: matchingLocalAgentRuntimeDefault(localDefaults, input.agentRuntime, input.baseUrl),
+          agentSecrets,
+        });
     try {
-      await testAgentConnection(settings, credential);
+      await testAgentConnection(input, credential);
     } catch (error) {
       throw httpError(424, "AGENT_CONNECTION_FAILED",
         error instanceof Error ? error.message : "Agent 连接测试失败");
@@ -446,9 +477,40 @@ export async function runApi(
       action: "agent_configuration.test",
       targetType: "instance_agent_configuration",
       targetId: "default",
-      metadata: { outcome: "SUCCEEDED" },
+      metadata: { outcome: "SUCCEEDED", agentRuntime: input.agentRuntime, baseUrl: input.baseUrl },
     });
     return reply.header("cache-control", "no-store").send({ ok: true });
+  });
+
+  app.post("/v1/settings/agent/credential", async (request, reply) => {
+    const principal = productAccess(request, config);
+    const input = parseAgentSettingsInput(request.body);
+    if (usesOfficialLogin(input.agentRuntime, input.baseUrl)) {
+      throw new Error("OpenAI 官方登录不使用可展示的 API Key");
+    }
+    const current = await repository.readAgentSettings();
+    const currentMask = current && !usesOfficialLogin(current.agentRuntime, current.baseUrl)
+      ? current.apiKeyMask ?? await agentSecrets.readApiKeyMask(current.credentialSecretRef)
+      : null;
+    const credential = await resolveDisplayedAgentCredential({
+      agentRuntime: input.agentRuntime,
+      baseUrl: input.baseUrl,
+      inputApiKey: input.apiKey,
+      current,
+      currentMask,
+      localDefault: matchingLocalAgentRuntimeDefault(
+        readLocalAgentRuntimeDefaults(), input.agentRuntime, input.baseUrl,
+      ),
+      agentSecrets,
+    });
+    await host.audit.record({
+      principal,
+      action: "agent_configuration.credential_reveal",
+      targetType: "instance_agent_configuration",
+      targetId: "default",
+      metadata: { agentRuntime: input.agentRuntime, baseUrl: input.baseUrl },
+    });
+    return reply.header("cache-control", "no-store").send({ apiKey: credential });
   });
 
   app.get("/v1/settings/steam", async (request, reply) => {
@@ -2280,7 +2342,7 @@ async function processConversationMessage(input: Readonly<{
     let createdProject = await repository.readProject(targetWorkspace.id, projectId) ?? shell.project;
     let changeRequest: ImplementationChangeRequest | undefined;
     let initialWorkflowAction: ConversationWorkflowAction = "NONE";
-    if (intentDecision.intent === "CHANGE_REQUEST" && intentDecision.actionable) {
+    if (implementationChangeReady(intentDecision, specialistReply.readyForDevelopment)) {
       changeRequest = await repository.createImplementationChangeRequest({
         workspaceId: targetWorkspace.id,
         projectId,
@@ -2543,7 +2605,7 @@ async function processConversationMessage(input: Readonly<{
     resolveImportAnalysis: false,
     responseLanguage: command.responseLanguage,
   });
-  if (intentDecision.intent !== "CHANGE_REQUEST" || !intentDecision.actionable) {
+  if (!implementationChangeReady(intentDecision, specialistReply.readyForDevelopment)) {
     const updatedProject = await repository.readProject(workspace.id, projectId) ?? project;
     return Object.freeze({
       statusCode: created ? 201 : 200, setWorkspaceCookie: false,
@@ -3386,6 +3448,40 @@ function publicAgentSettings(
     testPolicyReady: settings?.testPolicyReady ?? false,
     updatedAt: settings?.updatedAt ?? null,
   });
+}
+
+async function resolveDisplayedAgentCredential(input: Readonly<{
+  agentRuntime: StoredInstanceAgentSettings["agentRuntime"];
+  baseUrl: string;
+  inputApiKey: string | null;
+  current: StoredInstanceAgentSettings | null;
+  currentMask: string | null;
+  localDefault: LocalAgentRuntimeDefault | null;
+  agentSecrets: AgentSecretStore;
+}>): Promise<string> {
+  const { agentRuntime, baseUrl, inputApiKey, current, currentMask, localDefault, agentSecrets } = input;
+  const matchingCurrent = current?.agentRuntime === agentRuntime
+    && current.baseUrl === baseUrl
+    && !usesOfficialLogin(current.agentRuntime, current.baseUrl)
+    ? current
+    : null;
+  if (inputApiKey && !isMaskedApiKey(inputApiKey)) return inputApiKey;
+  if (inputApiKey && inputApiKey === currentMask && matchingCurrent) {
+    const value = await agentSecrets.readApiKey(matchingCurrent.credentialSecretRef);
+    if (value) return value;
+  }
+  if (inputApiKey && localDefault?.apiKey && inputApiKey === maskApiKey(localDefault.apiKey)) {
+    return localDefault.apiKey;
+  }
+  if (!inputApiKey && matchingCurrent) {
+    const value = await agentSecrets.readApiKey(matchingCurrent.credentialSecretRef);
+    if (value) return value;
+  }
+  if (!inputApiKey && localDefault?.apiKey) return localDefault.apiKey;
+  if (inputApiKey && isMaskedApiKey(inputApiKey)) {
+    throw new Error("API Key 掩码与当前展示连接的凭据不匹配");
+  }
+  throw new Error("当前连接需要 Provider API Key");
 }
 
 function usesOfficialLogin(runtime: StoredInstanceAgentSettings["agentRuntime"], baseUrl: string): boolean {

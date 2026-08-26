@@ -11,6 +11,11 @@ const root = fileURLToPath(new URL("..", import.meta.url));
 const projectName = `deviludo-e2e-${process.pid}-${randomBytes(4).toString("hex")}`;
 if (!/^deviludo-e2e-[a-z0-9-]+$/.test(projectName)) throw new Error("Unsafe E2E Compose project name");
 await import("./local-identity.mjs");
+await writeFile(
+  resolve(root, ".deviludo/local/agent-runtime-defaults.json"),
+  `${JSON.stringify({ version: 1, runtimes: [] })}\n`,
+  { mode: 0o600 },
+);
 
 const [webPort, corePort, minioPort] = await Promise.all([
   availablePort(), availablePort(), availablePort(),

@@ -25,6 +25,7 @@ x-core: &core
     DEVILUDO_CODEX_ACCOUNT_DEFAULT_MODEL: "${DEVILUDO_CODEX_ACCOUNT_DEFAULT_MODEL:-}"
     DEVILUDO_CODEX_AUTH_FILE: /run/deviludo-codex/auth.json
     DEVILUDO_CODEX_MODELS_CACHE_FILE: /run/deviludo-codex/models_cache.json
+    DEVILUDO_AGENT_RUNTIME_DEFAULTS_FILE: /run/deviludo-agent/runtime-defaults.json
     DEVILUDO_CODEX_RUN_ROOT: /var/lib/deviludo-codex
     DEVILUDO_CODEX_PROXY_URL: http://provider-proxy:3128
     DEVILUDO_SANDBOX_CONCURRENCY: ${DEVILUDO_SANDBOX_CONCURRENCY:-1}
@@ -117,6 +118,7 @@ services:
       - projects-data:/var/lib/deviludo-projects
       - ../.deviludo/local/codex-auth.json:/run/deviludo-codex/auth.json:ro
       - ../.deviludo/local/codex-models-cache.json:/run/deviludo-codex/models_cache.json:ro
+      - ../.deviludo/local/agent-runtime-defaults.json:/run/deviludo-agent/runtime-defaults.json:ro
       - executor-socket:/run/deviludo-executor
     depends_on:
       postgres:

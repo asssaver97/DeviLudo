@@ -109,6 +109,16 @@ export function CloseIcon(props: IconProps) {
   );
 }
 
+export function EyeIcon({ closed = false, ...props }: IconProps & Readonly<{ closed?: boolean }>) {
+  return (
+    <IconBase {...props}>
+      <path d="M2.5 12s3.4-5 9.5-5 9.5 5 9.5 5-3.4 5-9.5 5-9.5-5-9.5-5Z" {...stroke} />
+      <circle cx="12" cy="12" r="2.5" {...stroke} />
+      {closed ? <path d="m4 4 16 16" {...stroke} /> : null}
+    </IconBase>
+  );
+}
+
 /** A near-closed loop with an arrowhead: the "run this again" glyph. */
 export function RerunIcon(props: IconProps) {
   return (

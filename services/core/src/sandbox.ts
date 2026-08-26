@@ -334,7 +334,10 @@ function runtimeJobPrompt(job: JobProtocolV4, role: ProjectRuntimeRole): string 
   const purpose = typeof job.payload.purpose === "string" ? job.payload.purpose : role;
   const handoff = job.payload.testHandoff ?? job.payload.implementationBrief ?? null;
   if (role === "DESIGN") {
-    return `Apply the approved requirement revision and create a complete DEVELOPMENT handoff. Purpose: ${purpose}.`;
+    return [
+      `Apply the approved requirement revision and create a complete DEVELOPMENT handoff. Purpose: ${purpose}.`,
+      handoff ? `Approved design brief: ${JSON.stringify(handoff).slice(0, 40_000)}` : "",
+    ].filter(Boolean).join("\n");
   }
   if (role === "DEVELOPMENT") {
     return [

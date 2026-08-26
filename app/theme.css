@@ -327,6 +327,8 @@ html[data-theme="light"] :is(
   .workspace-dialog,
   .telemetry-status,
   .agent-connection-status,
+  .agent-local-default,
+  .agent-role-model-details,
   .agent-runtime-choice,
   .settings-json-editor textarea,
   .homeChat-contextRow,
@@ -360,6 +362,16 @@ html[data-theme="light"] :is(
   background: #f5f8fb;
   border-color: #c5d1dd;
   color: var(--ink);
+}
+
+html[data-theme="light"] .agent-secret-input > button {
+  background: #eef4f8;
+  border-color: #aab9c7;
+  color: #536579;
+}
+
+html[data-theme="light"] .agent-role-model-details[open] > summary {
+  border-bottom-color: #c2cfdb;
 }
 
 html[data-theme="light"] .badge.is-ready {

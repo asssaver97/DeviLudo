@@ -14,6 +14,7 @@ import {
   updateProjectContext,
 } from "@/services/core/src/project-context";
 import {
+  implementationChangeReady,
   parseProjectRuntimeIntent,
   parseProjectRuntimeReply,
   projectRuntimeIntentPrompt,
@@ -78,6 +79,26 @@ test("specialist output is attributed to the real persistent role session", () =
   assert.equal(reply.agentRole, "TEST");
   assert.equal(reply.runtime, "CODEX_CLI");
   assert.equal(reply.model, "test-model");
+});
+
+test("incomplete design discovery cannot stage or execute an implementation change", () => {
+  const change = parseProjectRuntimeIntent(result("INTENT", {
+    intent: "CHANGE_REQUEST",
+    targetRole: "DESIGN",
+    explicitExecution: true,
+    actionable: true,
+    summary: "Create a new game from an incomplete seed.",
+  }));
+  assert.equal(implementationChangeReady(change, false), false);
+  assert.equal(implementationChangeReady(change, true), true);
+  const question = parseProjectRuntimeIntent(result("INTENT", {
+    intent: "QUESTION",
+    targetRole: "DESIGN",
+    explicitExecution: false,
+    actionable: false,
+    summary: "Explain the proposed core loop.",
+  }));
+  assert.equal(implementationChangeReady(question, true), false);
 });
 
 test("project context is zstd-compressed, digest-verified, atomic durable state", async () => {
