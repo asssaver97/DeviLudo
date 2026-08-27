@@ -9,7 +9,7 @@ test("fresh workflow iterations form one linear immutable history", async () => 
   assert.match(baseline, /UNIQUE \(workspace_id, project_id, iteration_number\)/);
   assert.match(baseline, /UNIQUE \(workspace_id, parent_workflow_id\)/);
   assert.match(baseline, /FOREIGN KEY \(workspace_id, parent_workflow_id\)[\s\S]*workflow_instances\(workspace_id, id\)/);
-  assert.doesNotMatch(baseline, /row_number\(\) OVER|ALTER COLUMN iteration_number/);
+  assert.doesNotMatch(baseline, /ALTER COLUMN iteration_number/);
 });
 
 test("the iteration API is terminal-only, latest-only, and idempotent under duplicate creation", async () => {

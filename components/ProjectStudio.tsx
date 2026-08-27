@@ -398,13 +398,17 @@ export function ProjectStudio({ projectId }: { projectId: string }) {
 
   const activeAgentJob = runningAgentJobForConversation(project?.jobs ?? Object.freeze([]));
   const activeAgentJobId = activeAgentJob?.id ?? null;
+  const activeAgentJobState = activeAgentJob?.state === "FAILED"
+    ? "FAILED"
+    : activeAgentJob?.state === "RETRY" ? "RETRY" : "RUNNING";
   const activeAgentRole = progressAgentRole(activeAgentJob, project?.workflowState);
-  const agentRunning = activeAgentJob !== null;
+  const agentProgressVisible = activeAgentJob !== null;
+  const agentRunning = activeAgentJob?.state === "RUNNING" || activeAgentJob?.state === "RETRY";
   const activeAgentProgress = useMemo(
-    () => agentRunning && activeAgentJobId && agentProgressBuffer.jobId === activeAgentJobId
+    () => agentProgressVisible && activeAgentJobId && agentProgressBuffer.jobId === activeAgentJobId
       ? agentProgressBuffer.events
       : Object.freeze([]),
-    [activeAgentJobId, agentProgressBuffer, agentRunning],
+    [activeAgentJobId, agentProgressBuffer, agentProgressVisible],
   );
 
   useEffect(() => {
@@ -1245,11 +1249,13 @@ export function ProjectStudio({ projectId }: { projectId: string }) {
               </nav>
 
               <ConversationBox
-                agentProgress={{
-                  running: !viewingHistoricalIteration && agentRunning,
+                agentProgress={!viewingHistoricalIteration && activeAgentJob ? {
+                  running: agentRunning,
+                  state: activeAgentJobState,
                   role: activeAgentRole,
-                  events: viewingHistoricalIteration ? Object.freeze([]) : activeAgentProgress,
-                }}
+                  events: activeAgentProgress,
+                  error: activeAgentJob.lastError,
+                } : undefined}
                 className="project-conversation-box"
                 conversationKey={activeConversation?.id ?? null}
                 disabled={viewingHistoricalIteration}
@@ -1571,11 +1577,29 @@ export function pipelineJobsForStage(
   return Object.freeze(jobs.filter(job => job.kind === stage));
 }
 
-/** A queued Agent is waiting for its predecessor/runtime, not replying yet. */
+/**
+ * A queued Agent is waiting for its predecessor/runtime and has not replied yet.
+ * Once a turn has started, keep its retry and terminal failure visible so the
+ * conversation does not flash and silently disappear during or after backoff.
+ */
 export function runningAgentJobForConversation(
   jobs: ProductProjectDetail["jobs"],
 ): ProductProjectDetail["jobs"][number] | null {
-  return jobs.filter(job => job.kind === "AGENT_TURN" && job.state === "RUNNING").at(-1) ?? null;
+  const agentJobs = jobs.filter(job => job.kind === "AGENT_TURN");
+  const active = latestUpdatedJob(agentJobs.filter(job => job.state === "RUNNING"))
+    ?? latestUpdatedJob(agentJobs.filter(job => job.state === "RETRY"));
+  if (active) return active;
+  const latestTerminal = latestUpdatedJob(agentJobs.filter(job => job.state === "FAILED" || job.state === "SUCCEEDED"));
+  return latestTerminal?.state === "FAILED" ? latestTerminal : null;
+}
+
+function latestUpdatedJob(
+  jobs: ProductProjectDetail["jobs"],
+): ProductProjectDetail["jobs"][number] | null {
+  return jobs.reduce<ProductProjectDetail["jobs"][number] | null>((latest, job) => {
+    if (!latest) return job;
+    return Date.parse(job.updatedAt) >= Date.parse(latest.updatedAt) ? job : latest;
+  }, null);
 }
 
 export function pipelineStageFinishedAt(jobs: ProductProjectDetail["jobs"]): string | null {

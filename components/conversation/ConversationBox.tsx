@@ -41,8 +41,10 @@ type ConversationBoxProps = Readonly<{
   streamingReplies: StreamingConversationReplies;
   agentProgress?: Readonly<{
     running: boolean;
+    state: "RUNNING" | "RETRY" | "FAILED";
     role: ConversationDisplayAgentRole;
     events: readonly AgentProgressEvent[];
+    error: string | null;
   }>;
   showSendingReply?: boolean;
   value: string;
@@ -303,14 +305,14 @@ export function ConversationBox({
               </div>
             </article>
           );
-          }) : !agentProgress?.running ? (
+          }) : !agentProgress ? (
             <div className="conversation-box-empty">
               <PlusIcon />
               <b>{emptyTitle ?? text("开始新的项目会话", "START A PROJECT CONVERSATION")}</b>
               <p>{emptyDescription ?? text("讨论玩法，或告诉 DeviLudo 下一步要做什么。", "Discuss the gameplay or tell DeviLudo what to build next.")}</p>
             </div>
           ) : null}
-          {agentProgress?.running ? <AgentProgressPanel progress={agentProgress} /> : null}
+          {agentProgress ? <AgentProgressPanel progress={agentProgress} /> : null}
           {sending && showSendingReply && !PROJECT_RUNTIME_ROLES.some(role => Boolean(streamingReplies[role])) ? (
             <article className="conversation-box-message assistant is-thinking role-intent">
               <span className="message-avatar">IN</span>
@@ -451,8 +453,10 @@ function AgentProgressPanel({
   progress,
 }: Readonly<{ progress: Readonly<{
   running: boolean;
+  state: "RUNNING" | "RETRY" | "FAILED";
   role: ConversationDisplayAgentRole;
   events: readonly AgentProgressEvent[];
+  error: string | null;
 }> }>) {
   const { locale, text } = useLanguage();
   const viewportRef = useRef<HTMLDivElement | null>(null);
@@ -479,7 +483,9 @@ function AgentProgressPanel({
       <div>
         <header>
           <b>{identity.name}</b>
-          <span className="conversation-agent-working">{text("正在工作", "Working")}</span>
+          <span className="conversation-agent-working">{progress.state === "FAILED"
+            ? text("执行失败", "Failed")
+            : progress.state === "RETRY" ? text("等待重试", "Retrying") : text("正在工作", "Working")}</span>
         </header>
         <div
           className="agent-generation-progress-events"
@@ -492,7 +498,8 @@ function AgentProgressPanel({
           {rows.map(row => (
             <p className={`progress-${row.kind.toLowerCase()}`} key={row.sequence}>{localizedAgentProgressContent(row, locale)}</p>
           ))}
-          <TypingDots />
+          {progress.state === "FAILED" && progress.error ? <p className="progress-failed">{progress.error}</p> : null}
+          {progress.running ? <TypingDots /> : null}
         </div>
       </div>
     </article>

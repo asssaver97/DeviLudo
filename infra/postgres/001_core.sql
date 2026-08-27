@@ -1873,10 +1873,12 @@ BEGIN
 END
 $$;
 
--- A persistent Development Agent completes under the sandbox role, but that role
--- must not receive general access to player conversations. This narrow definer
--- function validates the completed job and publishes only its player-facing
--- result to the conversation associated with that workflow.
+-- Persistent Development and Test Agents complete under the sandbox role, but
+-- that role must not receive general access to player conversations. This narrow
+-- definer function validates the completed workflow Agent job and publishes only
+-- its player-facing result to the conversation associated with that workflow.
+-- The legacy function name is retained so compatible development baselines can
+-- refresh it in place without granting the sandbox broader database privileges.
 CREATE OR REPLACE FUNCTION deviludo.publish_development_agent_message(
   p_workspace_id uuid,
   p_job_id uuid,
@@ -1894,23 +1896,25 @@ DECLARE
   selected_conversation_id uuid;
   response_language text;
   project_name text;
+  agent_role text;
 BEGIN
   IF nullif(current_setting('app.workspace_id', true), '')::uuid IS DISTINCT FROM p_workspace_id THEN
-    RAISE EXCEPTION 'Development Agent message workspace mismatch';
+    RAISE EXCEPTION 'Workflow Agent message workspace mismatch';
   END IF;
   IF length(p_content) NOT BETWEEN 1 AND 4000 THEN
-    RAISE EXCEPTION 'Development Agent message content is invalid';
+    RAISE EXCEPTION 'Workflow Agent message content is invalid';
   END IF;
 
   SELECT candidate.* INTO job
     FROM deviludo.jobs candidate
    WHERE candidate.workspace_id = p_workspace_id AND candidate.id = p_job_id
      AND candidate.kind = 'AGENT_TURN' AND candidate.state = 'SUCCEEDED'
-     AND coalesce(candidate.payload->>'role', 'DEVELOPMENT') = 'DEVELOPMENT';
+     AND coalesce(candidate.payload->>'role', 'DEVELOPMENT') IN ('DEVELOPMENT', 'TEST');
   turn_output := job.receipt->'agentTurn';
+  agent_role := coalesce(job.payload->>'role', 'DEVELOPMENT');
   IF job.id IS NULL OR jsonb_typeof(turn_output) <> 'object'
-    OR turn_output->>'role' IS DISTINCT FROM 'DEVELOPMENT' THEN
-    RAISE EXCEPTION 'Development Agent message job is invalid';
+    OR turn_output->>'role' IS DISTINCT FROM agent_role THEN
+    RAISE EXCEPTION 'Workflow Agent message job is invalid';
   END IF;
 
   SELECT selected.id INTO selected_conversation_id
@@ -1935,7 +1939,7 @@ BEGIN
       FROM deviludo.projects project
      WHERE project.workspace_id = p_workspace_id AND project.id = job.project_id;
     IF project_name IS NULL THEN
-      RAISE EXCEPTION 'Development Agent message project is unavailable';
+      RAISE EXCEPTION 'Workflow Agent message project is unavailable';
     END IF;
     selected_conversation_id := gen_random_uuid();
     INSERT INTO deviludo.project_conversations(workspace_id, id, project_id, mode, title)
@@ -1945,8 +1949,8 @@ BEGIN
       job.project_id,
       'PROJECT_FEEDBACK',
       CASE WHEN response_language = 'zh'
-        THEN project_name || ' · 游戏生成'
-        ELSE project_name || ' · Game generation'
+        THEN project_name || CASE agent_role WHEN 'TEST' THEN ' · 测试' ELSE ' · 游戏生成' END
+        ELSE project_name || CASE agent_role WHEN 'TEST' THEN ' · Testing' ELSE ' · Game generation' END
       END
     );
   END IF;
@@ -1957,8 +1961,11 @@ BEGIN
   SELECT p_workspace_id, selected_conversation_id, 'ASSISTANT', p_content,
          jsonb_strip_nulls(jsonb_build_object(
            'source', 'WORKFLOW_AGENT',
-           'agentRole', 'DEVELOPMENT',
-           'agentName', 'DeviLudo Development Agent',
+           'agentRole', agent_role,
+           'agentName', CASE agent_role
+             WHEN 'TEST' THEN 'DeviLudo Test Agent'
+             ELSE 'DeviLudo Development Agent'
+           END,
            'agentRuntime', turn_output->'agentRuntime',
            'model', turn_output->'model',
            'settingsRevision', turn_output->'settingsRevision',
@@ -1966,7 +1973,9 @@ BEGIN
            'runtimeSessionId', turn_output->'sessionId',
            'workflowJobId', job.id,
            'purpose', turn_output->'purpose',
-           'sourceRevision', turn_output->'sourceRevision'
+           'sourceRevision', turn_output->'sourceRevision',
+           'planRevision', turn_output->'planRevision',
+           'verdict', turn_output->'verdict'
          ))
    WHERE NOT EXISTS (
      SELECT 1
@@ -2076,6 +2085,37 @@ BEGIN
       'sourceRelativePath', v_source.relative_path,
       'sourceDigest', v_source.content_digest
     );
+  END IF;
+  IF p_kind = 'AGENT_TURN' AND p_payload->>'role' = 'TEST' THEN
+    -- Build completions, resume signals and retries can arrive through distinct
+    -- idempotency keys while still describing the same Test Agent work. Serialize
+    -- that semantic key and reuse the one active turn instead of racing the
+    -- persistent TEST session with duplicate primary turns.
+    PERFORM pg_advisory_xact_lock(hashtextextended(
+      p_workspace_id::text || ':' || p_workflow_id::text || ':TEST:'
+        || coalesce(p_payload->>'purpose', 'TEST_PLAN') || ':'
+        || coalesce(p_payload->>'sourceRevision', '') || ':'
+        || coalesce(p_payload->>'testPlanId', ''),
+      0
+    ));
+    SELECT candidate.id INTO v_id
+      FROM deviludo.jobs candidate
+     WHERE candidate.workspace_id = p_workspace_id
+       AND candidate.workflow_id = p_workflow_id
+       AND candidate.project_id = p_project_id
+       AND candidate.kind = 'AGENT_TURN'
+       AND candidate.payload->>'role' = 'TEST'
+       AND coalesce(candidate.payload->>'purpose', 'TEST_PLAN')
+         = coalesce(p_payload->>'purpose', 'TEST_PLAN')
+       AND coalesce(candidate.payload->>'sourceRevision', '')
+         = coalesce(p_payload->>'sourceRevision', '')
+       AND coalesce(candidate.payload->>'testPlanId', '')
+         = coalesce(p_payload->>'testPlanId', '')
+       AND candidate.state IN ('QUEUED', 'RUNNING', 'RETRY')
+     ORDER BY CASE candidate.state WHEN 'RUNNING' THEN 0 ELSE 1 END,
+              candidate.created_at, candidate.id
+     LIMIT 1;
+    IF v_id IS NOT NULL THEN RETURN v_id; END IF;
   END IF;
   IF p_kind = 'E2E_PLATFORM_RUN' THEN
     SELECT * INTO v_goal
@@ -2923,6 +2963,70 @@ BEGIN
   THEN
     RAISE EXCEPTION 'invalid job claim';
   END IF;
+
+  -- Retire historical duplicates before one of them can briefly appear as a
+  -- second Test Agent reply. Prefer an already running canonical turn, then the
+  -- oldest queued/retry turn for the same workflow, source, purpose and plan.
+  WITH ranked AS MATERIALIZED (
+    SELECT job.workspace_id, job.id,
+           first_value(job.id) OVER semantic AS canonical_id,
+           row_number() OVER semantic AS semantic_rank
+      FROM deviludo.jobs job
+     WHERE job.kind = 'AGENT_TURN'
+       AND job.payload->>'role' = 'TEST'
+       AND job.state IN ('QUEUED', 'RUNNING', 'RETRY')
+     WINDOW semantic AS (
+       PARTITION BY job.workspace_id, job.workflow_id, job.project_id,
+         coalesce(job.payload->>'purpose', 'TEST_PLAN'),
+         coalesce(job.payload->>'sourceRevision', ''),
+         coalesce(job.payload->>'testPlanId', '')
+       ORDER BY CASE job.state WHEN 'RUNNING' THEN 0 ELSE 1 END,
+                job.created_at, job.id
+     )
+  )
+  UPDATE deviludo.jobs duplicate
+     SET state = 'CANCELLED', fencing_token = fencing_token + 1,
+         lease_owner = NULL, lease_token = NULL, lease_expires_at = NULL,
+         heartbeat_at = NULL,
+         last_error = 'superseded by canonical Test Agent turn ' || ranked.canonical_id::text,
+         updated_at = clock_timestamp()
+    FROM ranked
+   WHERE ranked.workspace_id = duplicate.workspace_id
+     AND ranked.id = duplicate.id AND ranked.semantic_rank > 1;
+
+  -- max_attempts is a durable contract, not display-only metadata. Reconcile
+  -- old rows that predate enforcement and stop retry storms in a visible
+  -- BLOCKED workflow instead of flashing a conversation every 15 seconds.
+  WITH exhausted AS (
+    UPDATE deviludo.jobs exhausted_job
+       SET state = 'FAILED', lease_owner = NULL, lease_token = NULL,
+           lease_expires_at = NULL, heartbeat_at = NULL,
+           last_error = left('Retry limit reached: ' || coalesce(exhausted_job.last_error, 'Agent execution failed'), 2000),
+           updated_at = clock_timestamp()
+     WHERE exhausted_job.state IN ('QUEUED', 'RETRY')
+       AND exhausted_job.attempt >= exhausted_job.max_attempts
+     RETURNING exhausted_job.workspace_id, exhausted_job.project_id,
+       exhausted_job.workflow_id, exhausted_job.id, exhausted_job.attempt,
+       exhausted_job.last_error
+  ), events AS (
+    INSERT INTO deviludo.workflow_events(
+      workspace_id, workflow_id, event_kind, event_data, idempotency_key
+    )
+    SELECT workspace_id, workflow_id, 'JOB_FAILED',
+           jsonb_build_object('jobId', id, 'attempt', attempt, 'reason', last_error),
+           'job-retry-exhausted:' || id::text
+      FROM exhausted
+    ON CONFLICT (workspace_id, workflow_id, idempotency_key) DO NOTHING
+  )
+  UPDATE deviludo.workflow_instances blocked
+     SET state = 'BLOCKED', version = version + 1, updated_at = clock_timestamp()
+   WHERE blocked.state NOT IN ('SUCCEEDED', 'FAILED', 'CANCELLED', 'BLOCKED')
+     AND EXISTS (
+       SELECT 1 FROM exhausted
+        WHERE exhausted.workspace_id = blocked.workspace_id
+          AND exhausted.workflow_id = blocked.id
+     );
+
   IF EXISTS (
     SELECT 1 FROM deviludo.jobs
     WHERE lease_owner = p_executor_id AND state = 'RUNNING'
@@ -3577,6 +3681,7 @@ DECLARE
   workflow deviludo.workflow_instances%ROWTYPE;
   product_failure boolean;
   configuration_failure boolean;
+  attempts_exhausted boolean;
 BEGIN
   SELECT * INTO job FROM deviludo.jobs
    WHERE id = p_job_id AND state = 'RUNNING'
@@ -3592,9 +3697,10 @@ BEGIN
   product_failure := job.kind = 'BUILD' AND position('BUILD_PRODUCT:' IN p_reason) > 0;
   configuration_failure := position('CONFIGURATION:' IN p_reason) > 0
     OR position('CREDENTIAL:' IN p_reason) > 0;
+  attempts_exhausted := job.attempt >= job.max_attempts;
 
   UPDATE deviludo.jobs SET
-      state = CASE WHEN product_failure OR configuration_failure OR job.kind = 'STEAM_PUBLISH'
+      state = CASE WHEN product_failure OR configuration_failure OR attempts_exhausted OR job.kind = 'STEAM_PUBLISH'
                    THEN 'FAILED'::deviludo.job_state ELSE 'RETRY'::deviludo.job_state END,
       available_at = clock_timestamp() + interval '15 seconds',
       lease_owner = NULL, lease_token = NULL, lease_expires_at = NULL,
@@ -3603,7 +3709,7 @@ BEGIN
    WHERE workspace_id = job.workspace_id AND id = job.id;
   INSERT INTO deviludo.workflow_events(workspace_id, workflow_id, event_kind, event_data, idempotency_key)
   VALUES (job.workspace_id, job.workflow_id,
-    CASE WHEN product_failure OR configuration_failure OR job.kind = 'STEAM_PUBLISH'
+    CASE WHEN product_failure OR configuration_failure OR attempts_exhausted OR job.kind = 'STEAM_PUBLISH'
       THEN 'JOB_FAILED' ELSE 'JOB_RETRY_SCHEDULED' END,
     jsonb_build_object('jobId', job.id, 'attempt', job.attempt,
       'reason', left(p_reason, 2000)),
@@ -3630,6 +3736,11 @@ BEGIN
     UPDATE deviludo.workflow_instances SET state = 'FAILED', version = version + 1,
       updated_at = clock_timestamp()
      WHERE workspace_id = workflow.workspace_id AND id = workflow.id;
+  ELSIF attempts_exhausted THEN
+    UPDATE deviludo.workflow_instances SET state = 'BLOCKED', version = version + 1,
+      updated_at = clock_timestamp()
+     WHERE workspace_id = workflow.workspace_id AND id = workflow.id
+       AND state NOT IN ('SUCCEEDED', 'FAILED', 'CANCELLED', 'BLOCKED');
   END IF;
   RETURN true;
 END

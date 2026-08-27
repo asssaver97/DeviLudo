@@ -594,6 +594,22 @@ test("a successful replacement Manifest retires generated objects but preserves 
       content: expect.stringMatching(/游戏生成已完成|Game generation is complete/),
       metadata: expect.objectContaining({ agentRole: "DEVELOPMENT", workflowJobId: expect.any(String) }),
     }),
+    expect.objectContaining({
+      role: "ASSISTANT",
+      content: expect.stringMatching(/测试计划已完成并冻结|test plan is complete and frozen/i),
+      metadata: expect.objectContaining({
+        agentRole: "TEST", purpose: "TEST_PLAN", planRevision: expect.any(Number),
+        workflowJobId: expect.any(String),
+      }),
+    }),
+    expect.objectContaining({
+      role: "ASSISTANT",
+      content: expect.stringMatching(/测试 Agent 结论：通过|Test Agent verdict: PASS/i),
+      metadata: expect.objectContaining({
+        agentRole: "TEST", purpose: "TEST_VERDICT", verdict: "PASS",
+        workflowJobId: expect.any(String),
+      }),
+    }),
   ]);
   await expect.poll(async () => (await stack.readProject(project.id)).workflowState,
     { timeout: 45_000 }).toBe("RELEASE_APPROVAL_PENDING");

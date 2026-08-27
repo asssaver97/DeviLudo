@@ -72,6 +72,17 @@ test("Agent completion advances Design, Development and Test through one persist
   assert.doesNotMatch(complete, /repair_count|max_attempts/);
 });
 
+test("completed Development and Test Agent turns publish durable player-facing messages", async () => {
+  const sql = await readFile(sqlUrl, "utf8");
+  const publish = functionSource(sql, "publish_development_agent_message");
+  assert.match(publish, /IN \('DEVELOPMENT', 'TEST'\)/);
+  assert.match(publish, /turn_output->>'role' IS DISTINCT FROM agent_role/);
+  assert.match(publish, /'agentRole', agent_role/);
+  assert.match(publish, /WHEN 'TEST' THEN 'DeviLudo Test Agent'/);
+  assert.match(publish, /'planRevision', turn_output->'planRevision'/);
+  assert.match(publish, /'verdict', turn_output->'verdict'/);
+});
+
 test("asset readiness cannot overtake an active Development Agent turn", async () => {
   const sql = await readFile(sqlUrl, "utf8");
   const advance = functionSource(sql, "advance_asset_workflows");
@@ -79,6 +90,21 @@ test("asset readiness cannot overtake an active Development Agent turn", async (
   assert.match(advance, /coalesce\(source\.payload->>'role', 'DEVELOPMENT'\) = 'DEVELOPMENT'/);
   assert.match(advance, /coalesce\(source\.payload->>'purpose', 'DEVELOPMENT'\) = 'DEVELOPMENT'/);
   assert.match(advance, /NOT EXISTS \([\s\S]*active_development\.state IN \('QUEUED', 'RUNNING', 'RETRY'\)[\s\S]*active_development\.payload->>'role'/);
+});
+
+test("Test Agent jobs are semantically deduplicated and retry storms terminate", async () => {
+  const sql = await readFile(sqlUrl, "utf8");
+  const enqueue = lastFunctionSource(sql, "enqueue_job");
+  const claim = functionSource(sql, "claim_job");
+  const fail = functionSource(sql, "fail_job");
+  assert.match(enqueue, /pg_advisory_xact_lock/);
+  assert.match(enqueue, /p_payload->>'role' = 'TEST'/);
+  assert.match(enqueue, /candidate\.state IN \('QUEUED', 'RUNNING', 'RETRY'\)/);
+  assert.match(claim, /superseded by canonical Test Agent turn/i);
+  assert.match(claim, /exhausted_job\.attempt >= exhausted_job\.max_attempts/);
+  assert.match(claim, /SET state = 'BLOCKED'/);
+  assert.match(fail, /attempts_exhausted := job\.attempt >= job\.max_attempts/);
+  assert.match(fail, /product_failure OR configuration_failure OR attempts_exhausted/);
 });
 
 test("Builder, platform tests and Steam are the only disposable job settlements", async () => {
@@ -96,8 +122,9 @@ test("Builder, platform tests and Steam are the only disposable job settlements"
   assert.match(complete, /INSERT INTO deviludo\.test_evidence/);
   assert.match(fail, /position\('CONFIGURATION:' IN p_reason\)[\s\S]*position\('CREDENTIAL:' IN p_reason\)/);
   assert.match(fail, /state = 'BLOCKED'/);
+  assert.match(fail, /attempts_exhausted/);
   assert.match(fail, /'RETRY'::deviludo\.job_state/);
-  assert.doesNotMatch(fail, /attempt >=|repair_count|max_attempts/);
+  assert.doesNotMatch(fail, /repair_count/);
 });
 
 test("all target platforms must use the current source and frozen Test plan before PASS", async () => {
@@ -127,6 +154,10 @@ test("schema migration permits only an exact development function refresh", asyn
   assert.match(migration, /complete_agent_turn_job/);
   assert.match(migration, /advance_asset_workflows/);
   assert.match(migration, /complete_job/);
+  assert.match(migration, /publish_development_agent_message/);
+  assert.match(migration, /enqueue_job/);
+  assert.match(migration, /claim_job/);
+  assert.match(migration, /fail_job/);
   assert.match(migration, /CREATE OR REPLACE FUNCTION deviludo\.\$\{functionName\}/);
   assert.match(migration, /WHERE singleton = true AND source_digest = \$2/);
   assert.match(migration, /WHERE version = \$2 AND checksum = \$3/);

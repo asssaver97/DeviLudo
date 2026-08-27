@@ -187,7 +187,8 @@ export async function runSandbox(
           const responseLanguage = responseLanguageFromJob(job, initializedContext.language);
           let hasStreamedContent = false;
           const runtimeResult = await projectRuntime.turn({
-            workspaceId: job.workspaceId, projectId: job.projectId, role, mode: "PRIMARY",
+            workspaceId: job.workspaceId, projectId: job.projectId, workflowJobId: job.jobId,
+            role, mode: "PRIMARY",
             prompt: runtimeJobPrompt(job, role), responseLanguage, settings,
             sourceRevision: project.source?.revision ?? null,
             sourceRelativePath: project.source?.relativePath ?? null,

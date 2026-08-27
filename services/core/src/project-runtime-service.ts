@@ -95,6 +95,7 @@ export class ProjectRuntimeService {
   async turn(input: Readonly<{
     workspaceId: string;
     projectId: string;
+    workflowJobId?: string;
     role: ProjectRuntimeRole;
     mode: ProjectRuntimeTurnMode;
     prompt: string;
@@ -162,6 +163,7 @@ export class ProjectRuntimeService {
     const started = await this.repository.startTurn({
       workspaceId: input.workspaceId,
       projectId: input.projectId,
+      workflowJobId: input.workflowJobId,
       role: input.role,
       mode: input.mode,
       runtime: input.settings.agentRuntime,

@@ -77,11 +77,17 @@ test("Test Agent work is projected onto E2E instead of Game Generation", () => {
   assert.deepEqual(pipelineJobsForStage("E2E_PLATFORM_RUN", jobs).map(item => item.id), ["test-plan", "e2e"]);
 });
 
-test("only a running Agent is shown as replying in the conversation", () => {
+test("a started Agent remains visible while retrying or failed but a never-started queued Agent stays hidden", () => {
   const development = { ...job("RUNNING", "2026-08-16T01:01:00.000Z"), id: "development", kind: "AGENT_TURN", agentRole: "DEVELOPMENT" as const };
   const queuedTest = { ...job("QUEUED", "2026-08-16T01:02:00.000Z"), id: "test-plan", kind: "AGENT_TURN", agentRole: "TEST" as const };
+  const retryTest = { ...job("RETRY", "2026-08-16T01:03:00.000Z"), id: "retry-test", kind: "AGENT_TURN", agentRole: "TEST" as const };
+  const failedTest = { ...job("FAILED", "2026-08-16T01:04:00.000Z"), id: "failed-test", kind: "AGENT_TURN", agentRole: "TEST" as const };
+  const succeededTest = { ...job("SUCCEEDED", "2026-08-16T01:05:00.000Z"), id: "succeeded-test", kind: "AGENT_TURN", agentRole: "TEST" as const };
 
   assert.equal(runningAgentJobForConversation([development, queuedTest])?.id, "development");
+  assert.equal(runningAgentJobForConversation([retryTest])?.id, "retry-test");
+  assert.equal(runningAgentJobForConversation([failedTest])?.id, "failed-test");
+  assert.equal(runningAgentJobForConversation([failedTest, succeededTest]), null);
   assert.equal(runningAgentJobForConversation([queuedTest]), null);
 });
 

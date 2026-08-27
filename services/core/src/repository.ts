@@ -2220,12 +2220,12 @@ export class CoreRepository {
         [job.workspaceId, job.jobId, job.lease.token, job.lease.fencingToken, JSON.stringify(output)],
       );
       if (result.rows[0]?.completed !== true) return false;
-      if (output.role !== "DEVELOPMENT") return true;
+      if (output.role !== "DEVELOPMENT" && output.role !== "TEST") return true;
 
       const responseLanguage = output.responseLanguage === "zh" ? "zh" : "en";
       await client.query(
         `SELECT deviludo.publish_development_agent_message($1::uuid, $2::uuid, $3::text)`,
-        [job.workspaceId, job.jobId, workflowDevelopmentConversationContent(output, responseLanguage)],
+        [job.workspaceId, job.jobId, workflowAgentConversationContent(output, responseLanguage)],
       );
       return true;
     });
@@ -4655,13 +4655,16 @@ function objectValue(value: unknown): Record<string, unknown> {
     : {};
 }
 
-function workflowDevelopmentConversationContent(
+function workflowAgentConversationContent(
   output: Readonly<Record<string, unknown>>,
   responseLanguage: "en" | "zh",
 ): string {
   const structured = objectValue(output.structured);
   const authored = typeof structured.content === "string" ? structured.content.trim() : "";
   if (authored) return authored.slice(0, 4_000);
+  if (output.role === "TEST") {
+    return workflowTestConversationContent(output, structured, responseLanguage);
+  }
   const summary = typeof objectValue(structured.handoff).summary === "string"
     ? String(objectValue(structured.handoff).summary).trim()
     : "";
@@ -4670,6 +4673,39 @@ function workflowDevelopmentConversationContent(
     ? `游戏生成已完成${Number.isSafeInteger(revision) && revision > 0 ? `，源码版本 ${revision} 已提交` : ""}，现已进入受控构建与测试流程。`
     : `Game generation is complete${Number.isSafeInteger(revision) && revision > 0 ? ` and source revision ${revision} is committed` : ""}. Controlled build and testing are now starting.`;
   return `${summary ? `${summary}\n\n` : ""}${transition}`.slice(0, 4_000);
+}
+
+function workflowTestConversationContent(
+  output: Readonly<Record<string, unknown>>,
+  structured: Readonly<Record<string, unknown>>,
+  responseLanguage: "en" | "zh",
+): string {
+  const purpose = output.purpose === "TEST_VERDICT" ? "TEST_VERDICT" : "TEST_PLAN";
+  const planRevision = Number(output.planRevision ?? structured.planRevision);
+  const planLabel = Number.isSafeInteger(planRevision) && planRevision > 0
+    ? responseLanguage === "zh" ? `（计划版本 ${planRevision}）` : ` (plan revision ${planRevision})`
+    : "";
+  if (purpose === "TEST_PLAN") {
+    return responseLanguage === "zh"
+      ? `测试计划已完成并冻结${planLabel}，现在开始在所有目标平台执行 E2E 测试。`
+      : `The test plan is complete and frozen${planLabel}. E2E testing is now starting on every target platform.`;
+  }
+
+  const verdict = String(output.verdict ?? structured.verdict ?? "").toUpperCase();
+  const handoff = objectValue(output.handoff ?? structured.handoff);
+  const summary = typeof handoff.summary === "string" ? handoff.summary.trim() : "";
+  const conclusion = responseLanguage === "zh"
+    ? verdict === "PASS"
+      ? "E2E 测试已完成，测试 Agent 结论：通过。所有目标平台的测试证据均已满足验收门槛，现已进入发布审批。"
+      : verdict === "BLOCKED"
+        ? "E2E 测试已完成，测试 Agent 结论：受阻。需要先解决测试环境或配置问题。"
+        : "E2E 测试已完成，测试 Agent 结论：未通过。修复项已交回开发 Agent。"
+    : verdict === "PASS"
+      ? "E2E testing is complete. Test Agent verdict: PASS. Evidence from every target platform satisfies the acceptance gates, so release approval is now pending."
+      : verdict === "BLOCKED"
+        ? "E2E testing is complete. Test Agent verdict: BLOCKED. The test environment or configuration must be repaired first."
+        : "E2E testing is complete. Test Agent verdict: FAIL. The repair handoff has been returned to the Development Agent.";
+  return `${summary ? `${summary}\n\n` : ""}${conclusion}`.slice(0, 4_000);
 }
 
 function analysisLeaseMatches(stateData: Record<string, unknown>, leaseToken: string): boolean {

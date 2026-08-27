@@ -605,6 +605,7 @@ export class ProjectRuntimeRepository {
   async startTurn(input: Readonly<{
     workspaceId: string;
     projectId: string;
+    workflowJobId?: string;
     role: ProjectRuntimeRole;
     mode: ProjectRuntimeTurnMode;
     runtime: AgentRuntimeKind;
@@ -634,7 +635,48 @@ export class ProjectRuntimeRepository {
         [input.workspaceId, input.projectId, input.role, input.runtime, container.generation, input.contextRevision],
       );
       if (input.mode !== "READ_ONLY_BRANCH" && session.rows[0].active_turn_id) {
-        throw new Error(`${input.role} Runtime session already has an active primary turn`);
+        const activeTurnId = String(session.rows[0].active_turn_id);
+        const active = await client.query<{ output_summary: string | null; started_at: string }>(
+          `SELECT output_summary, started_at::text
+             FROM deviludo.agent_turns
+            WHERE workspace_id = $1::uuid AND id = $2::uuid AND state = 'RUNNING'`,
+          [input.workspaceId, activeTurnId],
+        );
+        const otherWorkflowJob = input.workflowJobId
+          ? await client.query(
+            `SELECT 1 FROM deviludo.jobs
+              WHERE workspace_id = $1::uuid AND project_id = $2::uuid
+                AND kind = 'AGENT_TURN' AND state = 'RUNNING' AND id <> $3::uuid
+              LIMIT 1`,
+            [input.workspaceId, input.projectId, input.workflowJobId],
+          )
+          : null;
+        const marker = input.workflowJobId ? `workflow-job:${input.workflowJobId}` : null;
+        const legacyOrphan = Boolean(input.workflowJobId && active.rows[0]
+          && !active.rows[0].output_summary
+          && Date.parse(active.rows[0].started_at) <= Date.now() - 2 * 60_000);
+        const recoverable = Boolean(input.workflowJobId
+          && otherWorkflowJob?.rowCount === 0
+          && (!active.rows[0] || active.rows[0].output_summary === marker || legacyOrphan));
+        if (!recoverable) {
+          throw new Error(`${input.role} Runtime session already has an active primary turn`);
+        }
+        await client.query(
+          `UPDATE deviludo.agent_turns
+              SET state = 'FAILED', lease_token = NULL, mcp_token_hash = NULL,
+                  mcp_token_expires_at = NULL,
+                  output_summary = 'Recovered after its workflow Job was interrupted',
+                  completed_at = clock_timestamp()
+            WHERE workspace_id = $1::uuid AND id = $2::uuid AND state = 'RUNNING'`,
+          [input.workspaceId, activeTurnId],
+        );
+        await client.query(
+          `UPDATE deviludo.agent_sessions
+              SET active_turn_id = NULL, updated_at = clock_timestamp()
+            WHERE workspace_id = $1::uuid AND id = $2::uuid
+              AND active_turn_id = $3::uuid`,
+          [input.workspaceId, session.rows[0].id, activeTurnId],
+        );
       }
       const turnId = randomUUID();
       const leaseToken = randomUUID();
@@ -642,16 +684,17 @@ export class ProjectRuntimeRepository {
       const mcpHash = `sha256:${createHash("sha256").update(mcpToken).digest("hex")}`;
       const expiresAt = new Date(Date.now() + 24 * 60 * 60_000).toISOString();
       await client.query(
-        `INSERT INTO deviludo.agent_turns(
+         `INSERT INTO deviludo.agent_turns(
            workspace_id, id, project_id, session_id, role, mode, state,
            context_revision, source_revision, response_language, lease_token,
-           mcp_token_hash, mcp_token_expires_at, fencing_token, started_at
+           mcp_token_hash, mcp_token_expires_at, fencing_token, output_summary, started_at
          ) VALUES ($1::uuid, $2::uuid, $3::uuid, $4::uuid, $5::deviludo.agent_role,
            $6::deviludo.agent_turn_mode, 'RUNNING', $7, $8, $9, $10::uuid,
-           $11, $12::timestamptz, $13, clock_timestamp())`,
+           $11, $12::timestamptz, $13, $14, clock_timestamp())`,
         [input.workspaceId, turnId, input.projectId, session.rows[0].id, input.role,
           input.mode, input.contextRevision, input.sourceRevision, input.responseLanguage,
-          leaseToken, mcpHash, expiresAt, container.fencing_token],
+          leaseToken, mcpHash, expiresAt, container.fencing_token,
+          input.workflowJobId ? `workflow-job:${input.workflowJobId}` : null],
       );
       if (input.mode !== "READ_ONLY_BRANCH") {
         await client.query(

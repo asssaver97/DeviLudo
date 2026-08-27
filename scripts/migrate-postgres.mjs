@@ -13,12 +13,26 @@ const VERSION = "001_persistent_multi_agent";
 // require the explicit destructive reset.
 const DEVELOPMENT_FUNCTION_REFRESHES = Object.freeze({
   "sha256:96384b5f8ea0e01bbdbb482aa9578e2eac6ceec52b3abb33a65ddafc6e121c74": Object.freeze({
-    targetDigest: "sha256:6d13a7454178ac15c3bce4b2d8f11a0d42a120a5cedd7aecab90b6b92dd4500d",
+    targetDigest: "sha256:f0c5d77abd07e73807b6f4c7065d7bb9d46a9b1f552127218765cc8487acd4d5",
     functions: Object.freeze([
       "complete_agent_turn_job",
       "advance_asset_workflows",
       "complete_job",
+      "publish_development_agent_message",
+      "enqueue_job",
+      "claim_job",
+      "fail_job",
     ]),
+  }),
+  "sha256:6d13a7454178ac15c3bce4b2d8f11a0d42a120a5cedd7aecab90b6b92dd4500d": Object.freeze({
+    targetDigest: "sha256:f0c5d77abd07e73807b6f4c7065d7bb9d46a9b1f552127218765cc8487acd4d5",
+    functions: Object.freeze([
+      "publish_development_agent_message", "enqueue_job", "claim_job", "fail_job",
+    ]),
+  }),
+  "sha256:cfa7b7fefde20e24a4f8a026ef23053429d28945f780c174dfb20b3de503e65c": Object.freeze({
+    targetDigest: "sha256:f0c5d77abd07e73807b6f4c7065d7bb9d46a9b1f552127218765cc8487acd4d5",
+    functions: Object.freeze(["enqueue_job", "claim_job", "fail_job"]),
   }),
 });
 const connectionFile = process.env.DEVILUDO_MIGRATION_DATABASE_URL_FILE;
