@@ -179,10 +179,18 @@ export class ProjectRuntimeSupervisor {
 
   async destroy(request: ProjectRuntimeControlRequest): Promise<ProjectRuntimeStatus> {
     validateControl(request);
-    await this.assertCurrent(request);
-    const prefix = `${request.workspaceId}:${request.projectId}:`;
-    for (const [key, controller] of this.activeTurns) if (key.startsWith(prefix)) controller.abort();
-    await this.destroyExisting(runtimeName(this.options.projectsVolume, request.workspaceId, request.projectId), request.projectId);
+    const name = runtimeName(this.options.projectsVolume, request.workspaceId, request.projectId);
+    const current = await this.inspect(name);
+    // Destroy is intentionally idempotent. Core can retain a container record
+    // briefly after Docker has already removed the physical Runtime, and that
+    // state must not prevent the project itself from being deleted. Preserve
+    // fencing when a container does exist so a stale request cannot destroy a
+    // newer Runtime generation.
+    if (current && (current.generation !== request.generation || current.fencingToken !== request.fencingToken)) {
+      throw new Error("Project Runtime generation or fencing token is stale");
+    }
+    this.abortProjectTurns(request.workspaceId, request.projectId);
+    await this.destroyExisting(name, request.projectId);
     return destroyedStatus(request);
   }
 

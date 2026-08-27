@@ -40,7 +40,10 @@ import {
   runtimeEventText,
   structuredRuntimeOutput,
 } from "@/services/project-runtime/runtime-events.mjs";
-import { runtimeProgressEvent } from "@/services/sandbox-executor/src/project-runtime-supervisor";
+import {
+  ProjectRuntimeSupervisor,
+  runtimeProgressEvent,
+} from "@/services/sandbox-executor/src/project-runtime-supervisor";
 import {
   canonicalToolName,
   nativeToolName,
@@ -367,6 +370,39 @@ test("Runtime progress preserves split JSONL events and exposes live tool activi
     type: "item.completed",
     item: { type: "agent_message", text: "I'm using the mandatory design skill." },
   })}`, "DESIGN", "zh"), null);
+});
+
+test("Project Runtime deletion is idempotent when its Docker container is already absent", async () => {
+  const dockerCalls: string[][] = [];
+  const supervisor = new ProjectRuntimeSupervisor({
+    docker: async arguments_ => {
+      dockerCalls.push([...arguments_]);
+      if (arguments_[0] === "inspect") throw new Error("No such container");
+      return "";
+    },
+    resolveSecret: async () => "",
+    executorId: "executor-test",
+    projectsRoot: "/tmp/deviludo-project-runtime-test",
+    projectsVolume: "deviludo-projects-test",
+    agentNetwork: "agent-test",
+    egressProxy: "http://provider-proxy:3128",
+    mcpGateway: "http://core-api:8080",
+    allowlistedImages: new Set(),
+  });
+  const status = await supervisor.destroy({
+    schemaVersion: "deviludo.project-runtime.v2",
+    workspaceId,
+    projectId,
+    generation: 1,
+    fencingToken: 1,
+    runtime: "CODEX_CLI",
+  });
+
+  assert.equal(status.state, "DESTROYED");
+  assert.equal(status.containerId, null);
+  assert.deepEqual(dockerCalls.map(arguments_ => arguments_[0]), ["inspect", "rm", "volume"]);
+  assert.deepEqual(dockerCalls[1]?.slice(0, 3), ["rm", "-f", "-v"]);
+  assert.deepEqual(dockerCalls[2]?.slice(0, 3), ["volume", "rm", "-f"]);
 });
 
 test("Runtime streams only the decoded player-facing content field", () => {
