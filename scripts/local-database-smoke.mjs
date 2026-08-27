@@ -722,7 +722,7 @@ async function requestAssetRerunWithTemporaryImageConfiguration(owner, input) {
           credential_secret_ref, api_key_mask, api_key_fingerprint, credential_version, updated_by
         ) VALUES (
           true, 'CODEX_CLI', 'https://chatgpt.com/backend-api/codex', 'database-smoke',
-          '{"design":null,"development":null,"test":null}'::jsonb, NULL,
+          '{"intent":null,"analysis":null,"design":null,"development":null,"test":null}'::jsonb, NULL,
           'vault://instance/agent-runtime/api-key/versions/' || $1::text,
           'db-********test', 'sha256:000000000000', $1::uuid, 'database smoke'
         )

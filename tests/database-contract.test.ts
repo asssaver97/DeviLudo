@@ -118,6 +118,11 @@ test("schema migration refuses every old compatibility baseline", async () => {
   assert.match(reset, /deviludo-runtime-/);
 });
 
+test("database smoke settings cover every persistent Agent role", async () => {
+  const smoke = await readFile(new URL("../scripts/local-database-smoke.mjs", import.meta.url), "utf8");
+  assert.match(smoke, /\{"intent":null,"analysis":null,"design":null,"development":null,"test":null\}/);
+});
+
 test("workspace-owned Runtime tables use forced row isolation and scoped foreign keys", async () => {
   const sql = await readFile(sqlUrl, "utf8");
   assert.match(sql, /current_setting\('app\.workspace_id', true\)/);
