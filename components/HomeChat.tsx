@@ -6,6 +6,7 @@ import { useEffect, useMemo, useState, type FormEvent } from "react";
 import { cachedValue, clientCacheKeys, loadCached, storeCached } from "@/lib/product/client-cache";
 import type { ImplementationChangeRequest, ProductConversation, ProductProjectSummary } from "@/lib/product/contracts";
 import {
+  appendStreamingConversationProcess,
   appendStreamingConversationReply,
   appendStreamingDevelopmentLog,
   chronologicalMessages,
@@ -117,6 +118,7 @@ export function HomeChat() {
         `conversation:${crypto.randomUUID()}`,
         {
           onAgentStart: agentRole => setStreamingReplies(current => startStreamingConversationReply(current, agentRole)),
+          onAgentProcess: (agentRole, processEvent) => setStreamingReplies(current => appendStreamingConversationProcess(current, agentRole, processEvent)),
           onAgentDelta: (agentRole, delta) => setStreamingReplies(current => appendStreamingConversationReply(current, agentRole, delta)),
           onAgentReplace: (agentRole, replyContent) => setStreamingReplies(current => replaceStreamingConversationReply(current, agentRole, replyContent)),
           onAgentActivity: (agentRole, activity) => setStreamingReplies(current => updateStreamingConversationActivity(current, agentRole, activity)),

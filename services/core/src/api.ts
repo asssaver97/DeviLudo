@@ -15,6 +15,7 @@ import {
   type ProjectRuntimeRole,
   type WorkspaceSummary,
 } from "@/lib/product/contracts";
+import type { ProjectRuntimeProgressEvent } from "@/lib/product/project-runtime";
 import {
   assertPoolOperatingSystem,
   isServerPoolKind,
@@ -1211,6 +1212,7 @@ export async function runApi(
         onStage: phase => write({ type: "status", phase }),
         stream: {
           onStart: agentRole => write({ type: "agent_start", agentRole }),
+          onProcess: (agentRole, event) => write({ type: "agent_process", agentRole, event }),
           onDelta: (agentRole, delta) => write({ type: "agent_delta", agentRole, delta }),
           onReplace: (agentRole, content) => write({ type: "agent_replace", agentRole, content }),
           onActivity: (agentRole, activity) => write({ type: "agent_activity", agentRole, activity }),
@@ -2192,6 +2194,27 @@ function storeConversationImages(
   })));
 }
 
+function initialConversationProcess(language: ResponseLanguage): string {
+  return language === "zh" ? "正在思考并规划下一步" : "Thinking and planning the next step";
+}
+
+function forwardConversationRuntimeProgress(
+  stream: ProductConversationStreamCallbacks | undefined,
+  role: ProjectAgentRole,
+  event: ProjectRuntimeProgressEvent,
+): Readonly<{ content: string; process: boolean }> {
+  if (event.kind === "CONTENT_DELTA") {
+    stream?.onDelta(role, event.content);
+    return Object.freeze({ content: event.content, process: false });
+  }
+  if (event.kind === "ACTIVITY") stream?.onActivity(role, event.content);
+  else stream?.onDevelopmentLog(role, event.content);
+  const process = event.content.trim();
+  if (!process || !stream) return Object.freeze({ content: "", process: false });
+  stream.onProcess(role, process);
+  return Object.freeze({ content: "", process: true });
+}
+
 async function processConversationMessage(input: Readonly<{
   request: FastifyRequest;
   principal: CorePrincipal;
@@ -2307,7 +2330,12 @@ async function processConversationMessage(input: Readonly<{
     input.onStage?.("RESPONDING");
     const specialistRole = intentDecision.targetRole;
     let streamedSpecialistContent = "";
+    let hasStreamedSpecialistProcess = false;
     input.stream?.onStart(specialistRole);
+    if (input.stream) {
+      input.stream.onProcess(specialistRole, initialConversationProcess(command.responseLanguage));
+      hasStreamedSpecialistProcess = true;
+    }
     const specialistResult = await input.projectRuntime.turn({
       workspaceId: targetWorkspace.id,
       projectId,
@@ -2324,11 +2352,9 @@ async function processConversationMessage(input: Readonly<{
       sourceRelativePath: null,
       attachments: command.images,
       onEvent: event => {
-        if (event.kind === "CONTENT_DELTA") {
-          streamedSpecialistContent += event.content;
-          input.stream?.onDelta(specialistRole, event.content);
-        } else if (event.kind === "ACTIVITY") input.stream?.onActivity(specialistRole, event.content);
-        else input.stream?.onDevelopmentLog(specialistRole, event.content);
+        const forwarded = forwardConversationRuntimeProgress(input.stream, specialistRole, event);
+        streamedSpecialistContent += forwarded.content;
+        hasStreamedSpecialistProcess ||= forwarded.process;
       },
     }).catch(error => { throw httpError(424, "AGENT_CONVERSATION_FAILED", error instanceof Error ? error.message : "Project Agent failed"); });
     const specialistReply = parseProjectRuntimeReply(
@@ -2340,7 +2366,8 @@ async function processConversationMessage(input: Readonly<{
     );
     await deliverValidatedConversationReply({
       stream: input.stream, role: specialistRole, content: specialistReply.content,
-      streamedContent: streamedSpecialistContent, signal: input.signal,
+      streamedContent: streamedSpecialistContent, hasStreamedProcess: hasStreamedSpecialistProcess,
+      signal: input.signal,
     });
     input.stream?.onComplete(specialistRole);
     input.onStage?.("SAVING");
@@ -2604,7 +2631,12 @@ async function processConversationMessage(input: Readonly<{
     ? designConversationConvergence(existingConversation?.messages ?? Object.freeze([]), command.content)
     : undefined;
   let streamedSpecialistContent = "";
+  let hasStreamedSpecialistProcess = false;
   input.stream?.onStart(specialistRole);
+  if (input.stream) {
+    input.stream.onProcess(specialistRole, initialConversationProcess(command.responseLanguage));
+    hasStreamedSpecialistProcess = true;
+  }
   const specialistResult = await input.projectRuntime.turn({
     workspaceId: workspace.id,
     projectId,
@@ -2622,11 +2654,9 @@ async function processConversationMessage(input: Readonly<{
     sourceRelativePath: project.source?.relativePath ?? null,
     attachments: command.images,
     onEvent: event => {
-      if (event.kind === "CONTENT_DELTA") {
-        streamedSpecialistContent += event.content;
-        input.stream?.onDelta(specialistRole, event.content);
-      } else if (event.kind === "ACTIVITY") input.stream?.onActivity(specialistRole, event.content);
-      else input.stream?.onDevelopmentLog(specialistRole, event.content);
+      const forwarded = forwardConversationRuntimeProgress(input.stream, specialistRole, event);
+      streamedSpecialistContent += forwarded.content;
+      hasStreamedSpecialistProcess ||= forwarded.process;
     },
   }).catch(error => { throw httpError(424, "AGENT_CONVERSATION_FAILED", error instanceof Error ? error.message : "Project Agent failed"); });
   const specialistReply = parseProjectRuntimeReply(
@@ -2638,7 +2668,8 @@ async function processConversationMessage(input: Readonly<{
   );
   await deliverValidatedConversationReply({
     stream: input.stream, role: specialistRole, content: specialistReply.content,
-    streamedContent: streamedSpecialistContent, signal: input.signal,
+    streamedContent: streamedSpecialistContent, hasStreamedProcess: hasStreamedSpecialistProcess,
+    signal: input.signal,
   });
   input.stream?.onComplete(specialistRole);
   input.onStage?.("SAVING");

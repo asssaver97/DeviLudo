@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import {
+  appendStreamingConversationProcess,
   appendStreamingConversationReply,
   appendStreamingDevelopmentLog,
   chronologicalMessages,
@@ -25,23 +26,23 @@ test("streaming reply activity moves from thinking to typing and then clears its
 
   const developmentStarted = startStreamingConversationReply(initial, "DEVELOPMENT");
   assert.deepEqual(developmentStarted, {
-    DEVELOPMENT: { content: "", phase: "THINKING", activity: null, developmentLogs: [] },
+    DEVELOPMENT: { content: "", processEvents: [], phase: "THINKING", activity: null, developmentLogs: [] },
   });
 
   const withLog = appendStreamingDevelopmentLog(developmentStarted, "DEVELOPMENT", "正在执行测试");
   assert.deepEqual(withLog, {
-    DEVELOPMENT: { content: "", phase: "TYPING", activity: null, developmentLogs: ["正在执行测试"] },
+    DEVELOPMENT: { content: "", processEvents: [], phase: "TYPING", activity: null, developmentLogs: ["正在执行测试"] },
   });
 
   const typing = appendStreamingConversationReply(withLog, "DEVELOPMENT", "先检查控制器。");
   assert.deepEqual(typing, {
-    DEVELOPMENT: { content: "先检查控制器。", phase: "TYPING", activity: null, developmentLogs: ["正在执行测试"] },
+    DEVELOPMENT: { content: "先检查控制器。", processEvents: [], phase: "TYPING", activity: null, developmentLogs: ["正在执行测试"] },
   });
   assert.equal(streamingConversationReplyIsActive(typing.DEVELOPMENT!), true);
 
   const complete = completeStreamingConversationReply(typing, "DEVELOPMENT");
   assert.deepEqual(complete, {
-    DEVELOPMENT: { content: "先检查控制器。", phase: "COMPLETE", activity: null, developmentLogs: ["正在执行测试"] },
+    DEVELOPMENT: { content: "先检查控制器。", processEvents: [], phase: "COMPLETE", activity: null, developmentLogs: ["正在执行测试"] },
   });
   assert.equal(streamingConversationReplyIsActive(complete.DEVELOPMENT!), false);
 });
@@ -56,8 +57,8 @@ test("completed Agent replies remain visible without a status while the next Age
     "DESIGN",
   );
   assert.deepEqual(startStreamingConversationReply(designComplete, "TEST"), {
-    DESIGN: { content: "设计结论", phase: "COMPLETE", activity: null, developmentLogs: [] },
-    TEST: { content: "", phase: "THINKING", activity: null, developmentLogs: [] },
+    DESIGN: { content: "设计结论", processEvents: [], phase: "COMPLETE", activity: null, developmentLogs: [] },
+    TEST: { content: "", processEvents: [], phase: "THINKING", activity: null, developmentLogs: [] },
   });
 });
 
@@ -70,6 +71,7 @@ test("completed tool activity clears immediately and final normalization can rep
   const cleared = updateStreamingConversationActivity(reading, "DESIGN", "");
   assert.deepEqual(cleared.DESIGN, {
     content: "",
+    processEvents: [],
     phase: "THINKING",
     activity: null,
     developmentLogs: [],
@@ -77,10 +79,23 @@ test("completed tool activity clears immediately and final normalization can rep
   const partial = appendStreamingConversationReply(cleared, "DESIGN", "原始计划");
   assert.deepEqual(replaceStreamingConversationReply(partial, "DESIGN", "规范化后的开发计划").DESIGN, {
     content: "规范化后的开发计划",
+    processEvents: [],
     phase: "TYPING",
     activity: null,
     developmentLogs: [],
   });
+});
+
+test("safe process events remain visible until the authoritative reply replaces them", () => {
+  const started = startStreamingConversationReply(initialStreamingConversationReplies(), "DESIGN");
+  const thinking = appendStreamingConversationProcess(started, "DESIGN", "正在思考并规划下一步");
+  const reading = appendStreamingConversationProcess(thinking, "DESIGN", "正在读取项目上下文");
+  const duplicate = appendStreamingConversationProcess(reading, "DESIGN", "正在读取项目上下文");
+  assert.deepEqual(duplicate.DESIGN?.processEvents, ["正在思考并规划下一步", "正在读取项目上下文"]);
+  assert.equal(duplicate.DESIGN?.phase, "TYPING");
+  const replaced = replaceStreamingConversationReply(duplicate, "DESIGN", "最终设计结论");
+  assert.equal(replaced.DESIGN?.content, "最终设计结论");
+  assert.deepEqual(replaced.DESIGN?.processEvents, []);
 });
 
 test("development logs cannot be attached to a Design Agent reply", () => {

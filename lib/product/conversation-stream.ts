@@ -29,6 +29,7 @@ export type ConversationImageDraft = Readonly<{
 
 export type StreamingConversationReply = Readonly<{
   content: string;
+  processEvents: readonly string[];
   phase: "THINKING" | "TYPING" | "COMPLETE";
   activity: string | null;
   developmentLogs: readonly string[];
@@ -38,6 +39,7 @@ export type StreamingConversationReplies = Readonly<Partial<Record<ProjectAgentR
 
 export type ConversationStreamCallbacks = Readonly<{
   onAgentStart: (agentRole: ProjectAgentRole) => void;
+  onAgentProcess: (agentRole: ProjectAgentRole, event: string) => void;
   onAgentDelta: (agentRole: ProjectAgentRole, delta: string) => void;
   onAgentReplace: (agentRole: ProjectAgentRole, content: string) => void;
   onAgentActivity: (agentRole: ProjectAgentRole, activity: string) => void;
@@ -97,6 +99,11 @@ export async function sendConversationMessageStream(
     }
     if (event.type === "agent_start" && isProjectAgentRole(event.agentRole)) {
       callbacks.onAgentStart(event.agentRole);
+      return;
+    }
+    if (event.type === "agent_process" && typeof event.event === "string"
+      && isProjectAgentRole(event.agentRole)) {
+      callbacks.onAgentProcess(event.agentRole, event.event);
       return;
     }
     if (event.type === "agent_delta" && typeof event.delta === "string"
@@ -170,9 +177,34 @@ export function startStreamingConversationReply(
     ...current,
     [agentRole]: Object.freeze({
       content: current[agentRole]?.content ?? "",
+      processEvents: current[agentRole]?.processEvents ?? Object.freeze([]),
       phase: "THINKING",
       activity: null,
       developmentLogs: current[agentRole]?.developmentLogs ?? Object.freeze([]),
+    }),
+  });
+}
+
+export function appendStreamingConversationProcess(
+  current: StreamingConversationReplies,
+  agentRole: ProjectAgentRole,
+  event: string,
+): StreamingConversationReplies {
+  const reply = current[agentRole];
+  const normalized = event.trim();
+  if (!normalized) return current;
+  const existing = reply?.processEvents ?? [];
+  const processEvents = existing.at(-1) === normalized
+    ? existing
+    : Object.freeze([...existing, normalized].slice(-24));
+  return Object.freeze({
+    ...current,
+    [agentRole]: Object.freeze({
+      content: reply?.content ?? "",
+      processEvents,
+      phase: "TYPING",
+      activity: reply?.activity ?? null,
+      developmentLogs: reply?.developmentLogs ?? Object.freeze([]),
     }),
   });
 }
@@ -187,6 +219,7 @@ export function appendStreamingConversationReply(
     ...current,
     [agentRole]: Object.freeze({
       content: `${reply?.content ?? ""}${delta}`,
+      processEvents: reply?.processEvents ?? Object.freeze([]),
       phase: "TYPING",
       activity: null,
       developmentLogs: reply?.developmentLogs ?? Object.freeze([]),
@@ -204,6 +237,7 @@ export function replaceStreamingConversationReply(
     ...current,
     [agentRole]: Object.freeze({
       content,
+      processEvents: Object.freeze([]),
       phase: "TYPING",
       activity: null,
       developmentLogs: reply?.developmentLogs ?? Object.freeze([]),
@@ -222,6 +256,7 @@ export function updateStreamingConversationActivity(
     ...current,
     [agentRole]: Object.freeze({
       content: reply?.content ?? "",
+      processEvents: reply?.processEvents ?? Object.freeze([]),
       phase: normalizedActivity || reply?.content ? "TYPING" : "THINKING",
       activity: normalizedActivity,
       developmentLogs: reply?.developmentLogs ?? Object.freeze([]),
@@ -242,6 +277,7 @@ export function appendStreamingDevelopmentLog(
     ...current,
     [agentRole]: Object.freeze({
       content: reply?.content ?? "",
+      processEvents: reply?.processEvents ?? Object.freeze([]),
       phase: "TYPING",
       activity: reply?.activity ?? null,
       developmentLogs: Object.freeze(logs),

@@ -24,6 +24,7 @@ import type {
 import { readAgentProgressStream } from "@/lib/product/agent-progress-stream";
 import { useLocalInstance } from "./ProductShell";
 import {
+  appendStreamingConversationProcess,
   appendStreamingConversationReply,
   appendStreamingDevelopmentLog,
   chronologicalMessages,
@@ -568,6 +569,7 @@ export function ProjectStudio({ projectId }: { projectId: string }) {
         `conversation:${crypto.randomUUID()}`,
         {
           onAgentStart: agentRole => setStreamingReplies(current => startStreamingConversationReply(current, agentRole)),
+          onAgentProcess: (agentRole, processEvent) => setStreamingReplies(current => appendStreamingConversationProcess(current, agentRole, processEvent)),
           onAgentDelta: (agentRole, delta) => setStreamingReplies(current => appendStreamingConversationReply(current, agentRole, delta)),
           onAgentReplace: (agentRole, replyContent) => setStreamingReplies(current => replaceStreamingConversationReply(current, agentRole, replyContent)),
           onAgentActivity: (agentRole, activity) => setStreamingReplies(current => updateStreamingConversationActivity(current, agentRole, activity)),

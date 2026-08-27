@@ -39,20 +39,28 @@ test("conversation stream emits the authoritative reply before the persisted res
   expect(response.status()).toBe(200);
   const events = (await response.text()).trim().split("\n").map(line => JSON.parse(line) as Record<string, unknown>);
   const starts = events.filter(event => event.type === "agent_start");
+  const processes = events.filter(event => event.type === "agent_process");
   const deltas = events.filter(event => event.type === "agent_delta");
+  const replacements = events.filter(event => event.type === "agent_replace");
   const agentCompleted = events.filter(event => event.type === "agent_complete");
   const completedAt = events.findIndex(event => event.type === "complete");
   const documentAt = events.findIndex(event => event.type === "project_document");
   expect(deltas.length).toBeGreaterThanOrEqual(2);
+  expect(processes.length).toBeGreaterThanOrEqual(1);
+  expect(replacements.length).toBe(1);
   expect(starts).toEqual([{ type: "agent_start", agentRole: "DESIGN" }]);
   expect(agentCompleted).toEqual([{ type: "agent_complete", agentRole: "DESIGN" }]);
   expect(events.findIndex(event => event.type === "agent_start")).toBeLessThan(events.findIndex(event => event.type === "agent_delta"));
+  expect(events.findIndex(event => event.type === "agent_start")).toBeLessThan(events.findIndex(event => event.type === "agent_process"));
+  expect(events.findIndex(event => event.type === "agent_process")).toBeLessThan(events.findIndex(event => event.type === "agent_complete"));
+  expect(events.findIndex(event => event.type === "agent_replace")).toBeLessThan(events.findIndex(event => event.type === "agent_complete"));
   expect(events.findIndex(event => event.type === "agent_delta")).toBeLessThan(events.findIndex(event => event.type === "agent_complete"));
   expect(events.findIndex(event => event.type === "agent_complete")).toBeLessThan(completedAt);
   expect(events.findIndex(event => event.type === "agent_delta")).toBeLessThan(completedAt);
   expect(documentAt).toBe(-1);
   expect(deltas.map(event => event.delta).join("")).toContain("测试设计 Agent");
   expect(new Set(deltas.map(event => event.agentRole))).toEqual(new Set(["DESIGN"]));
+  expect(new Set(processes.map(event => event.agentRole))).toEqual(new Set(["DESIGN"]));
   const complete = events[completedAt] as {
     conversation: Conversation;
     project: { document: { revision: number; content: { introduction: string } } };

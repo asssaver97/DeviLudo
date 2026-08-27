@@ -562,6 +562,11 @@ test("streaming Agent text keeps animated dots visible until the reply completes
               activity: "正在读取项目上下文",
             })}\n`));
             controller.enqueue(encoder.encode(`${JSON.stringify({
+              type: "agent_process",
+              agentRole: "DESIGN",
+              event: "正在读取项目上下文",
+            })}\n`));
+            controller.enqueue(encoder.encode(`${JSON.stringify({
               type: "agent_log",
               agentRole: "DESIGN",
               line: "不应显示的设计 Agent 开发日志",
@@ -571,6 +576,11 @@ test("streaming Agent text keeps animated dots visible until the reply completes
               agentRole: "DESIGN",
               delta: "正在整理完整的玩法与开发计划",
             })}\n`)), 300);
+            window.setTimeout(() => controller.enqueue(encoder.encode(`${JSON.stringify({
+              type: "agent_replace",
+              agentRole: "DESIGN",
+              content: "最终玩法与开发计划",
+            })}\n`)), 700);
           },
         }), { status: 200, headers: { "content-type": "application/x-ndjson" } });
       }
@@ -585,7 +595,10 @@ test("streaming Agent text keeps animated dots visible until the reply completes
   await expect(streamingReply).toContainText("正在读取项目上下文");
   await expect(streamingReply).not.toContainText("不应显示的设计 Agent 开发日志");
   await expect(streamingReply).toContainText("正在整理完整的玩法与开发计划");
+  await expect(streamingReply).toContainText("正在读取项目上下文");
+  await expect(streamingReply).toContainText("最终玩法与开发计划");
   await expect(streamingReply).not.toContainText("正在读取项目上下文");
+  await expect(streamingReply).not.toContainText("正在整理完整的玩法与开发计划");
   const dots = streamingReply.locator("[aria-label='等待回复']");
   await expect(dots).toBeVisible();
   await expect(dots.locator("i")).toHaveCount(3);

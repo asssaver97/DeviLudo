@@ -357,7 +357,14 @@ test("Runtime progress preserves split JSONL events and exposes live tool activi
     item: { type: "mcp_tool_call", tool: "context_read" },
   })}`, "DESIGN", "zh"), {
     kind: "ACTIVITY",
-    content: "",
+    content: "项目上下文读取完成",
+  });
+  assert.deepEqual(runtimeProgressEvent(`DEVILUDO_RUNTIME_EVENT:${JSON.stringify({
+    type: "item.started",
+    item: { type: "reasoning" },
+  })}`, "TEST", "zh"), {
+    kind: "ACTIVITY",
+    content: "正在思考并整理回复",
   });
   assert.deepEqual(runtimeProgressEvent(`DEVILUDO_RUNTIME_EVENT:${JSON.stringify({
     type: "deviludo.content_delta",
@@ -425,6 +432,7 @@ test("a Runtime without token deltas still renders its validated reply progressi
     streamedContent: "",
     stream: {
       onStart() {},
+      onProcess() {},
       onDelta(_role, delta) { deltas.push(delta); },
       onReplace(_role, replacement) { replacements.push(replacement); },
       onActivity() {},
@@ -435,6 +443,28 @@ test("a Runtime without token deltas still renders its validated reply progressi
   assert.equal(deltas.length, 3);
   assert.equal(deltas.join(""), content);
   assert.deepEqual(replacements, []);
+});
+
+test("an authoritative reply replaces temporary process events", async () => {
+  const deltas: string[] = [];
+  const replacements: string[] = [];
+  await deliverValidatedConversationReply({
+    role: "TEST",
+    content: "最终测试结论",
+    streamedContent: "最终测试结论",
+    hasStreamedProcess: true,
+    stream: {
+      onStart() {},
+      onProcess() {},
+      onDelta(_role, delta) { deltas.push(delta); },
+      onReplace(_role, replacement) { replacements.push(replacement); },
+      onActivity() {},
+      onDevelopmentLog() {},
+      onComplete() {},
+    },
+  });
+  assert.deepEqual(deltas, []);
+  assert.deepEqual(replacements, ["最终测试结论"]);
 });
 
 test("incomplete design discovery cannot stage or execute an implementation change", () => {

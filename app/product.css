@@ -3680,6 +3680,19 @@ textarea {
   color: var(--muted);
 }
 
+.conversation-agent-process {
+  color: var(--muted);
+  display: grid;
+  font-size: 0.82em;
+  gap: 0.2rem;
+  margin-bottom: 0.45rem;
+}
+
+.conversation-agent-process > span::before {
+  color: var(--blue);
+  content: "› ";
+}
+
 .conversation-development-logs {
   display: grid;
   gap: 0.3rem;

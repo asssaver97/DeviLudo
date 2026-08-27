@@ -53,6 +53,7 @@ export type ProductConversationGroupReply = ProductConversationAgentReply & Read
 
 export type ProductConversationStreamCallbacks = Readonly<{
   onStart: (role: ProjectAgentRole) => void;
+  onProcess: (role: ProjectAgentRole, event: string) => void;
   onDelta: (role: ProjectAgentRole, delta: string) => void;
   onReplace: (role: ProjectAgentRole, content: string) => void;
   onActivity: (role: ProjectAgentRole, activity: string) => void;
@@ -67,11 +68,18 @@ export async function deliverValidatedConversationReply(input: Readonly<{
   role: ProjectAgentRole;
   content: string;
   streamedContent: string;
+  hasStreamedProcess?: boolean;
   signal?: AbortSignal;
 }>): Promise<void> {
   if (!input.stream) return;
   if (input.streamedContent) {
-    if (input.streamedContent !== input.content) input.stream.onReplace(input.role, input.content);
+    if (input.hasStreamedProcess || input.streamedContent !== input.content) {
+      input.stream.onReplace(input.role, input.content);
+    }
+    return;
+  }
+  if (input.hasStreamedProcess) {
+    input.stream.onReplace(input.role, input.content);
     return;
   }
   const characters = [...input.content];

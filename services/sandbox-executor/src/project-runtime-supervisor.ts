@@ -372,6 +372,9 @@ export function runtimeProgressEvent(
     }
     const started = eventType.endsWith(".started") || eventType.endsWith("_start");
     const completed = eventType.endsWith(".completed") || eventType.endsWith("_stop");
+    if (itemType === "reasoning" || itemType === "thinking") {
+      return thinkingActivityEvent(role, completed, language);
+    }
     if (itemType === "command_execution" || itemType === "shell_command") {
       if (role !== "DEVELOPMENT") return activityEvent(role, "work", completed, language);
       const command = safeCommandSummary(typeof item?.command === "string" ? item.command : "");
@@ -388,7 +391,7 @@ export function runtimeProgressEvent(
     }
     if (itemType === "mcp_tool_call" || itemType === "tool_use") {
       const tool = safeActivityName(item?.tool ?? item?.name);
-      if (role !== "DEVELOPMENT") return activityEvent(role, isContextRead(tool) ? "context" : "work", completed, language);
+      if (role !== "DEVELOPMENT") return toolActivityEvent(role, tool, completed, language);
       if (started) return progressEvent("DEVELOPMENT_LOG", language === "zh"
         ? `正在调用项目工具${tool ? `：${tool}` : ""}`
         : `Calling project tool${tool ? `: ${tool}` : ""}`);
@@ -401,15 +404,18 @@ export function runtimeProgressEvent(
     }
     const nested = event.event as Record<string, unknown> | undefined;
     const contentBlock = nested?.content_block as Record<string, unknown> | undefined;
+    if (nested?.type === "content_block_start" && contentBlock?.type === "thinking") {
+      return thinkingActivityEvent(role, false, language);
+    }
     if (nested?.type === "content_block_start" && contentBlock?.type === "tool_use") {
       const tool = safeActivityName(contentBlock.name);
-      if (role !== "DEVELOPMENT") return activityEvent(role, isContextRead(tool) ? "context" : "work", false, language);
+      if (role !== "DEVELOPMENT") return toolActivityEvent(role, tool, false, language);
       return progressEvent("DEVELOPMENT_LOG", language === "zh"
         ? `正在调用开发工具${tool ? `：${tool}` : ""}`
         : `Calling development tool${tool ? `: ${tool}` : ""}`);
     }
     if (nested?.type === "content_block_stop" && role !== "DEVELOPMENT") {
-      return activityEvent(role, "work", true, language);
+      return progressEvent("ACTIVITY", language === "zh" ? "当前处理步骤已完成" : "Current processing step completed");
     }
     // Provider commentary and reasoning are deliberately not forwarded. Live
     // player-facing text arrives only through the Runtime's dedicated,
@@ -432,21 +438,49 @@ function activityEvent(
   language: "en" | "zh",
 ): ProjectRuntimeProgressEvent | null {
   if (role === "INTENT" || role === "DEVELOPMENT") return null;
-  if (completed) return progressEvent("ACTIVITY", "");
   if (language === "zh") {
     if (role === "DESIGN" && activity === "context") {
-      return progressEvent("ACTIVITY", "正在读取项目上下文");
+      return progressEvent("ACTIVITY", completed ? "项目上下文读取完成" : "正在读取项目上下文");
     }
-    if (role === "DESIGN") return progressEvent("ACTIVITY", "正在检查项目资料");
-    if (role === "TEST") return progressEvent("ACTIVITY", "正在检查项目与验收证据");
-    return progressEvent("ACTIVITY", "正在分析项目");
+    if (role === "DESIGN") return progressEvent("ACTIVITY", completed ? "项目资料检查完成" : "正在检查项目资料");
+    if (role === "TEST") return progressEvent("ACTIVITY", completed ? "项目与验收证据检查完成" : "正在检查项目与验收证据");
+    return progressEvent("ACTIVITY", completed ? "项目分析步骤已完成" : "正在分析项目");
   }
   if (role === "DESIGN" && activity === "context") {
-    return progressEvent("ACTIVITY", "Reading project context");
+    return progressEvent("ACTIVITY", completed ? "Project context read completed" : "Reading project context");
   }
-  if (role === "DESIGN") return progressEvent("ACTIVITY", "Reviewing project materials");
-  if (role === "TEST") return progressEvent("ACTIVITY", "Reviewing project and acceptance evidence");
-  return progressEvent("ACTIVITY", "Analyzing project");
+  if (role === "DESIGN") return progressEvent("ACTIVITY", completed ? "Project material review completed" : "Reviewing project materials");
+  if (role === "TEST") return progressEvent("ACTIVITY", completed ? "Project and acceptance evidence review completed" : "Reviewing project and acceptance evidence");
+  return progressEvent("ACTIVITY", completed ? "Project analysis step completed" : "Analyzing project");
+}
+
+function thinkingActivityEvent(
+  role: ProjectRuntimeRole,
+  completed: boolean,
+  language: "en" | "zh",
+): ProjectRuntimeProgressEvent | null {
+  if (role === "INTENT") return null;
+  return progressEvent("ACTIVITY", language === "zh"
+    ? completed ? "阶段性思考已完成" : "正在思考并整理回复"
+    : completed ? "Reasoning step completed" : "Thinking and organizing the response");
+}
+
+function toolActivityEvent(
+  role: ProjectRuntimeRole,
+  tool: string,
+  completed: boolean,
+  language: "en" | "zh",
+): ProjectRuntimeProgressEvent | null {
+  if (isContextRead(tool)) return activityEvent(role, "context", completed, language);
+  if (role === "INTENT" || role === "DEVELOPMENT") return null;
+  if (language === "zh") {
+    return progressEvent("ACTIVITY", completed
+      ? `项目工具调用完成${tool ? `：${tool}` : ""}`
+      : `正在调用项目工具${tool ? `：${tool}` : ""}`);
+  }
+  return progressEvent("ACTIVITY", completed
+    ? `Project tool completed${tool ? `: ${tool}` : ""}`
+    : `Calling project tool${tool ? `: ${tool}` : ""}`);
 }
 
 function isContextRead(tool: string): boolean {

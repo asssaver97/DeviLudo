@@ -336,8 +336,13 @@ export function ConversationBox({
                     <div>
                       <header><b>{identity.name}</b>{status ? <span className="conversation-agent-working">{status}</span> : null}</header>
                       <p>
+                        {reply.processEvents.length ? (
+                          <span className="conversation-agent-process">
+                            {reply.processEvents.map((event, index) => <span key={`${index}:${event}`}>{event}</span>)}
+                          </span>
+                        ) : null}
                         {reply.content}
-                        {!reply.content && reply.activity ? (
+                        {!reply.content && !reply.processEvents.length && reply.activity ? (
                           <span className="conversation-agent-activity">{reply.activity}</span>
                         ) : null}
                         {streamingConversationReplyIsActive(reply) ? <TypingDots /> : null}
