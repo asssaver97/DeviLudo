@@ -89,6 +89,7 @@ test("Builder, platform tests and Steam are the only disposable job settlements"
   const fail = functionSource(sql, "fail_job");
   assert.match(complete, /AGENT_TURN must be settled by the persistent Project Runtime/);
   assert.match(complete, /job\.kind = 'BUILD'/);
+  assert.match(complete, /state = 'BUILDING'[\s\S]*active_build\.state IN \('QUEUED', 'RUNNING', 'RETRY'\)[\s\S]*IF FOUND THEN[\s\S]*'TEST_PLAN'/);
   assert.match(complete, /job\.kind = 'E2E_PLATFORM_RUN'/);
   assert.match(complete, /job\.kind = 'STEAM_PUBLISH'/);
   assert.match(complete, /INSERT INTO deviludo\.platform_test_runs/);

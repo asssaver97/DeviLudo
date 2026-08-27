@@ -63,7 +63,7 @@ const ACTIVE_PIPELINE_STAGE: Readonly<Record<string, (typeof PIPELINE)[number][0
   DESIGNING: "AGENT_TURN",
   DEVELOPING: "AGENT_TURN",
   BUILDING: "BUILD",
-  TEST_PLANNING: "AGENT_TURN",
+  TEST_PLANNING: "E2E_PLATFORM_RUN",
   TESTING: "E2E_PLATFORM_RUN",
   STEAM_PUBLISHING: "STEAM_PUBLISH",
 });
@@ -396,9 +396,7 @@ export function ProjectStudio({ projectId }: { projectId: string }) {
     }
   }
 
-  const activeAgentJob = project?.jobs
-    .filter(job => job.kind === "AGENT_TURN" && ["QUEUED", "RETRY", "RUNNING"].includes(job.state))
-    .at(-1) ?? null;
+  const activeAgentJob = runningAgentJobForConversation(project?.jobs ?? Object.freeze([]));
   const activeAgentJobId = activeAgentJob?.id ?? null;
   const activeAgentRole = progressAgentRole(activeAgentJob, project?.workflowState);
   const agentRunning = activeAgentJob !== null;
@@ -1049,7 +1047,7 @@ export function ProjectStudio({ projectId }: { projectId: string }) {
               ) : null}
             </li>
             {PIPELINE.map(([kind, chineseLabel, englishLabel]) => {
-              const jobs = latestPipelineJobs(currentPipelineJobs(viewedJobs.filter(job => job.kind === kind)));
+              const jobs = latestPipelineJobs(currentPipelineJobs(pipelineJobsForStage(kind, viewedJobs)));
               const stageArtifacts = artifactsByStage.get(kind) ?? Object.freeze([]);
               const inProfile = profileStages.has(kind);
               const state = aggregateJobState(jobs.map(job => job.state));
@@ -1551,6 +1549,33 @@ export function currentPipelineJobs(jobs: ProductProjectDetail["jobs"]): Product
     job.state === "CANCELLED"
     && job.lastError?.startsWith("superseded by ") === true
   )));
+}
+
+/**
+ * Agent turns have three product roles but only two delivery nodes. Design and
+ * Development belong to game generation; Test planning and verdicts belong to
+ * cross-platform acceptance. Keeping that projection explicit prevents the
+ * newest Test turn from lighting the Game Generation node.
+ */
+export function pipelineJobsForStage(
+  stage: (typeof PIPELINE)[number][0],
+  jobs: ProductProjectDetail["jobs"],
+): ProductProjectDetail["jobs"] {
+  if (stage === "AGENT_TURN") {
+    return Object.freeze(jobs.filter(job => job.kind === "AGENT_TURN" && job.agentRole !== "TEST"));
+  }
+  if (stage === "E2E_PLATFORM_RUN") {
+    return Object.freeze(jobs.filter(job => job.kind === "E2E_PLATFORM_RUN"
+      || (job.kind === "AGENT_TURN" && job.agentRole === "TEST")));
+  }
+  return Object.freeze(jobs.filter(job => job.kind === stage));
+}
+
+/** A queued Agent is waiting for its predecessor/runtime, not replying yet. */
+export function runningAgentJobForConversation(
+  jobs: ProductProjectDetail["jobs"],
+): ProductProjectDetail["jobs"][number] | null {
+  return jobs.filter(job => job.kind === "AGENT_TURN" && job.state === "RUNNING").at(-1) ?? null;
 }
 
 export function pipelineStageFinishedAt(jobs: ProductProjectDetail["jobs"]): string | null {

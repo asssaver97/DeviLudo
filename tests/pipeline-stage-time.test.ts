@@ -2,9 +2,11 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import {
   currentPipelineJobs,
+  pipelineJobsForStage,
   pipelineEventFinishedAt,
   pipelineStageFinishedAt,
   pipelineStageWaitsForPredecessor,
+  runningAgentJobForConversation,
 } from "../components/ProjectStudio";
 import type { ProductEvent, ProductJob } from "../lib/product/contracts";
 
@@ -58,8 +60,29 @@ test("stages after the active delivery stage wait for their predecessor", () => 
   assert.equal(pipelineStageWaitsForPredecessor("E2E_PLATFORM_RUN", "BUILDING"), true);
   assert.equal(pipelineStageWaitsForPredecessor("STEAM_PUBLISH", "BUILDING"), true);
   assert.equal(pipelineStageWaitsForPredecessor("BUILD", "BUILDING"), false);
+  assert.equal(pipelineStageWaitsForPredecessor("BUILD", "TEST_PLANNING"), false);
+  assert.equal(pipelineStageWaitsForPredecessor("E2E_PLATFORM_RUN", "TEST_PLANNING"), false);
   assert.equal(pipelineStageWaitsForPredecessor("E2E_PLATFORM_RUN", "TESTING"), false);
   assert.equal(pipelineStageWaitsForPredecessor("E2E_PLATFORM_RUN", "FAILED"), false);
+});
+
+test("Test Agent work is projected onto E2E instead of Game Generation", () => {
+  const design = { ...job("SUCCEEDED", "2026-08-16T01:00:00.000Z"), id: "design", kind: "AGENT_TURN", agentRole: "DESIGN" as const };
+  const development = { ...job("SUCCEEDED", "2026-08-16T01:01:00.000Z"), id: "development", kind: "AGENT_TURN", agentRole: "DEVELOPMENT" as const };
+  const testPlan = { ...job("RUNNING", "2026-08-16T01:02:00.000Z"), id: "test-plan", kind: "AGENT_TURN", agentRole: "TEST" as const };
+  const e2e = { ...job("QUEUED", "2026-08-16T01:03:00.000Z", "macos"), id: "e2e" };
+  const jobs = [design, development, testPlan, e2e];
+
+  assert.deepEqual(pipelineJobsForStage("AGENT_TURN", jobs).map(item => item.id), ["design", "development"]);
+  assert.deepEqual(pipelineJobsForStage("E2E_PLATFORM_RUN", jobs).map(item => item.id), ["test-plan", "e2e"]);
+});
+
+test("only a running Agent is shown as replying in the conversation", () => {
+  const development = { ...job("RUNNING", "2026-08-16T01:01:00.000Z"), id: "development", kind: "AGENT_TURN", agentRole: "DEVELOPMENT" as const };
+  const queuedTest = { ...job("QUEUED", "2026-08-16T01:02:00.000Z"), id: "test-plan", kind: "AGENT_TURN", agentRole: "TEST" as const };
+
+  assert.equal(runningAgentJobForConversation([development, queuedTest])?.id, "development");
+  assert.equal(runningAgentJobForConversation([queuedTest]), null);
 });
 
 test("the requirements or analysis node uses the latest approval event as its finish time", () => {

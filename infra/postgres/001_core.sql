@@ -3476,10 +3476,22 @@ BEGIN
   IF job.kind = 'BUILD' THEN
     UPDATE deviludo.workflow_instances SET state = 'TEST_PLANNING', version = version + 1,
       updated_at = clock_timestamp()
-     WHERE workspace_id = workflow.workspace_id AND id = workflow.id;
-    PERFORM deviludo.enqueue_job(job.workspace_id, job.workflow_id, job.project_id,
-      'AGENT_TURN', NULL, job.workflow_id::text || ':test-plan:after:' || job.id::text,
-      jsonb_build_object('role', 'TEST', 'purpose', 'TEST_PLAN'));
+     WHERE workspace_id = workflow.workspace_id AND id = workflow.id
+       AND state = 'BUILDING'
+       AND NOT EXISTS (
+         SELECT 1
+           FROM deviludo.jobs active_build
+          WHERE active_build.workspace_id = job.workspace_id
+            AND active_build.workflow_id = job.workflow_id
+            AND active_build.kind = 'BUILD'
+            AND active_build.id <> job.id
+            AND active_build.state IN ('QUEUED', 'RUNNING', 'RETRY')
+       );
+    IF FOUND THEN
+      PERFORM deviludo.enqueue_job(job.workspace_id, job.workflow_id, job.project_id,
+        'AGENT_TURN', NULL, job.workflow_id::text || ':test-plan:after:' || job.id::text,
+        jsonb_build_object('role', 'TEST', 'purpose', 'TEST_PLAN'));
+    END IF;
   ELSIF job.kind = 'E2E_PLATFORM_RUN' THEN
     INSERT INTO deviludo.platform_test_runs(
       workspace_id, project_id, plan_id, source_revision, target_platform,
