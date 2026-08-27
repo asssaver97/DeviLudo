@@ -39,6 +39,7 @@ export type StreamingConversationReplies = Readonly<Partial<Record<ProjectAgentR
 export type ConversationStreamCallbacks = Readonly<{
   onAgentStart: (agentRole: ProjectAgentRole) => void;
   onAgentDelta: (agentRole: ProjectAgentRole, delta: string) => void;
+  onAgentReplace: (agentRole: ProjectAgentRole, content: string) => void;
   onAgentActivity: (agentRole: ProjectAgentRole, activity: string) => void;
   onAgentDevelopmentLog: (agentRole: ProjectAgentRole, line: string) => void;
   onAgentComplete: (agentRole: ProjectAgentRole) => void;
@@ -101,6 +102,11 @@ export async function sendConversationMessageStream(
     if (event.type === "agent_delta" && typeof event.delta === "string"
       && isProjectAgentRole(event.agentRole)) {
       callbacks.onAgentDelta(event.agentRole, event.delta);
+      return;
+    }
+    if (event.type === "agent_replace" && typeof event.content === "string"
+      && isProjectAgentRole(event.agentRole)) {
+      callbacks.onAgentReplace(event.agentRole, event.content);
       return;
     }
     if (event.type === "agent_activity" && typeof event.activity === "string"
@@ -188,18 +194,36 @@ export function appendStreamingConversationReply(
   });
 }
 
+export function replaceStreamingConversationReply(
+  current: StreamingConversationReplies,
+  agentRole: ProjectAgentRole,
+  content: string,
+): StreamingConversationReplies {
+  const reply = current[agentRole];
+  return Object.freeze({
+    ...current,
+    [agentRole]: Object.freeze({
+      content,
+      phase: "TYPING",
+      activity: null,
+      developmentLogs: reply?.developmentLogs ?? Object.freeze([]),
+    }),
+  });
+}
+
 export function updateStreamingConversationActivity(
   current: StreamingConversationReplies,
   agentRole: ProjectAgentRole,
   activity: string,
 ): StreamingConversationReplies {
   const reply = current[agentRole];
+  const normalizedActivity = activity.trim() || null;
   return Object.freeze({
     ...current,
     [agentRole]: Object.freeze({
       content: reply?.content ?? "",
-      phase: "TYPING",
-      activity,
+      phase: normalizedActivity || reply?.content ? "TYPING" : "THINKING",
+      activity: normalizedActivity,
       developmentLogs: reply?.developmentLogs ?? Object.freeze([]),
     }),
   });

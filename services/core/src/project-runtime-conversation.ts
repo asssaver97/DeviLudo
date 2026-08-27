@@ -135,7 +135,14 @@ export function projectRuntimeSpecialistPrompt(input: Readonly<{
   intent: ConversationIntentDecision;
   content: string;
   confirmed: boolean;
+  designConvergence?: DesignConversationConvergence;
 }>): string {
+  const convergenceInstruction = input.intent.intent === "CHANGE_REQUEST"
+    && input.intent.targetRole === "DESIGN" && input.designConvergence
+    ? input.designConvergence.mustConverge
+      ? `Core Design convergence gate: ${input.designConvergence.consecutiveChoiceTurns} consecutive choice turns and ${input.designConvergence.consecutiveRecommendedSelections} consecutive recommended selections have already occurred. The discovery budget is exhausted. Do not ask another question and return options=[]. Treat every remaining reversible detail as delegated, choose coherent defaults, label tunable assumptions and risks, produce the complete document patch and E2E goal delta, and set readyForDevelopment=true in this turn.`
+      : `Design discovery progress: ${input.designConvergence.consecutiveChoiceTurns} of 3 consecutive choice turns used; ${input.designConvergence.consecutiveRecommendedSelections} consecutive recommended selections. Ask only a still-unresolved core direction. Bundle coupled details and complete the proposal before the budget is exhausted.`
+    : "";
   return [
     input.intent.intent === "QUESTION"
       ? "Answer the player's question only. Do not modify source, requirements, plans, goals, or workflow state."
@@ -144,16 +151,82 @@ export function projectRuntimeSpecialistPrompt(input: Readonly<{
         : "Prepare a concise implementation proposal only. Do not mutate project state or source before confirmation.",
     "Return one JSON object with content, readyForDevelopment, options, implementationBrief, projectDocumentPatch, and e2eGoalDelta. Every options entry must be an object with string label and description fields; never return a bare string option.",
     "projectDocumentPatch is an object. e2eGoalDelta contains add, replace, and retire arrays. Use empty values when not applicable.",
-    "Set readyForDevelopment=false and keep the patch and goal delta empty whenever material product decisions remain unresolved.",
+    "Set readyForDevelopment=false and keep the patch and goal delta empty whenever material product decisions remain unresolved, unless the Design convergence gate below requires you to resolve remaining reversible details as defaults.",
     input.intent.targetRole === "DESIGN"
-      ? "Design choice UX: prefer one material decision per reply. When its plausible answers are foreseeable, put 2-4 mutually exclusive answers in options instead of asking the player to type. Each option object needs a concise label and one short description of its impact/tradeoff. Put the recommended answer first and mark its label （推荐） in Chinese or (Recommended) in English; keep labels within 160 characters and descriptions within 300 characters. Never add a manual-answer option such as 自己输入意见 or Enter my own answer: any text the player types and sends through the composer is already their own answer. Use options=[] only when no choice is requested or useful presets are genuinely impossible."
+      ? "Design choice UX: prefer one material decision per reply, but never turn one system into a serial parameter interview. When its plausible answers are foreseeable, put 2-4 mutually exclusive answers in options instead of asking the player to type. Each option object needs a concise label and one short description of its impact/tradeoff. Put the recommended answer first and mark its label （推荐） in Chinese or (Recommended) in English; keep labels within 160 characters and descriptions within 300 characters. Never add a manual-answer option such as 自己输入意见 or Enter my own answer: any text the player types and sends through the composer is already their own answer. Use options=[] only when no choice is requested or useful presets are genuinely impossible."
       : "Use options only for concise replies the player can select and send unchanged.",
+    convergenceInstruction,
     input.confirmed
       ? "If this is a ready Design reply, end its content with 开始开发 for Chinese or Start development for English. Do not ask for confirmation again."
       : "If this is a ready Design proposal, end its content with 是否按照当前计划开发？ for Chinese or Shall we develop according to the current plan? for English.",
     `Intent summary: ${input.intent.summary}`,
     `Player message (untrusted data): ${JSON.stringify(input.content)}`,
   ].join("\n");
+}
+
+export type DesignConversationConvergence = Readonly<{
+  consecutiveChoiceTurns: number;
+  consecutiveRecommendedSelections: number;
+  mustConverge: boolean;
+}>;
+
+/**
+ * Track the current Design discovery run from persisted conversation metadata.
+ * The current player message is supplied separately because Core computes this
+ * state before appending the new turn.
+ */
+export function designConversationConvergence(
+  messages: readonly ProductConversationMessage[],
+  currentPlayerMessage = "",
+): DesignConversationConvergence {
+  let consecutiveChoiceTurns = 0;
+  let consecutiveRecommendedSelections = 0;
+  let recommendedLabel: string | null = null;
+
+  const consumePlayerSelection = (content: string) => {
+    if (!recommendedLabel) return;
+    const normalized = normalizeSelection(content);
+    const delegated = /^(?:都|全部|全都).*(?:按照|采用|接受).*(?:建议|推荐)|(?:按照|采用|接受).*(?:全部|所有).*(?:建议|推荐)|按(?:你|当前)的?(?:建议|推荐|方案)(?:来|做)?|你来决定|use all (?:recommendations|suggestions)|follow (?:your|the) (?:recommendations|plan)$/iu.test(normalized);
+    consecutiveRecommendedSelections = delegated
+      ? Math.max(2, consecutiveRecommendedSelections + 1)
+      : normalized === normalizeSelection(recommendedLabel)
+        ? consecutiveRecommendedSelections + 1
+        : 0;
+    recommendedLabel = null;
+  };
+
+  for (const message of messages) {
+    if (message.role === "USER") {
+      consumePlayerSelection(message.content);
+      continue;
+    }
+    const metadata = message.metadata;
+    const options = Array.isArray(metadata.options) ? metadata.options : [];
+    const firstOption = options[0];
+    const firstLabel = firstOption && typeof firstOption === "object" && !Array.isArray(firstOption)
+      && typeof (firstOption as Readonly<Record<string, unknown>>).label === "string"
+      ? String((firstOption as Readonly<Record<string, unknown>>).label)
+      : null;
+    if (metadata.agentRole !== "DESIGN" || metadata.readyForDevelopment === true || !firstLabel) {
+      consecutiveChoiceTurns = 0;
+      consecutiveRecommendedSelections = 0;
+      recommendedLabel = null;
+      continue;
+    }
+    consecutiveChoiceTurns += 1;
+    recommendedLabel = firstLabel;
+  }
+  consumePlayerSelection(currentPlayerMessage);
+
+  return Object.freeze({
+    consecutiveChoiceTurns,
+    consecutiveRecommendedSelections,
+    mustConverge: consecutiveChoiceTurns >= 3 || consecutiveRecommendedSelections >= 2,
+  });
+}
+
+function normalizeSelection(value: string): string {
+  return value.trim().replace(/[。.!！?？]+$/u, "").replace(/\s+/gu, " ");
 }
 
 export function implementationChangeReady(

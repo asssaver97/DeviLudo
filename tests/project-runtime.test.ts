@@ -3,6 +3,7 @@ import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
+import type { ProductConversationMessage } from "@/lib/product/contracts";
 import type { ProjectRuntimeTurnResult } from "@/lib/product/project-runtime";
 import {
   PROJECT_RUNTIME_IDLE_MS,
@@ -14,6 +15,10 @@ import {
   updateProjectContext,
 } from "@/services/core/src/project-context";
 import {
+  deliverValidatedConversationReply,
+} from "@/services/core/src/product-conversation";
+import {
+  designConversationConvergence,
   designReplyAction,
   implementationChangeReady,
   lightweightProjectRuntimeIntent,
@@ -28,7 +33,10 @@ import {
 } from "@/services/core/src/project-runtime-service";
 import {
   createRuntimeEventLineBuffer,
+  createStructuredContentDeltaExtractor,
   finalRuntimeContent,
+  runtimeEventDeltaText,
+  runtimeEventFinalText,
   runtimeEventText,
   structuredRuntimeOutput,
 } from "@/services/project-runtime/runtime-events.mjs";
@@ -78,6 +86,68 @@ test("persistent Runtime intent selects exactly one role and rejects contradicto
     content: "帮我设计玩法",
     confirmed: false,
   }), /Each option object needs a concise label and one short description/);
+});
+
+test("Design discovery converges after repeated choices or delegated recommendations", () => {
+  const question = (id: string, label: string): ProductConversationMessage => Object.freeze({
+    id,
+    role: "ASSISTANT",
+    content: "请选择",
+    attachments: Object.freeze([]),
+    metadata: Object.freeze({
+      agentRole: "DESIGN",
+      readyForDevelopment: false,
+      options: Object.freeze([Object.freeze({ label, description: "推荐方向" })]),
+    }),
+    createdAt: "2026-08-27T00:00:00.000Z",
+    completedAt: "2026-08-27T00:00:01.000Z",
+  });
+  const player = (id: string, content: string): ProductConversationMessage => Object.freeze({
+    id,
+    role: "USER",
+    content,
+    attachments: Object.freeze([]),
+    metadata: Object.freeze({}),
+    createdAt: "2026-08-27T00:00:00.000Z",
+    completedAt: "2026-08-27T00:00:01.000Z",
+  });
+
+  assert.deepEqual(designConversationConvergence([
+    question("q1", "方向 A（推荐）"),
+    player("u1", "方向 A（推荐）"),
+    question("q2", "规则 B（推荐）"),
+  ], "规则 B（推荐）"), {
+    consecutiveChoiceTurns: 2,
+    consecutiveRecommendedSelections: 2,
+    mustConverge: true,
+  });
+  assert.equal(designConversationConvergence([
+    question("q1", "A（推荐）"), player("u1", "自定义 A"),
+    question("q2", "B（推荐）"), player("u2", "自定义 B"),
+    question("q3", "C（推荐）"),
+  ], "自定义 C").mustConverge, true);
+  assert.equal(designConversationConvergence([
+    question("q1", "A（推荐）"),
+  ], "都按照建议来").mustConverge, true);
+
+  const forcedPrompt = projectRuntimeSpecialistPrompt({
+    intent: Object.freeze({
+      intent: "CHANGE_REQUEST",
+      targetRole: "DESIGN",
+      explicitExecution: false,
+      actionable: true,
+      summary: "Complete the game design.",
+    }),
+    content: "继续",
+    confirmed: false,
+    designConvergence: Object.freeze({
+      consecutiveChoiceTurns: 3,
+      consecutiveRecommendedSelections: 1,
+      mustConverge: true,
+    }),
+  });
+  assert.match(forcedPrompt, /Do not ask another question/);
+  assert.match(forcedPrompt, /set readyForDevelopment=true in this turn/);
 });
 
 test("lightweight Intent routes common messages without a Runtime turn", () => {
@@ -250,6 +320,14 @@ test("Runtime progress preserves split JSONL events and exposes live tool activi
     type: "stream_event",
     event: { type: "content_block_delta", delta: { type: "text_delta", text: "实时文本" } },
   }), "实时文本");
+  assert.equal(runtimeEventDeltaText({
+    type: "stream_event",
+    event: { type: "content_block_delta", delta: { type: "text_delta", text: "增量文本" } },
+  }), "增量文本");
+  assert.equal(runtimeEventFinalText({
+    type: "item.completed",
+    item: { type: "agent_message", text: "最终文本" },
+  }), "最终文本");
   assert.deepEqual(runtimeProgressEvent(`DEVILUDO_RUNTIME_EVENT:${JSON.stringify({
     type: "item.started",
     item: { type: "command_execution", command: "/bin/bash -lc 'API_KEY=secret npm test'" },
@@ -271,10 +349,56 @@ test("Runtime progress preserves split JSONL events and exposes live tool activi
     kind: "ACTIVITY",
     content: "正在读取项目上下文",
   });
+  assert.deepEqual(runtimeProgressEvent(`DEVILUDO_RUNTIME_EVENT:${JSON.stringify({
+    type: "item.completed",
+    item: { type: "mcp_tool_call", tool: "context_read" },
+  })}`, "DESIGN", "zh"), {
+    kind: "ACTIVITY",
+    content: "",
+  });
+  assert.deepEqual(runtimeProgressEvent(`DEVILUDO_RUNTIME_EVENT:${JSON.stringify({
+    type: "deviludo.content_delta",
+    delta: "玩家可见正文",
+  })}`, "DESIGN", "zh"), {
+    kind: "CONTENT_DELTA",
+    content: "玩家可见正文",
+  });
   assert.equal(runtimeProgressEvent(`DEVILUDO_RUNTIME_EVENT:${JSON.stringify({
     type: "item.completed",
     item: { type: "agent_message", text: "I'm using the mandatory design skill." },
   })}`, "DESIGN", "zh"), null);
+});
+
+test("Runtime streams only the decoded player-facing content field", () => {
+  const deltas: string[] = [];
+  const extractor = createStructuredContentDeltaExtractor(delta => deltas.push(delta));
+  extractor.push('```json\n{"readyForDevelopment":false,"con');
+  extractor.push('tent":"第一行\\n带引号：\\"测试\\"，Unicode：\\u6e38');
+  extractor.push('\\u620f","implementationBrief":"不得流出"}\n```');
+  assert.equal(deltas.join(""), '第一行\n带引号："测试"，Unicode：游戏');
+  assert.doesNotMatch(deltas.join(""), /readyForDevelopment|implementationBrief|不得流出/u);
+});
+
+test("a Runtime without token deltas still renders its validated reply progressively", async () => {
+  const deltas: string[] = [];
+  const replacements: string[] = [];
+  const content = "一".repeat(120);
+  await deliverValidatedConversationReply({
+    role: "DESIGN",
+    content,
+    streamedContent: "",
+    stream: {
+      onStart() {},
+      onDelta(_role, delta) { deltas.push(delta); },
+      onReplace(_role, replacement) { replacements.push(replacement); },
+      onActivity() {},
+      onDevelopmentLog() {},
+      onComplete() {},
+    },
+  });
+  assert.equal(deltas.length, 3);
+  assert.equal(deltas.join(""), content);
+  assert.deepEqual(replacements, []);
 });
 
 test("incomplete design discovery cannot stage or execute an implementation change", () => {

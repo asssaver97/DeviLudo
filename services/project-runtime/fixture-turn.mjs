@@ -395,7 +395,7 @@ function latestMessage(prompt) {
 function emitContent(value) {
   const midpoint = Math.max(1, Math.floor(value.length / 2));
   for (const chunk of [value.slice(0, midpoint), value.slice(midpoint)]) {
-    if (chunk) process.stderr.write(`DEVILUDO_RUNTIME_EVENT:${JSON.stringify({ delta: { text: chunk } })}\n`);
+    if (chunk) process.stderr.write(`DEVILUDO_RUNTIME_EVENT:${JSON.stringify({ type: "deviludo.content_delta", delta: chunk })}\n`);
   }
 }
 

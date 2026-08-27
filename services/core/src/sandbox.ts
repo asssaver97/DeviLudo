@@ -191,6 +191,7 @@ export async function runSandbox(
             sourceRevision: project.source?.revision ?? null,
             sourceRelativePath: project.source?.relativePath ?? null,
             onEvent: event => {
+              if (event.kind === "CONTENT_DELTA" || !event.content) return;
               progressWrites = progressWrites
                 .then(() => repository.appendJobProgress(job as JobProtocolV4, "AGENT_OUTPUT", event.content))
                 .then(() => undefined)

@@ -43,7 +43,7 @@ test("conversation stream emits the authoritative reply before the persisted res
   const agentCompleted = events.filter(event => event.type === "agent_complete");
   const completedAt = events.findIndex(event => event.type === "complete");
   const documentAt = events.findIndex(event => event.type === "project_document");
-  expect(deltas.length).toBeGreaterThanOrEqual(1);
+  expect(deltas.length).toBeGreaterThanOrEqual(2);
   expect(starts).toEqual([{ type: "agent_start", agentRole: "DESIGN" }]);
   expect(agentCompleted).toEqual([{ type: "agent_complete", agentRole: "DESIGN" }]);
   expect(events.findIndex(event => event.type === "agent_start")).toBeLessThan(events.findIndex(event => event.type === "agent_delta"));

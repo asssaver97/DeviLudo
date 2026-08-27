@@ -3,8 +3,11 @@ import { createHash, randomUUID } from "node:crypto";
 import { cp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { spawn } from "node:child_process";
 import {
+  createStructuredContentDeltaExtractor,
   createRuntimeEventLineBuffer,
   finalRuntimeContent,
+  runtimeEventDeltaText,
+  runtimeEventFinalText,
   runtimeEventText,
   structuredRuntimeOutput,
 } from "./runtime-events.mjs";
@@ -188,8 +191,24 @@ async function run(executable, args, env, stdin) {
   const content = [];
   const toolCalls = [];
   let sessionId = null;
+  let sawIncrementalText = false;
+  const visibleContent = createStructuredContentDeltaExtractor(delta => {
+    process.stderr.write(`DEVILUDO_RUNTIME_EVENT:${JSON.stringify({ type: "deviludo.content_delta", delta })}\n`);
+  });
   const runtimeEvents = createRuntimeEventLineBuffer(line => {
     process.stderr.write(`DEVILUDO_RUNTIME_EVENT:${line}\n`);
+    let event;
+    try { event = JSON.parse(line); } catch { return; }
+    const delta = runtimeEventDeltaText(event);
+    if (delta) {
+      sawIncrementalText = true;
+      visibleContent.push(delta);
+      return;
+    }
+    if (!sawIncrementalText) {
+      const finalText = runtimeEventFinalText(event);
+      if (finalText) visibleContent.push(finalText);
+    }
   });
   child.stdout.on("data", chunk => {
     const text = decoder.decode(chunk, { stream: true });

@@ -68,10 +68,11 @@ import {
   type ImportedSourceSnapshot,
   type SourceFile,
 } from "./project-import";
-import type {
-  ConversationImageInput,
-  ProductConversationGroupReply,
-  ProductConversationStreamCallbacks,
+import {
+  deliverValidatedConversationReply,
+  type ConversationImageInput,
+  type ProductConversationGroupReply,
+  type ProductConversationStreamCallbacks,
 } from "./product-conversation";
 import { generatedImageExtension, sniffContentType } from "./image-generation";
 import {
@@ -97,6 +98,7 @@ import { ProjectSourceStore } from "./project-sources";
 import { ProjectRuntimeRepository } from "./project-runtime-repository";
 import { ProjectRuntimeService } from "./project-runtime-service";
 import {
+  designConversationConvergence,
   designReplyAction,
   implementationChangeReady,
   implementationBrief as runtimeImplementationBrief,
@@ -1210,6 +1212,7 @@ export async function runApi(
         stream: {
           onStart: agentRole => write({ type: "agent_start", agentRole }),
           onDelta: (agentRole, delta) => write({ type: "agent_delta", agentRole, delta }),
+          onReplace: (agentRole, content) => write({ type: "agent_replace", agentRole, content }),
           onActivity: (agentRole, activity) => write({ type: "agent_activity", agentRole, activity }),
           onDevelopmentLog: (agentRole, line) => write({ type: "agent_log", agentRole, line }),
           onComplete: agentRole => write({ type: "agent_complete", agentRole }),
@@ -2303,6 +2306,7 @@ async function processConversationMessage(input: Readonly<{
     }
     input.onStage?.("RESPONDING");
     const specialistRole = intentDecision.targetRole;
+    let streamedSpecialistContent = "";
     input.stream?.onStart(specialistRole);
     const specialistResult = await input.projectRuntime.turn({
       workspaceId: targetWorkspace.id,
@@ -2320,7 +2324,10 @@ async function processConversationMessage(input: Readonly<{
       sourceRelativePath: null,
       attachments: command.images,
       onEvent: event => {
-        if (event.kind === "ACTIVITY") input.stream?.onActivity(specialistRole, event.content);
+        if (event.kind === "CONTENT_DELTA") {
+          streamedSpecialistContent += event.content;
+          input.stream?.onDelta(specialistRole, event.content);
+        } else if (event.kind === "ACTIVITY") input.stream?.onActivity(specialistRole, event.content);
         else input.stream?.onDevelopmentLog(specialistRole, event.content);
       },
     }).catch(error => { throw httpError(424, "AGENT_CONVERSATION_FAILED", error instanceof Error ? error.message : "Project Agent failed"); });
@@ -2331,7 +2338,10 @@ async function processConversationMessage(input: Readonly<{
       command.responseLanguage,
       designReplyAction(intentDecision, specialistRole),
     );
-    input.stream?.onDelta(specialistRole, specialistReply.content);
+    await deliverValidatedConversationReply({
+      stream: input.stream, role: specialistRole, content: specialistReply.content,
+      streamedContent: streamedSpecialistContent, signal: input.signal,
+    });
     input.stream?.onComplete(specialistRole);
     input.onStage?.("SAVING");
     const userAttachments = await storeConversationImages(objectStore, {
@@ -2590,6 +2600,10 @@ async function processConversationMessage(input: Readonly<{
   }
 
   const specialistRole = intentDecision.targetRole;
+  const designConvergence = specialistRole === "DESIGN"
+    ? designConversationConvergence(existingConversation?.messages ?? Object.freeze([]), command.content)
+    : undefined;
+  let streamedSpecialistContent = "";
   input.stream?.onStart(specialistRole);
   const specialistResult = await input.projectRuntime.turn({
     workspaceId: workspace.id,
@@ -2600,6 +2614,7 @@ async function processConversationMessage(input: Readonly<{
       intent: intentDecision,
       content: command.content,
       confirmed: intentDecision.intent === "CHANGE_REQUEST" && intentDecision.explicitExecution,
+      designConvergence,
     }),
     responseLanguage: command.responseLanguage,
     settings,
@@ -2607,7 +2622,10 @@ async function processConversationMessage(input: Readonly<{
     sourceRelativePath: project.source?.relativePath ?? null,
     attachments: command.images,
     onEvent: event => {
-      if (event.kind === "ACTIVITY") input.stream?.onActivity(specialistRole, event.content);
+      if (event.kind === "CONTENT_DELTA") {
+        streamedSpecialistContent += event.content;
+        input.stream?.onDelta(specialistRole, event.content);
+      } else if (event.kind === "ACTIVITY") input.stream?.onActivity(specialistRole, event.content);
       else input.stream?.onDevelopmentLog(specialistRole, event.content);
     },
   }).catch(error => { throw httpError(424, "AGENT_CONVERSATION_FAILED", error instanceof Error ? error.message : "Project Agent failed"); });
@@ -2618,7 +2636,10 @@ async function processConversationMessage(input: Readonly<{
     command.responseLanguage,
     designReplyAction(intentDecision, specialistRole),
   );
-  input.stream?.onDelta(specialistRole, specialistReply.content);
+  await deliverValidatedConversationReply({
+    stream: input.stream, role: specialistRole, content: specialistReply.content,
+    streamedContent: streamedSpecialistContent, signal: input.signal,
+  });
   input.stream?.onComplete(specialistRole);
   input.onStage?.("SAVING");
   const conversation = await repository.appendConversationTurn({

@@ -64,7 +64,7 @@ export class ProcessProjectRuntimeBackend implements ProjectRuntimeBackend {
         if (!line.startsWith(prefix)) continue;
         try {
           const event = JSON.parse(line.slice(prefix.length)) as { kind?: unknown; content?: unknown };
-          if ((event.kind === "ACTIVITY" || event.kind === "DEVELOPMENT_LOG")
+          if ((event.kind === "ACTIVITY" || event.kind === "CONTENT_DELTA" || event.kind === "DEVELOPMENT_LOG")
             && typeof event.content === "string") {
             onEvent?.(Object.freeze({ kind: event.kind, content: event.content }));
           }

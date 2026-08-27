@@ -8,6 +8,7 @@ import {
   failedOptimisticConversation,
   initialStreamingConversationReplies,
   optimisticConversation,
+  replaceStreamingConversationReply,
   startStreamingConversationReply,
   streamingConversationReplyIsActive,
   updateStreamingConversationActivity,
@@ -57,6 +58,28 @@ test("completed Agent replies remain visible without a status while the next Age
   assert.deepEqual(startStreamingConversationReply(designComplete, "TEST"), {
     DESIGN: { content: "设计结论", phase: "COMPLETE", activity: null, developmentLogs: [] },
     TEST: { content: "", phase: "THINKING", activity: null, developmentLogs: [] },
+  });
+});
+
+test("completed tool activity clears immediately and final normalization can replace streamed text", () => {
+  const reading = updateStreamingConversationActivity(
+    startStreamingConversationReply(initialStreamingConversationReplies(), "DESIGN"),
+    "DESIGN",
+    "正在读取项目上下文",
+  );
+  const cleared = updateStreamingConversationActivity(reading, "DESIGN", "");
+  assert.deepEqual(cleared.DESIGN, {
+    content: "",
+    phase: "THINKING",
+    activity: null,
+    developmentLogs: [],
+  });
+  const partial = appendStreamingConversationReply(cleared, "DESIGN", "原始计划");
+  assert.deepEqual(replaceStreamingConversationReply(partial, "DESIGN", "规范化后的开发计划").DESIGN, {
+    content: "规范化后的开发计划",
+    phase: "TYPING",
+    activity: null,
+    developmentLogs: [],
   });
 });
 

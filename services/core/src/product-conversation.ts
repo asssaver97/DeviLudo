@@ -54,10 +54,35 @@ export type ProductConversationGroupReply = ProductConversationAgentReply & Read
 export type ProductConversationStreamCallbacks = Readonly<{
   onStart: (role: ProjectAgentRole) => void;
   onDelta: (role: ProjectAgentRole, delta: string) => void;
+  onReplace: (role: ProjectAgentRole, content: string) => void;
   onActivity: (role: ProjectAgentRole, activity: string) => void;
   onDevelopmentLog: (role: ProjectAgentRole, line: string) => void;
   onComplete: (role: ProjectAgentRole) => void;
 }>;
+
+const VALIDATED_REPLY_CHUNK_CHARACTERS = 48;
+
+export async function deliverValidatedConversationReply(input: Readonly<{
+  stream?: ProductConversationStreamCallbacks;
+  role: ProjectAgentRole;
+  content: string;
+  streamedContent: string;
+  signal?: AbortSignal;
+}>): Promise<void> {
+  if (!input.stream) return;
+  if (input.streamedContent) {
+    if (input.streamedContent !== input.content) input.stream.onReplace(input.role, input.content);
+    return;
+  }
+  const characters = [...input.content];
+  for (let offset = 0; offset < characters.length; offset += VALIDATED_REPLY_CHUNK_CHARACTERS) {
+    if (input.signal?.aborted) return;
+    input.stream.onDelta(input.role, characters.slice(offset, offset + VALIDATED_REPLY_CHUNK_CHARACTERS).join(""));
+    if (offset + VALIDATED_REPLY_CHUNK_CHARACTERS < characters.length) {
+      await new Promise(resolve => setTimeout(resolve, 12));
+    }
+  }
+}
 
 export type ConversationImageInput = Readonly<{
   contentType: "image/png" | "image/jpeg" | "image/webp";

@@ -32,6 +32,7 @@ import {
   failedOptimisticConversation,
   initialStreamingConversationReplies,
   optimisticConversation,
+  replaceStreamingConversationReply,
   sendConversationMessageStream,
   startStreamingConversationReply,
   updateStreamingConversationActivity,
@@ -568,6 +569,7 @@ export function ProjectStudio({ projectId }: { projectId: string }) {
         {
           onAgentStart: agentRole => setStreamingReplies(current => startStreamingConversationReply(current, agentRole)),
           onAgentDelta: (agentRole, delta) => setStreamingReplies(current => appendStreamingConversationReply(current, agentRole, delta)),
+          onAgentReplace: (agentRole, replyContent) => setStreamingReplies(current => replaceStreamingConversationReply(current, agentRole, replyContent)),
           onAgentActivity: (agentRole, activity) => setStreamingReplies(current => updateStreamingConversationActivity(current, agentRole, activity)),
           onAgentDevelopmentLog: (agentRole, line) => setStreamingReplies(current => appendStreamingDevelopmentLog(current, agentRole, line)),
           onAgentComplete: agentRole => setStreamingReplies(current => completeStreamingConversationReply(current, agentRole)),

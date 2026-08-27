@@ -25,7 +25,7 @@ export type ProjectRuntimeStatus = ProjectRuntimeIdentity & Readonly<{
 export type ProjectRuntimeTurnMode = "PRIMARY" | "READ_ONLY_BRANCH" | "COMPACT";
 
 export type ProjectRuntimeProgressEvent = Readonly<{
-  kind: "ACTIVITY" | "DEVELOPMENT_LOG";
+  kind: "ACTIVITY" | "CONTENT_DELTA" | "DEVELOPMENT_LOG";
   content: string;
 }>;
 
