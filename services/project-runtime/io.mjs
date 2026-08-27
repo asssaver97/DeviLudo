@@ -8,8 +8,11 @@ const turnId = process.argv[3];
 if (!/^[0-9a-f-]{36}$/i.test(turnId ?? "")) throw new Error("Runtime injection turn is invalid");
 const directory = `/run/deviludo/${turnId}`;
 const path = target === "provider" ? `${directory}/provider-credential`
-  : target === "mcp" ? `${directory}/mcp-token` : null;
-const maximum = target === "provider" ? 64 * 1024 : target === "mcp" ? 8 * 1024 : 0;
+  : target === "mcp" ? `${directory}/mcp-token`
+    : target === "models" ? `${directory}/models-cache.json` : null;
+const maximum = target === "provider" ? 64 * 1024
+  : target === "mcp" ? 8 * 1024
+    : target === "models" ? 8 * 1024 * 1024 : 0;
 if (!path) throw new Error("Runtime injection target is not allowed");
 await mkdir(directory, { recursive: true, mode: 0o700 });
 const output = createWriteStream(path, { flags: "w", mode: 0o600 });

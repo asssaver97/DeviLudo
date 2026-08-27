@@ -1,5 +1,36 @@
 import type { AgentProgressEvent, AgentProgressEventKind } from "./contracts";
 
+const AGENT_PROGRESS_DATABASE_CHARACTERS = 4_000;
+
+/**
+ * PostgreSQL rejects NUL and the immutable baseline stores at most 4,000
+ * characters per progress row. Split Agent output across rows instead of
+ * truncating it; adjacent rows are reassembled in order by the renderer.
+ */
+export function agentProgressContentChunks(
+  kind: AgentProgressEventKind,
+  content: string,
+): readonly string[] {
+  const sanitized = content.replaceAll(/\u0000/g, "");
+  if (kind !== "AGENT_OUTPUT") {
+    const normalized = sanitized.trim().slice(0, AGENT_PROGRESS_DATABASE_CHARACTERS);
+    return normalized ? Object.freeze([normalized]) : Object.freeze([]);
+  }
+  if (!sanitized) return Object.freeze([]);
+  const chunks: string[] = [];
+  for (let start = 0; start < sanitized.length;) {
+    let end = Math.min(start + AGENT_PROGRESS_DATABASE_CHARACTERS, sanitized.length);
+    if (end < sanitized.length
+      && /[\uD800-\uDBFF]/u.test(sanitized[end - 1] ?? "")
+      && /[\uDC00-\uDFFF]/u.test(sanitized[end] ?? "")) {
+      end -= 1;
+    }
+    chunks.push(sanitized.slice(start, end));
+    start = end;
+  }
+  return Object.freeze(chunks);
+}
+
 export type AgentProgressDisplayRow = Readonly<{
   sequence: number;
   kind: AgentProgressEventKind;

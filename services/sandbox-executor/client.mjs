@@ -82,7 +82,7 @@ function consumeStreamEvent(action, line, output, execution) {
   if (!line.trim()) return;
   const event = JSON.parse(line);
   if (event.type === "progress" && event.event
-    && ["ACTIVITY", "CONTENT_DELTA", "DEVELOPMENT_LOG"].includes(event.event.kind)
+    && ["RUNTIME_OUTPUT", "ACTIVITY", "CONTENT_DELTA", "DEVELOPMENT_LOG"].includes(event.event.kind)
     && typeof event.event.content === "string") {
     process.stderr.write(`DEVILUDO_RUNTIME_PROGRESS:${JSON.stringify(event.event)}\n`);
     return;

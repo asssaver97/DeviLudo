@@ -5,6 +5,7 @@ import type {
   E2eGoal,
   E2eGoalDelta,
   ProjectAgentRole,
+  ProjectRuntimeRole,
   ProjectDiscoveryReport,
   ProjectDocumentContent,
 } from "@/lib/product/contracts";
@@ -52,13 +53,13 @@ export type ProductConversationGroupReply = ProductConversationAgentReply & Read
 }>;
 
 export type ProductConversationStreamCallbacks = Readonly<{
-  onStart: (role: ProjectAgentRole) => void;
-  onProcess: (role: ProjectAgentRole, event: string) => void;
-  onDelta: (role: ProjectAgentRole, delta: string) => void;
-  onReplace: (role: ProjectAgentRole, content: string) => void;
-  onActivity: (role: ProjectAgentRole, activity: string) => void;
-  onDevelopmentLog: (role: ProjectAgentRole, line: string) => void;
-  onComplete: (role: ProjectAgentRole) => void;
+  onStart: (role: ProjectRuntimeRole) => void;
+  onProcess: (role: ProjectRuntimeRole, event: string) => void;
+  onDelta: (role: ProjectRuntimeRole, delta: string) => void;
+  onReplace: (role: ProjectRuntimeRole, content: string) => void;
+  onActivity: (role: ProjectRuntimeRole, activity: string) => void;
+  onDevelopmentLog: (role: ProjectRuntimeRole, line: string) => void;
+  onComplete: (role: ProjectRuntimeRole) => void;
 }>;
 
 const VALIDATED_REPLY_CHUNK_CHARACTERS = 48;

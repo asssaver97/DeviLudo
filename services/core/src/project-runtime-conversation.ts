@@ -1,4 +1,5 @@
 import {
+  isDevelopmentAuthorization,
   normalizeConversationReplyOptions,
   type ConversationIntentDecision,
   type E2eGoalDelta,
@@ -50,6 +51,9 @@ export function lightweightProjectRuntimeIntent(input: Readonly<{
     return null;
   }
 
+  if (input.hasPendingChange && isDevelopmentAuthorization(message)) {
+    return intentDecision("CONFIRM_CHANGE", "DEVELOPMENT", false, false, "Confirm the pending implementation change and start development.");
+  }
   if (input.hasPendingChange && /^(?:确认|同意|批准|按这个(?:方案)?|执行这个|就这样(?:做)?|都按照建议来|全部采用(?:建议|推荐)|confirm|approve|yes|go ahead|use all (?:recommendations|suggestions))[。.!！\s]*$/iu.test(message)) {
     return intentDecision("CONFIRM_CHANGE", "DESIGN", false, false, "Confirm the pending implementation change.");
   }
@@ -61,6 +65,9 @@ export function lightweightProjectRuntimeIntent(input: Readonly<{
   }
   if (/^(?:继续|恢复|resume|continue)(?:当前)?(?:开发|任务|流程|工作)?[。.!！\s]*$/iu.test(message)) {
     return intentDecision("CONTINUE", "DEVELOPMENT", false, false, "Continue the stopped workflow.");
+  }
+  if (isDevelopmentAuthorization(message)) {
+    return intentDecision("CHANGE_REQUEST", "DEVELOPMENT", true, true, "Start development from the approved current plan.");
   }
 
   const tentative = /(?:能不能|可不可以|是否可以|有没有可能|如果|假如|要是|建议(?:改|调整|增加|删除)|待.+判断|could\s+(?:we|you)|would\s+it|what\s+if|is\s+it\s+possible|suggest(?:ing)?\s+(?:changing|adding|removing))/iu.test(message);

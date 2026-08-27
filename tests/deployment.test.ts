@@ -43,12 +43,16 @@ test("credentials and MCP token are turn-scoped files and are erased after execu
   ]);
   assert.match(supervisor, /inject\(name, request\.turnId, "provider"/);
   assert.match(supervisor, /inject\(name, request\.turnId, "mcp"/);
+  assert.match(supervisor, /inject\(name, request\.turnId, "models"/);
   assert.match(supervisor, /rm", "-rf", `\/run\/deviludo\/\$\{request\.turnId\}`/);
   assert.match(io, /`\/run\/deviludo\/\$\{turnId\}`/);
+  assert.match(io, /target === "models"/);
   assert.match(turn, /await readFile\(credentialFile/);
   assert.match(turn, /rm\(credentialFile, \{ force: true \}\)/);
   assert.match(turn, /codexAuthFile[\s\S]*rm\(codexAuthFile, \{ force: true \}\)/);
   assert.match(turn, /ephemeralCodexHome = `\/run\/deviludo\/\$\{request\.turnId\}\/codex-home`/);
+  assert.match(turn, /model_catalog_json=\$\{modelCatalog\}/);
+  assert.match(turn, /supports_parallel_tool_calls: model\.supports_parallel_tool_calls \?\? false/);
   assert.doesNotMatch(turn, /codexAuthFile = `\$\{stateRoot\}/);
 });
 
@@ -69,6 +73,7 @@ test("compose grants Docker authority only to executord and shares the durable p
   assert.equal(socketMounts.length, 1);
   assert.match(compose, /DEVILUDO_PROJECTS_VOLUME/);
   assert.match(compose, /DEVILUDO_PROJECT_RUNTIME_MCP_GATEWAY: http:\/\/core-api:8080/);
+  assert.match(compose, /DEVILUDO_CODEX_MODELS_CACHE_FILE: \/run\/deviludo-codex\/models_cache\.json/);
   assert.match(compose, /projects-data:\s*\n\s*name:/);
   assert.doesNotMatch(compose, /DEVILUDO_PROJECT_DOCUMENT_IDLE_SECONDS/);
 });

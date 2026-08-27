@@ -3,7 +3,7 @@ import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
-import type { ProductConversationMessage } from "@/lib/product/contracts";
+import { isDevelopmentAuthorization, type ProductConversationMessage } from "@/lib/product/contracts";
 import type { ProjectRuntimeTurnResult } from "@/lib/product/project-runtime";
 import {
   PROJECT_RUNTIME_IDLE_MS,
@@ -154,6 +154,37 @@ test("Design discovery converges after repeated choices or delegated recommendat
 });
 
 test("lightweight Intent routes common messages without a Runtime turn", () => {
+  for (const authorization of [
+    "按此计划开发",
+    "按当前计划开发（推荐）",
+    "按照当前计划开发",
+    "BUILD CURRENT PLAN",
+  ]) {
+    assert.equal(isDevelopmentAuthorization(authorization), true);
+    assert.deepEqual(lightweightProjectRuntimeIntent({
+      content: authorization,
+      hasAttachments: false,
+      hasPendingChange: false,
+    }), {
+      intent: "CHANGE_REQUEST",
+      targetRole: "DEVELOPMENT",
+      explicitExecution: true,
+      actionable: true,
+      summary: "Start development from the approved current plan.",
+    });
+  }
+  assert.equal(isDevelopmentAuthorization("调整当前计划"), false);
+  assert.deepEqual(lightweightProjectRuntimeIntent({
+    content: "按此计划开发",
+    hasAttachments: false,
+    hasPendingChange: true,
+  }), {
+    intent: "CONFIRM_CHANGE",
+    targetRole: "DEVELOPMENT",
+    explicitExecution: false,
+    actionable: false,
+    summary: "Confirm the pending implementation change and start development.",
+  });
   assert.deepEqual(lightweightProjectRuntimeIntent({
     content: "都按照建议来",
     hasAttachments: false,
@@ -308,7 +339,7 @@ test("ready Design replies end with a development plan and localized confirmatio
   assert.doesNotMatch(authorized.content, /是否按照当前计划开发？/u);
 });
 
-test("Runtime progress preserves split JSONL events and exposes live tool activity", () => {
+test("Runtime progress preserves every provider JSONL record without rewriting it", () => {
   const lines: string[] = [];
   const buffer = createRuntimeEventLineBuffer(line => lines.push(line));
   buffer.push('{"delta":{"te');
@@ -331,52 +362,65 @@ test("Runtime progress preserves split JSONL events and exposes live tool activi
     type: "item.completed",
     item: { type: "agent_message", text: "最终文本" },
   }), "最终文本");
-  assert.deepEqual(runtimeProgressEvent(`DEVILUDO_RUNTIME_EVENT:${JSON.stringify({
+  const commandOutput = JSON.stringify({
     type: "item.started",
     item: { type: "command_execution", command: "/bin/bash -lc 'API_KEY=secret npm test'" },
-  })}`, "DEVELOPMENT", "zh"), {
-    kind: "DEVELOPMENT_LOG",
-    content: "正在执行命令：API_KEY=•••• npm test",
   });
-  assert.deepEqual(runtimeProgressEvent(`DEVILUDO_RUNTIME_EVENT:${JSON.stringify({
+  assert.deepEqual(runtimeProgressEvent(`DEVILUDO_RUNTIME_EVENT:${commandOutput}`), {
+    kind: "RUNTIME_OUTPUT",
+    content: `${commandOutput}\n`,
+  });
+  const toolOutput = JSON.stringify({
     type: "item.completed",
     item: { type: "mcp_tool_call", tool: "source_checkpoint_create" },
-  })}`, "DEVELOPMENT", "zh"), {
-    kind: "DEVELOPMENT_LOG",
-    content: "项目工具调用完成：source_checkpoint_create",
   });
-  assert.deepEqual(runtimeProgressEvent(`DEVILUDO_RUNTIME_EVENT:${JSON.stringify({
+  assert.deepEqual(runtimeProgressEvent(`DEVILUDO_RUNTIME_EVENT:${toolOutput}`), {
+    kind: "RUNTIME_OUTPUT",
+    content: `${toolOutput}\n`,
+  });
+  const contextStart = JSON.stringify({
     type: "item.started",
     item: { type: "mcp_tool_call", tool: "context_read" },
-  })}`, "DESIGN", "zh"), {
-    kind: "ACTIVITY",
-    content: "正在读取项目上下文",
   });
-  assert.deepEqual(runtimeProgressEvent(`DEVILUDO_RUNTIME_EVENT:${JSON.stringify({
+  assert.deepEqual(runtimeProgressEvent(`DEVILUDO_RUNTIME_EVENT:${contextStart}`), {
+    kind: "RUNTIME_OUTPUT",
+    content: `${contextStart}\n`,
+  });
+  const contextComplete = JSON.stringify({
     type: "item.completed",
     item: { type: "mcp_tool_call", tool: "context_read" },
-  })}`, "DESIGN", "zh"), {
-    kind: "ACTIVITY",
-    content: "项目上下文读取完成",
   });
-  assert.deepEqual(runtimeProgressEvent(`DEVILUDO_RUNTIME_EVENT:${JSON.stringify({
+  assert.deepEqual(runtimeProgressEvent(`DEVILUDO_RUNTIME_EVENT:${contextComplete}`), {
+    kind: "RUNTIME_OUTPUT",
+    content: `${contextComplete}\n`,
+  });
+  const reasoningStart = JSON.stringify({
     type: "item.started",
     item: { type: "reasoning" },
-  })}`, "TEST", "zh"), {
-    kind: "ACTIVITY",
-    content: "正在思考并整理回复",
+  });
+  assert.deepEqual(runtimeProgressEvent(`DEVILUDO_RUNTIME_EVENT:${reasoningStart}`), {
+    kind: "RUNTIME_OUTPUT",
+    content: `${reasoningStart}\n`,
   });
   assert.deepEqual(runtimeProgressEvent(`DEVILUDO_RUNTIME_EVENT:${JSON.stringify({
     type: "deviludo.content_delta",
     delta: "玩家可见正文",
-  })}`, "DESIGN", "zh"), {
+  })}`), {
     kind: "CONTENT_DELTA",
     content: "玩家可见正文",
   });
-  assert.equal(runtimeProgressEvent(`DEVILUDO_RUNTIME_EVENT:${JSON.stringify({
+  const agentMessage = JSON.stringify({
     type: "item.completed",
     item: { type: "agent_message", text: "I'm using the mandatory design skill." },
-  })}`, "DESIGN", "zh"), null);
+  });
+  assert.deepEqual(runtimeProgressEvent(`DEVILUDO_RUNTIME_EVENT:${agentMessage}`), {
+    kind: "RUNTIME_OUTPUT",
+    content: `${agentMessage}\n`,
+  });
+  assert.deepEqual(runtimeProgressEvent("DEVILUDO_RUNTIME_EVENT:not-json"), {
+    kind: "RUNTIME_OUTPUT",
+    content: "not-json\n",
+  });
 });
 
 test("Project Runtime deletion is idempotent when its Docker container is already absent", async () => {
@@ -614,6 +658,7 @@ test("Core has one Runtime path and controlled task images cannot execute Agent 
   assert.match(turn, /mcp_servers\.deviludo\.env_vars/);
   assert.match(turn, /ephemeralMcpConfig/);
   assert.match(turn, /request\.role === "INTENT"[\s\S]*model_reasoning_effort=low/);
+  assert.match(turn, /child\.stderr\.on\("data"[\s\S]*runtimeErrors\.push\(text\)/);
   assert.doesNotMatch(turn, /--ignore-user-config/);
   assert.match(runtimeService, /workflow\.analysisTurnId !== result\.turnId/);
   assert.match(runtimeService, /normalizeImportedProjectAnalysisReport\(input\.arguments\.analysis\)/);

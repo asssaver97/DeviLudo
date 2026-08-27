@@ -18,10 +18,11 @@ import {
   MAX_CONVERSATION_IMAGE_TOTAL_BYTES,
   normalizeConversationReplyOptions,
   PROJECT_AGENT_ROLES,
+  PROJECT_RUNTIME_ROLES,
   type AgentProgressEvent,
   type ConversationReplyOption,
   type ProductConversationMessage,
-  type ProjectAgentRole,
+  type ProjectRuntimeRole,
 } from "@/lib/product/contracts";
 import {
   streamingConversationReplyIsActive,
@@ -310,7 +311,7 @@ export function ConversationBox({
             </div>
           ) : null}
           {agentProgress?.running ? <AgentProgressPanel progress={agentProgress} /> : null}
-          {sending && showSendingReply && !PROJECT_AGENT_ROLES.some(role => Boolean(streamingReplies[role])) ? (
+          {sending && showSendingReply && !PROJECT_RUNTIME_ROLES.some(role => Boolean(streamingReplies[role])) ? (
             <article className="conversation-box-message assistant is-thinking role-intent">
               <span className="message-avatar">IN</span>
               <div>
@@ -323,7 +324,7 @@ export function ConversationBox({
             </article>
           ) : null}
           {sending && showSendingReply ? (
-            PROJECT_AGENT_ROLES.filter(role => Boolean(streamingReplies[role])).map(role => {
+            PROJECT_RUNTIME_ROLES.filter(role => Boolean(streamingReplies[role])).map(role => {
                 const identity = agentIdentity(role, text);
                 const reply = streamingReplies[role];
                 if (!reply) return null;
@@ -340,7 +341,7 @@ export function ConversationBox({
                       <p>
                         {reply.processEvents.length ? (
                           <span className="conversation-agent-process">
-                            {reply.processEvents.map((event, index) => <span key={`${index}:${event}`}>{event}</span>)}
+                            {reply.processEvents.map((event, index) => <code key={index}>{event}</code>)}
                           </span>
                         ) : null}
                         {reply.content}
@@ -541,7 +542,7 @@ function conversationIntent(metadata: Readonly<Record<string, unknown>>): string
     ? String(intent) : null;
 }
 
-type ConversationDisplayAgentRole = ProjectAgentRole | "ANALYSIS";
+type ConversationDisplayAgentRole = ProjectRuntimeRole;
 
 function messageAgentRole(message: ProductConversationMessage): ConversationDisplayAgentRole {
   const role = message.metadata.agentRole;
@@ -553,6 +554,12 @@ function agentIdentity(
   role: ConversationDisplayAgentRole,
   text: (chinese: string, english: string) => string,
 ): Readonly<{ avatar: string; name: string; shortName: string; responsibility: string }> {
+  if (role === "INTENT") return Object.freeze({
+    avatar: "IN",
+    name: text("DeviLudo 意图 Agent", "DeviLudo Intent Agent"),
+    shortName: text("意图", "INTENT"),
+    responsibility: text("轻量路由", "Lightweight routing"),
+  });
   if (role === "ANALYSIS") return Object.freeze({
     avatar: "AN",
     name: text("DeviLudo 分析 Agent", "DeviLudo Analysis Agent"),

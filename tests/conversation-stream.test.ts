@@ -86,12 +86,16 @@ test("completed tool activity clears immediately and final normalization can rep
   });
 });
 
-test("safe process events remain visible until the authoritative reply replaces them", () => {
+test("raw Runtime output preserves whitespace, duplicates, and every event until the authoritative reply replaces it", () => {
   const started = startStreamingConversationReply(initialStreamingConversationReplies(), "DESIGN");
-  const thinking = appendStreamingConversationProcess(started, "DESIGN", "正在思考并规划下一步");
-  const reading = appendStreamingConversationProcess(thinking, "DESIGN", "正在读取项目上下文");
-  const duplicate = appendStreamingConversationProcess(reading, "DESIGN", "正在读取项目上下文");
-  assert.deepEqual(duplicate.DESIGN?.processEvents, ["正在思考并规划下一步", "正在读取项目上下文"]);
+  const thinking = appendStreamingConversationProcess(started, "DESIGN", "{\"type\":\"item.started\"}\n");
+  const reading = appendStreamingConversationProcess(thinking, "DESIGN", "  raw output with whitespace  \n");
+  const duplicate = appendStreamingConversationProcess(reading, "DESIGN", "  raw output with whitespace  \n");
+  assert.deepEqual(duplicate.DESIGN?.processEvents, [
+    "{\"type\":\"item.started\"}\n",
+    "  raw output with whitespace  \n",
+    "  raw output with whitespace  \n",
+  ]);
   assert.equal(duplicate.DESIGN?.phase, "TYPING");
   const replaced = replaceStreamingConversationReply(duplicate, "DESIGN", "最终设计结论");
   assert.equal(replaced.DESIGN?.content, "最终设计结论");

@@ -154,6 +154,15 @@ export type ConversationIntentDecision = Readonly<{
   summary: string;
 }>;
 
+/** Generated design choices use the same semantics as "build current plan". */
+export function isDevelopmentAuthorization(value: string): boolean {
+  const normalized = value.trim()
+    .replace(/[（(](?:推荐|recommended)[）)]\s*$/iu, "")
+    .replace(/[。.!！?？]+$/u, "")
+    .trim();
+  return /^(?:按(?:照)?(?:此|当前|这个|该)(?:计划|方案)(?:进行)?开发|按照当前需求开发|开始(?:进行)?开发|立即开始开发|确认(?:并)?开始开发|build (?:the )?(?:current|this) plan|start development|develop (?:from|according to) (?:the )?(?:current|this) plan)$/iu.test(normalized);
+}
+
 export type E2eGoal = Readonly<{
   id: string;
   description: string;

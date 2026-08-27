@@ -19,6 +19,7 @@ const secretRoot = process.env.DEVILUDO_EXECUTOR_SECRET_ROOT ?? "/run/deviludo-s
 const projectsRoot = process.env.DEVILUDO_PROJECTS_ROOT ?? "/var/lib/deviludo-projects";
 const projectsVolume = process.env.DEVILUDO_PROJECTS_VOLUME ?? "deviludo-projects";
 const projectRuntimeMcpGateway = process.env.DEVILUDO_PROJECT_RUNTIME_MCP_GATEWAY ?? "http://core-api:8080";
+const codexModelsCacheFile = process.env.DEVILUDO_CODEX_MODELS_CACHE_FILE?.trim() || undefined;
 const projectSources = new ProjectSourceStore(projectsRoot);
 const microvmRuntime = process.env.DEVILUDO_EXECUTOR_MICROVM_RUNTIME ?? "";
 const microvmSmokeImage = process.env.DEVILUDO_EXECUTOR_MICROVM_SMOKE_IMAGE ?? "";
@@ -37,6 +38,7 @@ const projectRuntimes = new ProjectRuntimeSupervisor({
   agentNetwork: process.env.DEVILUDO_EXECUTOR_AGENT_NETWORK ?? "none",
   egressProxy: process.env.DEVILUDO_EXECUTOR_EGRESS_PROXY ?? "",
   mcpGateway: projectRuntimeMcpGateway,
+  codexModelsCacheFile,
   allowlistedImages,
 });
 /**
@@ -47,7 +49,8 @@ type LiveExecution = Readonly<{ abort: () => void; settled: Promise<void> }>;
 const liveExecutions = new Set<LiveExecution>();
 let shuttingDown = false;
 if (!executorId || !identityKeyFile || allowlistedImages.size < 1
-  || !workRoot.startsWith("/var/lib/deviludo-executor") || secretRoot !== "/run/deviludo-secrets") {
+  || !workRoot.startsWith("/var/lib/deviludo-executor") || secretRoot !== "/run/deviludo-secrets"
+  || (codexModelsCacheFile !== undefined && !codexModelsCacheFile.startsWith("/"))) {
   throw new Error("Executor identity, allowlist, and fixed storage roots are required");
 }
 if (process.env.NODE_ENV === "production"

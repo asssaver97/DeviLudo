@@ -22,6 +22,7 @@ import type {
   ProductWorkflowIterationDetail,
   ProductWorkflowIterationSummary,
 } from "@/lib/product/contracts";
+import { isDevelopmentAuthorization } from "@/lib/product/contracts";
 import { readAgentProgressStream } from "@/lib/product/agent-progress-stream";
 import { useLocalInstance } from "./ProductShell";
 import {
@@ -428,7 +429,7 @@ export function ProjectStudio({ projectId }: { projectId: string }) {
                   ? current
                   : Object.freeze({
                     jobId: activeAgentJobId,
-                    events: Object.freeze([...activeEvents, event].slice(-200)),
+                    events: Object.freeze([...activeEvents, event]),
                   });
               });
             },
@@ -648,6 +649,20 @@ export function ProjectStudio({ projectId }: { projectId: string }) {
     } finally {
       setDecidingChange(false);
     }
+  }
+
+  function selectConversationOption(option: string) {
+    if (isDevelopmentAuthorization(option)) {
+      if (project?.pendingImplementationChange) {
+        void decidePendingChange("CONFIRM");
+        return;
+      }
+      if (requirementsReady) {
+        void mutate("approve");
+        return;
+      }
+    }
+    void sendConversationMessage(undefined, option);
   }
 
   async function mutate(path: string, body?: Record<string, unknown>) {
@@ -1243,7 +1258,7 @@ export function ProjectStudio({ projectId }: { projectId: string }) {
                 focusKey={conversationFocusKey}
                 messages={orderedMessages}
                 attachments={conversationImages}
-                onOptionSelect={option => void sendConversationMessage(undefined, option)}
+                onOptionSelect={selectConversationOption}
                 onAttachmentsChange={setConversationImages}
                 onSubmit={sendConversationMessage}
                 onValueChange={setConversationInput}

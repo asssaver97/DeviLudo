@@ -2194,18 +2194,17 @@ function storeConversationImages(
   })));
 }
 
-function initialConversationProcess(language: ResponseLanguage): string {
-  return language === "zh" ? "正在思考并规划下一步" : "Thinking and planning the next step";
-}
-
 function forwardConversationRuntimeProgress(
   stream: ProductConversationStreamCallbacks | undefined,
-  role: ProjectAgentRole,
+  role: ProjectRuntimeRole,
   event: ProjectRuntimeProgressEvent,
 ): Readonly<{ content: string; process: boolean }> {
   if (event.kind === "CONTENT_DELTA") {
-    stream?.onDelta(role, event.content);
-    return Object.freeze({ content: event.content, process: false });
+    return Object.freeze({ content: "", process: false });
+  }
+  if (event.kind === "RUNTIME_OUTPUT") {
+    stream?.onProcess(role, event.content);
+    return Object.freeze({ content: "", process: Boolean(stream) });
   }
   if (event.kind === "ACTIVITY") stream?.onActivity(role, event.content);
   else stream?.onDevelopmentLog(role, event.content);
@@ -2307,6 +2306,7 @@ async function processConversationMessage(input: Readonly<{
       hasPendingChange: false,
     });
     if (!intentDecision) {
+      input.stream?.onStart("INTENT");
       const intentResult = await input.projectRuntime.turn({
         workspaceId: targetWorkspace.id,
         projectId,
@@ -2324,7 +2324,9 @@ async function processConversationMessage(input: Readonly<{
         sourceRevision: null,
         sourceRelativePath: null,
         attachments: command.images,
+        onEvent: event => { forwardConversationRuntimeProgress(input.stream, "INTENT", event); },
       }).catch(error => { throw httpError(424, "INTENT_AGENT_FAILED", error instanceof Error ? error.message : "Intent Agent failed"); });
+      input.stream?.onComplete("INTENT");
       intentDecision = parseProjectRuntimeIntent(intentResult);
     }
     input.onStage?.("RESPONDING");
@@ -2332,10 +2334,6 @@ async function processConversationMessage(input: Readonly<{
     let streamedSpecialistContent = "";
     let hasStreamedSpecialistProcess = false;
     input.stream?.onStart(specialistRole);
-    if (input.stream) {
-      input.stream.onProcess(specialistRole, initialConversationProcess(command.responseLanguage));
-      hasStreamedSpecialistProcess = true;
-    }
     const specialistResult = await input.projectRuntime.turn({
       workspaceId: targetWorkspace.id,
       projectId,
@@ -2462,6 +2460,7 @@ async function processConversationMessage(input: Readonly<{
     hasPendingChange: project.pendingImplementationChange !== null,
   });
   if (!intentDecision) {
+    input.stream?.onStart("INTENT");
     const intentResult = await input.projectRuntime.turn({
       workspaceId: workspace.id,
       projectId,
@@ -2479,7 +2478,9 @@ async function processConversationMessage(input: Readonly<{
       sourceRevision: project.source?.revision ?? null,
       sourceRelativePath: project.source?.relativePath ?? null,
       attachments: command.images,
+      onEvent: event => { forwardConversationRuntimeProgress(input.stream, "INTENT", event); },
     }).catch(error => { throw httpError(424, "INTENT_AGENT_FAILED", error instanceof Error ? error.message : "Intent Agent failed"); });
+    input.stream?.onComplete("INTENT");
     intentDecision = parseProjectRuntimeIntent(intentResult);
   }
   const conversationId = command.conversationId ?? randomUUID();
@@ -2567,9 +2568,14 @@ async function processConversationMessage(input: Readonly<{
         content: rejected
           ? (command.responseLanguage === "zh" ? "已保持当前实现，本次变更不会执行。" : "The current implementation is unchanged; the proposed change was rejected.")
           : (command.responseLanguage === "zh"
-              ? "修改已确认，设计 Agent 将按新需求修订设计与完整验收目标。"
-              : "Change confirmed. The Design Agent will revise the design and complete acceptance goals."),
-        metadata: Object.freeze({ source: "INTENT_AGENT", intentDecision }),
+              ? "已确认当前计划，开始开发。"
+              : "The current plan is confirmed. Development is starting."),
+        metadata: Object.freeze({
+          source: "INTENT_AGENT",
+          agentRole: rejected ? "DESIGN" : "DEVELOPMENT",
+          agentName: rejected ? "DeviLudo Design Agent" : "DeviLudo Development Agent",
+          intentDecision,
+        }),
       })],
       assistantApplyToDraft: false,
       assistantProjectDocument: null,
@@ -2633,10 +2639,6 @@ async function processConversationMessage(input: Readonly<{
   let streamedSpecialistContent = "";
   let hasStreamedSpecialistProcess = false;
   input.stream?.onStart(specialistRole);
-  if (input.stream) {
-    input.stream.onProcess(specialistRole, initialConversationProcess(command.responseLanguage));
-    hasStreamedSpecialistProcess = true;
-  }
   const specialistResult = await input.projectRuntime.turn({
     workspaceId: workspace.id,
     projectId,

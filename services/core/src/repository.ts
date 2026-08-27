@@ -52,6 +52,7 @@ import {
 import { parseResponseLanguage, type ResponseLanguage } from "@/lib/product/response-language";
 import { e2eGoalsDigest, initialE2eGoals, mergeE2eGoals } from "./e2e-goals";
 import type { StoredConversationImage } from "./object-store";
+import { agentProgressContentChunks } from "@/lib/product/agent-progress";
 
 export class CoreRepository {
   constructor(private readonly database: Database) {}
@@ -2182,23 +2183,28 @@ export class CoreRepository {
     kind: AgentProgressEventKind,
     content: string,
   ): Promise<AgentProgressEvent | null> {
-    const sanitized = content.replaceAll(/\u0000/g, "").slice(0, 4_000);
-    const normalized = kind === "AGENT_OUTPUT" ? sanitized : sanitized.trim();
-    if (normalized.length === 0) return null;
+    const chunks = agentProgressContentChunks(kind, content);
+    if (chunks.length === 0) return null;
     return this.database.withWorkspace(job.workspaceId, async client => {
       const result = await client.query<AgentProgressEventRow>(
-        `INSERT INTO deviludo.job_progress_events(
+        `WITH progress(content, ordinal) AS (
+           SELECT value, ordinal
+             FROM unnest($5::text[]) WITH ORDINALITY AS input(value, ordinal)
+         )
+         INSERT INTO deviludo.job_progress_events(
            workspace_id, project_id, workflow_id, job_id, event_kind, content
          )
-         SELECT candidate.workspace_id, candidate.project_id, candidate.workflow_id, candidate.id, $4, $5
+         SELECT candidate.workspace_id, candidate.project_id, candidate.workflow_id, candidate.id, $4, progress.content
            FROM deviludo.jobs candidate
+           CROSS JOIN progress
           WHERE candidate.id = $1::uuid
             AND candidate.lease_token = $2::uuid
             AND candidate.fencing_token = $3::bigint
+          ORDER BY progress.ordinal
          RETURNING sequence::text, job_id::text, event_kind, content, created_at::text`,
-        [job.jobId, job.lease.token, job.lease.fencingToken, kind, normalized],
+        [job.jobId, job.lease.token, job.lease.fencingToken, kind, chunks],
       );
-      return result.rows[0] ? agentProgressEventFromRow(result.rows[0]) : null;
+      return result.rows.at(-1) ? agentProgressEventFromRow(result.rows.at(-1)!) : null;
     });
   }
 

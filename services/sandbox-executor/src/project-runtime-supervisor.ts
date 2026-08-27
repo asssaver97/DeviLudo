@@ -1,7 +1,6 @@
 import { createHash } from "node:crypto";
 import { cp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { dirname, join, resolve, sep } from "node:path";
-import type { ProjectRuntimeRole } from "@/lib/product/contracts";
 import type {
   ProjectRuntimeControlRequest,
   ProjectRuntimeEnsureRequest,
@@ -35,6 +34,7 @@ export class ProjectRuntimeSupervisor {
     agentNetwork: string;
     egressProxy: string;
     mcpGateway: string;
+    codexModelsCacheFile?: string;
     allowlistedImages: ReadonlySet<string>;
   }>) {}
 
@@ -149,6 +149,15 @@ export class ProjectRuntimeSupervisor {
       const provider = Buffer.from(await this.options.resolveSecret(request.credentialRef));
       await this.inject(name, request.turnId, "provider", provider);
       await this.inject(name, request.turnId, "mcp", Buffer.from(request.mcpToken));
+      if (request.runtime === "CODEX_CLI"
+        && new URL(request.baseUrl).hostname === "chatgpt.com"
+        && this.options.codexModelsCacheFile) {
+        const modelsCache = await readFile(this.options.codexModelsCacheFile);
+        if (modelsCache.length < 2 || modelsCache.length > 8 * 1024 * 1024) {
+          throw new Error("Codex models cache file is invalid");
+        }
+        await this.inject(name, request.turnId, "models", modelsCache);
+      }
       const safeRequest = Buffer.from(JSON.stringify({ ...request, credentialRef: undefined, mcpToken: undefined }));
       const output = await this.dockerTurn(name, request, safeRequest, controller.signal, onEvent);
       const result = JSON.parse(output) as ProjectRuntimeTurnResult;
@@ -250,7 +259,7 @@ export class ProjectRuntimeSupervisor {
     await writeFile(marker, JSON.stringify({ sourceRelativePath: request.sourceRelativePath }), { mode: 0o660 });
   }
 
-  private async inject(name: string, turnId: string, target: "provider" | "mcp", value: Buffer): Promise<void> {
+  private async inject(name: string, turnId: string, target: "provider" | "mcp" | "models", value: Buffer): Promise<void> {
     await this.options.docker(["exec", "-i", name, "/usr/local/bin/deviludo-runtime-io", target, turnId], 30_000, value);
   }
 
@@ -277,7 +286,7 @@ export class ProjectRuntimeSupervisor {
           const lines = stderr.split(/\r?\n/);
           stderr = lines.pop() ?? "";
           for (const line of lines) {
-            const event = runtimeProgressEvent(line, request.role, request.responseLanguage);
+            const event = runtimeProgressEvent(line);
             if (event && (event.kind !== "CONTENT_DELTA" || request.mode === "READ_ONLY_BRANCH")) onEvent?.(event);
           }
         },
@@ -357,148 +366,29 @@ export class ProjectRuntimeSupervisor {
 
 export function runtimeProgressEvent(
   line: string,
-  role: ProjectRuntimeRole,
-  language: "en" | "zh" = "en",
 ): ProjectRuntimeProgressEvent | null {
   const prefix = "DEVILUDO_RUNTIME_EVENT:";
   if (!line.startsWith(prefix)) return null;
+  const content = line.slice(prefix.length);
   try {
-    const event = JSON.parse(line.slice(prefix.length)) as Record<string, unknown>;
-    const item = event.item as Record<string, unknown> | undefined;
+    const event = JSON.parse(content) as Record<string, unknown>;
     const eventType = typeof event.type === "string" ? event.type : "";
-    const itemType = typeof item?.type === "string" ? item.type : "";
     if (eventType === "deviludo.content_delta" && typeof event.delta === "string" && event.delta) {
       return progressEvent("CONTENT_DELTA", event.delta);
     }
-    const started = eventType.endsWith(".started") || eventType.endsWith("_start");
-    const completed = eventType.endsWith(".completed") || eventType.endsWith("_stop");
-    if (itemType === "reasoning" || itemType === "thinking") {
-      return thinkingActivityEvent(role, completed, language);
-    }
-    if (itemType === "command_execution" || itemType === "shell_command") {
-      if (role !== "DEVELOPMENT") return activityEvent(role, "work", completed, language);
-      const command = safeCommandSummary(typeof item?.command === "string" ? item.command : "");
-      if (started) return progressEvent("DEVELOPMENT_LOG", language === "zh"
-        ? `正在执行命令${command ? `：${command}` : ""}`
-        : `Running command${command ? `: ${command}` : ""}`);
-      if (completed) {
-        const rawExitCode = item?.exit_code;
-        const exitCode = Number.isInteger(rawExitCode) ? ` ${String(rawExitCode)}` : "";
-        return progressEvent("DEVELOPMENT_LOG", language === "zh"
-          ? `命令执行完成${exitCode ? `（退出码${exitCode}）` : ""}`
-          : `Command completed${exitCode ? ` (exit code${exitCode})` : ""}`);
-      }
-    }
-    if (itemType === "mcp_tool_call" || itemType === "tool_use") {
-      const tool = safeActivityName(item?.tool ?? item?.name);
-      if (role !== "DEVELOPMENT") return toolActivityEvent(role, tool, completed, language);
-      if (started) return progressEvent("DEVELOPMENT_LOG", language === "zh"
-        ? `正在调用项目工具${tool ? `：${tool}` : ""}`
-        : `Calling project tool${tool ? `: ${tool}` : ""}`);
-      if (completed) return progressEvent("DEVELOPMENT_LOG", language === "zh"
-        ? `项目工具调用完成${tool ? `：${tool}` : ""}`
-        : `Project tool completed${tool ? `: ${tool}` : ""}`);
-    }
-    if (itemType === "file_change" && completed && role === "DEVELOPMENT") {
-      return progressEvent("DEVELOPMENT_LOG", language === "zh" ? "已应用源码修改" : "Applied source changes");
-    }
-    const nested = event.event as Record<string, unknown> | undefined;
-    const contentBlock = nested?.content_block as Record<string, unknown> | undefined;
-    if (nested?.type === "content_block_start" && contentBlock?.type === "thinking") {
-      return thinkingActivityEvent(role, false, language);
-    }
-    if (nested?.type === "content_block_start" && contentBlock?.type === "tool_use") {
-      const tool = safeActivityName(contentBlock.name);
-      if (role !== "DEVELOPMENT") return toolActivityEvent(role, tool, false, language);
-      return progressEvent("DEVELOPMENT_LOG", language === "zh"
-        ? `正在调用开发工具${tool ? `：${tool}` : ""}`
-        : `Calling development tool${tool ? `: ${tool}` : ""}`);
-    }
-    if (nested?.type === "content_block_stop" && role !== "DEVELOPMENT") {
-      return progressEvent("ACTIVITY", language === "zh" ? "当前处理步骤已完成" : "Current processing step completed");
-    }
-    // Provider commentary and reasoning are deliberately not forwarded. Live
-    // player-facing text arrives only through the Runtime's dedicated,
-    // structured-content delta event and Core reconciles it with the validated
-    // final reply before completion.
-    return null;
+    // Every provider JSONL record is forwarded byte-for-byte (apart from the
+    // transport prefix and restored line ending). Presentation belongs to the
+    // conversation UI; the Runtime bridge must not summarize or redact it.
+    return progressEvent("RUNTIME_OUTPUT", `${content}\n`);
   } catch {
-    return null;
+    // Preserve malformed provider output too. The final signed Runtime result
+    // remains independently validated, while live output stays lossless.
+    return progressEvent("RUNTIME_OUTPUT", `${content}\n`);
   }
 }
 
 function progressEvent(kind: ProjectRuntimeProgressEvent["kind"], content: string): ProjectRuntimeProgressEvent {
   return Object.freeze({ kind, content });
-}
-
-function activityEvent(
-  role: ProjectRuntimeRole,
-  activity: "context" | "work",
-  completed: boolean,
-  language: "en" | "zh",
-): ProjectRuntimeProgressEvent | null {
-  if (role === "INTENT" || role === "DEVELOPMENT") return null;
-  if (language === "zh") {
-    if (role === "DESIGN" && activity === "context") {
-      return progressEvent("ACTIVITY", completed ? "项目上下文读取完成" : "正在读取项目上下文");
-    }
-    if (role === "DESIGN") return progressEvent("ACTIVITY", completed ? "项目资料检查完成" : "正在检查项目资料");
-    if (role === "TEST") return progressEvent("ACTIVITY", completed ? "项目与验收证据检查完成" : "正在检查项目与验收证据");
-    return progressEvent("ACTIVITY", completed ? "项目分析步骤已完成" : "正在分析项目");
-  }
-  if (role === "DESIGN" && activity === "context") {
-    return progressEvent("ACTIVITY", completed ? "Project context read completed" : "Reading project context");
-  }
-  if (role === "DESIGN") return progressEvent("ACTIVITY", completed ? "Project material review completed" : "Reviewing project materials");
-  if (role === "TEST") return progressEvent("ACTIVITY", completed ? "Project and acceptance evidence review completed" : "Reviewing project and acceptance evidence");
-  return progressEvent("ACTIVITY", completed ? "Project analysis step completed" : "Analyzing project");
-}
-
-function thinkingActivityEvent(
-  role: ProjectRuntimeRole,
-  completed: boolean,
-  language: "en" | "zh",
-): ProjectRuntimeProgressEvent | null {
-  if (role === "INTENT") return null;
-  return progressEvent("ACTIVITY", language === "zh"
-    ? completed ? "阶段性思考已完成" : "正在思考并整理回复"
-    : completed ? "Reasoning step completed" : "Thinking and organizing the response");
-}
-
-function toolActivityEvent(
-  role: ProjectRuntimeRole,
-  tool: string,
-  completed: boolean,
-  language: "en" | "zh",
-): ProjectRuntimeProgressEvent | null {
-  if (isContextRead(tool)) return activityEvent(role, "context", completed, language);
-  if (role === "INTENT" || role === "DEVELOPMENT") return null;
-  if (language === "zh") {
-    return progressEvent("ACTIVITY", completed
-      ? `项目工具调用完成${tool ? `：${tool}` : ""}`
-      : `正在调用项目工具${tool ? `：${tool}` : ""}`);
-  }
-  return progressEvent("ACTIVITY", completed
-    ? `Project tool completed${tool ? `: ${tool}` : ""}`
-    : `Calling project tool${tool ? `: ${tool}` : ""}`);
-}
-
-function isContextRead(tool: string): boolean {
-  return tool === "context_read" || tool.endsWith("__context_read");
-}
-
-function safeActivityName(value: unknown): string {
-  return typeof value === "string" ? value.replaceAll(/[^A-Za-z0-9_.:/-]/g, "").slice(0, 100) : "";
-}
-
-function safeCommandSummary(value: string): string {
-  let command = value.trim().split(/\r?\n/, 1)[0] ?? "";
-  const shell = command.match(/^\/bin\/(?:ba|z)?sh\s+-lc\s+(.+)$/u)?.[1];
-  if (shell) command = shell.replace(/^(['"])(.*)\1$/u, "$2");
-  return command
-    .replace(/\b([A-Za-z_][A-Za-z0-9_]*=)(?:"[^"]*"|'[^']*'|\S+)/gu, "$1••••")
-    .replace(/(--?(?:api[-_]?key|token|password|secret))(?:=|\s+)\S+/giu, "$1=••••")
-    .slice(0, 180);
 }
 
 function validateEnsure(value: ProjectRuntimeEnsureRequest, images: ReadonlySet<string>): void {

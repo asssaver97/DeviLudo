@@ -4,7 +4,7 @@ import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { useEffect, useMemo, useState, type FormEvent } from "react";
 import { cachedValue, clientCacheKeys, loadCached, storeCached } from "@/lib/product/client-cache";
-import type { ImplementationChangeRequest, ProductConversation, ProductProjectSummary } from "@/lib/product/contracts";
+import { isDevelopmentAuthorization, type ImplementationChangeRequest, type ProductConversation, type ProductProjectSummary } from "@/lib/product/contracts";
 import {
   appendStreamingConversationProcess,
   appendStreamingConversationReply,
@@ -214,6 +214,20 @@ export function HomeChat() {
     }
   }
 
+  function selectConversationOption(option: string) {
+    if (isDevelopmentAuthorization(option)) {
+      if (pendingChange) {
+        void confirmPendingChange();
+        return;
+      }
+      if (requirementsReady) {
+        void startDevelopment();
+        return;
+      }
+    }
+    void sendMessage(undefined, option);
+  }
+
   const projectSelector = (
     <div className="homeChat-contextRow">
       <label>
@@ -269,7 +283,7 @@ export function HomeChat() {
       messages={orderedMessages}
       attachments={attachments}
       onAttachmentsChange={setAttachments}
-      onOptionSelect={option => void sendMessage(undefined, option)}
+      onOptionSelect={selectConversationOption}
       onSubmit={sendMessage}
       onValueChange={setContent}
       placeholder={placeholder}

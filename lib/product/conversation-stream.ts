@@ -5,7 +5,7 @@ import type {
   ProductConversation,
   ProductConversationMessage,
   ProductProjectDetail,
-  ProjectAgentRole,
+  ProjectRuntimeRole,
   WorkspaceSummary,
 } from "./contracts";
 
@@ -35,16 +35,16 @@ export type StreamingConversationReply = Readonly<{
   developmentLogs: readonly string[];
 }>;
 
-export type StreamingConversationReplies = Readonly<Partial<Record<ProjectAgentRole, StreamingConversationReply>>>;
+export type StreamingConversationReplies = Readonly<Partial<Record<ProjectRuntimeRole, StreamingConversationReply>>>;
 
 export type ConversationStreamCallbacks = Readonly<{
-  onAgentStart: (agentRole: ProjectAgentRole) => void;
-  onAgentProcess: (agentRole: ProjectAgentRole, event: string) => void;
-  onAgentDelta: (agentRole: ProjectAgentRole, delta: string) => void;
-  onAgentReplace: (agentRole: ProjectAgentRole, content: string) => void;
-  onAgentActivity: (agentRole: ProjectAgentRole, activity: string) => void;
-  onAgentDevelopmentLog: (agentRole: ProjectAgentRole, line: string) => void;
-  onAgentComplete: (agentRole: ProjectAgentRole) => void;
+  onAgentStart: (agentRole: ProjectRuntimeRole) => void;
+  onAgentProcess: (agentRole: ProjectRuntimeRole, event: string) => void;
+  onAgentDelta: (agentRole: ProjectRuntimeRole, delta: string) => void;
+  onAgentReplace: (agentRole: ProjectRuntimeRole, content: string) => void;
+  onAgentActivity: (agentRole: ProjectRuntimeRole, activity: string) => void;
+  onAgentDevelopmentLog: (agentRole: ProjectRuntimeRole, line: string) => void;
+  onAgentComplete: (agentRole: ProjectRuntimeRole) => void;
   onProjectDocument?: (project: ProductProjectDetail) => void;
 }>;
 
@@ -97,27 +97,27 @@ export async function sendConversationMessageStream(
     } catch {
       throw new ConversationStreamError("INVALID_STREAM", "对话服务返回了无效数据");
     }
-    if (event.type === "agent_start" && isProjectAgentRole(event.agentRole)) {
+    if (event.type === "agent_start" && isProjectRuntimeRole(event.agentRole)) {
       callbacks.onAgentStart(event.agentRole);
       return;
     }
     if (event.type === "agent_process" && typeof event.event === "string"
-      && isProjectAgentRole(event.agentRole)) {
+      && isProjectRuntimeRole(event.agentRole)) {
       callbacks.onAgentProcess(event.agentRole, event.event);
       return;
     }
     if (event.type === "agent_delta" && typeof event.delta === "string"
-      && isProjectAgentRole(event.agentRole)) {
+      && isProjectRuntimeRole(event.agentRole)) {
       callbacks.onAgentDelta(event.agentRole, event.delta);
       return;
     }
     if (event.type === "agent_replace" && typeof event.content === "string"
-      && isProjectAgentRole(event.agentRole)) {
+      && isProjectRuntimeRole(event.agentRole)) {
       callbacks.onAgentReplace(event.agentRole, event.content);
       return;
     }
     if (event.type === "agent_activity" && typeof event.activity === "string"
-      && isProjectAgentRole(event.agentRole)) {
+      && isProjectRuntimeRole(event.agentRole)) {
       callbacks.onAgentActivity(event.agentRole, event.activity);
       return;
     }
@@ -126,7 +126,7 @@ export async function sendConversationMessageStream(
       callbacks.onAgentDevelopmentLog(event.agentRole, event.line);
       return;
     }
-    if (event.type === "agent_complete" && isProjectAgentRole(event.agentRole)) {
+    if (event.type === "agent_complete" && isProjectRuntimeRole(event.agentRole)) {
       callbacks.onAgentComplete(event.agentRole);
       return;
     }
@@ -171,7 +171,7 @@ export function initialStreamingConversationReplies(): StreamingConversationRepl
 
 export function startStreamingConversationReply(
   current: StreamingConversationReplies,
-  agentRole: ProjectAgentRole,
+  agentRole: ProjectRuntimeRole,
 ): StreamingConversationReplies {
   return Object.freeze({
     ...current,
@@ -187,16 +187,13 @@ export function startStreamingConversationReply(
 
 export function appendStreamingConversationProcess(
   current: StreamingConversationReplies,
-  agentRole: ProjectAgentRole,
+  agentRole: ProjectRuntimeRole,
   event: string,
 ): StreamingConversationReplies {
   const reply = current[agentRole];
-  const normalized = event.trim();
-  if (!normalized) return current;
+  if (!event) return current;
   const existing = reply?.processEvents ?? [];
-  const processEvents = existing.at(-1) === normalized
-    ? existing
-    : Object.freeze([...existing, normalized].slice(-24));
+  const processEvents = Object.freeze([...existing, event]);
   return Object.freeze({
     ...current,
     [agentRole]: Object.freeze({
@@ -211,7 +208,7 @@ export function appendStreamingConversationProcess(
 
 export function appendStreamingConversationReply(
   current: StreamingConversationReplies,
-  agentRole: ProjectAgentRole,
+  agentRole: ProjectRuntimeRole,
   delta: string,
 ): StreamingConversationReplies {
   const reply = current[agentRole];
@@ -229,7 +226,7 @@ export function appendStreamingConversationReply(
 
 export function replaceStreamingConversationReply(
   current: StreamingConversationReplies,
-  agentRole: ProjectAgentRole,
+  agentRole: ProjectRuntimeRole,
   content: string,
 ): StreamingConversationReplies {
   const reply = current[agentRole];
@@ -247,7 +244,7 @@ export function replaceStreamingConversationReply(
 
 export function updateStreamingConversationActivity(
   current: StreamingConversationReplies,
-  agentRole: ProjectAgentRole,
+  agentRole: ProjectRuntimeRole,
   activity: string,
 ): StreamingConversationReplies {
   const reply = current[agentRole];
@@ -266,7 +263,7 @@ export function updateStreamingConversationActivity(
 
 export function appendStreamingDevelopmentLog(
   current: StreamingConversationReplies,
-  agentRole: ProjectAgentRole,
+  agentRole: ProjectRuntimeRole,
   line: string,
 ): StreamingConversationReplies {
   const reply = current[agentRole];
@@ -287,7 +284,7 @@ export function appendStreamingDevelopmentLog(
 
 export function completeStreamingConversationReply(
   current: StreamingConversationReplies,
-  agentRole: ProjectAgentRole,
+  agentRole: ProjectRuntimeRole,
 ): StreamingConversationReplies {
   const reply = current[agentRole];
   if (!reply) return current;
@@ -301,8 +298,9 @@ export function streamingConversationReplyIsActive(reply: StreamingConversationR
   return reply.phase !== "COMPLETE";
 }
 
-function isProjectAgentRole(value: unknown): value is ProjectAgentRole {
-  return value === "DESIGN" || value === "DEVELOPMENT" || value === "TEST";
+function isProjectRuntimeRole(value: unknown): value is ProjectRuntimeRole {
+  return value === "INTENT" || value === "ANALYSIS" || value === "DESIGN"
+    || value === "DEVELOPMENT" || value === "TEST";
 }
 
 export function optimisticConversation(

@@ -23,6 +23,8 @@ const sessionFile = `${stateRoot}/sessions/${request.role.toLowerCase()}.json`;
 const skillFile = `/opt/deviludo/skills/${request.role.toLowerCase()}/SKILL.md`;
 const credentialFile = process.env.DEVILUDO_PROVIDER_CREDENTIAL_FILE ?? "/run/deviludo/provider-credential";
 const mcpTokenFile = process.env.DEVILUDO_MCP_TOKEN_FILE ?? "/run/deviludo/mcp-token";
+const codexModelsCacheFile = process.env.DEVILUDO_CODEX_MODELS_CACHE_FILE
+  ?? `/run/deviludo/${request.turnId}/models-cache.json`;
 const startedAt = new Date().toISOString();
 const previous = await readJson(sessionFile);
 const nativeSessionId = previous?.nativeSessionId ?? randomUUID();
@@ -107,6 +109,9 @@ if (request.runtime === "CLAUDE_CODE") {
   await prepareCodexHome(ephemeralCodexHome);
   environment.DEVILUDO_CODEX_PROVIDER_API_KEY = credential;
   const official = new URL(request.baseUrl).hostname === "chatgpt.com";
+  const modelCatalog = official
+    ? await installCodexModelsCache(ephemeralCodexHome, codexModelsCacheFile)
+    : null;
   if (official) {
     await mkdir(environment.CODEX_HOME, { recursive: true, mode: 0o700 });
     codexAuthFile = `${environment.CODEX_HOME}/auth.json`;
@@ -138,6 +143,7 @@ if (request.runtime === "CLAUDE_CODE") {
     "--dangerously-bypass-approvals-and-sandbox",
     ...(!writable ? ["--disable", "shell_tool"] : []),
   ];
+  if (modelCatalog) args.push("--config", `model_catalog_json=${modelCatalog}`);
   if (!official) args.push("--config", `model_providers.${provider}.env_key=DEVILUDO_CODEX_PROVIDER_API_KEY`);
   if (request.model !== "account-default") args.push("-m", request.model);
   for (const attachmentPath of request.attachmentPaths) args.push("-i", attachmentPath);
@@ -158,6 +164,7 @@ const result = await run(command, args, environment, input).finally(async () => 
   await Promise.all([
     rm(credentialFile, { force: true }),
     rm(mcpTokenFile, { force: true }),
+    rm(codexModelsCacheFile, { force: true }),
     ...(codexAuthFile ? [rm(codexAuthFile, { force: true })] : []),
     ...(ephemeralMcpConfig ? [rm(ephemeralMcpConfig, { force: true })] : []),
   ]);
@@ -210,12 +217,19 @@ async function run(executable, args, env, stdin) {
       if (finalText) visibleContent.push(finalText);
     }
   });
+  const runtimeErrors = createRuntimeEventLineBuffer(line => {
+    process.stderr.write(`DEVILUDO_RUNTIME_EVENT:${line}\n`);
+  });
   child.stdout.on("data", chunk => {
     const text = decoder.decode(chunk, { stream: true });
     stdout += text;
     runtimeEvents.push(text);
   });
-  child.stderr.on("data", chunk => { stderr += chunk.toString("utf8"); });
+  child.stderr.on("data", chunk => {
+    const text = chunk.toString("utf8");
+    stderr += text;
+    runtimeErrors.push(text);
+  });
   const exitCode = await new Promise((resolve, reject) => {
     child.once("error", reject);
     child.once("close", resolve);
@@ -224,6 +238,7 @@ async function run(executable, args, env, stdin) {
   stdout += trailing;
   runtimeEvents.push(trailing);
   runtimeEvents.flush();
+  runtimeErrors.flush();
   for (const line of stdout.split(/\r?\n/).filter(Boolean)) {
     let event;
     try { event = JSON.parse(line); } catch { continue; }
@@ -297,6 +312,39 @@ async function prepareCodexHome(destination) {
   for (const role of ["intent", "analysis", "design", "development", "test"]) {
     await cp(`/opt/deviludo/skills/${role}`, `${destination}/skills/deviludo-${role}`, { recursive: true });
   }
+}
+
+async function installCodexModelsCache(destination, source) {
+  let serialized;
+  try {
+    serialized = await readFile(source, "utf8");
+  } catch (error) {
+    if (error?.code === "ENOENT") return null;
+    throw error;
+  }
+  const bytes = Buffer.byteLength(serialized);
+  if (bytes < 2 || bytes > 8 * 1024 * 1024) throw new Error("Codex models cache file is invalid");
+  let parsed;
+  try { parsed = JSON.parse(serialized); } catch { throw new Error("Codex models cache file is invalid"); }
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)
+    || !/^\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?$/.test(parsed.client_version ?? "")
+    || !Array.isArray(parsed.models) || parsed.models.length < 1) {
+    throw new Error("Codex models cache file is invalid");
+  }
+  const models = parsed.models.map(model => {
+    if (!model || typeof model !== "object" || Array.isArray(model) || typeof model.slug !== "string") {
+      throw new Error("Codex models cache file is invalid");
+    }
+    if (model.supports_parallel_tool_calls !== undefined
+      && typeof model.supports_parallel_tool_calls !== "boolean") {
+      throw new Error("Codex models cache file is invalid");
+    }
+    return { ...model, supports_parallel_tool_calls: model.supports_parallel_tool_calls ?? false };
+  });
+  await writeFile(`${destination}/models_cache.json`, serialized, { mode: 0o600 });
+  const catalog = `${destination}/model-catalog.json`;
+  await writeFile(catalog, JSON.stringify({ models }), { mode: 0o600 });
+  return catalog;
 }
 
 async function persistCodexSessions(source) {

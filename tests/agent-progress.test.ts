@@ -1,6 +1,10 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { agentProgressDisplayRows, localizedAgentProgressContent } from "../lib/product/agent-progress";
+import {
+  agentProgressContentChunks,
+  agentProgressDisplayRows,
+  localizedAgentProgressContent,
+} from "../lib/product/agent-progress";
 import type { AgentProgressEvent } from "../lib/product/contracts";
 
 function progress(
@@ -40,6 +44,14 @@ test("Agent whitespace survives transport fragment merging", () => {
   ]);
 
   assert.equal(rows[0]?.content, "First sentence. Second sentence.\n\nNew paragraph.");
+});
+
+test("long raw Agent output is split for storage and reconstructed without deletion", () => {
+  const content = `${"a".repeat(3_999)}😀${"b".repeat(4_002)}\n`;
+  const chunks = agentProgressContentChunks("AGENT_OUTPUT", content);
+  assert.equal(chunks.length, 3);
+  assert.equal(chunks.join(""), content);
+  assert.ok(chunks.every(chunk => [...chunk].length <= 4_000));
 });
 
 test("English UI localizes executor phases but preserves Agent-authored output", () => {
