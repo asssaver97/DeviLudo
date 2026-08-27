@@ -93,18 +93,21 @@ async function runDatabaseSmoke(url) {
     `);
     const artifactOwner = artifactOwnerResult.rows[0]?.owner;
     const expectedDefiners = [
-      "acknowledge_host_source_events", "advance_asset_workflows", "claim_asset_generation", "claim_host_admission_event", "claim_job",
-      "claim_local_git_commit", "claim_object_cleanup", "claim_project_cleanup", "claim_project_import_analysis", "cleanup_expired_executor_state",
-      "complete_asset_generation", "complete_host_admission_event", "complete_local_git_commit", "complete_object_cleanup", "complete_project_cleanup",
+      "acknowledge_host_source_events", "advance_asset_workflows", "claim_agent_container_lifecycle", "claim_asset_generation", "claim_host_admission_event", "claim_job",
+      "claim_local_git_commit", "claim_object_cleanup", "claim_paused_agent_container_for_pressure", "claim_project_cleanup", "claim_project_import_analysis", "cleanup_expired_executor_state",
+      "complete_agent_container_lifecycle", "complete_asset_generation", "complete_host_admission_event", "complete_local_git_commit", "complete_object_cleanup", "complete_project_cleanup",
       "enqueue_expired_artifacts", "enqueue_host_source_event",
-      "fail_asset_generation", "fail_host_admission_event", "fail_local_git_commit", "fail_object_cleanup", "fail_project_cleanup",
-      "pull_host_source_events", "reconcile_expired_uploads", "reconcile_host_admission_events", "recover_expired_jobs",
+      "fail_agent_container_lifecycle", "fail_asset_generation", "fail_host_admission_event", "fail_local_git_commit", "fail_object_cleanup", "fail_project_cleanup",
+      "publish_development_agent_message", "pull_host_source_events", "reconcile_expired_uploads", "reconcile_host_admission_events", "recover_expired_jobs",
       "retain_latest_e2e_report",
     ];
     if (JSON.stringify(definers.rows.map(row => row.proname)) !== JSON.stringify(expectedDefiners)
       || !artifactOwner
       || definers.rows.some(row => row.owner !== (row.proname === "retain_latest_e2e_report"
-        ? artifactOwner : "deviludo_claim_executor"))) {
+        ? artifactOwner
+        : row.proname === "publish_development_agent_message"
+          ? "deviludo_conversation_writer"
+          : "deviludo_claim_executor"))) {
       throw new Error("A SECURITY DEFINER function has an unexpected owner or scope");
     }
     await assertFunctionPrivilege(owner, "deviludo_scheduler", "deviludo.cleanup_expired_executor_state()", true);

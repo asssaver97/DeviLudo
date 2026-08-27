@@ -207,5 +207,8 @@ test("local startup returns with E2E preparation in the background and exposes c
   assert.match(startup, /"run", "--rm", "--no-deps", "minio-init"/);
   assert.match(startup, /matchesCachedFingerprint\("projectSources", projectFingerprint\)/);
   assert.match(startup, /matchesCachedFingerprint\("objectStore", objectStoreFingerprint\)/);
+  assert.match(startup, /const projectsVolume = process\.env\.DEVILUDO_PROJECTS_VOLUME\?\.trim\(\) \|\| "deviludo-projects"/);
+  assert.match(startup, /DEVILUDO_PROJECTS_VOLUME: projectsVolume/);
+  assert.match(startup, /fingerprintProjectSources\(\)[\s\S]*"volume",\s*projectsVolume/);
   assert.match(startup, /executeVisible\("docker", \[\s*"compose"/);
 });

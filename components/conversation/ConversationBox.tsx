@@ -90,12 +90,14 @@ export function ConversationBox({
 }: ConversationBoxProps) {
   const { errorText, locale, text } = useLanguage();
   const messageViewport = useRef<HTMLDivElement | null>(null);
+  const composer = useRef<HTMLFormElement | null>(null);
   const textarea = useRef<HTMLTextAreaElement | null>(null);
   const imageInput = useRef<HTMLInputElement | null>(null);
   const imageDragDepth = useRef(0);
   const [imageError, setImageError] = useState<string | null>(null);
   const [imageDropActive, setImageDropActive] = useState(false);
   const followLatestMessage = useRef(true);
+  const hasPrimaryAction = primaryAction !== null && primaryAction !== undefined;
   const latestProgressSequence = agentProgress?.events.at(-1)?.sequence ?? null;
   const latestOptionMessageId = useMemo(() => {
     if (sending) return null;
@@ -122,6 +124,11 @@ export function ConversationBox({
     if (focusKey === undefined || disabled) return;
     textarea.current?.focus();
   }, [disabled, focusKey]);
+
+  useLayoutEffect(() => {
+    if (!hasPrimaryAction) return;
+    composer.current?.scrollIntoView({ block: "nearest" });
+  }, [hasPrimaryAction]);
 
   function handleKeyDown(event: KeyboardEvent<HTMLTextAreaElement>) {
     if (event.key === "Enter" && (event.metaKey || event.ctrlKey)) {
@@ -359,6 +366,7 @@ export function ConversationBox({
           followLatestMessage.current = true;
           onSubmit(event);
         }}
+        ref={composer}
       >
         <span aria-hidden={!imageDropActive} className="conversation-image-drop-hint">
           {text("松开以添加图片", "Drop to attach images")}

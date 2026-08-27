@@ -181,10 +181,10 @@ test("a proposed requirement keeps the document unchanged until confirmation", a
   await page.goto(`/projects/${project.id}`);
 
   const input = page.getByLabel("继续项目会话");
-  await input.fill("确认核心循环以资源管理为主，并加入随机事件。项目说明也要同步。");
+  await input.fill("如果把核心循环改为资源管理并加入随机事件，会有什么影响？请先给出方案。");
   await page.getByRole("button", { name: "发送项目消息" }).click();
 
-  await expect(page.getByText("测试设计 Agent 已结合项目上下文生成回复。", { exact: true })).toBeVisible();
+  await expect(page.locator(".conversation-box-message.role-design").last()).toContainText("测试设计 Agent 已结合项目上下文生成回复。");
   await expect(page.locator(".product-document-sidebar .revision-badge")).toContainText("R1");
   await page.getByRole("button", { name: "确认修改并重跑" }).click();
   await expect(page.getByText("测试设计 Agent 已整理当前游戏需求。", { exact: true })).toBeVisible();
@@ -634,7 +634,7 @@ test("a creator can refine and deliver a game through every Core and platform st
   await page.getByLabel("继续项目会话").fill("玩法目标、操作方式和胜负条件已经确认，请判断是否可以开始开发。");
   await page.getByRole("button", { name: "发送项目消息" }).click();
   await expect(page.getByRole("button", { name: "确认修改并重跑" })).toBeVisible();
-  await expect(page.getByText("测试设计 Agent 已结合项目上下文生成回复。", { exact: true })).toBeVisible();
+  await expect(page.locator(".conversation-box-message.role-design").last()).toContainText("测试设计 Agent 已结合项目上下文生成回复。");
   await expect(page.getByText("CHANGE_REQUEST", { exact: true })).toBeVisible();
   await page.getByRole("button", { name: "确认修改并重跑" }).click();
   // Three isolated platform nodes run concurrently but can spend close to a

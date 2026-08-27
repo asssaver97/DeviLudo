@@ -17,6 +17,7 @@ const execute = promisify(execFile);
 const root = new URL("..", import.meta.url);
 const rootPath = fileURLToPath(root);
 const composeProject = process.env.COMPOSE_PROJECT_NAME?.trim() || "deviludo-local";
+const projectsVolume = process.env.DEVILUDO_PROJECTS_VOLUME?.trim() || "deviludo-projects";
 const startupCacheFile = new URL("../.deviludo/local/startup-cache.json", import.meta.url);
 const startupLockFile = fileURLToPath(new URL("../.deviludo/local/local-up.lock", import.meta.url));
 const startupStartedAt = Date.now();
@@ -175,6 +176,7 @@ const startupCache = await readStartupCache(dockerIdentity);
 let baselineReset = false;
 const baseEnvironment = {
   ...process.env,
+  DEVILUDO_PROJECTS_VOLUME: projectsVolume,
   DEVILUDO_WEB_HOST_PORT: webPort,
   DEVILUDO_CORE_HOST_PORT: corePort,
   DEVILUDO_CORE_BIND_ADDRESS: remoteE2eHost ? "0.0.0.0" : "127.0.0.1",
@@ -832,7 +834,7 @@ async function inspectExecutorSocketPermissions(environment) {
 async function fingerprintProjectSources() {
   const volume = await inspectFormat([
     "volume",
-    `${composeProject}_projects-data`,
+    projectsVolume,
   ], "{{.CreatedAt}}");
   return volume ? digest(["project-sources", volume, "uid=1001", "gid=1001", "mode=2770"]) : null;
 }

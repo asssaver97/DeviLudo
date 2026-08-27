@@ -1,5 +1,6 @@
 import { spawn } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
+import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 import { execFile } from "node:child_process";
 import { GetObjectCommand, PutObjectCommand, S3Client } from "@aws-sdk/client-s3";
@@ -8,6 +9,8 @@ import { getSignedUrl } from "@aws-sdk/s3-request-presigner";
 const execute = promisify(execFile);
 const root = new URL("..", import.meta.url);
 const skipRealWindowE2e = process.env.DEVILUDO_SKIP_NATIVE_E2E === "1";
+const projectsVolume = process.env.DEVILUDO_PROJECTS_VOLUME?.trim() || "deviludo-projects";
+const fixtureSourceDirectory = fileURLToPath(new URL("../fixtures/godot-smoke", import.meta.url));
 const workspaceId = randomUUID();
 const projectId = randomUUID();
 const workflowId = randomUUID();
@@ -16,10 +19,9 @@ const createdKeys = [];
 
 try {
   await minio(["alias", "set", "deviludo-smoke", "http://127.0.0.1:9000", "deviludo-local", "deviludo-local-secret"]);
-  const fixtureImage = await imageId("deviludo-agent-fixture:local");
-  const agentJobId = randomUUID();
+  const specificationJobId = randomUUID();
   const specificationContent = Buffer.from(`${JSON.stringify({
-    vision: "验证本地隔离执行器能够从冻结需求生成并交付可测试的 Godot 游戏。",
+    vision: "验证本地隔离执行器能够从持久化源码构建并交付可测试的 Godot 游戏。",
     coreLoop: [
       "玩家使用键盘完成一轮可重复的时间循环。",
       "游戏必须在关键状态显示清晰的时间循环提示。",
@@ -32,7 +34,7 @@ try {
     revisionNotes: ["本规格仅用于本地执行器端到端 smoke。"],
   }, null, 2)}\n`);
   const specificationDigest = `sha256:${createHash("sha256").update(specificationContent).digest("hex")}`;
-  const specificationKey = `${objectPrefix(agentJobId)}/specification.json`;
+  const specificationKey = `${objectPrefix(specificationJobId)}/specification.json`;
   await localS3().send(new PutObjectCommand({
     Bucket: bucket,
     Key: specificationKey,
@@ -48,50 +50,8 @@ try {
     sha256: specificationDigest,
     sizeBytes: specificationContent.length,
   };
-  const agentPlan = {
-    schemaVersion: "deviludo.sandbox-plan.v2",
-    mode: "RESTRICTED_CONTAINER",
-    workspace: workspacePath(agentJobId),
-    objectPrefix: objectPrefix(agentJobId),
-    vaultPath: vaultPath(agentJobId),
-    agentConfiguration: {
-      runtime: "CLAUDE_CODE",
-      baseUrl: "https://fixture.invalid",
-      model: "fixture",
-      credentialRef: `vault://instance/agent-runtime/api-key/versions/${randomUUID()}`,
-      credentialEnvironmentVariable: "ANTHROPIC_AUTH_TOKEN",
-      environment: {
-        ANTHROPIC_BASE_URL: "https://fixture.invalid",
-        ANTHROPIC_MODEL: "fixture",
-        ANTHROPIC_DEFAULT_OPUS_MODEL: "fixture",
-        ANTHROPIC_DEFAULT_SONNET_MODEL: "fixture",
-        ANTHROPIC_DEFAULT_HAIKU_MODEL: "fixture",
-        CLAUDE_CODE_SUBAGENT_MODEL: "fixture",
-      },
-      revision: 1,
-    },
-    networkPolicy: "AGENT_EGRESS_ALLOWLIST",
-    job: job({
-      jobId: agentJobId,
-      jobKind: "AGENT_TURN",
-      runtimeImage: fixtureImage,
-      requiredCapabilities: ["MICROVM", "NETWORK_POLICY"],
-      inputObjects: [specificationObject],
-      outputContract: { kinds: ["SPECIFICATION"], maxBytes: 134_217_728 },
-      budget: { cpuMillis: 120_000, memoryBytes: 536_870_912, networkBytes: 0 },
-      timeoutSeconds: 120,
-      payload: { fixture: true, publishSourceRevision: 1 },
-    }),
-  };
-  const agentProgress = [];
-  const agentReceiptPromise = runClient(agentPlan, event => {
-    agentProgress.push(event);
-  });
-  const agentReceipt = await agentReceiptPromise;
-  assertReceipt(agentReceipt, ["SPECIFICATION"]);
-  createdKeys.push(...agentReceipt.outputObjects.map(object => object.key));
-  const source = agentReceipt.details?.sourceRevision;
-  if (!source?.relativePath || !source?.digest) throw new Error("Fixture Agent did not publish a persistent source revision");
+  const source = await publishFixtureSource();
+  if (!source?.relativePath || !source?.digest) throw new Error("Fixture source was not published as a persistent revision");
 
   const assetContent = Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M/wHwAF/gL+Avv1AAAAAElFTkSuQmCC", "base64");
   const assetDigest = `sha256:${createHash("sha256").update(assetContent).digest("hex")}`;
@@ -121,7 +81,7 @@ try {
       jobKind: "BUILD",
       runtimeImage: await imageId("deviludo-godot-builder:local"),
       requiredCapabilities: ["RESTRICTED_CONTAINER", "BUILD_TOOLCHAIN"],
-      inputObjects: [...agentReceipt.outputObjects, {
+      inputObjects: [specificationObject, {
         kind: "ASSET",
         assetKey,
         bucket,
@@ -162,12 +122,10 @@ try {
   }
 
   console.log(JSON.stringify({
-    fixtureAgent: {
-      receipt: agentReceipt.schemaVersion,
-      providerCalled: false,
-      simulated: agentReceipt.simulated,
-      progressEvents: agentProgress.length,
-      playerGuidance: "delivered-and-observed",
+    fixtureSource: {
+      revision: source.revision,
+      digest: source.digest,
+      fileCount: source.fileCount,
     },
     build: { receipt: buildReceipt.schemaVersion, simulated: buildReceipt.simulated, materializedAssets: 1 },
     artifact: { kind: build.kind, targetPlatform: build.targetPlatform, sha256: build.sha256, sizeBytes: build.sizeBytes },
@@ -178,7 +136,50 @@ try {
     },
   }));
 } finally {
+  await deleteFixtureSource().catch(() => undefined);
   for (const key of createdKeys) await minio(["rm", "--force", `deviludo-smoke/${bucket}/${key}`]).catch(() => undefined);
+}
+
+async function publishFixtureSource() {
+  return runProjectSourceScript(`
+    const result = await store.publishDirectory({
+      workspaceId: process.env.SMOKE_WORKSPACE_ID,
+      projectId: process.env.SMOKE_PROJECT_ID,
+      revision: 1,
+      directory: "/fixture",
+    });
+    process.stdout.write(JSON.stringify(result));
+  `, true);
+}
+
+async function deleteFixtureSource() {
+  await runProjectSourceScript(`
+    await store.deleteProject(process.env.SMOKE_WORKSPACE_ID, process.env.SMOKE_PROJECT_ID);
+    process.stdout.write(JSON.stringify({ deleted: true }));
+  `, false);
+}
+
+async function runProjectSourceScript(script, mountFixture) {
+  const arguments_ = [
+    "run", "--rm", "--user", "1001:1001", "--entrypoint", "node",
+    "--mount", `type=volume,src=${projectsVolume},dst=/var/lib/deviludo-projects`,
+    "--env", "SMOKE_WORKSPACE_ID", "--env", "SMOKE_PROJECT_ID",
+  ];
+  if (mountFixture) arguments_.push("--mount", `type=bind,src=${fixtureSourceDirectory},dst=/fixture,readonly`);
+  arguments_.push(
+    "deviludo-core:local", "--import", "tsx", "--input-type=module", "--eval",
+    `import projectSources from "./services/core/src/project-sources.ts";
+     const { ProjectSourceStore } = projectSources;
+     const store = new ProjectSourceStore("/var/lib/deviludo-projects");
+     ${script}`,
+  );
+  const result = await execute("docker", arguments_, {
+    cwd: root,
+    timeout: 120_000,
+    maxBuffer: 2 * 1024 * 1024,
+    env: { ...process.env, SMOKE_WORKSPACE_ID: workspaceId, SMOKE_PROJECT_ID: projectId },
+  });
+  return JSON.parse(result.stdout);
 }
 
 function job(input) {

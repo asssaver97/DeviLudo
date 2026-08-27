@@ -95,6 +95,7 @@ test("disposable Core task image handles only Builder and Steam publisher", asyn
   ]);
   assert.match(runner, /jobKind === "BUILD"/);
   assert.match(runner, /jobKind === "STEAM_PUBLISH"/);
+  assert.match(runner, /await import\("\/usr\/local\/lib\/deviludo\/e2e-evidence\.mjs"\)/);
   assert.doesNotMatch(runner, /AGENT_TURN/);
   assert.doesNotMatch(fixture, /AGENT_TURN/);
   assert.match(sandbox, /AGENT_TURN jobs must use the persistent Project Runtime/);

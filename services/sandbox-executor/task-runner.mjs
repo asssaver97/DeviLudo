@@ -76,6 +76,7 @@ async function runGodotBuild(plan) {
 }
 
 async function godotCommand(arguments_) {
+  const { godotErrorLines } = await import("/usr/local/lib/deviludo/e2e-evidence.mjs");
   let result;
   try {
     result = await command("godot", arguments_, godotEnvironment());

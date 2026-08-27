@@ -23,7 +23,7 @@ type Conversation = Readonly<{
 
 const ONE_PIXEL_PNG = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAusB9Y9Zl1sAAAAASUVORK5CYII=";
 
-test("conversation stream emits reply deltas before the persisted result", async ({ stack }) => {
+test("conversation stream emits the authoritative reply before the persisted result", async ({ stack }) => {
   await stack.configureAgent();
   const project = await stack.createProject({
     name: "流式会话验证",
@@ -43,7 +43,7 @@ test("conversation stream emits reply deltas before the persisted result", async
   const agentCompleted = events.filter(event => event.type === "agent_complete");
   const completedAt = events.findIndex(event => event.type === "complete");
   const documentAt = events.findIndex(event => event.type === "project_document");
-  expect(deltas.length).toBeGreaterThan(1);
+  expect(deltas.length).toBeGreaterThanOrEqual(1);
   expect(starts).toEqual([{ type: "agent_start", agentRole: "DESIGN" }]);
   expect(agentCompleted).toEqual([{ type: "agent_complete", agentRole: "DESIGN" }]);
   expect(events.findIndex(event => event.type === "agent_start")).toBeLessThan(events.findIndex(event => event.type === "agent_delta"));
