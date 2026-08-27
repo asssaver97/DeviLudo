@@ -107,7 +107,7 @@ test("validated E2E completion reaches release review without scheduling Steam p
   expect(JSON.stringify(await stack.readProject(project.id))).not.toContain("wrappedToken");
 });
 
-test("recoverable E2E infrastructure failure keeps retrying without sending product work to Development", async ({ stack }) => {
+test("recoverable E2E infrastructure failure retries, then blocks at its attempt limit without returning product work to Development", async ({ stack }) => {
   const { project, nodes } = await prepareE2eStage(stack);
   const queued = projectJob(await stack.readProject(project.id), "E2E_PLATFORM_RUN", "macos");
   await stack.updateJob(queued.id, "two-attempts");
@@ -124,13 +124,15 @@ test("recoverable E2E infrastructure failure keeps retrying without sending prod
   const terminalFailure = await fail(stack, second, "deterministic executor failure again");
   expect(terminalFailure.ok()).toBeTruthy();
 
-  const waiting = await stack.waitForProject(project.id, value => value.jobs.some(job => (
-    job.id === first.jobId && job.state === "RETRY" && job.attempt === 2
+  const blocked = await stack.waitForProject(project.id, value => value.jobs.some(job => (
+    job.id === first.jobId && job.state === "FAILED" && job.attempt === 2
   )));
-  expect(waiting.workflowState).toBe("TESTING");
-  const retryingJob = waiting.jobs.find(job => job.id === first.jobId);
-  expect(retryingJob).toMatchObject({ state: "RETRY", attempt: 2 });
-  expect(retryingJob?.lastError).toContain("again");
+  expect(blocked.workflowState).toBe("BLOCKED");
+  const failedJob = blocked.jobs.find(job => job.id === first.jobId);
+  expect(failedJob).toMatchObject({ state: "FAILED", attempt: 2 });
+  expect(failedJob?.lastError).toContain("again");
+  expect(blocked.jobs.filter(job => job.kind === "AGENT_TURN" && job.agentRole === "DEVELOPMENT")).toHaveLength(1);
+  expect(blocked.events.some(event => event.kind === "JOB_FAILED" && event.data.jobId === first.jobId)).toBe(true);
 
   const staleCompletion = await completeResponse(stack, first);
   expect(staleCompletion.status()).toBe(400);
