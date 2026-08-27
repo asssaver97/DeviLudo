@@ -185,21 +185,31 @@ export async function runSandbox(
             } : null,
           });
           const responseLanguage = responseLanguageFromJob(job, initializedContext.language);
+          let hasStreamedContent = false;
           const runtimeResult = await projectRuntime.turn({
             workspaceId: job.workspaceId, projectId: job.projectId, role, mode: "PRIMARY",
             prompt: runtimeJobPrompt(job, role), responseLanguage, settings,
             sourceRevision: project.source?.revision ?? null,
             sourceRelativePath: project.source?.relativePath ?? null,
             onEvent: event => {
-              if (event.kind === "CONTENT_DELTA" || !event.content) return;
+              if (!event.content) return;
+              const content = event.kind === "CONTENT_DELTA"
+                ? `${JSON.stringify({ type: "deviludo.content_delta", delta: event.content })}\n`
+                : event.content;
+              const contentDelta = event.kind === "CONTENT_DELTA";
               progressWrites = progressWrites
-                .then(() => repository.appendJobProgress(job as JobProtocolV4, "AGENT_OUTPUT", event.content))
+                .then(async () => {
+                  await repository.appendJobProgress(job as JobProtocolV4, "AGENT_OUTPUT", content);
+                  hasStreamedContent ||= contentDelta;
+                })
                 .then(() => undefined)
                 .catch(() => undefined);
             },
           });
           await progressWrites;
-          await repository.appendJobProgress(job, "AGENT_OUTPUT", runtimeResult.content);
+          if (!hasStreamedContent) {
+            await repository.appendJobProgress(job, "AGENT_OUTPUT", runtimeResult.content);
+          }
           const context = await projectRuntime.readContext(job.workspaceId, job.projectId);
           if (role === "DEVELOPMENT") {
             const inputRevision = Number(job.payload.sourceRevision ?? 0);

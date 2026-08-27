@@ -341,7 +341,7 @@ export function ConversationBox({
                       <p>
                         {reply.processEvents.length ? (
                           <span className="conversation-agent-process">
-                            {reply.processEvents.map((event, index) => <code key={index}>{event}</code>)}
+                            {reply.processEvents.join("")}
                           </span>
                         ) : null}
                         {reply.content}

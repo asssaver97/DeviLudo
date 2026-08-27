@@ -8,6 +8,7 @@ import type {
   ProjectRuntimeRole,
   WorkspaceSummary,
 } from "./contracts";
+import { runtimeOutputText } from "./runtime-output";
 
 export type ConversationStreamResult = Readonly<{
   workspace: WorkspaceSummary;
@@ -191,9 +192,10 @@ export function appendStreamingConversationProcess(
   event: string,
 ): StreamingConversationReplies {
   const reply = current[agentRole];
-  if (!event) return current;
+  const rendered = runtimeOutputText(event);
+  if (!rendered) return current;
   const existing = reply?.processEvents ?? [];
-  const processEvents = Object.freeze([...existing, event]);
+  const processEvents = Object.freeze([...existing, rendered]);
   return Object.freeze({
     ...current,
     [agentRole]: Object.freeze({

@@ -2200,7 +2200,8 @@ function forwardConversationRuntimeProgress(
   event: ProjectRuntimeProgressEvent,
 ): Readonly<{ content: string; process: boolean }> {
   if (event.kind === "CONTENT_DELTA") {
-    return Object.freeze({ content: "", process: false });
+    stream?.onProcess(role, event.content);
+    return Object.freeze({ content: event.content, process: Boolean(stream && event.content) });
   }
   if (event.kind === "RUNTIME_OUTPUT") {
     stream?.onProcess(role, event.content);

@@ -86,15 +86,20 @@ test("completed tool activity clears immediately and final normalization can rep
   });
 });
 
-test("raw Runtime output preserves whitespace, duplicates, and every event until the authoritative reply replaces it", () => {
+test("Runtime process rendering extracts text and ignores JSON-only transport events", () => {
   const started = startStreamingConversationReply(initialStreamingConversationReplies(), "DESIGN");
   const thinking = appendStreamingConversationProcess(started, "DESIGN", "{\"type\":\"item.started\"}\n");
-  const reading = appendStreamingConversationProcess(thinking, "DESIGN", "  raw output with whitespace  \n");
-  const duplicate = appendStreamingConversationProcess(reading, "DESIGN", "  raw output with whitespace  \n");
+  assert.deepEqual(thinking.DESIGN?.processEvents, []);
+  assert.equal(thinking.DESIGN?.phase, "THINKING");
+  const reasoningEvent = `${JSON.stringify({
+    type: "item.completed",
+    item: { type: "reasoning", text: "先检查核心循环。" },
+  })}\n`;
+  const reading = appendStreamingConversationProcess(thinking, "DESIGN", reasoningEvent);
+  const duplicate = appendStreamingConversationProcess(reading, "DESIGN", reasoningEvent);
   assert.deepEqual(duplicate.DESIGN?.processEvents, [
-    "{\"type\":\"item.started\"}\n",
-    "  raw output with whitespace  \n",
-    "  raw output with whitespace  \n",
+    "先检查核心循环。\n",
+    "先检查核心循环。\n",
   ]);
   assert.equal(duplicate.DESIGN?.phase, "TYPING");
   const replaced = replaceStreamingConversationReply(duplicate, "DESIGN", "最终设计结论");

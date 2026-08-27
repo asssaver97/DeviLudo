@@ -91,7 +91,7 @@ test("persistent Runtime intent selects exactly one role and rejects contradicto
   }), /Each option object needs a concise label and one short description/);
 });
 
-test("Design discovery converges after repeated choices or delegated recommendations", () => {
+test("Design discovery converges only after the player explicitly delegates remaining decisions", () => {
   const question = (id: string, label: string): ProductConversationMessage => Object.freeze({
     id,
     role: "ASSISTANT",
@@ -119,19 +119,15 @@ test("Design discovery converges after repeated choices or delegated recommendat
     question("q1", "方向 A（推荐）"),
     player("u1", "方向 A（推荐）"),
     question("q2", "规则 B（推荐）"),
-  ], "规则 B（推荐）"), {
-    consecutiveChoiceTurns: 2,
-    consecutiveRecommendedSelections: 2,
-    mustConverge: true,
-  });
+  ], "规则 B（推荐）"), { remainingDecisionsDelegated: false });
   assert.equal(designConversationConvergence([
     question("q1", "A（推荐）"), player("u1", "自定义 A"),
     question("q2", "B（推荐）"), player("u2", "自定义 B"),
     question("q3", "C（推荐）"),
-  ], "自定义 C").mustConverge, true);
+  ], "自定义 C").remainingDecisionsDelegated, false);
   assert.equal(designConversationConvergence([
     question("q1", "A（推荐）"),
-  ], "都按照建议来").mustConverge, true);
+  ], "都按照建议来").remainingDecisionsDelegated, true);
 
   const forcedPrompt = projectRuntimeSpecialistPrompt({
     intent: Object.freeze({
@@ -144,13 +140,27 @@ test("Design discovery converges after repeated choices or delegated recommendat
     content: "继续",
     confirmed: false,
     designConvergence: Object.freeze({
-      consecutiveChoiceTurns: 3,
-      consecutiveRecommendedSelections: 1,
-      mustConverge: true,
+      remainingDecisionsDelegated: true,
     }),
   });
   assert.match(forcedPrompt, /Do not ask another question/);
   assert.match(forcedPrompt, /set readyForDevelopment=true in this turn/);
+
+  const openPrompt = projectRuntimeSpecialistPrompt({
+    intent: Object.freeze({
+      intent: "CHANGE_REQUEST",
+      targetRole: "DESIGN",
+      explicitExecution: false,
+      actionable: true,
+      summary: "Continue resolving the game design.",
+    }),
+    content: "规则 B（推荐）",
+    confirmed: false,
+    designConvergence: Object.freeze({
+      remainingDecisionsDelegated: false,
+    }),
+  });
+  assert.match(openPrompt, /no automatic turn-count or recommended-selection convergence threshold/);
 });
 
 test("lightweight Intent routes common messages without a Runtime turn", () => {

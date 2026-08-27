@@ -46,6 +46,21 @@ test("Agent whitespace survives transport fragment merging", () => {
   assert.equal(rows[0]?.content, "First sentence. Second sentence.\n\nNew paragraph.");
 });
 
+test("Agent progress renders model text instead of provider JSON", () => {
+  const rows = agentProgressDisplayRows([
+    progress(1, "AGENT_OUTPUT", `${JSON.stringify({ type: "thread.started", thread_id: "private-thread" })}\n`),
+    progress(2, "AGENT_OUTPUT", `${JSON.stringify({
+      type: "item.completed",
+      item: { type: "reasoning", text: "正在核对玩法约束。" },
+    })}\n`),
+    progress(3, "AGENT_OUTPUT", `${JSON.stringify({ type: "turn.completed", usage: { input_tokens: 42 } })}\n`),
+  ]);
+
+  assert.deepEqual(rows.map(row => [row.kind, row.content]), [
+    ["AGENT_OUTPUT", "正在核对玩法约束。\n"],
+  ]);
+});
+
 test("long raw Agent output is split for storage and reconstructed without deletion", () => {
   const content = `${"a".repeat(3_999)}😀${"b".repeat(4_002)}\n`;
   const chunks = agentProgressContentChunks("AGENT_OUTPUT", content);

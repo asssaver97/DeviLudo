@@ -1,4 +1,5 @@
 import type { AgentProgressEvent, AgentProgressEventKind } from "./contracts";
+import { runtimeOutputText } from "./runtime-output";
 
 const AGENT_PROGRESS_DATABASE_CHARACTERS = 4_000;
 
@@ -61,7 +62,11 @@ export function agentProgressDisplayRows(
       content: event.content,
     }));
   }
-  return Object.freeze(rows);
+  return Object.freeze(rows.flatMap(row => {
+    if (row.kind !== "AGENT_OUTPUT") return [row];
+    const content = runtimeOutputText(row.content);
+    return content ? [Object.freeze({ ...row, content })] : [];
+  }));
 }
 
 /** Translate executor-owned status copy without rewriting Agent-authored output. */

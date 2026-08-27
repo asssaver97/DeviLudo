@@ -3681,21 +3681,13 @@ textarea {
 }
 
 .conversation-agent-process {
-  display: grid;
-  gap: 0.35rem;
-  margin-bottom: 0.45rem;
-}
-
-.conversation-agent-process > code {
-  background: color-mix(in srgb, var(--blue) 5%, #080f19);
-  border-left: 2px solid color-mix(in srgb, var(--blue) 55%, transparent);
   color: var(--muted);
   display: block;
-  font: 0.78em/1.55 var(--font-geist-mono), monospace;
+  font: inherit;
+  margin-bottom: 0.45rem;
   max-height: 18rem;
   overflow: auto;
-  padding: 0.35rem 0.55rem;
-  tab-size: 2;
+  padding-right: 0.35rem;
   white-space: pre-wrap;
   word-break: break-word;
 }

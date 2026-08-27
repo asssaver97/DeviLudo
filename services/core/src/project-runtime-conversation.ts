@@ -146,9 +146,9 @@ export function projectRuntimeSpecialistPrompt(input: Readonly<{
 }>): string {
   const convergenceInstruction = input.intent.intent === "CHANGE_REQUEST"
     && input.intent.targetRole === "DESIGN" && input.designConvergence
-    ? input.designConvergence.mustConverge
-      ? `Core Design convergence gate: ${input.designConvergence.consecutiveChoiceTurns} consecutive choice turns and ${input.designConvergence.consecutiveRecommendedSelections} consecutive recommended selections have already occurred. The discovery budget is exhausted. Do not ask another question and return options=[]. Treat every remaining reversible detail as delegated, choose coherent defaults, label tunable assumptions and risks, produce the complete document patch and E2E goal delta, and set readyForDevelopment=true in this turn.`
-      : `Design discovery progress: ${input.designConvergence.consecutiveChoiceTurns} of 3 consecutive choice turns used; ${input.designConvergence.consecutiveRecommendedSelections} consecutive recommended selections. Ask only a still-unresolved core direction. Bundle coupled details and complete the proposal before the budget is exhausted.`
+    ? input.designConvergence.remainingDecisionsDelegated
+      ? "Core Design delegation signal: the player explicitly delegated all remaining reversible decisions. Do not ask another question and return options=[]. Choose coherent defaults, label tunable assumptions and risks, produce the complete document patch and E2E goal delta, and set readyForDevelopment=true in this turn."
+      : "Design discovery has no automatic turn-count or recommended-selection convergence threshold. Ask another high-leverage question whenever a genuinely unresolved player decision would materially change the design. Bundle coupled details and do not ask about reversible tunables."
     : "";
   return [
     input.intent.intent === "QUESTION"
@@ -172,63 +172,20 @@ export function projectRuntimeSpecialistPrompt(input: Readonly<{
 }
 
 export type DesignConversationConvergence = Readonly<{
-  consecutiveChoiceTurns: number;
-  consecutiveRecommendedSelections: number;
-  mustConverge: boolean;
+  remainingDecisionsDelegated: boolean;
 }>;
 
 /**
- * Track the current Design discovery run from persisted conversation metadata.
- * The current player message is supplied separately because Core computes this
- * state before appending the new turn.
+ * Recognize only an explicit delegation of the remaining Design decisions.
+ * Choice-turn counts and repeated recommended selections intentionally have no
+ * effect on convergence.
  */
 export function designConversationConvergence(
-  messages: readonly ProductConversationMessage[],
+  _messages: readonly ProductConversationMessage[],
   currentPlayerMessage = "",
 ): DesignConversationConvergence {
-  let consecutiveChoiceTurns = 0;
-  let consecutiveRecommendedSelections = 0;
-  let recommendedLabel: string | null = null;
-
-  const consumePlayerSelection = (content: string) => {
-    if (!recommendedLabel) return;
-    const normalized = normalizeSelection(content);
-    const delegated = /^(?:都|全部|全都).*(?:按照|采用|接受).*(?:建议|推荐)|(?:按照|采用|接受).*(?:全部|所有).*(?:建议|推荐)|按(?:你|当前)的?(?:建议|推荐|方案)(?:来|做)?|你来决定|use all (?:recommendations|suggestions)|follow (?:your|the) (?:recommendations|plan)$/iu.test(normalized);
-    consecutiveRecommendedSelections = delegated
-      ? Math.max(2, consecutiveRecommendedSelections + 1)
-      : normalized === normalizeSelection(recommendedLabel)
-        ? consecutiveRecommendedSelections + 1
-        : 0;
-    recommendedLabel = null;
-  };
-
-  for (const message of messages) {
-    if (message.role === "USER") {
-      consumePlayerSelection(message.content);
-      continue;
-    }
-    const metadata = message.metadata;
-    const options = Array.isArray(metadata.options) ? metadata.options : [];
-    const firstOption = options[0];
-    const firstLabel = firstOption && typeof firstOption === "object" && !Array.isArray(firstOption)
-      && typeof (firstOption as Readonly<Record<string, unknown>>).label === "string"
-      ? String((firstOption as Readonly<Record<string, unknown>>).label)
-      : null;
-    if (metadata.agentRole !== "DESIGN" || metadata.readyForDevelopment === true || !firstLabel) {
-      consecutiveChoiceTurns = 0;
-      consecutiveRecommendedSelections = 0;
-      recommendedLabel = null;
-      continue;
-    }
-    consecutiveChoiceTurns += 1;
-    recommendedLabel = firstLabel;
-  }
-  consumePlayerSelection(currentPlayerMessage);
-
   return Object.freeze({
-    consecutiveChoiceTurns,
-    consecutiveRecommendedSelections,
-    mustConverge: consecutiveChoiceTurns >= 3 || consecutiveRecommendedSelections >= 2,
+    remainingDecisionsDelegated: /^(?:(?:都|全部|全都).*(?:按照|采用|接受).*(?:建议|推荐)(?:来|做)?|(?:按照|采用|接受).*(?:全部|所有).*(?:建议|推荐)(?:来|做)?|按(?:你|当前)的?(?:建议|推荐|方案)(?:来|做)?|你来决定|由你决定|你定|use all (?:recommendations|suggestions)|follow (?:your|the) (?:recommendations|plan)|you decide)$/iu.test(normalizeSelection(currentPlayerMessage)),
   });
 }
 
