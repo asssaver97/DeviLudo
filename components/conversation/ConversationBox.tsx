@@ -38,7 +38,11 @@ type ConversationBoxProps = Readonly<{
   messages: readonly ProductConversationMessage[];
   sending: boolean;
   streamingReplies: StreamingConversationReplies;
-  agentProgress?: Readonly<{ running: boolean; events: readonly AgentProgressEvent[] }>;
+  agentProgress?: Readonly<{
+    running: boolean;
+    role: ConversationDisplayAgentRole;
+    events: readonly AgentProgressEvent[];
+  }>;
   showSendingReply?: boolean;
   value: string;
   attachments: readonly ConversationImageDraft[];
@@ -100,13 +104,11 @@ export function ConversationBox({
   const hasPrimaryAction = primaryAction !== null && primaryAction !== undefined;
   const latestProgressSequence = agentProgress?.events.at(-1)?.sequence ?? null;
   const latestOptionMessageId = useMemo(() => {
-    if (sending) return null;
-    for (let index = messages.length - 1; index >= 0; index -= 1) {
-      const message = messages[index];
-      if (message.role === "ASSISTANT" && conversationOptions(message.metadata).length > 0) return message.id;
-    }
-    return null;
-  }, [messages, sending]);
+    if (sending || agentProgress?.running) return null;
+    const latestMessage = messages.at(-1);
+    return latestMessage?.role === "ASSISTANT" && conversationOptions(latestMessage.metadata).length > 0
+      ? latestMessage.id : null;
+  }, [agentProgress?.running, messages, sending]);
 
   useLayoutEffect(() => {
     followLatestMessage.current = true;
@@ -446,12 +448,17 @@ function formatMessageCompletedAt(timestamp: string, locale: "zh" | "en", full =
 
 function AgentProgressPanel({
   progress,
-}: Readonly<{ progress: Readonly<{ running: boolean; events: readonly AgentProgressEvent[] }> }>) {
+}: Readonly<{ progress: Readonly<{
+  running: boolean;
+  role: ConversationDisplayAgentRole;
+  events: readonly AgentProgressEvent[];
+}> }>) {
   const { locale, text } = useLanguage();
   const viewportRef = useRef<HTMLDivElement | null>(null);
   const followLatest = useRef(true);
   const rows = useMemo(() => agentProgressDisplayRows(progress.events), [progress.events]);
   const jobId = progress.events.at(-1)?.jobId ?? null;
+  const identity = agentIdentity(progress.role, text);
 
   useLayoutEffect(() => {
     followLatest.current = true;
@@ -466,12 +473,12 @@ function AgentProgressPanel({
   }, [progress.running, rows]);
 
   return (
-    <article aria-live="polite" className="conversation-box-message assistant agent-generation-progress">
-      <span className="message-avatar">RUN</span>
+    <article aria-live="polite" className={`conversation-box-message assistant agent-generation-progress role-${progress.role.toLowerCase()}`}>
+      <span className="message-avatar">{identity.avatar}</span>
       <div>
         <header>
-          <b>{text("游戏生成进度", "Game generation progress")}</b>
-          <span className="conversation-box-applied">{text("生成中", "RUNNING")}</span>
+          <b>{identity.name}</b>
+          <span className="conversation-agent-working">{text("正在工作", "Working")}</span>
         </header>
         <div
           className="agent-generation-progress-events"

@@ -272,6 +272,8 @@ export type ProjectSourceRevision = Readonly<{
 export type ProductJob = Readonly<{
   id: string;
   kind: string;
+  agentRole?: ProjectRuntimeRole | null;
+  agentPurpose?: string | null;
   poolKind: string;
   targetOperatingSystem: string | null;
   state: string;

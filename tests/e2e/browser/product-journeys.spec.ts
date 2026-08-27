@@ -219,19 +219,32 @@ test("the project chat streams Agent progress, answers questions, and confirms i
     name: "生成进度控制台",
     concept: "验证玩家可以在开发 Agent 工作时查看输出、提问并确认实现调整。",
   });
+  const conversationId = randomUUID();
   const jobId = randomUUID();
   await stack.executeSql(`
+    INSERT INTO deviludo.project_conversations(workspace_id, id, project_id, mode, title)
+    VALUES (
+      '${project.workspaceId}'::uuid, '${conversationId}'::uuid, '${project.id}'::uuid,
+      'PROJECT_FEEDBACK', '开发任务选项失效验证'
+    );
+    INSERT INTO deviludo.conversation_messages(workspace_id, conversation_id, role, content, metadata)
+    VALUES (
+      '${project.workspaceId}'::uuid, '${conversationId}'::uuid, 'ASSISTANT',
+      '设计已经完成，是否按照当前计划开发？',
+      '{"agentRole":"DESIGN","options":[{"label":"按当前计划开发（推荐）","description":"开始实现"},{"label":"调整首轮方案","description":"继续设计"}]}'::jsonb
+    );
     UPDATE deviludo.workflow_instances
-       SET state = 'DEVELOPING', updated_at = clock_timestamp()
+       SET state = 'BUILDING', updated_at = clock_timestamp()
      WHERE id = '${project.workflowId}'::uuid;
     INSERT INTO deviludo.jobs(
       workspace_id, id, workflow_id, project_id, kind, pool_kind,
       required_capabilities, exclusive, runtime_image, output_contract,
-      state, idempotency_key, lease_owner, lease_token, lease_expires_at, fencing_token
+      payload, state, idempotency_key, lease_owner, lease_token, lease_expires_at, fencing_token
     ) VALUES (
       '${project.workspaceId}'::uuid, '${jobId}'::uuid, '${project.workflowId}'::uuid, '${project.id}'::uuid,
       'AGENT_TURN', 'CORE', ARRAY['MICROVM','NETWORK_POLICY'], false,
       'sha256:${"b".repeat(64)}', '{"kinds":["SPECIFICATION"],"maxBytes":1073741824}'::jsonb,
+      '{"role":"DEVELOPMENT","purpose":"DEVELOPMENT"}'::jsonb,
       'RUNNING', 'browser-agent-progress', 'browser-held-agent', gen_random_uuid(),
       clock_timestamp() + interval '1 hour', 1
     );
@@ -246,8 +259,10 @@ test("the project chat streams Agent progress, answers questions, and confirms i
   await page.goto(`/projects/${project.id}`);
   const messageViewport = page.locator(".conversation-box-messages");
   const liveProgress = messageViewport.locator(".agent-generation-progress");
-  await expect(liveProgress.getByText("游戏生成进度", { exact: true })).toBeVisible();
+  await expect(liveProgress.getByText("DeviLudo 开发 Agent", { exact: true })).toBeVisible();
+  await expect(liveProgress.getByText("正在工作", { exact: true })).toBeVisible();
   await expect(liveProgress).toHaveCount(1);
+  await expect(page.getByRole("group", { name: "可选回复" })).toHaveCount(0);
   await expect(page.getByText("正在分析项目结构", { exact: true })).toBeVisible();
   const progressOutput = page.locator(".agent-generation-progress-events .progress-agent_output");
   await expect(progressOutput).toHaveCount(1);
@@ -429,7 +444,7 @@ test("game generation progress is a chronological chat message and resets betwee
   await page.goto(`/projects/${project.id}`);
   const messageViewport = page.locator(".conversation-box-messages");
   const liveProgress = messageViewport.locator(".agent-generation-progress");
-  await expect(liveProgress.getByText("游戏生成进度", { exact: true })).toBeVisible();
+  await expect(liveProgress.getByText("DeviLudo 开发 Agent", { exact: true })).toBeVisible();
   await expect(liveProgress).toContainText("第一轮生成进度");
   await expect(liveProgress).toHaveCount(1);
   await expect.poll(() => messageViewport.evaluate(element => (

@@ -1523,7 +1523,9 @@ export class CoreRepository {
       if (!row || !row.workflow_id) return null;
       const [jobs, events, document, documentRevisions, pendingChange, goalRevision] = await Promise.all([
         client.query<ProductJobRow>(
-          `SELECT id::text, kind::text, pool_kind::text, target_operating_system::text,
+          `SELECT id::text, kind::text, payload->>'role' AS agent_role,
+                  payload->>'purpose' AS agent_purpose,
+                  pool_kind::text, target_operating_system::text,
                   state::text, attempt, last_error, created_at::text, updated_at::text
              FROM deviludo.jobs
             WHERE workflow_id = $1::uuid
@@ -1585,6 +1587,8 @@ export class CoreRepository {
         jobs: Object.freeze(jobs.rows.map(job => Object.freeze({
           id: job.id,
           kind: job.kind,
+          agentRole: productJobAgentRole(job.agent_role),
+          agentPurpose: job.agent_purpose,
           poolKind: job.pool_kind,
           targetOperatingSystem: job.target_operating_system,
           state: job.state,
@@ -1791,7 +1795,9 @@ export class CoreRepository {
       );
       const [jobs, events, artifacts] = await Promise.all([
         client.query<ProductJobRow>(
-          `SELECT id::text, kind::text, pool_kind::text, target_operating_system::text,
+          `SELECT id::text, kind::text, payload->>'role' AS agent_role,
+                  payload->>'purpose' AS agent_purpose,
+                  pool_kind::text, target_operating_system::text,
                   state::text, attempt, last_error, created_at::text, updated_at::text
              FROM deviludo.jobs WHERE workflow_id = $1::uuid
             ORDER BY created_at, kind, target_operating_system NULLS FIRST`,
@@ -4456,6 +4462,8 @@ const WORKFLOW_ITERATION_SELECT = `
 type ProductJobRow = {
   id: string;
   kind: string;
+  agent_role: string | null;
+  agent_purpose: string | null;
   pool_kind: string;
   target_operating_system: string | null;
   state: string;
@@ -4600,6 +4608,8 @@ function productJobFromRow(job: ProductJobRow): ProductJob {
   return Object.freeze({
     id: job.id,
     kind: job.kind,
+    agentRole: productJobAgentRole(job.agent_role),
+    agentPurpose: job.agent_purpose,
     poolKind: job.pool_kind,
     targetOperatingSystem: job.target_operating_system,
     state: job.state,
@@ -4608,6 +4618,11 @@ function productJobFromRow(job: ProductJobRow): ProductJob {
     createdAt: job.created_at,
     updatedAt: job.updated_at,
   });
+}
+
+function productJobAgentRole(role: string | null): ProductJob["agentRole"] {
+  return role === "INTENT" || role === "ANALYSIS" || role === "DESIGN"
+    || role === "DEVELOPMENT" || role === "TEST" ? role : null;
 }
 
 function productEventFromRow(event: ProductEventRow): ProductEvent {

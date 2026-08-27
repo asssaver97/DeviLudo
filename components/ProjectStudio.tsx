@@ -18,6 +18,7 @@ import type {
   ProductConversationSummary,
   ProductProjectDetail,
   ProductProjectSummary,
+  ProjectAgentRole,
   ProductWorkflowIterationDetail,
   ProductWorkflowIterationSummary,
 } from "@/lib/product/contracts";
@@ -394,10 +395,12 @@ export function ProjectStudio({ projectId }: { projectId: string }) {
     }
   }
 
-  const activeAgentJobId = project?.jobs
-    .filter(job => job.kind === "AGENT_TURN")
-    .at(-1)?.id ?? null;
-  const agentRunning = project?.workflowState === "DEVELOPING";
+  const activeAgentJob = project?.jobs
+    .filter(job => job.kind === "AGENT_TURN" && ["QUEUED", "RETRY", "RUNNING"].includes(job.state))
+    .at(-1) ?? null;
+  const activeAgentJobId = activeAgentJob?.id ?? null;
+  const activeAgentRole = progressAgentRole(activeAgentJob, project?.workflowState);
+  const agentRunning = activeAgentJob !== null;
   const activeAgentProgress = useMemo(
     () => agentRunning && activeAgentJobId && agentProgressBuffer.jobId === activeAgentJobId
       ? agentProgressBuffer.events
@@ -1231,6 +1234,7 @@ export function ProjectStudio({ projectId }: { projectId: string }) {
               <ConversationBox
                 agentProgress={{
                   running: !viewingHistoricalIteration && agentRunning,
+                  role: activeAgentRole,
                   events: viewingHistoricalIteration ? Object.freeze([]) : activeAgentProgress,
                 }}
                 className="project-conversation-box"
@@ -1835,4 +1839,18 @@ function runtimeStateLabel(state: string, text: (chinese: string, english: strin
 
 function workflowNeedsPolling(state: string): boolean {
   return ["ANALYZING", "DESIGNING", "DEVELOPING", "BUILDING", "TEST_PLANNING", "TESTING", "STEAM_PUBLISHING"].includes(state);
+}
+
+function progressAgentRole(
+  job: ProductProjectDetail["jobs"][number] | null,
+  workflowState: string | undefined,
+): ProjectAgentRole | "ANALYSIS" {
+  if (job?.agentRole === "ANALYSIS" || job?.agentRole === "DESIGN"
+    || job?.agentRole === "DEVELOPMENT" || job?.agentRole === "TEST") {
+    return job.agentRole;
+  }
+  if (workflowState === "ANALYZING") return "ANALYSIS";
+  if (workflowState === "DESIGNING") return "DESIGN";
+  if (workflowState === "TEST_PLANNING") return "TEST";
+  return "DEVELOPMENT";
 }
