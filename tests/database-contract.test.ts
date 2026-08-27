@@ -61,12 +61,24 @@ test("Agent completion advances Design, Development and Test through one persist
   assert.match(complete, /purpose text;/);
   assert.match(complete, /role = 'DESIGN'/);
   assert.match(complete, /role = 'DEVELOPMENT'/);
+  assert.match(complete, /assets_ready boolean;/);
+  assert.match(complete, /item\.status NOT IN \('generated', 'uploaded', 'existing'\)/);
+  assert.match(complete, /IF assets_ready THEN[\s\S]*state = 'BUILDING'[\s\S]*enqueue_job/);
   assert.match(complete, /jsonb_build_object\('targetPlatforms', workflow\.target_platforms\)/);
   assert.match(complete, /purpose = 'TEST_PLAN'/);
   assert.match(complete, /verdict := upper/);
   assert.match(complete, /'TEST_PLAN'[\s\S]*E2E_PLATFORM_RUN/);
   assert.match(complete, /ELSE[\s\S]*'testHandoff'/);
   assert.doesNotMatch(complete, /repair_count|max_attempts/);
+});
+
+test("asset readiness cannot overtake an active Development Agent turn", async () => {
+  const sql = await readFile(sqlUrl, "utf8");
+  const advance = functionSource(sql, "advance_asset_workflows");
+  assert.match(advance, /source\.state = 'SUCCEEDED'/);
+  assert.match(advance, /coalesce\(source\.payload->>'role', 'DEVELOPMENT'\) = 'DEVELOPMENT'/);
+  assert.match(advance, /coalesce\(source\.payload->>'purpose', 'DEVELOPMENT'\) = 'DEVELOPMENT'/);
+  assert.match(advance, /NOT EXISTS \([\s\S]*active_development\.state IN \('QUEUED', 'RUNNING', 'RETRY'\)[\s\S]*active_development\.payload->>'role'/);
 });
 
 test("Builder, platform tests and Steam are the only disposable job settlements", async () => {

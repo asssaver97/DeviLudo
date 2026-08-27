@@ -307,6 +307,11 @@ async function runDatabaseSmoke(url) {
            lease_owner = NULL, lease_token = NULL,
            lease_expires_at = NULL, heartbeat_at = NULL
      WHERE workspace_id = $1::uuid AND id = $2::uuid`, [workspaceIds[0], jobIds[0], `database-smoke:${jobIds[0]}`]);
+    // A completed Design turn is deliberately present while the workflow is
+    // DEVELOPING. Asset readiness must not mistake it for Development output.
+    await owner.query(`UPDATE deviludo.jobs
+       SET payload = payload || '{"role":"DESIGN","purpose":"DESIGN"}'::jsonb
+     WHERE workspace_id = $1::uuid AND id = $2::uuid`, [workspaceIds[0], jobIds[0]]);
     const admissionReconciled = await scheduler.query(
       "SELECT deviludo.reconcile_host_admission_events()::integer AS inserted",
     );
@@ -386,6 +391,39 @@ async function runDatabaseSmoke(url) {
              sha256 = 'sha256:${"b".repeat(64)}', size_bytes = 64
        WHERE workspace_id = $1::uuid AND asset_key = 'ui/smoke'
     `, [workspaceIds[0]]);
+    const designMustNotAdvance = await scheduler.query("SELECT deviludo.advance_asset_workflows()::integer AS count");
+    const heldAfterDesign = await owner.query(`
+      SELECT workflow.state::text,
+             count(job.id) FILTER (WHERE job.kind = 'BUILD' AND job.state = 'QUEUED')::integer AS builds
+        FROM deviludo.workflow_instances workflow
+        LEFT JOIN deviludo.jobs job
+          ON job.workspace_id = workflow.workspace_id AND job.workflow_id = workflow.id
+       WHERE workflow.workspace_id = $1::uuid AND workflow.id = $2::uuid
+       GROUP BY workflow.state
+    `, [workspaceIds[0], workflowIds[0]]);
+    if (Number(designMustNotAdvance.rows[0]?.count) !== 0
+      || heldAfterDesign.rows[0]?.state !== "DEVELOPING"
+      || heldAfterDesign.rows[0]?.builds !== 0) {
+      throw new Error("A completed Design turn released the Development-to-Build gate");
+    }
+
+    // Even a prior successful Development turn cannot release the gate while
+    // the current Development turn is queued, running, or awaiting retry.
+    await owner.query(`UPDATE deviludo.jobs
+       SET payload = payload || '{"role":"DEVELOPMENT","purpose":"DEVELOPMENT"}'::jsonb
+     WHERE workspace_id = $1::uuid AND id = $2::uuid`, [workspaceIds[0], jobIds[0]]);
+    const activeDevelopmentJobId = randomUUID();
+    await owner.query(`SELECT deviludo.enqueue_job(
+      $1::uuid, $2::uuid, $3::uuid, 'AGENT_TURN', NULL, $4,
+      '{"role":"DEVELOPMENT","purpose":"DEVELOPMENT"}'::jsonb
+    )`, [workspaceIds[0], workflowIds[0], projectIds[0], `active-development-smoke:${activeDevelopmentJobId}`]);
+    const activeDevelopmentMustNotAdvance = await scheduler.query("SELECT deviludo.advance_asset_workflows()::integer AS count");
+    if (Number(activeDevelopmentMustNotAdvance.rows[0]?.count) !== 0) {
+      throw new Error("Asset readiness overtook an active Development turn");
+    }
+    await owner.query(`UPDATE deviludo.jobs SET state = 'CANCELLED'
+      WHERE workspace_id = $1::uuid AND workflow_id = $2::uuid
+        AND idempotency_key = $3`, [workspaceIds[0], workflowIds[0], `active-development-smoke:${activeDevelopmentJobId}`]);
     const advanced = await scheduler.query("SELECT deviludo.advance_asset_workflows()::integer AS count");
     if (Number(advanced.rows[0]?.count) !== 1) throw new Error("Uploaded art did not release the artifact build gate");
     const gated = await owner.query(`

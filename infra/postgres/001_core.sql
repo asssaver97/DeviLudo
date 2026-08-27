@@ -1751,6 +1751,7 @@ DECLARE
   platform deviludo.server_os;
   verdict text;
   verdict_plan_id uuid;
+  assets_ready boolean;
 BEGIN
   SELECT * INTO job FROM deviludo.jobs
    WHERE workspace_id = p_workspace_id AND id = p_job_id FOR UPDATE;
@@ -1786,11 +1787,32 @@ BEGIN
       job.workflow_id::text || ':development:after:' || job.id::text,
       jsonb_build_object('role', 'DEVELOPMENT', 'purpose', 'DEVELOPMENT'));
   ELSIF role = 'DEVELOPMENT' THEN
-    UPDATE deviludo.workflow_instances SET state = 'BUILDING', version = version + 1,
-      updated_at = clock_timestamp() WHERE workspace_id = job.workspace_id AND id = job.workflow_id;
-    PERFORM deviludo.enqueue_job(job.workspace_id, job.workflow_id, job.project_id, 'BUILD', NULL,
-      job.workflow_id::text || ':build:after:' || job.id::text,
-      jsonb_build_object('targetPlatforms', workflow.target_platforms));
+    SELECT NOT EXISTS (
+      SELECT 1
+        FROM deviludo.asset_manifests manifest
+       WHERE manifest.workspace_id = job.workspace_id
+         AND manifest.project_id = job.project_id
+         AND manifest.workflow_id = job.workflow_id
+         AND manifest.auto_generate_enabled = true
+         AND EXISTS (
+           SELECT 1
+             FROM deviludo.asset_items item
+            WHERE item.workspace_id = manifest.workspace_id
+              AND item.manifest_id = manifest.id
+              AND item.status NOT IN ('generated', 'uploaded', 'existing')
+         )
+    ) INTO assets_ready;
+    IF assets_ready THEN
+      UPDATE deviludo.workflow_instances SET state = 'BUILDING', version = version + 1,
+        updated_at = clock_timestamp()
+       WHERE workspace_id = job.workspace_id AND id = job.workflow_id
+         AND state = 'DEVELOPING';
+      IF FOUND THEN
+        PERFORM deviludo.enqueue_job(job.workspace_id, job.workflow_id, job.project_id, 'BUILD', NULL,
+          job.workflow_id::text || ':build:after:' || job.id::text,
+          jsonb_build_object('targetPlatforms', workflow.target_platforms));
+      END IF;
+    END IF;
   ELSIF purpose = 'TEST_PLAN' THEN
     IF NOT EXISTS (
       SELECT 1 FROM deviludo.test_plans_v2 plan
@@ -2808,6 +2830,8 @@ BEGIN
            AND source.workflow_id = workflow.id
            AND source.kind = 'AGENT_TURN'
            AND source.state = 'SUCCEEDED'
+           AND coalesce(source.payload->>'role', 'DEVELOPMENT') = 'DEVELOPMENT'
+           AND coalesce(source.payload->>'purpose', 'DEVELOPMENT') = 'DEVELOPMENT'
          ORDER BY source.updated_at DESC, source.created_at DESC
          LIMIT 1
       ) agent ON true
@@ -2821,6 +2845,16 @@ BEGIN
          LIMIT 1
       ) asset_rerun ON true
      WHERE workflow.state = 'DEVELOPING'
+       AND NOT EXISTS (
+         SELECT 1
+           FROM deviludo.jobs active_development
+          WHERE active_development.workspace_id = workflow.workspace_id
+            AND active_development.workflow_id = workflow.id
+            AND active_development.kind = 'AGENT_TURN'
+            AND active_development.state IN ('QUEUED', 'RUNNING', 'RETRY')
+            AND coalesce(active_development.payload->>'role', 'DEVELOPMENT') = 'DEVELOPMENT'
+            AND coalesce(active_development.payload->>'purpose', 'DEVELOPMENT') = 'DEVELOPMENT'
+       )
        AND (
          manifest.auto_generate_enabled = false
          OR NOT EXISTS (
