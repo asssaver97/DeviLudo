@@ -6,6 +6,21 @@ const { Client } = pg;
 const BASELINE = "003";
 const COMPATIBILITY = "deviludo-persistent-multi-agent-v3";
 const VERSION = "001_persistent_multi_agent";
+// Development checkouts can move the implementation of an existing function
+// without changing the persistent data shape. Keep these refreshes exact and
+// finite: both full-file digests and every replaceable function are reviewed.
+// Unknown snapshots, production databases, and all structural changes still
+// require the explicit destructive reset.
+const DEVELOPMENT_FUNCTION_REFRESHES = Object.freeze({
+  "sha256:96384b5f8ea0e01bbdbb482aa9578e2eac6ceec52b3abb33a65ddafc6e121c74": Object.freeze({
+    targetDigest: "sha256:6d13a7454178ac15c3bce4b2d8f11a0d42a120a5cedd7aecab90b6b92dd4500d",
+    functions: Object.freeze([
+      "complete_agent_turn_job",
+      "advance_asset_workflows",
+      "complete_job",
+    ]),
+  }),
+});
 const connectionFile = process.env.DEVILUDO_MIGRATION_DATABASE_URL_FILE;
 if (connectionFile && process.env.DEVILUDO_MIGRATION_DATABASE_URL) throw new Error("Set only one migration credential source");
 const connectionString = connectionFile
@@ -64,7 +79,38 @@ try {
     || ledger.rows.length !== 1
     || ledger.rows[0]?.version !== VERSION
     || ledger.rows[0]?.checksum !== baselineDigest) {
-    throw resetRequired("the database schema differs from this release's immutable baseline");
+    const refresh = compatibleDevelopmentFunctionRefresh(current, ledger.rows, baselineDigest);
+    if (!refresh) {
+      throw resetRequired("the database schema differs from this release's immutable baseline");
+    }
+    await client.query("BEGIN");
+    try {
+      for (const functionName of refresh.functions) {
+        await client.query(functionDefinition(baselineSource, functionName));
+      }
+      const metadata = await client.query(
+        `UPDATE deviludo.schema_metadata
+            SET source_digest = $1
+          WHERE singleton = true AND source_digest = $2
+          RETURNING singleton`,
+        [baselineDigest, current.source_digest],
+      );
+      const migration = await client.query(
+        `UPDATE deviludo.schema_migrations
+            SET checksum = $1, applied_at = clock_timestamp()
+          WHERE version = $2 AND checksum = $3
+          RETURNING version`,
+        [baselineDigest, VERSION, current.source_digest],
+      );
+      if (metadata.rowCount !== 1 || migration.rowCount !== 1) {
+        throw new Error("Compatible development baseline refresh lost its database fence");
+      }
+      await client.query("COMMIT");
+      console.log(`Refreshed ${refresh.functions.length} compatible development database functions without deleting data`);
+    } catch (error) {
+      await client.query("ROLLBACK");
+      throw error;
+    }
   }
 } finally {
   await client.query("SELECT pg_advisory_unlock(hashtext('deviludo-persistent-multi-agent-v3'))").catch(() => undefined);
@@ -75,6 +121,28 @@ function resetRequired(reason) {
   return Object.assign(new Error(
     `INCOMPATIBLE_BASELINE_RESET_REQUIRED: ${reason}; in-place migration is intentionally unsupported`,
   ), { code: "INCOMPATIBLE_BASELINE_RESET_REQUIRED" });
+}
+
+function compatibleDevelopmentFunctionRefresh(current, ledger, targetDigest) {
+  if (process.env.NODE_ENV !== "development"
+    || ledger.length !== 1
+    || ledger[0]?.version !== VERSION
+    || ledger[0]?.checksum !== current.source_digest) return null;
+  const refresh = DEVELOPMENT_FUNCTION_REFRESHES[current.source_digest];
+  return refresh?.targetDigest === targetDigest ? refresh : null;
+}
+
+function functionDefinition(source, functionName) {
+  if (!/^[a-z][a-z0-9_]*$/.test(functionName)) throw new Error("Compatible function name is invalid");
+  const marker = `CREATE OR REPLACE FUNCTION deviludo.${functionName}(`;
+  const start = source.indexOf(marker);
+  if (start < 0 || source.indexOf(marker, start + marker.length) >= 0) {
+    throw new Error(`Compatible function ${functionName} is not unique in the baseline`);
+  }
+  const body = source.indexOf("\nAS $$", start);
+  const end = body < 0 ? -1 : source.indexOf("\n$$;", body);
+  if (body < 0 || end < 0) throw new Error(`Compatible function ${functionName} is incomplete`);
+  return source.slice(start, end + "\n$$;".length);
 }
 
 function digest(source) {

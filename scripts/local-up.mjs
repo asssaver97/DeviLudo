@@ -1536,8 +1536,11 @@ async function migrateWithOptionalBaselineReset(environment, state, expectedBase
   } catch (error) {
     if (!isIncompatibleBaselineError(error)) throw error;
     if (!resetIncompatibleBaseline) {
+      const samePersistentBaseline = state?.baseline === "003 deviludo-persistent-multi-agent-v3";
       throw Object.assign(new Error([
-        "Detected an incompatible DeviLudo data baseline containing the retired hosted-platform or account model. In-place migration is not supported.",
+        samePersistentBaseline
+          ? "Detected a modified persistent multi-Agent v3 database snapshot without an approved data-preserving refresh."
+          : "Detected an incompatible DeviLudo data baseline containing the retired hosted-platform or account model. In-place migration is not supported.",
         "To delete local PostgreSQL, MinIO artifacts, project source storage, and Vault data, run:",
         "  npm run local:reset:self-hosted",
         "Bound external project directories will not be deleted.",

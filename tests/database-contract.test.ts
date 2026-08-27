@@ -116,16 +116,24 @@ test("all target platforms must use the current source and frozen Test plan befo
   assert.match(completeAgent, /PASS contradicts deterministic platform evidence/);
 });
 
-test("schema migration refuses every old compatibility baseline", async () => {
+test("schema migration permits only an exact development function refresh", async () => {
   const migration = await readFile(new URL("../scripts/migrate-postgres.mjs", import.meta.url), "utf8");
   const reset = await readFile(new URL("../scripts/reset-self-hosted-baseline.mjs", import.meta.url), "utf8");
   assert.match(migration, /const BASELINE = "003"/);
   assert.match(migration, /const COMPATIBILITY = "deviludo-persistent-multi-agent-v3"/);
   assert.match(migration, /const VERSION = "001_persistent_multi_agent"/);
+  assert.match(migration, /DEVELOPMENT_FUNCTION_REFRESHES/);
+  assert.match(migration, /process\.env\.NODE_ENV !== "development"/);
+  assert.match(migration, /complete_agent_turn_job/);
+  assert.match(migration, /advance_asset_workflows/);
+  assert.match(migration, /complete_job/);
+  assert.match(migration, /CREATE OR REPLACE FUNCTION deviludo\.\$\{functionName\}/);
+  assert.match(migration, /WHERE singleton = true AND source_digest = \$2/);
+  assert.match(migration, /WHERE version = \$2 AND checksum = \$3/);
   assert.match(migration, /ledger\.rows\.length !== 1/);
   assert.match(migration, /ledger\.rows\[0\]\?\.checksum !== baselineDigest/);
   assert.match(migration, /INCOMPATIBLE_BASELINE_RESET_REQUIRED/);
-  assert.doesNotMatch(migration, /readdir|migrationsUrl|migration\.source|ALTER TABLE/);
+  assert.doesNotMatch(migration, /readdir|migrationsUrl|migration\.source|ALTER TABLE|ALTER TYPE/);
   assert.match(reset, /DROP SCHEMA IF EXISTS deviludo CASCADE/);
   assert.match(reset, /deviludo\.kind=project-runtime/);
   assert.match(reset, /deviludo-runtime-/);
