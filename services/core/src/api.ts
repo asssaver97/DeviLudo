@@ -80,6 +80,8 @@ import {
   MAX_PLAYER_POLICY_REQUEST_BYTES,
   parsePlayerPolicyDecision,
   parsePlayerPolicyRequest,
+  playerPolicyActionContract,
+  playerPolicyDecisionContract,
   playerPolicyIdempotencyInput,
 } from "./e2e-player-policy";
 import type {
@@ -1971,7 +1973,7 @@ export async function runApi(
         configurationDigest: policy.configurationDigest, settingsRevision: policy.settingsRevision, model: policy.model,
       }, cached: true });
       const startedAt = Date.now();
-      let generated: Readonly<{ decision: ReturnType<typeof parsePlayerPolicyDecision>; inputTokens: number; outputTokens: number }>;
+      let generated: Readonly<{ decision: ReturnType<typeof parsePlayerPolicyDecision>; inputTokens: number; outputTokens: number }> | null = null;
       try {
         const project = await repository.readProject(job.workspaceId, job.projectId);
         if (!project) return reply.code(404).send({ code: "PROJECT_NOT_FOUND" });
@@ -1987,36 +1989,53 @@ export async function runApi(
             relativePath: project.source.relativePath,
           } : null,
         });
-        const runtimeResult = await projectRuntime.turn({
-          workspaceId: job.workspaceId,
-          projectId: job.projectId,
-          role: "TEST",
-          mode: "READ_ONLY_BRANCH",
-          prompt: [
-            "Inspect the attached current game frame and choose the next bounded native input for the frozen test plan.",
-            "Return only the player decision JSON object with screenIntegrity, screenIntegrityReason, status, observation, rationale, and actions.",
-            `Observation contract: ${JSON.stringify({
-              goal: policyRequest.goal,
-              allowedActions: policyRequest.allowedActions,
-              history: policyRequest.history,
-              recovery: policyRequest.recovery,
-              testPlanRevision: job.payload.testPlanRevision,
-            })}`,
-          ].join("\n"),
-          responseLanguage: "en",
-          settings,
-          sourceRevision: project.source?.revision ?? null,
-          sourceRelativePath: project.source?.relativePath ?? null,
-          attachments: Object.freeze([Object.freeze({
-            content: Buffer.from(policyRequest.screenshotBase64, "base64"),
-            extension: "png" as const,
-          })]),
-        });
-        generated = Object.freeze({
-          decision: parsePlayerPolicyDecision(runtimeResult.content, policyRequest.allowedActions),
-          inputTokens: 0,
-          outputTokens: 0,
-        });
+        let repairInstruction = "";
+        for (let generationAttempt = 0; generationAttempt < 2; generationAttempt += 1) {
+          const runtimeResult = await waitForPlayerPolicyRuntime(() => projectRuntime.turn({
+            workspaceId: job.workspaceId,
+            projectId: job.projectId,
+            role: "TEST",
+            mode: "READ_ONLY_BRANCH",
+            prompt: [
+              "Inspect the attached current 1280x720 game frame and choose the next bounded native input for the frozen test plan.",
+              `Player decision contract:\n${playerPolicyDecisionContract().join("\n")}`,
+              "Each actions[] item must use one exact lowercase native wire shape listed below. POINTER, KEYBOARD, and GAMEPAD are capability group names, never action type values. Do not return semantic targetId or action fields; for pointer input, inspect the image and return integer frame coordinates.",
+              `Allowed native action shapes:\n${playerPolicyActionContract(policyRequest.allowedActions).join("\n")}`,
+              `Observation contract: ${JSON.stringify({
+                goal: policyRequest.goal,
+                allowedActions: policyRequest.allowedActions,
+                history: policyRequest.history,
+                recovery: policyRequest.recovery,
+                testPlanRevision: job.payload.testPlanRevision,
+              })}`,
+              repairInstruction,
+            ].filter(Boolean).join("\n"),
+            responseLanguage: "en",
+            settings,
+            sourceRevision: project.source?.revision ?? null,
+            sourceRelativePath: project.source?.relativePath ?? null,
+            attachments: Object.freeze([Object.freeze({
+              content: Buffer.from(policyRequest.screenshotBase64, "base64"),
+              extension: "png" as const,
+            })]),
+          }));
+          try {
+            generated = Object.freeze({
+              decision: parsePlayerPolicyDecision(runtimeResult.content, policyRequest.allowedActions),
+              inputTokens: 0,
+              outputTokens: 0,
+            });
+            break;
+          } catch (error) {
+            if (generationAttempt === 1) throw error;
+            repairInstruction = [
+              `Your previous JSON was rejected: ${error instanceof Error ? error.message : "invalid player decision"}.`,
+              `Rejected JSON: ${runtimeResult.content.slice(0, 2_000)}`,
+              "Return a corrected decision using only an exact native action shape above.",
+            ].join("\n");
+          }
+        }
+        if (!generated) throw new Error("Test Agent did not return a valid player decision");
       } catch (error) {
         const code = "TEST_AGENT_RUNTIME";
         request.log.warn({
@@ -3499,6 +3518,22 @@ function projectAnalysisFailureMessage(error: unknown): string {
   if (isTimeoutFailure(error)) return "项目分析超时，请检查本地目录、Agent 服务或网络后重试。";
   const message = error instanceof Error ? error.message.trim() : "项目分析失败";
   return message || "项目分析失败";
+}
+
+async function waitForPlayerPolicyRuntime<T>(operation: () => Promise<T>): Promise<T> {
+  for (let attempt = 0; ; attempt += 1) {
+    try {
+      return await operation();
+    } catch (error) {
+      const lifecycleTransition = error instanceof Error
+        && error.message === "Project Runtime is completing a lifecycle transition";
+      if (!lifecycleTransition || attempt >= 23) throw error;
+      // The E2E guest keeps the current frame alive for up to 490 seconds.
+      // Wait behind a bounded Runtime compaction instead of discarding the VM,
+      // replaying the deterministic journey, and consuming a job attempt.
+      await new Promise(resolve => setTimeout(resolve, 5_000));
+    }
+  }
 }
 
 async function abortableDelay(milliseconds: number, signal: AbortSignal): Promise<void> {

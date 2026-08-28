@@ -5,6 +5,7 @@ import { join } from "node:path";
 import { tmpdir } from "node:os";
 import {
   evaluateProbeAssertions,
+  missingChangedAssertionReferences,
   probeSnapshotValidationError,
   probeStateDigest,
   resolveProbeAssetBinding,
@@ -136,6 +137,15 @@ describe("deviludo.e2e-ui-probe", () => {
       { source: "SCENE", operator: "EQUALS", value: "main" },
     ], before as never, after as never).map(result => result.passed), [true, true, true, true]);
     assert.notEqual(probeStateDigest(before as never), probeStateDigest(after as never));
+  });
+
+  test("identifies a CHANGED Oracle whose pre-action Probe reference is absent", () => {
+    assert.deepEqual(missingChangedAssertionReferences([
+      { source: "PROGRESS", key: "loop", operator: "CHANGED" },
+      { source: "PROGRESS", key: "turn", operator: "CHANGED" },
+      { source: "CONTROL", targetId: "missing", property: "value", operator: "CHANGED" },
+      { source: "STATE", key: "future_field", operator: "EQUALS", value: true },
+    ], snapshot() as never), ["PROGRESS:loop", "CONTROL:missing.value"]);
   });
 
   test("requires enabled input targets but permits disabled post-action visual regions", () => {

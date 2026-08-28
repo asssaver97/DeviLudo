@@ -12,6 +12,14 @@ const VERSION = "001_persistent_multi_agent";
 // Unknown snapshots, production databases, and all structural changes still
 // require the explicit destructive reset.
 const DEVELOPMENT_FUNCTION_REFRESHES = Object.freeze({
+  "sha256:938d91a606e0698d260da5f903a8eeedb928a54abb0ac446984b0616efa7ddd4": Object.freeze({
+    targetDigest: "sha256:8f231ec989e4bf3d38ce2242cdcda52e4e562091bff3a581506ade9ba85c9e79",
+    functions: Object.freeze(["claim_agent_container_lifecycle"]),
+  }),
+  "sha256:0743ff5b1cd235cec7268fd3533a819f6f1657d8a46aa72492471f7542054a38": Object.freeze({
+    targetDigest: "sha256:938d91a606e0698d260da5f903a8eeedb928a54abb0ac446984b0616efa7ddd4",
+    functions: Object.freeze(["complete_agent_turn_job", "complete_job"]),
+  }),
   "sha256:96384b5f8ea0e01bbdbb482aa9578e2eac6ceec52b3abb33a65ddafc6e121c74": Object.freeze({
     targetDigest: "sha256:0743ff5b1cd235cec7268fd3533a819f6f1657d8a46aa72492471f7542054a38",
     functions: Object.freeze([

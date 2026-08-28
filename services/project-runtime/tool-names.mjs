@@ -21,6 +21,19 @@ export function canonicalToolName(role, nativeName) {
 
 export function toolInputSchema(canonicalName) {
   nativeToolName(canonicalName);
+  if (canonicalName === "source.read") {
+    return Object.freeze({
+      type: "object",
+      additionalProperties: false,
+      required: ["path"],
+      properties: Object.freeze({
+        path: { type: "string", minLength: 1, maxLength: 1000 },
+        startLine: { type: "integer", minimum: 1, description: "Optional 1-based first line; provide together with endLine for files larger than 1 MiB." },
+        endLine: { type: "integer", minimum: 1, description: "Optional inclusive final line; a range may span at most 1000 lines." },
+      }),
+    });
+  }
+  if (canonicalName === "test_plan.replace") return testPlanReplaceInputSchema();
   if (canonicalName !== "context.update_analysis") {
     return Object.freeze({ type: "object", additionalProperties: true });
   }
@@ -63,5 +76,164 @@ export function toolInputSchema(canonicalName) {
         }),
       }),
     }),
+  });
+}
+
+function testPlanReplaceInputSchema() {
+  const stableId = { type: "string", pattern: "^[a-z0-9][a-z0-9-]{0,119}$" };
+  const assertion = {
+    type: "object",
+    additionalProperties: false,
+    required: ["source", "operator"],
+    properties: {
+      source: { enum: ["STATE", "PROGRESS", "CONTROL", "SCENE"] },
+      key: { type: "string", description: "Exact STATE or PROGRESS field path verified by reading the current source; placeholders are invalid." },
+      targetId: stableId,
+      property: { enum: ["visible", "enabled", "text", "value"] },
+      operator: { enum: ["EQUALS", "NOT_EQUALS", "GREATER_THAN", "GREATER_THAN_OR_EQUALS", "LESS_THAN", "LESS_THAN_OR_EQUALS", "CONTAINS", "EXISTS", "CHANGED"] },
+      value: { type: ["string", "number", "boolean"] },
+    },
+  };
+  const interactionEvent = {
+    type: "object",
+    description: "Action events require unique stepId, intent, coversRequirementIds and non-empty postconditions. Except for START_SESSION, every action requires a CHANGED postcondition for the exact Probe value changed by that input. Checkpoints require id, role, assertions and visualMode. DYNAMIC ACTION/PROGRESS/COMPLETION checkpoints also require changeTargetId.",
+    additionalProperties: true,
+    required: ["type"],
+    properties: {
+      type: { enum: ["key_tap", "key_hold", "click", "double_click", "drag", "scroll", "text_input", "gamepad_button_tap", "gamepad_button_hold", "gamepad_axis", "gamepad_trigger", "gamepad_release_all", "wait", "checkpoint"] },
+      stepId: stableId,
+      intent: { enum: ["START_SESSION", "NAVIGATION", "PRIMARY_ACTION", "FEATURE_ACTION", "COMPLETE_LOOP"] },
+      coversRequirementIds: { type: "array", items: stableId, uniqueItems: true },
+      postconditions: { type: "array", minItems: 1, maxItems: 32, items: assertion },
+      id: stableId,
+      role: { enum: ["START", "READY", "ACTION", "PROGRESS", "COMPLETION"] },
+      assertions: { type: "array", minItems: 1, maxItems: 32, items: assertion },
+      visualMode: { enum: ["DYNAMIC", "STABLE_REPLAY"] },
+      changeTargetId: stableId,
+      targetId: stableId,
+      fromTargetId: stableId,
+      toTargetId: stableId,
+      key: { type: "string" },
+      button: { enum: ["LEFT", "RIGHT", "MIDDLE", "A", "B", "X", "Y", "BACK", "GUIDE", "START", "LEFT_STICK", "RIGHT_STICK", "LEFT_SHOULDER", "RIGHT_SHOULDER", "DPAD_UP", "DPAD_DOWN", "DPAD_LEFT", "DPAD_RIGHT"] },
+      axis: { enum: ["LEFT_X", "LEFT_Y", "RIGHT_X", "RIGHT_Y"] },
+      trigger: { enum: ["LEFT", "RIGHT"] },
+      value: { type: "number", minimum: -1, maximum: 1 },
+      deltaY: { type: "integer", minimum: -10000, maximum: 10000 },
+      text: { type: "string", minLength: 1, maxLength: 1000 },
+      delay_ms: { type: "integer", minimum: 0, maximum: 300000 },
+      duration_ms: { type: "integer", minimum: 1, maximum: 300000 },
+      referenceImage: { type: "string", pattern: "^res://.+\\.png$" },
+      threshold: { type: "number", minimum: 0, maximum: 1 },
+      expectedOutput: { type: "string" },
+    },
+  };
+  const requirement = {
+    type: "object",
+    additionalProperties: false,
+    required: ["requirementId", "description", "source", "verificationClass"],
+    properties: {
+      requirementId: stableId,
+      description: { type: "string", minLength: 1, maxLength: 2000 },
+      source: { enum: ["CORE_LOOP", "ACCEPTANCE"] },
+      verificationClass: { enum: ["PLAYER_INTERACTION", "SYSTEM"] },
+      systemCategory: { enum: ["DATA", "RUNTIME", "NETWORK"] },
+      exemptionReason: { type: "string", minLength: 10, maxLength: 1000 },
+    },
+  };
+  const feature = {
+    type: "object",
+    description: "interactive features additionally require interactionScript, timeoutMs and launchProfile; unit features require gdsTestPath, checkNames and timeoutMs.",
+    additionalProperties: false,
+    required: ["id", "requirementIds", "category", "description", "verificationMethod"],
+    properties: {
+      id: stableId,
+      requirementIds: { type: "array", minItems: 1, items: stableId },
+      category: { enum: ["core-loop", "player-control", "data-integrity", "runtime-quality", "ui", "audio", "network"] },
+      description: { type: "string", minLength: 1, maxLength: 2000 },
+      verificationMethod: { enum: ["unit", "interactive", "visual", "manual"] },
+      gdsTestPath: { type: "string", pattern: "^res://.+\\.gd$" },
+      checkNames: { type: "array", minItems: 1, items: stableId },
+      interactionScript: {
+        type: "object",
+        additionalProperties: false,
+        required: ["events"],
+        properties: { events: { type: "array", minItems: 1, maxItems: 200, items: interactionEvent } },
+      },
+      timeoutMs: { type: "integer", minimum: 1, maximum: 300000 },
+      coreJourney: { type: "boolean" },
+      launchProfile: {
+        type: "object",
+        additionalProperties: false,
+        required: ["type"],
+        properties: { type: { enum: ["FRESH", "SCENARIO"] }, scenarioId: stableId },
+      },
+      expectedVisual: { type: "object" },
+    },
+  };
+  return Object.freeze({
+    type: "object",
+    additionalProperties: false,
+    required: ["plan"],
+    properties: {
+      plan: {
+        type: "object",
+        additionalProperties: false,
+        required: ["testManifest", "assetPlacementPlan"],
+        properties: {
+          testManifest: {
+            type: "object",
+            description: "The current contract is authoritative; do not copy a project agent.json manifest or invent legacy top-level fields.",
+            additionalProperties: false,
+            required: ["schema", "inputProfiles", "primaryInputProfile", "adaptivePlayer", "requirements", "features"],
+            properties: {
+              schema: { const: "deviludo.test-manifest" },
+              inputProfiles: { type: "array", minItems: 1, maxItems: 2, uniqueItems: true, items: { enum: ["KEYBOARD_MOUSE", "GAMEPAD"] } },
+              primaryInputProfile: { enum: ["KEYBOARD_MOUSE", "GAMEPAD"] },
+              adaptivePlayer: {
+                type: "object",
+                additionalProperties: false,
+                required: ["goal", "requirementIds", "allowedActions", "successAssertions", "failureAssertions", "rolloutTimeoutMs", "maxDecisions", "seedStrategy"],
+                properties: {
+                  goal: { type: "string", minLength: 10, maxLength: 4000 },
+                  requirementIds: { type: "array", minItems: 1, uniqueItems: true, items: stableId },
+                  allowedActions: { type: "array", minItems: 1, uniqueItems: true, items: { enum: ["KEYBOARD", "POINTER", "GAMEPAD"] } },
+                  successAssertions: { type: "array", minItems: 1, maxItems: 32, items: assertion },
+                  failureAssertions: { type: "array", minItems: 1, maxItems: 32, items: assertion },
+                  rolloutTimeoutMs: { type: "integer", minimum: 240000, maximum: 300000 },
+                  maxDecisions: { type: "integer", minimum: 8, maximum: 40 },
+                  seedStrategy: { const: "STABLE_PROJECT_PLATFORM" },
+                },
+              },
+              requirements: { type: "array", minItems: 1, maxItems: 500, items: requirement },
+              features: { type: "array", minItems: 1, maxItems: 500, items: feature },
+            },
+          },
+          assetPlacementPlan: {
+            type: "object",
+            additionalProperties: false,
+            required: ["schema", "plannedAssetKeys", "placements", "unmappedAssetKeys"],
+            properties: {
+              schema: { const: "deviludo.asset-placement-plan" },
+              plannedAssetKeys: { type: "array", uniqueItems: true, items: { type: "string" } },
+              placements: {
+                type: "array",
+                items: {
+                  type: "object",
+                  additionalProperties: false,
+                  required: ["assetKey", "targetId", "checkpointRole", "expectedResourcePath", "expectedSha256"],
+                  properties: {
+                    assetKey: { type: "string" }, targetId: stableId,
+                    checkpointRole: { enum: ["START", "READY", "ACTION", "PROGRESS", "COMPLETION"] },
+                    expectedResourcePath: { type: "string", pattern: "^res://.+\\.(png|jpg|jpeg|webp|svg)$" },
+                    expectedSha256: { type: ["string", "null"] },
+                  },
+                },
+              },
+              unmappedAssetKeys: { type: "array", maxItems: 0 },
+            },
+          },
+        },
+      },
+    },
   });
 }

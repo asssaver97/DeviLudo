@@ -10,7 +10,7 @@ import {
   type ProjectRuntimeTurnResult,
 } from "@/lib/product/project-runtime";
 import { normalizeProjectPath } from "@/lib/product/source-archive";
-import { planE2eExecution, validateTestManifest } from "@/lib/product/test-manifest";
+import { planE2eExecution, testManifestValidationError, validateTestManifest } from "@/lib/product/test-manifest";
 import { resolveAgentModel } from "./agent-settings";
 import { normalizeImportedProjectAnalysisReport } from "./project-import";
 import {
@@ -519,7 +519,12 @@ export class ProjectRuntimeService {
       return Object.freeze({ context: await this.readContext(input.workspaceId, input.projectId) });
     }
     if (input.name === "source.list") return Object.freeze({ paths: await this.listSource(input.workspaceId, input.projectId) });
-    if (input.name === "source.read") return Object.freeze({ content: await this.readSource(input.workspaceId, input.projectId, String(input.arguments.path ?? "")) });
+    if (input.name === "source.read") {
+      return this.readSource(input.workspaceId, input.projectId, String(input.arguments.path ?? ""), {
+        startLine: input.arguments.startLine,
+        endLine: input.arguments.endLine,
+      });
+    }
     if (["conversation.reply", "workflow.intent_decision"].includes(input.name)) return Object.freeze({ accepted: true });
     if (input.name === "workflow.stop") return this.updateWorkflow(input.workspaceId, input.projectId, { state: "STOPPED", stopped: true });
     if (input.name === "workflow.continue") return this.updateWorkflow(input.workspaceId, input.projectId, { state: "DEVELOPING", stopped: false });
@@ -564,13 +569,19 @@ export class ProjectRuntimeService {
     if (input.name === "build.request") return this.updateWorkflow(input.workspaceId, input.projectId, { state: "BUILDING", buildRequestedByTurnId: input.turnId });
     if (input.name === "test_plan.replace") {
       const draftPlan = boundedObject(input.arguments.plan);
+      const before = await this.readContext(input.workspaceId, input.projectId);
+      if (!before.source) throw new Error("A test plan requires a published source revision");
+      const candidatePlan = freezeTestPlan(draftPlan, before);
+      await this.validatePublishedProbeReferences(input.workspaceId, input.projectId, candidatePlan);
       const context = await this.mutateContext(input.workspaceId, input.projectId, current => {
         if (!current.source) throw new Error("A test plan requires a published source revision");
-        const plan = freezeTestPlan(draftPlan, current);
+        if (current.source.revision !== before.source!.revision || current.e2e.goalRevision !== before.e2e.goalRevision) {
+          throw new Error("The source or E2E goals changed while the Test Agent was authoring its plan");
+        }
         return updateProjectContext(current, { e2e: Object.freeze({
           ...current.e2e,
           planRevision: (current.e2e.planRevision ?? 0) + 1,
-          plan,
+          plan: candidatePlan,
         }) });
       });
       const stored = await this.repository.recordTestPlan({
@@ -635,15 +646,66 @@ export class ProjectRuntimeService {
     return Object.freeze(paths.sort());
   }
 
-  private async readSource(workspaceId: string, projectId: string, path: string): Promise<string> {
+  private async readSource(
+    workspaceId: string,
+    projectId: string,
+    path: string,
+    range: Readonly<{ startLine: unknown; endLine: unknown }>,
+  ): Promise<Readonly<Record<string, unknown>>> {
     const root = await this.sourceRoot(workspaceId, projectId);
     const target = resolve(root, normalizeProjectPath(path));
     if (!target.startsWith(`${root}${sep}`)) throw new Error("Source path escapes the project");
     const info = await lstat(target);
-    if (!info.isFile() || info.isSymbolicLink() || info.size > 1024 * 1024) throw new Error("Source file is not readable");
+    if (!info.isFile() || info.isSymbolicLink() || info.size > 16 * 1024 * 1024) throw new Error("Source file is not readable");
     const bytes = await readFile(target);
     if (bytes.includes(0)) throw new Error("Binary source is not returned as conversation context");
-    return bytes.toString("utf8");
+    const hasRange = range.startLine !== undefined || range.endLine !== undefined;
+    if (!hasRange) {
+      if (info.size > 1024 * 1024) {
+        throw new Error("Source file exceeds 1 MiB; provide startLine and endLine to read at most 1000 lines");
+      }
+      return Object.freeze({ content: bytes.toString("utf8") });
+    }
+    const startLine = Number(range.startLine);
+    const endLine = Number(range.endLine);
+    if (!Number.isSafeInteger(startLine) || !Number.isSafeInteger(endLine)
+      || startLine < 1 || endLine < startLine || endLine - startLine >= 1_000) {
+      throw new Error("source.read line range must use 1-based startLine/endLine spanning at most 1000 lines");
+    }
+    const lines = bytes.toString("utf8").split("\n");
+    return Object.freeze({
+      content: lines.slice(startLine - 1, endLine).join("\n"),
+      startLine,
+      endLine: Math.min(endLine, lines.length),
+      totalLines: lines.length,
+    });
+  }
+
+  private async validatePublishedProbeReferences(
+    workspaceId: string,
+    projectId: string,
+    plan: Readonly<Record<string, unknown>>,
+  ): Promise<void> {
+    const root = await this.sourceRoot(workspaceId, projectId);
+    const publisherTexts: string[] = [];
+    for (const path of await this.listSource(workspaceId, projectId)) {
+      if (!/\.(?:gd|cs|js|mjs|cjs|ts|tsx|lua|py)$/i.test(path)) continue;
+      const target = resolve(root, normalizeProjectPath(path));
+      const info = await lstat(target);
+      if (!info.isFile() || info.isSymbolicLink() || info.size > 16 * 1024 * 1024) continue;
+      const bytes = await readFile(target);
+      if (bytes.includes(0)) continue;
+      const text = bytes.toString("utf8");
+      if (text.includes("deviludo.e2e-ui-probe")) publisherTexts.push(text);
+    }
+    if (publisherTexts.length === 0) {
+      throw new Error("The current source does not publish the deviludo.e2e-ui-probe contract required by an interactive test plan");
+    }
+    const missing = unpublishedTestPlanProbeReferences(plan, publisherTexts);
+    if (missing.length > 0) {
+      throw new Error(`The Test Agent plan references values not published by the current Probe source: ${missing
+        .map(reference => `${reference.kind}:${reference.value}`).join(", ")}`);
+    }
   }
 
   private async sourceRoot(workspaceId: string, projectId: string): Promise<string> {
@@ -1036,8 +1098,70 @@ function assetSourcePath(asset: Readonly<Record<string, unknown>>): string | nul
   try { return normalizeProjectPath(source); } catch { return null; }
 }
 
+type ProbeReference = Readonly<{ kind: "CONTROL" | "STATE" | "PROGRESS"; value: string }>;
+
+function testPlanProbeReferences(plan: Readonly<Record<string, unknown>>): readonly ProbeReference[] {
+  const references = new Map<string, ProbeReference>();
+  const add = (kind: ProbeReference["kind"], value: unknown) => {
+    if (typeof value !== "string" || !value) return;
+    references.set(`${kind}:${value}`, Object.freeze({ kind, value }));
+  };
+  const visit = (value: unknown): void => {
+    if (Array.isArray(value)) {
+      value.forEach(visit);
+      return;
+    }
+    if (!value || typeof value !== "object") return;
+    const item = value as Record<string, unknown>;
+    if (item.source === "STATE" || item.source === "PROGRESS") add(item.source, item.key);
+    if (item.source === "CONTROL") add("CONTROL", item.targetId);
+    if (typeof item.type === "string" && item.type !== "checkpoint" && item.type !== "wait") {
+      add("CONTROL", item.targetId);
+      add("CONTROL", item.fromTargetId);
+      add("CONTROL", item.toTargetId);
+    }
+    if (item.type === "checkpoint") add("CONTROL", item.changeTargetId);
+    Object.values(item).forEach(visit);
+  };
+  visit(plan.testManifest);
+  const placement = boundedObject(plan.assetPlacementPlan);
+  if (Array.isArray(placement.placements)) {
+    placement.placements.forEach(item => add("CONTROL", boundedObject(item).targetId));
+  }
+  return Object.freeze([...references.values()]);
+}
+
+export function unpublishedTestPlanProbeReferences(
+  plan: Readonly<Record<string, unknown>>,
+  publisherTexts: readonly string[],
+): readonly ProbeReference[] {
+  const published = probePublisherLiterals(publisherTexts);
+  return Object.freeze(testPlanProbeReferences(plan).filter(reference => !published.matches(reference.value)));
+}
+
+function probePublisherLiterals(texts: readonly string[]): Readonly<{ matches(value: string): boolean }> {
+  const exact = new Set<string>();
+  const patterns: RegExp[] = [];
+  const literal = /"((?:\\.|[^"\\]){1,240})"|'((?:\\.|[^'\\]){1,240})'/g;
+  for (const text of texts) {
+    for (const match of text.matchAll(literal)) {
+      const value = String(match[1] ?? match[2] ?? "").replace(/\\(["'\\])/g, "$1");
+      exact.add(value);
+      if (/%[sdif]/i.test(value)) {
+        const expression = value
+          .replace(/[.*+?^${}()|[\]\\]/g, "\\$&")
+          .replace(/%[sdif]/gi, "[a-z0-9_.-]+");
+        patterns.push(new RegExp(`^${expression}$`));
+      }
+    }
+  }
+  return Object.freeze({ matches: (value: string) => exact.has(value) || patterns.some(pattern => pattern.test(value)) });
+}
+
 function freezeTestPlan(value: Readonly<Record<string, unknown>>, context: ProjectContext): Readonly<Record<string, unknown>> {
   const manifest = value.testManifest;
+  const validationError = testManifestValidationError(manifest);
+  if (validationError) throw new Error(`The Test Agent plan contains an invalid deterministic test manifest: ${validationError}`);
   if (!validateTestManifest(manifest)) throw new Error("The Test Agent plan contains an invalid deterministic test manifest");
   const manifestRequirementIds = new Set(manifest.requirements.map(item => item.requirementId));
   const goalIds = context.e2e.goals.map(goal => String(goal.id ?? "")).filter(Boolean);

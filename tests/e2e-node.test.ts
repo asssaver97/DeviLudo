@@ -89,7 +89,7 @@ test("E2E infrastructure failures retain the underlying node, VM, runtime, or ne
   );
 });
 
-test("a trusted failed guest report is a product outcome instead of an E2E node failure", () => {
+test("trusted product and plan-configuration failures remain E2E outcomes instead of node failures", () => {
   const digest = `sha256:${"a".repeat(64)}` as const;
   const job: JobProtocolV4 = Object.freeze({
     ...baseJob,
@@ -102,31 +102,35 @@ test("a trusted failed guest report is a product outcome instead of an E2E node 
       sizeBytes: 1024,
     })]),
   });
-  assert.doesNotThrow(() => validateExecutionReceipt(job, Object.freeze({
-    schema: "deviludo.godot-guest-report",
-    action: "test",
-    jobId: job.jobId,
-    inputDigest: digest,
-    outcome: "FAILED",
-    failureDomain: "PRODUCT",
-    summary: "The exported game crashed while entering the first level",
-    guest: Object.freeze({ exitCode: 1 }),
-    evidence: Object.freeze({ schema: "deviludo.e2e-evidence", result: "FAILED", headlessCheckCount: 2,
-      interactiveJourneyCount: 0, deterministicInputCount: 0, realInputCount: 0, keyboardMouseInputCount: 0,
-      gamepadInputCount: 0, adaptiveRolloutCount: 0, adaptiveSuccessCount: 0, adaptiveDecisionCount: 0,
-      coveredPlayerRequirementCount: 0, playerRequirementCount: 1,
-      plannedAssetPlacementCount: 0, verifiedAssetPlacementCount: 0, screenshotCount: 1,
-      visualBaselineCount: 0, videoCount: 1, hasVisualDiff: false,
-      frameRateSampleCount: 0, minimumFps: null, p10Fps: null, medianFps: null,
-      inputResponseSampleCount: 0, p95InputResponseMs: null, maxInputResponseMs: null, performancePassed: false,
-      softwareRenderer: false, frameRateEnforced: true,
-      testManifestDigest: `sha256:${"d".repeat(64)}`,
-      regressionTraceDigest: null, regressionInputProfile: null, regressionEstimatedDurationMs: null,
-      packageLaunchMode: "MACOS_LAUNCH_SERVICES" }),
-    outputPath: "/tmp/deviludo-e2e/evidence.zip",
-    outputSha256: `sha256:${"c".repeat(64)}`,
-    outputSizeBytes: 1024,
-  })));
+  for (const failureDomain of ["PRODUCT", "CONFIGURATION"] as const) {
+    assert.doesNotThrow(() => validateExecutionReceipt(job, Object.freeze({
+      schema: "deviludo.godot-guest-report",
+      action: "test",
+      jobId: job.jobId,
+      inputDigest: digest,
+      outcome: "FAILED",
+      failureDomain,
+      summary: failureDomain === "PRODUCT"
+        ? "The exported game crashed while entering the first level"
+        : "The frozen plan references a Probe key that the tested source does not publish",
+      guest: Object.freeze({ exitCode: 1 }),
+      evidence: Object.freeze({ schema: "deviludo.e2e-evidence", result: "FAILED", headlessCheckCount: 2,
+        interactiveJourneyCount: 0, deterministicInputCount: 0, realInputCount: 0, keyboardMouseInputCount: 0,
+        gamepadInputCount: 0, adaptiveRolloutCount: 0, adaptiveSuccessCount: 0, adaptiveDecisionCount: 0,
+        coveredPlayerRequirementCount: 0, playerRequirementCount: 1,
+        plannedAssetPlacementCount: 0, verifiedAssetPlacementCount: 0, screenshotCount: 1,
+        visualBaselineCount: 0, videoCount: 1, hasVisualDiff: false,
+        frameRateSampleCount: 0, minimumFps: null, p10Fps: null, medianFps: null,
+        inputResponseSampleCount: 0, p95InputResponseMs: null, maxInputResponseMs: null, performancePassed: false,
+        softwareRenderer: false, frameRateEnforced: true,
+        testManifestDigest: `sha256:${"d".repeat(64)}`,
+        regressionTraceDigest: null, regressionInputProfile: null, regressionEstimatedDurationMs: null,
+        packageLaunchMode: "MACOS_LAUNCH_SERVICES" }),
+      outputPath: "/tmp/deviludo-e2e/evidence.zip",
+      outputSha256: `sha256:${"c".repeat(64)}`,
+      outputSizeBytes: 1024,
+    })));
+  }
   assert.throws(() => validateExecutionReceipt(job, Object.freeze({
     schema: "deviludo.godot-guest-report",
     action: "test",

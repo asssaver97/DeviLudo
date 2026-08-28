@@ -89,9 +89,13 @@ if (request.mode === "COMPACT") {
   content = JSON.stringify(structured);
 } else if (request.role === "TEST" && request.prompt.includes("current source and plan revisions")) {
   const evidence = await callTool("evidence.read", {});
+  const configuration = Array.isArray(evidence.runs)
+    && evidence.runs.some(run => String(run?.failureClass ?? "") === "CONFIGURATION");
   const failed = Array.isArray(evidence.runs)
     && evidence.runs.some(run => String(run?.verdict ?? "") !== "PASS");
-  structured = failed
+  structured = configuration
+    ? { verdict: "REPLAN", handoff: null, reason: "The frozen plan references an unpublished Probe field." }
+    : failed
     ? { verdict: "FAIL", handoff: { toRole: "DEVELOPMENT", summary: "Repair the failed platform evidence and rebuild." } }
     : { verdict: "PASS", handoff: null };
   await callTool("test.verdict", structured);
@@ -300,7 +304,7 @@ function testManifest(goals) {
     { source: "STATE", key: "gameplay_input_enabled", operator: "EQUALS", value: true },
     { source: "STATE", key: "blocking_layer_count", operator: "EQUALS", value: 0 },
   ];
-  const changed = [{ source: "PROGRESS", key: "loop", operator: "CHANGED" }];
+  const changed = [{ source: "PROGRESS", key: "turn", operator: "CHANGED" }];
   return {
     schema: "deviludo.test-manifest",
     inputProfiles: ["KEYBOARD_MOUSE"],
@@ -330,6 +334,7 @@ function testManifest(goals) {
         { type: "click", stepId: "start-session", intent: "START_SESSION", targetId: "new-game", coversRequirementIds: requirementIds, postconditions: playing },
         { type: "checkpoint", id: "game-ready", role: "READY", assertions: playing, visualMode: "STABLE_REPLAY" },
         { type: "click", stepId: "primary-action", intent: "PRIMARY_ACTION", targetId: "primary-control", coversRequirementIds: requirementIds, postconditions: changed },
+        { type: "click", stepId: "feature-action", intent: "FEATURE_ACTION", targetId: "feature-control", coversRequirementIds: requirementIds, postconditions: changed },
         { type: "checkpoint", id: "loop-progress", role: "PROGRESS", assertions: changed, visualMode: "DYNAMIC", changeTargetId: "game-viewport" },
         { type: "click", stepId: "complete-loop", intent: "COMPLETE_LOOP", targetId: "end-turn", coversRequirementIds: requirementIds, postconditions: changed },
         { type: "checkpoint", id: "loop-complete", role: "COMPLETION", assertions: changed, visualMode: "DYNAMIC", changeTargetId: "game-viewport" },

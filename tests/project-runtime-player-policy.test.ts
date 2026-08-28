@@ -4,6 +4,8 @@ import test from "node:test";
 import {
   parsePlayerPolicyDecision,
   parsePlayerPolicyRequest,
+  playerPolicyActionContract,
+  playerPolicyDecisionContract,
   playerPolicyIdempotencyInput,
 } from "@/services/core/src/e2e-player-policy";
 
@@ -33,6 +35,13 @@ test("native runner input is bounded before the Test Runtime sees it", () => {
 });
 
 test("Test Runtime decisions cannot escape the native input allowlist", () => {
+  const contract = playerPolicyActionContract(["KEYBOARD", "POINTER"]);
+  assert.ok(contract.some(shape => shape.startsWith("click:")));
+  assert.ok(contract.some(shape => shape.startsWith("key_tap:")));
+  assert.ok(contract.every(shape => !shape.includes('"type":"POINTER"')));
+  assert.ok(contract.every(shape => !shape.includes("targetId")));
+  assert.match(playerPolicyDecisionContract().join("\n"), /never return "FAIL"/);
+  assert.match(playerPolicyDecisionContract().join("\n"), /PRODUCT_DEFECT requires an empty actions array/);
   const decision = parsePlayerPolicyDecision(JSON.stringify({
     screenIntegrity: "PASS",
     screenIntegrityReason: "The game frame is intact.",

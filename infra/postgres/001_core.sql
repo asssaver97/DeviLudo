@@ -1127,6 +1127,13 @@ BEGIN
         AND running_turn.project_id = container.project_id
         AND running_turn.state = 'RUNNING'
    )
+     AND NOT EXISTS (
+       SELECT 1 FROM deviludo.jobs running_test
+        WHERE running_test.workspace_id = container.workspace_id
+          AND running_test.project_id = container.project_id
+          AND running_test.kind = 'E2E_PLATFORM_RUN'
+          AND running_test.state = 'RUNNING'
+     )
      AND (container.lease_expires_at IS NULL OR container.lease_expires_at < clock_timestamp())
      AND (
        (container.state = 'RUNNING'
@@ -1751,6 +1758,7 @@ DECLARE
   platform deviludo.server_os;
   verdict text;
   verdict_plan_id uuid;
+  configuration_failed boolean;
   assets_ready boolean;
 BEGIN
   SELECT * INTO job FROM deviludo.jobs
@@ -1839,6 +1847,12 @@ BEGIN
          AND plan.source_revision = (p_output->>'sourceRevision')::bigint
          AND plan.plan_revision = (p_output->>'planRevision')::bigint
     ) THEN RAISE EXCEPTION 'Test Agent verdict does not match the current frozen plan'; END IF;
+    SELECT EXISTS (
+      SELECT 1 FROM deviludo.platform_test_runs run
+       WHERE run.workspace_id = job.workspace_id AND run.project_id = job.project_id
+         AND run.plan_id = verdict_plan_id AND run.failure_class = 'CONFIGURATION'
+    ) INTO configuration_failed;
+    IF configuration_failed THEN verdict := 'REPLAN'; END IF;
     IF verdict = 'PASS' THEN
       IF EXISTS (
         SELECT 1 FROM deviludo.platform_test_runs run
@@ -1860,13 +1874,23 @@ BEGIN
     ELSIF verdict = 'BLOCKED' THEN
       UPDATE deviludo.workflow_instances SET state = 'BLOCKED', version = version + 1,
         updated_at = clock_timestamp() WHERE workspace_id = job.workspace_id AND id = job.workflow_id;
-    ELSE
+    ELSIF verdict = 'REPLAN' AND configuration_failed THEN
+      UPDATE deviludo.workflow_instances SET state = 'TEST_PLANNING', version = version + 1,
+        updated_at = clock_timestamp() WHERE workspace_id = job.workspace_id AND id = job.workflow_id;
+      PERFORM deviludo.enqueue_job(job.workspace_id, job.workflow_id, job.project_id, 'AGENT_TURN', NULL,
+        job.workflow_id::text || ':test-replan:plan:' || verdict_plan_id::text,
+        jsonb_build_object('role', 'TEST', 'purpose', 'TEST_PLAN',
+          'replacesTestPlanId', verdict_plan_id,
+          'replanReason', 'CONFIGURATION'));
+    ELSIF verdict = 'FAIL' THEN
       UPDATE deviludo.workflow_instances SET state = 'DEVELOPING', version = version + 1,
         updated_at = clock_timestamp() WHERE workspace_id = job.workspace_id AND id = job.workflow_id;
       PERFORM deviludo.enqueue_job(job.workspace_id, job.workflow_id, job.project_id, 'AGENT_TURN', NULL,
         job.workflow_id::text || ':development:test-handoff:' || job.id::text,
         jsonb_build_object('role', 'DEVELOPMENT', 'purpose', 'DEVELOPMENT',
           'testHandoff', coalesce(p_output->'handoff', p_output)));
+    ELSE
+      RAISE EXCEPTION 'Test Agent verdict must be PASS, FAIL, BLOCKED, or REPLAN';
     END IF;
   END IF;
   RETURN true;
@@ -3550,7 +3574,7 @@ BEGIN
     failure_class := upper(coalesce(p_receipt #>> '{execution,failureDomain}',
       CASE outcome WHEN 'PASSED' THEN 'PRODUCT' ELSE '' END));
     IF outcome NOT IN ('PASSED', 'FAILED')
-      OR (outcome = 'FAILED' AND failure_class <> 'PRODUCT')
+      OR (outcome = 'FAILED' AND failure_class NOT IN ('PRODUCT', 'CONFIGURATION'))
       OR length(coalesce(p_receipt #>> '{execution,summary}', '')) NOT BETWEEN 1 AND 2000
       OR coalesce(job.payload->>'testPlanDigest', '') !~ '^sha256:[0-9a-f]{64}$'
       OR coalesce(job.payload->>'sourceDigest', '') !~ '^sha256:[0-9a-f]{64}$'
@@ -3635,7 +3659,7 @@ BEGIN
     ) VALUES (
       job.workspace_id, job.project_id, v_plan_id,
       (job.payload->>'sourceRevision')::bigint, job.target_operating_system,
-      'SUCCEEDED', CASE WHEN outcome = 'FAILED' THEN 'PRODUCT' ELSE NULL END,
+      'SUCCEEDED', CASE WHEN outcome = 'FAILED' THEN failure_class ELSE NULL END,
       coalesce(p_receipt->'execution', '{}'::jsonb),
       jsonb_build_object('summary', p_receipt #>> '{execution,summary}',
         'outputObjects', p_executor_receipt->'outputObjects'),

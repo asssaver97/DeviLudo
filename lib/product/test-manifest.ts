@@ -24,6 +24,7 @@ export const MIN_ADAPTIVE_ROLLOUT_TIMEOUT_MS = 240_000;
 export const MAX_ADAPTIVE_ROLLOUT_TIMEOUT_MS = 300_000;
 export const ADAPTIVE_ROLLOUT_COUNT = 3 as const;
 export const ADAPTIVE_REQUIRED_SUCCESSES = 2 as const;
+const TEST_PLAN_PLACEHOLDERS = new Set(["loop"]);
 
 export const TEST_INPUT_PROFILES = ["KEYBOARD_MOUSE", "GAMEPAD"] as const;
 export type TestInputProfile = typeof TEST_INPUT_PROFILES[number];
@@ -108,8 +109,175 @@ export type TestExecutionResult = Readonly<{
   duration_ms: number;
 }>;
 
+/**
+ * Return a bounded, actionable explanation for Runtime tool callers. The
+ * boolean validator remains the single authority; this preflight prevents a
+ * model from mistaking a correctable payload-shape error for broken E2E
+ * infrastructure.
+ */
+export function testManifestValidationError(value: unknown): string | null {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    return "testManifest must be an object";
+  }
+  const manifest = value as Record<string, unknown>;
+  const placeholder = testPlanPlaceholder(value);
+  if (placeholder) {
+    return `testManifest contains unresolved placeholder ${placeholder}; read the current source and use an exact published Probe key or semantic control ID`;
+  }
+  if (manifest.schema !== TEST_MANIFEST_SCHEMA) {
+    return `testManifest.schema must equal ${TEST_MANIFEST_SCHEMA}`;
+  }
+  const retired = ["schemaVersion", "version", "suite", "gdsTestPath", "seed", "goalIds", "inputMode", "checkpoints", "globalGates"]
+    .filter(field => Object.hasOwn(manifest, field));
+  if (retired.length) {
+    return `testManifest contains unsupported top-level fields: ${retired.join(", ")}`;
+  }
+  const requiredTopLevel = ["inputProfiles", "primaryInputProfile", "adaptivePlayer", "requirements", "features"]
+    .filter(field => !Object.hasOwn(manifest, field));
+  if (requiredTopLevel.length) {
+    return `testManifest is missing required fields: ${requiredTopLevel.join(", ")}`;
+  }
+  if (!Array.isArray(manifest.inputProfiles) || manifest.inputProfiles.length < 1
+    || manifest.inputProfiles.length > TEST_INPUT_PROFILES.length
+    || manifest.inputProfiles.some(profile => !TEST_INPUT_PROFILES.includes(profile as TestInputProfile))
+    || new Set(manifest.inputProfiles).size !== manifest.inputProfiles.length
+    || !TEST_INPUT_PROFILES.includes(manifest.primaryInputProfile as TestInputProfile)
+    || !manifest.inputProfiles.includes(manifest.primaryInputProfile)) {
+    return "inputProfiles must contain unique KEYBOARD_MOUSE and/or GAMEPAD values and include primaryInputProfile";
+  }
+  if (!manifest.adaptivePlayer || typeof manifest.adaptivePlayer !== "object" || Array.isArray(manifest.adaptivePlayer)) {
+    return "adaptivePlayer must be an object";
+  }
+  const adaptive = manifest.adaptivePlayer as Record<string, unknown>;
+  const adaptiveFields = [
+    "goal", "requirementIds", "allowedActions", "successAssertions", "failureAssertions",
+    "rolloutTimeoutMs", "maxDecisions", "seedStrategy",
+  ].filter(field => !Object.hasOwn(adaptive, field));
+  if (adaptiveFields.length) {
+    return `adaptivePlayer is missing required fields: ${adaptiveFields.join(", ")}`;
+  }
+  if (typeof adaptive.goal !== "string" || adaptive.goal.trim().length < 10 || adaptive.goal.length > 4_000) {
+    return "adaptivePlayer.goal must be a 10-4000 character description";
+  }
+  if (!Array.isArray(adaptive.requirementIds) || adaptive.requirementIds.length < 1) {
+    return "adaptivePlayer.requirementIds must be a non-empty array";
+  }
+  if (!Array.isArray(adaptive.allowedActions) || adaptive.allowedActions.length < 1
+    || adaptive.allowedActions.some(action => !ADAPTIVE_ACTION_GROUPS.includes(action as AdaptiveActionGroup))) {
+    return `adaptivePlayer.allowedActions must contain only: ${ADAPTIVE_ACTION_GROUPS.join(", ")}`;
+  }
+  if (!Array.isArray(adaptive.successAssertions) || adaptive.successAssertions.length < 1
+    || !adaptive.successAssertions.every(validateProbeAssertion)
+    || !adaptive.successAssertions.some(assertion => assertion && typeof assertion === "object"
+      && assertion.source === "PROGRESS"
+      && ["CHANGED", "NOT_EQUALS", "GREATER_THAN", "GREATER_THAN_OR_EQUALS"].includes(assertion.operator))) {
+    return "adaptivePlayer.successAssertions must contain valid Probe assertions including one progress-changing assertion";
+  }
+  if (!Array.isArray(adaptive.failureAssertions) || adaptive.failureAssertions.length < 1
+    || !adaptive.failureAssertions.every(validateProbeAssertion)) {
+    return "adaptivePlayer.failureAssertions must contain valid Probe assertions";
+  }
+  if (!Number.isInteger(adaptive.rolloutTimeoutMs)
+    || Number(adaptive.rolloutTimeoutMs) < MIN_ADAPTIVE_ROLLOUT_TIMEOUT_MS
+    || Number(adaptive.rolloutTimeoutMs) > MAX_ADAPTIVE_ROLLOUT_TIMEOUT_MS) {
+    return `adaptivePlayer.rolloutTimeoutMs must be an integer from ${MIN_ADAPTIVE_ROLLOUT_TIMEOUT_MS} to ${MAX_ADAPTIVE_ROLLOUT_TIMEOUT_MS}`;
+  }
+  if (!Number.isInteger(adaptive.maxDecisions) || Number(adaptive.maxDecisions) < 8 || Number(adaptive.maxDecisions) > 40) {
+    return "adaptivePlayer.maxDecisions must be an integer from 8 to 40";
+  }
+  if (adaptive.seedStrategy !== "STABLE_PROJECT_PLATFORM") {
+    return "adaptivePlayer.seedStrategy must equal STABLE_PROJECT_PLATFORM";
+  }
+  if (!Array.isArray(manifest.requirements) || manifest.requirements.length < 1) {
+    return "requirements must be a non-empty array";
+  }
+  for (const [index, requirement] of manifest.requirements.entries()) {
+    if (!requirement || typeof requirement !== "object" || Array.isArray(requirement)) {
+      return `requirements[${index}] must be an object`;
+    }
+    const item = requirement as Record<string, unknown>;
+    const fields = ["requirementId", "description", "source", "verificationClass"]
+      .filter(field => !Object.hasOwn(item, field));
+    if (fields.length) return `requirements[${index}] is missing required fields: ${fields.join(", ")}`;
+    if (typeof item.requirementId !== "string" || !isStableId(item.requirementId)) {
+      return `requirements[${index}].requirementId must match ^[a-z0-9][a-z0-9-]{0,119}$`;
+    }
+    if (!["CORE_LOOP", "ACCEPTANCE"].includes(String(item.source))) {
+      return `requirements[${index}].source must be CORE_LOOP or ACCEPTANCE`;
+    }
+    if (!["PLAYER_INTERACTION", "SYSTEM"].includes(String(item.verificationClass))) {
+      return `requirements[${index}].verificationClass must be PLAYER_INTERACTION or SYSTEM`;
+    }
+    if (item.verificationClass === "SYSTEM"
+      && (!Object.hasOwn(item, "systemCategory") || !Object.hasOwn(item, "exemptionReason"))) {
+      return `requirements[${index}] SYSTEM verification requires systemCategory and exemptionReason`;
+    }
+  }
+  if (!Array.isArray(manifest.features) || manifest.features.length < 1) {
+    return "features must be a non-empty array";
+  }
+  for (const [index, feature] of manifest.features.entries()) {
+    if (!feature || typeof feature !== "object" || Array.isArray(feature)) {
+      return `features[${index}] must be an object`;
+    }
+    const item = feature as Record<string, unknown>;
+    const fields = ["id", "requirementIds", "category", "description", "verificationMethod"]
+      .filter(field => !Object.hasOwn(item, field));
+    if (fields.length) return `features[${index}] is missing required fields: ${fields.join(", ")}`;
+    if (typeof item.id !== "string" || !isStableId(item.id)) {
+      return `features[${index}].id must match ^[a-z0-9][a-z0-9-]{0,119}$`;
+    }
+    if (!FEATURE_CATEGORIES.includes(item.category as FeatureCategory)) {
+      return `features[${index}].category must be one of: ${FEATURE_CATEGORIES.join(", ")}`;
+    }
+    if (!VERIFICATION_METHODS.includes(item.verificationMethod as VerificationMethod)) {
+      return `features[${index}].verificationMethod must be one of: ${VERIFICATION_METHODS.join(", ")}; a core journey uses verificationMethod interactive plus coreJourney true`;
+    }
+    if (!Array.isArray(item.requirementIds) || item.requirementIds.length < 1) {
+      return `features[${index}].requirementIds must be a non-empty array`;
+    }
+    if (item.verificationMethod === "interactive") {
+      const interactiveFields = ["interactionScript", "timeoutMs", "launchProfile"]
+        .filter(field => !Object.hasOwn(item, field));
+      if (interactiveFields.length) {
+        return `features[${index}] interactive verification is missing: ${interactiveFields.join(", ")}`;
+      }
+      const actionWithoutTransitionOracle = firstActionWithoutTransitionOracle(item.interactionScript);
+      if (actionWithoutTransitionOracle) {
+        return `features[${index}] action ${actionWithoutTransitionOracle} must include a CHANGED postcondition for the exact STATE, PROGRESS, CONTROL, or SCENE value changed by that input`;
+      }
+      if (!validateInteractionScript(item.interactionScript)) {
+        return `features[${index}].interactionScript is invalid; use events ordered START -> START_SESSION -> READY -> PRIMARY_ACTION/FEATURE_ACTION -> PROGRESS -> COMPLETE_LOOP -> COMPLETION`;
+      }
+      if (!Number.isInteger(item.timeoutMs) || Number(item.timeoutMs) < 1 || Number(item.timeoutMs) > MAX_JOURNEY_TIMEOUT_MS) {
+        return `features[${index}].timeoutMs must be an integer from 1 to ${MAX_JOURNEY_TIMEOUT_MS}`;
+      }
+      if (!validLaunchProfile(item.launchProfile)) {
+        return `features[${index}].launchProfile must be exactly {"type":"FRESH"} or a valid SCENARIO profile`;
+      }
+      if (item.coreJourney === true) {
+        const actions = interactionActionEvents(item.interactionScript as InteractionScript);
+        const postEntryActions = actions.filter(action => !["START_SESSION", "NAVIGATION"].includes(action.intent));
+        if (postEntryActions.length < 3 || !actions.some(action => action.intent === "FEATURE_ACTION")) {
+          return `features[${index}] coreJourney must contain at least three post-entry actions including PRIMARY_ACTION, FEATURE_ACTION, and COMPLETE_LOOP`;
+        }
+      }
+    }
+    if (item.verificationMethod === "unit") {
+      const unitFields = ["gdsTestPath", "checkNames", "timeoutMs"]
+        .filter(field => !Object.hasOwn(item, field));
+      if (unitFields.length) return `features[${index}] unit verification is missing: ${unitFields.join(", ")}`;
+    }
+  }
+  if (!validateTestManifest(value)) {
+    return "manifest semantics are invalid: provide one FRESH core-loop journey ordered START -> START_SESSION -> READY -> PRIMARY_ACTION -> PROGRESS -> COMPLETE_LOOP -> COMPLETION; every action needs unique stepId, intent, coversRequirementIds, and postconditions; cover every player requirement with real actions and every requirement with a non-manual feature";
+  }
+  return null;
+}
+
 export function validateTestManifest(value: unknown): value is TestManifest {
   if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+  if (testPlanPlaceholder(value)) return false;
   const manifest = value as Record<string, unknown>;
   if (manifest.schema !== TEST_MANIFEST_SCHEMA || Object.hasOwn(manifest, "schemaVersion") || Object.hasOwn(manifest, "version")
     || Object.hasOwn(manifest, "suite") || Object.hasOwn(manifest, "gdsTestPath")
@@ -177,6 +345,7 @@ export function validateTestManifest(value: unknown): value is TestManifest {
       for (const name of item.checkNames as string[]) checkNames.add(name);
     } else if (item.verificationMethod === "interactive") {
       if (!validateInteractionScript(item.interactionScript)
+        || firstActionWithoutTransitionOracle(item.interactionScript) !== null
         || !Number.isInteger(item.timeoutMs) || Number(item.timeoutMs) < 1 || Number(item.timeoutMs) > MAX_JOURNEY_TIMEOUT_MS
         || !validLaunchProfile(item.launchProfile)) return false;
       interactiveJourneys += 1;
@@ -200,12 +369,13 @@ export function validateTestManifest(value: unknown): value is TestManifest {
         const assertionsComplete = checkpoints.every(event => event.assertions.length > 0
           && (event.referenceImage || event.expectedOutput === undefined || event.expectedOutput === checkpointOutputMarker(event.id)));
         const intents = new Set(actions.map(action => action.intent));
+        const postEntryActions = actions.filter(action => !["START_SESSION", "NAVIGATION"].includes(action.intent));
         if ((item.launchProfile as { type?: unknown } | undefined)?.type === "FRESH"
           && ["START", "READY", "PROGRESS", "COMPLETION"].every(role => roles.has(role as CheckpointRole))
           && checkpoints.some(event => event.visualMode === "STABLE_REPLAY")
           && assertionsComplete
-          && intents.has("PRIMARY_ACTION") && intents.has("COMPLETE_LOOP")
-          && actions.length >= 2
+          && intents.has("PRIMARY_ACTION") && intents.has("FEATURE_ACTION") && intents.has("COMPLETE_LOOP")
+          && postEntryActions.length >= 3
           && interactionHasUserAction(item.interactionScript)
           && validateCoreJourneyLifecycle(item.interactionScript)) hasCoreJourney = true;
       }
@@ -342,6 +512,50 @@ function validateAdaptivePlayer(
 
 function isStableId(value: string): boolean {
   return /^[a-z0-9][a-z0-9-]{0,119}$/.test(value);
+}
+
+function testPlanPlaceholder(value: unknown, path = "testManifest"): string | null {
+  if (Array.isArray(value)) {
+    for (const [index, item] of value.entries()) {
+      const found = testPlanPlaceholder(item, `${path}[${index}]`);
+      if (found) return found;
+    }
+    return null;
+  }
+  if (!value || typeof value !== "object") return null;
+  for (const [key, item] of Object.entries(value as Record<string, unknown>)) {
+    const itemPath = `${path}.${key}`;
+    if (["requirementId", "targetId", "changeTargetId", "fromTargetId", "toTargetId", "key"].includes(key)
+      && typeof item === "string" && TEST_PLAN_PLACEHOLDERS.has(item)) {
+      return `${itemPath}=${JSON.stringify(item)}`;
+    }
+    const found = testPlanPlaceholder(item, itemPath);
+    if (found) return found;
+  }
+  return null;
+}
+
+/**
+ * The real-window runner requires every post-session input to prove its own
+ * transition. Equality-only assertions can already be true before the input,
+ * which turns a malformed plan into a false product failure. START_SESSION is
+ * the sole exception because the core lifecycle fixes its before/after states.
+ */
+function firstActionWithoutTransitionOracle(value: unknown): string | null {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  const events = (value as { events?: unknown }).events;
+  if (!Array.isArray(events)) return null;
+  for (const event of events) {
+    if (!event || typeof event !== "object" || Array.isArray(event)) continue;
+    const action = event as Record<string, unknown>;
+    if (action.intent === undefined || action.intent === "START_SESSION") continue;
+    if (!Array.isArray(action.postconditions)
+      || !action.postconditions.some(assertion => assertion && typeof assertion === "object"
+        && !Array.isArray(assertion) && (assertion as { operator?: unknown }).operator === "CHANGED")) {
+      return typeof action.stepId === "string" ? action.stepId : "<missing-stepId>";
+    }
+  }
+  return null;
 }
 
 function isSafeGodotTestPath(value: string): boolean {

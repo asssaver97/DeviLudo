@@ -35,6 +35,46 @@ export function playerPolicyIdempotencyInput(request: PlayerPolicyRequest) {
   return Object.freeze({ goal: request.goal, allowedActions: request.allowedActions });
 }
 
+/**
+ * Translate coarse manifest capabilities into the exact native action wire
+ * shapes expected by the guest. Passing only names such as POINTER invites the
+ * vision model to return a semantic target action that cannot be executed.
+ */
+export function playerPolicyActionContract(groups: readonly string[]): readonly string[] {
+  const actions = [
+    'wait: {"type":"wait","duration_ms":100..2000}',
+  ];
+  if (groups.includes("KEYBOARD")) actions.push(
+    'key_tap: {"type":"key_tap","key":"ENTER"}',
+    'key_hold: {"type":"key_hold","key":"LEFT","duration_ms":1..2000}',
+    'text_input: {"type":"text_input","text":"player text"}',
+  );
+  if (groups.includes("POINTER")) actions.push(
+    'click: {"type":"click","x":0..1279,"y":0..719}',
+    'double_click: {"type":"double_click","x":0..1279,"y":0..719}',
+    'scroll: {"type":"scroll","x":0..1279,"y":0..719,"deltaY":non-zero integer -1200..1200}',
+    'drag: {"type":"drag","fromX":0..1279,"fromY":0..719,"toX":0..1279,"toY":0..719,"duration_ms":1..2000}',
+  );
+  if (groups.includes("GAMEPAD")) actions.push(
+    'gamepad_button_tap: {"type":"gamepad_button_tap","button":"A"}',
+    'gamepad_button_hold: {"type":"gamepad_button_hold","button":"A","duration_ms":1..2000}',
+    'gamepad_axis: {"type":"gamepad_axis","axis":"LEFT_X","value":-1..1}',
+    'gamepad_trigger: {"type":"gamepad_trigger","trigger":"LEFT","value":0..1}',
+    'gamepad_release_all: {"type":"gamepad_release_all"}',
+  );
+  return Object.freeze(actions);
+}
+
+export function playerPolicyDecisionContract(): readonly string[] {
+  return Object.freeze([
+    "Return exactly one JSON object with only: screenIntegrity, screenIntegrityReason, status, observation, rationale, actions.",
+    'screenIntegrity is exactly "PASS" or "PRODUCT_DEFECT"; never return "FAIL". Use PRODUCT_DEFECT only for a visible unusable or contradictory game screen.',
+    'status is exactly "CONTINUE", "GOAL_REACHED", or "UNRECOVERABLE".',
+    "screenIntegrityReason, observation, and rationale are non-empty strings of at most 500 characters each.",
+    "CONTINUE with screenIntegrity PASS requires 1-4 actions. PRODUCT_DEFECT requires an empty actions array.",
+  ]);
+}
+
 export function parsePlayerPolicyRequest(value: unknown): PlayerPolicyRequest {
   if (!value || typeof value !== "object" || Array.isArray(value)) throw invalid("Player policy request must be an object");
   const request = value as Record<string, unknown>;

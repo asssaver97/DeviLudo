@@ -60,4 +60,5 @@ export function resolveProbeControl(snapshot: E2EProbeSnapshot, targetId: string
 export function resolveProbeControlAtPoint(snapshot: E2EProbeSnapshot, x: number, y: number): E2EProbeControl | null;
 export function resolveProbeAssetBinding(snapshot: E2EProbeSnapshot, assetKey: string, targetId: string): E2EProbeAssetBinding;
 export function evaluateProbeAssertions(assertions: readonly ProbeAssertion[], before: E2EProbeSnapshot, after: E2EProbeSnapshot): readonly E2EProbeAssertionResult[];
+export function missingChangedAssertionReferences(assertions: readonly ProbeAssertion[], snapshot: E2EProbeSnapshot): readonly string[];
 export function probeStateDigest(snapshot: E2EProbeSnapshot): string;

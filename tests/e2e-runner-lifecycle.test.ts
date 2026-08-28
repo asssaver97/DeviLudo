@@ -266,6 +266,9 @@ test("the production Guest, relay, executor and node all wire the lifecycle guar
   assert.match(guest, /driver\("find-pid", \["--executable", executable\]/);
   assert.doesNotMatch(guest, /execute\("ps", \["-ax", "-o", "pid=,command="\]/);
   assert.match(guest, /POSTCONDITION_TRANSITION_MISSING/);
+  assert.match(guest, /!transitionProven\) throw configurationFailure\([\s\S]*POSTCONDITION_TRANSITION_MISSING/);
+  assert.match(guest, /missingChangedAssertionReferences\(event\.postconditions, before\)[\s\S]*TEST_PLAN_REFERENCE_MISSING/);
+  assert.match(guest, /Project Runtime is completing a lifecycle transition/);
   assert.match(guest, /let executionError = null;[\s\S]*failures\.some\(failure => failure\.startsWith\("GODOT_SCRIPT_ERROR"\)\)[\s\S]*if \(executionError\) throw executionError/);
   assert.match(guest, /decision\.screenIntegrity === "PRODUCT_DEFECT"[\s\S]*VISUAL_INTEGRITY_DEFECT/);
   assert.match(guest, /if \(rollout\.failureCode === "VISUAL_INTEGRITY_DEFECT"\) break/);
@@ -296,6 +299,7 @@ test("the production Guest, relay, executor and node all wire the lifecycle guar
   assert.match(guest, /const failures = \[\];[\s\S]*failures\.push\(\{[\s\S]*continue;/);
   assert.match(guest, /if \(failures\.length > 0\)[\s\S]*`\$\{journeyId\}\/\$\{checkpointId\}:[\s\S]*failures\.map\(failure => `\$\{failure\.code\} \$\{failure\.detail\}`\)\.join\(", "\)/);
   assert.match(guest, /finish\("FAILED", "PRODUCT", summary, activeManifest\)/);
+  assert.match(guest, /finish\("FAILED", "CONFIGURATION", summary, activeManifest\)/);
   assert.match(guest, /Buffer\.isBuffer\(error\?\.stderr\)[\s\S]*error\.stderr\.toString\("utf8"\)\.trim\(\)/);
   assert.match(guest, /const detail = stderr \|\| message \|\| String\(error \?\? ""\)\.trim\(\) \|\| `GUI driver \$\{command\} failed without diagnostics`/);
   assert.match(guest, /throw new Error\(`INFRASTRUCTURE: GUI driver \$\{command\} failed:/);

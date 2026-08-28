@@ -194,6 +194,19 @@ export function evaluateProbeAssertions(assertions, before, after) {
   });
 }
 
+/**
+ * A CHANGED oracle can only prove a transition when its reference exists in
+ * the pre-action snapshot. Treating an absent key as a product timeout makes a
+ * malformed frozen plan look like slow game input.
+ */
+export function missingChangedAssertionReferences(assertions, snapshot) {
+  if (!Array.isArray(assertions) || !snapshot) return [];
+  return assertions
+    .filter(assertion => assertion?.operator === "CHANGED"
+      && assertionValue(assertion, snapshot) === undefined)
+    .map(assertionReference);
+}
+
 export function probeStateDigest(snapshot) {
   const controls = [...snapshot.controls]
     .map(control => ({ id: control.id, scope: control.scope, visible: control.visible, enabled: control.enabled, text: control.text ?? null, value: control.value ?? null }))
@@ -218,6 +231,12 @@ function assertionValue(assertion, snapshot) {
     return control?.[assertion.property];
   }
   return undefined;
+}
+
+function assertionReference(assertion) {
+  if (assertion.source === "CONTROL") return `CONTROL:${assertion.targetId}.${assertion.property}`;
+  if (assertion.source === "SCENE") return "SCENE";
+  return `${assertion.source}:${assertion.key}`;
 }
 
 function compareAssertion(assertion, previous, actual) {

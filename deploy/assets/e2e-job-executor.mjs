@@ -170,9 +170,9 @@ function normalizeGuestOutcome(receipt) {
     && typeof receipt.summary === "string" && receipt.summary.trim()) {
     return { outcome: "PASSED", failureDomain: null, summary: receipt.summary.trim().slice(0, 2000) };
   }
-  if (receipt.outcome === "FAILED" && receipt.failureDomain === "PRODUCT"
+  if (receipt.outcome === "FAILED" && ["PRODUCT", "CONFIGURATION"].includes(receipt.failureDomain)
     && exitCode !== 0 && typeof receipt.summary === "string" && receipt.summary.trim()) {
-    return { outcome: "FAILED", failureDomain: "PRODUCT", summary: receipt.summary.trim().slice(0, 2000) };
+    return { outcome: "FAILED", failureDomain: receipt.failureDomain, summary: receipt.summary.trim().slice(0, 2000) };
   }
   const diagnostic = {
     schema: receipt.schema ?? null,

@@ -220,7 +220,9 @@ export function validateExecutionReceipt(job: JobProtocolV4, receipt: Readonly<R
   if (receipt.schema !== "deviludo.godot-guest-report" || Object.hasOwn(receipt, "schemaVersion")
     || receipt.action !== "test"
     || !["PASSED", "FAILED"].includes(String(receipt.outcome))
-    || (receipt.outcome === "FAILED" ? receipt.failureDomain !== "PRODUCT" : receipt.failureDomain !== null)
+    || (receipt.outcome === "FAILED"
+      ? !["PRODUCT", "CONFIGURATION"].includes(String(receipt.failureDomain))
+      : receipt.failureDomain !== null)
     || typeof receipt.summary !== "string" || receipt.summary.trim().length < 1 || receipt.summary.length > 2_000
     || !receipt.guest || typeof receipt.guest !== "object" || Array.isArray(receipt.guest)) {
     throw new Error("Godot guest receipt is invalid");

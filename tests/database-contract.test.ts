@@ -49,6 +49,7 @@ test("Runtime lifecycle claims exactly five-minute idle and thirty-minute paused
   assert.match(claim, /p_paused_seconds/);
   assert.match(claim, /FOR UPDATE SKIP LOCKED/);
   assert.match(claim, /NOT EXISTS \([\s\S]*agent_turns running_turn[\s\S]*state = 'RUNNING'/);
+  assert.match(claim, /NOT EXISTS \([\s\S]*jobs running_test[\s\S]*kind = 'E2E_PLATFORM_RUN'[\s\S]*state = 'RUNNING'/);
   assert.match(claim, /WHEN container\.state = 'PAUSED'[\s\S]*THEN 'DESTROY'/);
   assert.match(claim, /p_idle_seconds integer DEFAULT 300/);
   assert.match(claim, /p_paused_seconds integer DEFAULT 1800/);
@@ -67,8 +68,11 @@ test("Agent completion advances Design, Development and Test through one persist
   assert.match(complete, /jsonb_build_object\('targetPlatforms', workflow\.target_platforms\)/);
   assert.match(complete, /purpose = 'TEST_PLAN'/);
   assert.match(complete, /verdict := upper/);
+  assert.match(complete, /failure_class = 'CONFIGURATION'/);
+  assert.match(complete, /verdict := 'REPLAN'/);
+  assert.match(complete, /test-replan:plan:/);
   assert.match(complete, /'TEST_PLAN'[\s\S]*E2E_PLATFORM_RUN/);
-  assert.match(complete, /ELSE[\s\S]*'testHandoff'/);
+  assert.match(complete, /verdict = 'FAIL'[\s\S]*'testHandoff'/);
   assert.doesNotMatch(complete, /repair_count|max_attempts/);
 });
 
@@ -168,6 +172,7 @@ test("schema migration permits only an exact development function refresh", asyn
   assert.match(migration, /enqueue_job/);
   assert.match(migration, /claim_job/);
   assert.match(migration, /fail_job/);
+  assert.match(migration, /claim_agent_container_lifecycle/);
   assert.match(migration, /CREATE OR REPLACE FUNCTION deviludo\.\$\{functionName\}/);
   assert.match(migration, /WHERE singleton = true AND source_digest = \$2/);
   assert.match(migration, /WHERE version = \$2 AND checksum = \$3/);

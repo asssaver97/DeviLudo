@@ -225,18 +225,31 @@ export async function runSandbox(
             && (!context.e2e.planRevision || !context.e2e.plan)) {
             throw new Error("Test Agent completed without persisting a complete test plan");
           }
+          const testRuns = context.testSummary && Array.isArray(context.testSummary.runs)
+            ? context.testSummary.runs
+            : [];
+          const configurationReplan = role === "TEST" && job.payload.purpose === "TEST_VERDICT"
+            && testRuns.some(run => run && typeof run === "object"
+              && (run as Record<string, unknown>).failureClass === "CONFIGURATION");
+          const structured = configurationReplan
+            ? Object.freeze({
+                verdict: "REPLAN",
+                handoff: null,
+                reason: "The frozen plan references Probe fields that the tested source does not publish.",
+              })
+            : runtimeResult.structured;
           const completed = await repository.completePersistentAgentTurn(job, Object.freeze({
             turnId: runtimeResult.turnId,
             sessionId: runtimeResult.sessionId,
             role,
             purpose: typeof job.payload.purpose === "string" ? job.payload.purpose : null,
             content: runtimeResult.content,
-            structured: runtimeResult.structured,
+            structured,
             contextRevision: context.revision,
             sourceRevision: context.source?.revision ?? null,
             planRevision: context.e2e.planRevision ?? null,
-            verdict: runtimeResult.structured.verdict ?? null,
-            handoff: runtimeResult.structured.handoff ?? null,
+            verdict: structured.verdict ?? null,
+            handoff: structured.handoff ?? null,
             responseLanguage,
             agentRuntime: settings.agentRuntime,
             model: resolveAgentModel(
@@ -372,9 +385,9 @@ function runtimeJobPrompt(job: JobProtocolV4, role: ProjectRuntimeRole): string 
     ].filter(Boolean).join("\n");
   }
   if (purpose === "TEST_VERDICT") {
-    return "Read all platform evidence for the current source and plan revisions. Return PASS only if every deterministic, visual, performance, crash, input-response, requirement, and asset-binding gate passes. Otherwise return FAIL with one structured DEVELOPMENT handoff, or BLOCKED only for unrecoverable configuration.";
+    return "Read all platform evidence for the current source and plan revisions. Return PASS only if every deterministic, visual, performance, crash, input-response, requirement, and asset-binding gate passes. Return REPLAN without a Development handoff when evidence is classified CONFIGURATION or TEST_PLAN_REFERENCE_MISSING. Otherwise return FAIL with one structured DEVELOPMENT handoff, or BLOCKED only for unrecoverable environment configuration.";
   }
-  return "Create and persist the complete test plan for the current requirement and source revisions, covering every target platform, real input, planned asset binding, screenshots, video, crashes, and performance. Start all platform runs with the identical frozen plan.";
+  return "Create and persist the complete test plan for the current requirement and source revisions, covering every target platform, real input, planned asset binding, screenshots, video, crashes, and performance. Before freezing it, use source_list and source_read (with startLine/endLine ranges for large files) to inspect the functions that actually publish the Probe keys and semantic control IDs. Prior plans, agent.json, refresh scripts, and tests may be stale and are not publication evidence. Start all platform runs with the identical frozen plan.";
 }
 
 function admissionOperation(jobKind:JobProtocolV4["jobKind"]):"AGENT"|"SANDBOX"|"E2E"|"BUILD"|"STEAM_PUBLISH"{

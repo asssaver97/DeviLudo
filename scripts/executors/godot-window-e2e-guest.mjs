@@ -21,6 +21,7 @@ import {
 } from "../e2e-evidence.mjs";
 import {
   evaluateProbeAssertions,
+  missingChangedAssertionReferences,
   probeStateDigest,
   resolveProbeAssetBinding,
   resolveProbeControl,
@@ -206,23 +207,30 @@ try {
 
   await finish("PASSED", null, "玩家需求、原生包启动、确定性真实输入、自适应游玩和运行时流畅度均已通过", manifest);
 } catch (error) {
-  if (!isProductFailure(error)) throw error;
-  // A visual or semantic assertion can throw before the normal performance
-  // gate even though the completed real-window runs already prove severe
-  // stutter. Preserve that assertion as supporting evidence, but make the
-  // measured runtime defect the primary failure so the repair Agent and UI do
-  // not hide it behind whichever assertion happened to throw first.
-  performanceSummary = summarizeE2ePerformance({ frameRateRuns, inputResponses });
-  const measuredStutter = performanceSummary.failures.find(item => item.code === "GAME_STUTTER_DETECTED");
-  let primaryFailure = error;
-  if (measuredStutter && error.code !== measuredStutter.code) {
-    failures.push(`${error.code}: ${productFailureMessage(error.code, error.message)}`);
-    primaryFailure = productFailure(measuredStutter.code, measuredStutter.message);
+  if (isConfigurationFailure(error)) {
+    const summary = productFailureMessage(error.code, error.message);
+    failures.push(`${error.code}: ${summary}`);
+    gameExitCode = gameExitCode || 1;
+    await finish("FAILED", "CONFIGURATION", summary, activeManifest);
+  } else {
+    if (!isProductFailure(error)) throw error;
+    // A visual or semantic assertion can throw before the normal performance
+    // gate even though the completed real-window runs already prove severe
+    // stutter. Preserve that assertion as supporting evidence, but make the
+    // measured runtime defect the primary failure so the repair Agent and UI do
+    // not hide it behind whichever assertion happened to throw first.
+    performanceSummary = summarizeE2ePerformance({ frameRateRuns, inputResponses });
+    const measuredStutter = performanceSummary.failures.find(item => item.code === "GAME_STUTTER_DETECTED");
+    let primaryFailure = error;
+    if (measuredStutter && error.code !== measuredStutter.code) {
+      failures.push(`${error.code}: ${productFailureMessage(error.code, error.message)}`);
+      primaryFailure = productFailure(measuredStutter.code, measuredStutter.message);
+    }
+    const summary = productFailureMessage(primaryFailure.code, primaryFailure.message);
+    failures.push(`${primaryFailure.code}: ${summary}`);
+    gameExitCode = gameExitCode || 1;
+    await finish("FAILED", "PRODUCT", summary, activeManifest);
   }
-  const summary = productFailureMessage(primaryFailure.code, primaryFailure.message);
-  failures.push(`${primaryFailure.code}: ${summary}`);
-  gameExitCode = gameExitCode || 1;
-  await finish("FAILED", "PRODUCT", summary, activeManifest);
 } finally {
   if (streamHeartbeat) clearInterval(streamHeartbeat);
   policyInput?.close();
@@ -462,6 +470,13 @@ async function executeJourney(gamePackage, journey, runLabel, recordEvidence) {
           const detail = error instanceof Error ? error.message : String(error);
           throw productFailure("ACTION_TARGET_UNAVAILABLE", `${journey.id}/${event.stepId}: ${detail}`);
         }
+        const missingReferences = missingChangedAssertionReferences(event.postconditions, before);
+        if (missingReferences.length > 0) {
+          throw configurationFailure(
+            "TEST_PLAN_REFERENCE_MISSING",
+            `${journey.id}/${event.stepId} 的 CHANGED 断言引用了操作前 Probe 中不存在的字段：${missingReferences.join(", ")}`,
+          );
+        }
         await testEnvironment.sequence(nativeEvents, Math.min(journey.timeoutMs, remainingPlatformBudget()));
         const gamepadCount = gamepadEventCount(nativeEvents);
         gamepadInputCount += gamepadCount;
@@ -523,7 +538,10 @@ async function executeJourney(gamePackage, journey, runLabel, recordEvidence) {
             });
           }
           if (!assertionsPassed) throw productFailure("POSTCONDITION_FAILED", `${journey.id}/${event.stepId} 操作后状态断言失败`);
-          if (!transitionProven) throw productFailure("POSTCONDITION_TRANSITION_MISSING", `${journey.id}/${event.stepId} 的断言未证明该操作改变了被测结果`);
+          if (!transitionProven) throw configurationFailure(
+            "POSTCONDITION_TRANSITION_MISSING",
+            `${journey.id}/${event.stepId} 的测试计划没有用 CHANGED 断言证明该操作改变的 Probe 字段`,
+          );
           throw productFailure("ACTION_STATE_UNCHANGED", `${journey.id}/${event.stepId} 未产生可验证状态变化`);
         }
         if (recordEvidence) event.coversRequirementIds.forEach(id => coveredPlayerRequirements.add(id));
@@ -1260,7 +1278,7 @@ async function requestPlayerPolicy(request) {
     } catch (error) {
       lastError = error;
       const detail = error instanceof Error ? error.message : String(error ?? "");
-      const retryable = /PLAYER_POLICY_PROVIDER|PLAYER_POLICY_VISION_UNAVAILABLE|player policy timed out/i.test(detail);
+      const retryable = /PLAYER_POLICY_PROVIDER|PLAYER_POLICY_VISION_UNAVAILABLE|player policy timed out|Project Runtime is completing a lifecycle transition/i.test(detail);
       if (!retryable || attempt === 2) throw error;
       // Keep the current game/window/probe state alive. Retrying here avoids
       // replaying every deterministic journey and consumes no extra model
@@ -1959,6 +1977,8 @@ function productFailureMessage(code, message) {
 }
 function productFailure(code, message) { return Object.assign(new Error(productFailureMessage(code, message)), { code, productFailure: true }); }
 function isProductFailure(error) { return Boolean(error && typeof error === "object" && error.productFailure === true); }
+function configurationFailure(code, message) { return Object.assign(new Error(productFailureMessage(code, message)), { code, configurationFailure: true }); }
+function isConfigurationFailure(error) { return Boolean(error && typeof error === "object" && error.configurationFailure === true); }
 function safeEnvironment(overrides = {}) { return { PATH: process.env.PATH ?? "/usr/local/bin:/usr/bin:/bin", LANG: "C.UTF-8", DISPLAY: process.env.DISPLAY ?? "", HOME: process.env.HOME ?? tmpdir(), ...overrides }; }
 async function isolatedGameEnvironment(scope, overrides = {}) {
   if (!/^[A-Za-z0-9._-]{1,200}$/.test(scope)) throw new Error("Game user-data scope is invalid");

@@ -30,6 +30,7 @@ import {
 import {
   summarizeRuntimeToolCalls,
   summarizeToolAuditValue,
+  unpublishedTestPlanProbeReferences,
 } from "@/services/core/src/project-runtime-service";
 import {
   createRuntimeEventLineBuffer,
@@ -612,6 +613,66 @@ test("Analysis MCP advertises the complete canonical report schema", () => {
   assert.equal(schema.properties.analysis.properties.questions, undefined);
 });
 
+test("Test MCP advertises the current complete manifest contract", () => {
+  const schema = toolInputSchema("test_plan.replace") as {
+    required: readonly string[];
+    properties: {
+      plan: {
+        required: readonly string[];
+        properties: {
+          testManifest: { required: readonly string[]; properties: Record<string, unknown> };
+          assetPlacementPlan: { required: readonly string[] };
+        };
+      };
+    };
+  };
+  assert.deepEqual(schema.required, ["plan"]);
+  assert.deepEqual(schema.properties.plan.required, ["testManifest", "assetPlacementPlan"]);
+  assert.deepEqual(schema.properties.plan.properties.testManifest.required, [
+    "schema", "inputProfiles", "primaryInputProfile", "adaptivePlayer", "requirements", "features",
+  ]);
+  assert.ok(schema.properties.plan.properties.testManifest.properties.adaptivePlayer);
+  assert.deepEqual(schema.properties.plan.properties.assetPlacementPlan.required, [
+    "schema", "plannedAssetKeys", "placements", "unmappedAssetKeys",
+  ]);
+});
+
+test("source.read advertises bounded line ranges for large source files", () => {
+  const schema = toolInputSchema("source.read") as {
+    required: readonly string[];
+    additionalProperties: boolean;
+    properties: Record<string, Record<string, unknown>>;
+  };
+  assert.deepEqual(schema.required, ["path"]);
+  assert.equal(schema.additionalProperties, false);
+  assert.equal(schema.properties.startLine?.minimum, 1);
+  assert.equal(schema.properties.endLine?.minimum, 1);
+});
+
+test("Test plans cannot freeze Probe references absent from the current publisher source", () => {
+  const plan = {
+    testManifest: {
+      adaptivePlayer: {
+        successAssertions: [{ source: "PROGRESS", key: "move_budget", operator: "GREATER_THAN", value: 0 }],
+      },
+      features: [{ interactionScript: { events: [
+        { type: "click", targetId: "reachable-hex", postconditions: [{ source: "CONTROL", targetId: "move", property: "enabled", operator: "EQUALS", value: true }] },
+        { type: "click", targetId: "move-target", postconditions: [{ source: "PROGRESS", key: "owned_tiles", operator: "CHANGED" }] },
+        { type: "checkpoint", changeTargetId: "resource-food-icon", assertions: [{ source: "STATE", key: "screen_mode", operator: "EQUALS", value: "PLAYING" }] },
+      ] } }],
+    },
+    assetPlacementPlan: { placements: [] },
+  };
+  const publisher = `
+    { "schema": "deviludo.e2e-ui-probe", "state": { "screen_mode": "PLAYING" },
+      "progress": { "move_budget": 2, "owned_tiles": 1 },
+      "controls": ["reachable-hex", "move", "resource-%s-icon"] }
+  `;
+  assert.deepEqual(unpublishedTestPlanProbeReferences(plan, [publisher]), [
+    { kind: "CONTROL", value: "move-target" },
+  ]);
+});
+
 test("MCP audit records summarize large tool results and redact credentials", () => {
   const result = summarizeToolAuditValue({
     context: { plan: "x".repeat(70_000), credentialSecretRef: "vault://must-not-persist" },
@@ -686,6 +747,13 @@ test("all five signed role Skills exist and define the intended boundary", async
     assert.match(skill, /\n# /);
     assert.match(skill, /MCP|tool/i);
   }
+  const testSkill = await readFile(new URL("../services/project-runtime/skills/test/SKILL.md", import.meta.url), "utf8");
+  assert.match(testSkill, /sole test-manifest contract/);
+  assert.match(testSkill, /call `source_list` and then `source_read`/);
+  assert.match(testSkill, /return REPLAN without a Development handoff/);
+  assert.doesNotMatch(testSkill, /"key":"loop"/);
+  assert.match(testSkill, /validation rejection is a correctable plan-authoring error/);
+  assert.match(testSkill, /must not call `test_verdict`, return BLOCKED, or return a null plan/);
 });
 
 function result(role: ProjectRuntimeTurnResult["role"], structured: Readonly<Record<string, unknown>>): ProjectRuntimeTurnResult {

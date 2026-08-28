@@ -42,6 +42,7 @@ export type WorkflowEvent =
       jobKind: JobKind;
       agentRole?: "DESIGN" | "DEVELOPMENT" | "TEST";
       purpose?: "DESIGN" | "DEVELOPMENT" | "TEST_PLAN" | "TEST_VERDICT";
+      verdict?: "PASS" | "FAIL" | "BLOCKED" | "REPLAN";
       targetOperatingSystem: ServerOperatingSystem | null;
       /** Agent completion waits here only when this run has auto-generated art. */
       waitForAssets?: boolean;
@@ -188,6 +189,19 @@ export function transitionWorkflow(snapshot: WorkflowSnapshot, event: WorkflowEv
   }
   if (snapshot.state === "TEST_PLANNING" && event.jobKind === "AGENT_TURN"
     && event.agentRole === "TEST" && event.purpose === "TEST_VERDICT") {
+    if (event.verdict === "REPLAN") {
+      return result(
+        { ...snapshot, state: "TEST_PLANNING", completedE2e: Object.freeze([]) },
+        [command(snapshot, "AGENT_TURN", null, `test-replan:after:${event.jobId}`, "TEST", "TEST_PLAN")],
+      );
+    }
+    if (event.verdict === "FAIL") {
+      return result(
+        { ...snapshot, state: "DEVELOPING" },
+        [command(snapshot, "AGENT_TURN", null, `development:test-handoff:${event.jobId}`, "DEVELOPMENT", "DEVELOPMENT")],
+      );
+    }
+    if (event.verdict === "BLOCKED") return result({ ...snapshot, state: "BLOCKED" }, []);
     return result({ ...snapshot, state: "RELEASE_APPROVAL_PENDING" }, []);
   }
   if (snapshot.state === "STEAM_PUBLISHING" && event.jobKind === "STEAM_PUBLISH") {

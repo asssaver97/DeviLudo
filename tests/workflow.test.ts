@@ -65,6 +65,26 @@ test("validation can stop at manual release approval without publishing", () => 
   assert.deepEqual(skipped.enqueue, []);
 });
 
+test("a Test plan configuration verdict replans without invoking Development", () => {
+  let transition = transitionWorkflow(
+    initialWorkflowSnapshot(workflowId, workspaceId, projectId, "VALIDATE", ["macos"]),
+    { kind: "SPEC_APPROVED" },
+  );
+  transition = transitionWorkflow(transition.snapshot, agentSuccess("design", "DESIGN", "DESIGN"));
+  transition = transitionWorkflow(transition.snapshot, agentSuccess("development", "DEVELOPMENT", "DEVELOPMENT"));
+  transition = transitionWorkflow(transition.snapshot, jobSuccess("build", "BUILD"));
+  transition = transitionWorkflow(transition.snapshot, agentSuccess("plan", "TEST", "TEST_PLAN"));
+  transition = transitionWorkflow(transition.snapshot, {
+    kind: "JOB_SUCCEEDED", jobId: "e2e-macos", jobKind: "E2E_PLATFORM_RUN", targetOperatingSystem: "macos",
+  });
+  transition = transitionWorkflow(transition.snapshot, {
+    ...agentSuccess("verdict", "TEST", "TEST_VERDICT"), verdict: "REPLAN",
+  });
+  assert.equal(transition.snapshot.state, "TEST_PLANNING");
+  assert.deepEqual(transition.snapshot.completedE2e, []);
+  assert.deepEqual(transition.enqueue.map(job => [job.agentRole, job.purpose]), [["TEST", "TEST_PLAN"]]);
+});
+
 test("rerunning Build invalidates platform results and returns through Test planning", () => {
   const succeeded = transitionWorkflow(
     reachReleasePending(initialWorkflowSnapshot(workflowId, workspaceId, projectId, "VALIDATE", ["macos"])),

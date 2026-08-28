@@ -84,5 +84,11 @@ function toolDescription(name) {
   if (name === "context.update_analysis") {
     return "Persist the complete imported-project analysis. Pass the canonical report in the required analysis object.";
   }
+  if (name === "source.read") {
+    return "Read a UTF-8 source file from the current immutable revision. For files larger than 1 MiB, provide a 1-based startLine/endLine range spanning at most 1000 lines.";
+  }
+  if (name === "test_plan.replace") {
+    return "Persist the complete current Test Agent plan. Follow this tool's input schema exactly and use only source-read Probe keys and semantic control IDs. A validation error is a correctable plan-authoring error: revise the payload and retry; it is not E2E infrastructure failure.";
+  }
   return `DeviLudo built-in ${name} tool. Access is enforced for the ${role} role and audited by turn.`;
 }

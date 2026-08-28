@@ -5,6 +5,7 @@ import {
   planE2eExecution,
   stableRequirementId,
   specificationRequirementCatalog,
+  testManifestValidationError,
   validateTestExecutionResult,
   validateTestManifest,
   type TestExecutionResult,
@@ -61,6 +62,7 @@ function completeManifest(): TestManifest {
           { type: "click", stepId: "start-session", intent: "START_SESSION", targetId: "new-game", coversRequirementIds: ["req-core-loop"], postconditions: playingAssertions },
           { ...checkpoint("game-ready", "READY", true), assertions: playingAssertions },
           { type: "click", stepId: "activate-primary-control", intent: "PRIMARY_ACTION", targetId: "primary-control", coversRequirementIds: ["req-core-loop"], postconditions: [changedTurn] },
+          { type: "click", stepId: "exercise-feature", intent: "FEATURE_ACTION", targetId: "feature-control", coversRequirementIds: ["req-core-loop"], postconditions: [changedTurn] },
           checkpoint("turn-progress", "PROGRESS"),
           { type: "click", stepId: "finish", intent: "COMPLETE_LOOP", targetId: "end-turn", coversRequirementIds: ["req-core-loop"], postconditions: [changedTurn] },
           checkpoint("game-complete", "COMPLETION", true),
@@ -70,7 +72,7 @@ function completeManifest(): TestManifest {
         id: "pause-journey", requirementIds: ["req-pause"], category: "player-control",
         description: "真实暂停操作", verificationMethod: "interactive", launchProfile: { type: "FRESH" }, timeoutMs: 30_000,
         interactionScript: { events: [
-          { type: "key_tap", stepId: "pause", intent: "FEATURE_ACTION", key: "KEY_P", coversRequirementIds: ["req-pause"], postconditions: [{ source: "STATE", key: "paused", operator: "EQUALS", value: true }] },
+          { type: "key_tap", stepId: "pause", intent: "FEATURE_ACTION", key: "KEY_P", coversRequirementIds: ["req-pause"], postconditions: [{ source: "STATE", key: "paused", operator: "CHANGED" }] },
         ] },
       },
       {
@@ -83,7 +85,63 @@ function completeManifest(): TestManifest {
 
 describe("test-manifest", () => {
   test("validates fresh core play, semantic real input, postconditions and system checks", () => {
-    assert.equal(validateTestManifest(completeManifest()), true);
+    const manifest = completeManifest();
+    assert.equal(validateTestManifest(manifest), true);
+    assert.equal(testManifestValidationError(manifest), null);
+  });
+
+  test("returns actionable contract errors instead of misclassifying an invalid plan as infrastructure", () => {
+    const manifest = completeManifest();
+    assert.match(testManifestValidationError({
+      schema: TEST_MANIFEST_SCHEMA,
+      requirements: manifest.requirements,
+      features: manifest.features,
+    }) ?? "", /missing required fields: inputProfiles, primaryInputProfile, adaptivePlayer/);
+    assert.match(testManifestValidationError({
+      ...manifest,
+      requirements: manifest.requirements.map(item => ({ requirementId: item.requirementId })),
+    }) ?? "", /requirements\[0\].*description, source, verificationClass/);
+    assert.match(testManifestValidationError({
+      ...manifest,
+      seed: 19870531,
+    }) ?? "", /unsupported top-level fields: seed/);
+    assert.match(testManifestValidationError({
+      ...manifest,
+      features: [{ ...manifest.features[0], verificationMethod: "CORE_JOURNEY" }],
+    }) ?? "", /verificationMethod must be one of: unit, interactive, visual, manual/);
+    assert.match(testManifestValidationError({
+      ...manifest,
+      adaptivePlayer: {
+        ...manifest.adaptivePlayer,
+        successAssertions: [{ source: "PROGRESS", key: "loop", operator: "CHANGED" }],
+      },
+    }) ?? "", /unresolved placeholder.*PROGRESS|unresolved placeholder.*key/);
+    assert.match(testManifestValidationError({
+      ...manifest,
+      features: [{ ...manifest.features[0], interactionScript: { events: [] } }],
+    }) ?? "", /interactionScript is invalid/);
+    const equalityOnly = manifest.features[0]!.interactionScript!.events.map(event =>
+      event.type === "click" && event.stepId === "exercise-feature"
+        ? { ...event, postconditions: [{ source: "CONTROL", targetId: "move", property: "enabled", operator: "EQUALS", value: true }] }
+        : event);
+    assert.match(testManifestValidationError({
+      ...manifest,
+      features: [{ ...manifest.features[0], interactionScript: { events: equalityOnly } }, ...manifest.features.slice(1)],
+    }) ?? "", /action exercise-feature must include a CHANGED postcondition/);
+    assert.equal(validateTestManifest({
+      ...manifest,
+      features: [{ ...manifest.features[0], interactionScript: { events: equalityOnly } }, ...manifest.features.slice(1)],
+    }), false);
+    const coreFeature = manifest.features[0]!;
+    assert.match(testManifestValidationError({
+      ...manifest,
+      features: [{
+        ...coreFeature,
+        interactionScript: {
+          events: coreFeature.interactionScript!.events.filter(event => event.type !== "click" || event.intent !== "FEATURE_ACTION"),
+        },
+      }, ...manifest.features.slice(1)],
+    }) ?? "", /PRIMARY_ACTION, FEATURE_ACTION, and COMPLETE_LOOP/);
   });
 
   test("rejects versioned contracts and blind raw-key launch contracts", () => {
@@ -136,10 +194,10 @@ describe("test-manifest", () => {
 
   test("supports action, turn-strategy, pointer and narrative semantic player contracts", () => {
     const archetypes = [
-      { id: "action", event: { type: "key_tap", key: "SPACE", postconditions: [{ source: "STATE", key: "attacks", operator: "GREATER_THAN", value: 0 }] } },
+      { id: "action", event: { type: "key_tap", key: "SPACE", postconditions: [{ source: "STATE", key: "attacks", operator: "CHANGED" }] } },
       { id: "turn-strategy", event: { type: "click", targetId: "end-turn", postconditions: [{ source: "PROGRESS", key: "turn", operator: "CHANGED" }] } },
-      { id: "pointer", event: { type: "double_click", targetId: "world-target", postconditions: [{ source: "STATE", key: "selected", operator: "EQUALS", value: true }] } },
-      { id: "narrative", event: { type: "click", targetId: "choice-a", postconditions: [{ source: "SCENE", operator: "EQUALS", value: "chapter-two" }] } },
+      { id: "pointer", event: { type: "double_click", targetId: "world-target", postconditions: [{ source: "STATE", key: "selected", operator: "CHANGED" }] } },
+      { id: "narrative", event: { type: "click", targetId: "choice-a", postconditions: [{ source: "SCENE", operator: "CHANGED" }] } },
     ] as const;
     for (const archetype of archetypes) {
       const manifest = completeManifest();
