@@ -864,7 +864,9 @@ export class ProjectRuntimeRepository {
   async claimLifecycle(): Promise<RuntimeLifecycleClaim | null> {
     const result = await this.database.pool.query(
       `SELECT * FROM deviludo.claim_agent_container_lifecycle($1, $2, $3)`,
-      [300, 1800, 180],
+      // Compaction is sequential across role sessions and can legitimately
+      // exceed three minutes. Keep one owner for the complete bounded pass.
+      [300, 1800, 900],
     );
     return lifecycleClaim(result.rows[0]);
   }

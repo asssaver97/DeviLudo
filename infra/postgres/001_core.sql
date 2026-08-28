@@ -1777,6 +1777,13 @@ BEGIN
   END IF;
   SELECT * INTO workflow FROM deviludo.workflow_instances
    WHERE workspace_id = job.workspace_id AND id = job.workflow_id FOR UPDATE;
+  IF role = 'DESIGN' AND (
+    jsonb_typeof(p_output->'handoff') IS DISTINCT FROM 'object'
+    OR p_output #>> '{handoff,toRole}' IS DISTINCT FROM 'DEVELOPMENT'
+    OR length(btrim(coalesce(p_output #>> '{handoff,summary}', ''))) = 0
+  ) THEN
+    RAISE EXCEPTION 'Design Agent did not create a complete DEVELOPMENT handoff';
+  END IF;
   UPDATE deviludo.jobs SET state = 'SUCCEEDED', receipt = jsonb_build_object('agentTurn', p_output),
       lease_owner = NULL, lease_token = NULL, lease_expires_at = NULL, heartbeat_at = NULL,
       updated_at = clock_timestamp()

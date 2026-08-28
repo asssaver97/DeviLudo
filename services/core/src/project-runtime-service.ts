@@ -1,7 +1,7 @@
 import { lstat, mkdir, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import { createHash, randomUUID } from "node:crypto";
 import { join, relative, resolve, sep } from "node:path";
-import type { ProjectRuntimeRole } from "@/lib/product/contracts";
+import { PROJECT_RUNTIME_ROLES, type ProjectRuntimeRole } from "@/lib/product/contracts";
 import {
   PROJECT_RUNTIME_SCHEMA,
   type ProjectRuntimeControlRequest,
@@ -43,6 +43,26 @@ const ROLE_TOOLS = Object.freeze({
 const READ_ONLY_TOOLS = new Set([
   "context.read", "source.list", "source.read", "evidence.read", "conversation.reply",
 ]);
+const LIFECYCLE_RETRY_INTERVAL_MS = 1_000;
+// Match the scheduler's bounded lifecycle lease. A workflow attempt must not
+// be consumed while another owner can still be legitimately compacting it.
+const LIFECYCLE_RETRY_LIMIT = 900;
+
+type ProjectRuntimeTurnInput = Readonly<{
+  workspaceId: string;
+  projectId: string;
+  workflowJobId?: string;
+  role: ProjectRuntimeRole;
+  mode: ProjectRuntimeTurnMode;
+  prompt: string;
+  responseLanguage: "en" | "zh";
+  settings: StoredInstanceAgentSettings;
+  sourceRevision: number | null;
+  sourceRelativePath: string | null;
+  lifecycleLeaseToken?: string;
+  attachments?: readonly Readonly<{ content: Buffer; extension: "png" | "jpg" | "webp" }>[];
+  onEvent?: (event: ProjectRuntimeProgressEvent) => void;
+}>;
 
 export class ProjectRuntimeService {
   private readonly contexts: ProjectContextStore;
@@ -92,21 +112,14 @@ export class ProjectRuntimeService {
     return context;
   }
 
-  async turn(input: Readonly<{
-    workspaceId: string;
-    projectId: string;
-    workflowJobId?: string;
-    role: ProjectRuntimeRole;
-    mode: ProjectRuntimeTurnMode;
-    prompt: string;
-    responseLanguage: "en" | "zh";
-    settings: StoredInstanceAgentSettings;
-    sourceRevision: number | null;
-    sourceRelativePath: string | null;
-    lifecycleLeaseToken?: string;
-    attachments?: readonly Readonly<{ content: Buffer; extension: "png" | "jpg" | "webp" }>[];
-    onEvent?: (event: ProjectRuntimeProgressEvent) => void;
-  }>): Promise<ProjectRuntimeTurnResult> {
+  turn(input: ProjectRuntimeTurnInput): Promise<ProjectRuntimeTurnResult> {
+    return retryProjectRuntimeLifecycle(
+      () => this.runTurn(input),
+      { retryLimit: input.lifecycleLeaseToken ? 0 : LIFECYCLE_RETRY_LIMIT },
+    );
+  }
+
+  private async runTurn(input: ProjectRuntimeTurnInput): Promise<ProjectRuntimeTurnResult> {
     const registered = await this.readRegisteredContext(input.workspaceId, input.projectId);
     let metadata = registered.metadata;
     let context = registered.context;
@@ -207,6 +220,12 @@ export class ProjectRuntimeService {
         const durable = await this.readContext(input.workspaceId, input.projectId);
         if (durable.workflow.analysisTurnId !== result.turnId) {
           throw new Error("Project Analysis Agent did not persist its report through context_update_analysis");
+        }
+      }
+      if (input.role === "DESIGN" && input.mode === "PRIMARY") {
+        const durable = await this.readContext(input.workspaceId, input.projectId);
+        if (!runtimeTurnHandoff(durable, result.turnId, "DESIGN", "DEVELOPMENT")) {
+          throw new Error("Design Agent completed without creating a DEVELOPMENT handoff");
         }
       }
       const toolSummaries = summarizeRuntimeToolCalls(result.toolCalls);
@@ -559,9 +578,16 @@ export class ProjectRuntimeService {
         context.assetPlan.filter(asset => retained.has(String(asset.key ?? ""))));
     }
     if (input.name === "handoff.create") {
+      const handoff = boundedObject(input.arguments);
+      const toRole = String(handoff.toRole ?? "");
+      const summary = typeof handoff.summary === "string" ? handoff.summary.trim() : "";
+      if (!PROJECT_RUNTIME_ROLES.includes(toRole as ProjectRuntimeRole) || toRole === input.role || !summary) {
+        throw new Error("Agent handoff requires a different valid role and a non-empty summary");
+      }
       return this.mutateResult(input.workspaceId, input.projectId, current => updateProjectContext(current, {
         handoffs: Object.freeze([...current.handoffs, Object.freeze({
-          id: input.turnId, fromRole: input.role, ...boundedObject(input.arguments), createdAt: new Date().toISOString(),
+          ...handoff, id: input.turnId, fromRole: input.role, toRole,
+          summary, createdAt: new Date().toISOString(),
         })].slice(-100)),
       }));
     }
@@ -937,6 +963,42 @@ function contextFromSeed(current: ProjectContext, seed: ProjectContextSeed, init
 
 function sameJson(left: unknown, right: unknown): boolean {
   return JSON.stringify(left) === JSON.stringify(right);
+}
+
+export function runtimeTurnHandoff(
+  context: ProjectContext,
+  turnId: string,
+  fromRole: ProjectRuntimeRole,
+  toRole: ProjectRuntimeRole,
+): Readonly<Record<string, unknown>> | null {
+  return context.handoffs.find(handoff => handoff.id === turnId
+    && handoff.fromRole === fromRole
+    && handoff.toRole === toRole
+    && typeof handoff.summary === "string"
+    && handoff.summary.trim().length > 0) ?? null;
+}
+
+export async function retryProjectRuntimeLifecycle<T>(
+  operation: () => Promise<T>,
+  options: Readonly<{
+    retryLimit?: number;
+    wait?: () => Promise<void>;
+  }> = {},
+): Promise<T> {
+  const retryLimit = options.retryLimit ?? LIFECYCLE_RETRY_LIMIT;
+  const wait = options.wait ?? (() => new Promise<void>(resolve => {
+    setTimeout(resolve, LIFECYCLE_RETRY_INTERVAL_MS);
+  }));
+  for (let attempt = 0; ; attempt += 1) {
+    try {
+      return await operation();
+    } catch (error) {
+      const lifecycleTransition = error instanceof Error
+        && error.message === "Project Runtime is completing a lifecycle transition";
+      if (!lifecycleTransition || attempt >= retryLimit) throw error;
+      await wait();
+    }
+  }
 }
 
 function physicalIdentity(value: Readonly<Record<string, unknown>>): PhysicalRuntimeIdentity | null {

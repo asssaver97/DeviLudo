@@ -1991,7 +1991,7 @@ export async function runApi(
         });
         let repairInstruction = "";
         for (let generationAttempt = 0; generationAttempt < 2; generationAttempt += 1) {
-          const runtimeResult = await waitForPlayerPolicyRuntime(() => projectRuntime.turn({
+          const runtimeResult = await projectRuntime.turn({
             workspaceId: job.workspaceId,
             projectId: job.projectId,
             role: "TEST",
@@ -2018,7 +2018,7 @@ export async function runApi(
               content: Buffer.from(policyRequest.screenshotBase64, "base64"),
               extension: "png" as const,
             })]),
-          }));
+          });
           try {
             generated = Object.freeze({
               decision: parsePlayerPolicyDecision(runtimeResult.content, policyRequest.allowedActions),
@@ -3518,22 +3518,6 @@ function projectAnalysisFailureMessage(error: unknown): string {
   if (isTimeoutFailure(error)) return "项目分析超时，请检查本地目录、Agent 服务或网络后重试。";
   const message = error instanceof Error ? error.message.trim() : "项目分析失败";
   return message || "项目分析失败";
-}
-
-async function waitForPlayerPolicyRuntime<T>(operation: () => Promise<T>): Promise<T> {
-  for (let attempt = 0; ; attempt += 1) {
-    try {
-      return await operation();
-    } catch (error) {
-      const lifecycleTransition = error instanceof Error
-        && error.message === "Project Runtime is completing a lifecycle transition";
-      if (!lifecycleTransition || attempt >= 23) throw error;
-      // The E2E guest keeps the current frame alive for up to 490 seconds.
-      // Wait behind a bounded Runtime compaction instead of discarding the VM,
-      // replaying the deterministic journey, and consuming a job attempt.
-      await new Promise(resolve => setTimeout(resolve, 5_000));
-    }
-  }
 }
 
 async function abortableDelay(milliseconds: number, signal: AbortSignal): Promise<void> {

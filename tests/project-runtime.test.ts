@@ -28,6 +28,8 @@ import {
   projectRuntimeSpecialistPrompt,
 } from "@/services/core/src/project-runtime-conversation";
 import {
+  retryProjectRuntimeLifecycle,
+  runtimeTurnHandoff,
   summarizeRuntimeToolCalls,
   summarizeToolAuditValue,
   unpublishedTestPlanProbeReferences,
@@ -54,6 +56,39 @@ import {
 
 const workspaceId = "10000000-0000-4000-8000-000000000001";
 const projectId = "10000000-0000-4000-8000-000000000002";
+
+test("Runtime turns wait through lifecycle compaction without consuming a workflow attempt", async () => {
+  let attempts = 0;
+  let waits = 0;
+  const result = await retryProjectRuntimeLifecycle(async () => {
+    attempts += 1;
+    if (attempts < 3) throw new Error("Project Runtime is completing a lifecycle transition");
+    return "started";
+  }, {
+    retryLimit: 3,
+    wait: async () => { waits += 1; },
+  });
+  assert.equal(result, "started");
+  assert.equal(attempts, 3);
+  assert.equal(waits, 2);
+
+  await assert.rejects(() => retryProjectRuntimeLifecycle(
+    async () => { throw new Error("Runtime backend failed"); },
+    { wait: async () => { throw new Error("must not wait"); } },
+  ), /Runtime backend failed/);
+});
+
+test("Design completion accepts only the current turn's durable Development handoff", () => {
+  const context = updateProjectContext(createProjectContext({ workspaceId, projectId }), {
+    handoffs: Object.freeze([
+      Object.freeze({ id: "old", fromRole: "DESIGN", toRole: "DEVELOPMENT", summary: "Old" }),
+      Object.freeze({ id: "current", fromRole: "DESIGN", toRole: "DEVELOPMENT", summary: "Implement it" }),
+    ]),
+  });
+  assert.equal(runtimeTurnHandoff(context, "current", "DESIGN", "DEVELOPMENT")?.summary, "Implement it");
+  assert.equal(runtimeTurnHandoff(context, "old", "DESIGN", "TEST"), null);
+  assert.equal(runtimeTurnHandoff(context, "missing", "DESIGN", "DEVELOPMENT"), null);
+});
 
 test("persistent Runtime intent selects exactly one role and rejects contradictory mutation flags", () => {
   const decision = parseProjectRuntimeIntent(result("INTENT", {

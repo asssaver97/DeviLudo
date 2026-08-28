@@ -61,6 +61,9 @@ test("Agent completion advances Design, Development and Test through one persist
   assert.match(complete, /role text;/);
   assert.match(complete, /purpose text;/);
   assert.match(complete, /role = 'DESIGN'/);
+  assert.match(complete, /jsonb_typeof\(p_output->'handoff'\) IS DISTINCT FROM 'object'/);
+  assert.match(complete, /handoff,toRole.*IS DISTINCT FROM 'DEVELOPMENT'/);
+  assert.match(complete, /Design Agent did not create a complete DEVELOPMENT handoff/);
   assert.match(complete, /role = 'DEVELOPMENT'/);
   assert.match(complete, /assets_ready boolean;/);
   assert.match(complete, /item\.status NOT IN \('generated', 'uploaded', 'existing'\)/);

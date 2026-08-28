@@ -7,7 +7,7 @@ import type { CoreRepository } from "./repository";
 import { CoreObjectStore } from "./object-store";
 import { ProjectSourceStore } from "./project-sources";
 import type { CoreHostServices } from "./access";
-import type { ProjectRuntimeService } from "./project-runtime-service";
+import { runtimeTurnHandoff, type ProjectRuntimeService } from "./project-runtime-service";
 import type { ProjectRuntimeRole } from "@/lib/product/contracts";
 import { resolveAgentModel } from "./agent-settings";
 
@@ -212,6 +212,12 @@ export async function runSandbox(
             await repository.appendJobProgress(job, "AGENT_OUTPUT", runtimeResult.content);
           }
           const context = await projectRuntime.readContext(job.workspaceId, job.projectId);
+          const designHandoff = role === "DESIGN"
+            ? runtimeTurnHandoff(context, runtimeResult.turnId, "DESIGN", "DEVELOPMENT")
+            : null;
+          if (role === "DESIGN" && !designHandoff) {
+            throw new Error("Design Agent completed without creating a DEVELOPMENT handoff");
+          }
           if (role === "DEVELOPMENT") {
             const inputRevision = Number(job.payload.sourceRevision ?? 0);
             if (!context.source || context.source.revision <= inputRevision) {
@@ -249,7 +255,7 @@ export async function runSandbox(
             sourceRevision: context.source?.revision ?? null,
             planRevision: context.e2e.planRevision ?? null,
             verdict: structured.verdict ?? null,
-            handoff: structured.handoff ?? null,
+            handoff: designHandoff ?? structured.handoff ?? null,
             responseLanguage,
             agentRuntime: settings.agentRuntime,
             model: resolveAgentModel(
