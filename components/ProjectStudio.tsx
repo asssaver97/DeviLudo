@@ -67,10 +67,10 @@ const ACTIVE_PIPELINE_STAGE: Readonly<Record<string, (typeof PIPELINE)[number][0
   TESTING: "E2E_PLATFORM_RUN",
   STEAM_PUBLISHING: "STEAM_PUBLISH",
 });
-const RERUNNABLE_WORKFLOW_STATES = new Set(["RELEASE_APPROVAL_PENDING", "FAILED", "SUCCEEDED", "CANCELLED"]);
+const RERUNNABLE_WORKFLOW_STATES = new Set(["RELEASE_APPROVAL_PENDING", "BLOCKED", "FAILED", "SUCCEEDED", "CANCELLED"]);
 const ITERATION_TERMINAL_STATES = new Set(["FAILED", "SUCCEEDED", "CANCELLED"]);
 const ASSET_RERUN_WORKFLOW_STATES = new Set([
-  "DEVELOPING", "RELEASE_APPROVAL_PENDING", "FAILED", "SUCCEEDED", "CANCELLED",
+  "DEVELOPING", "RELEASE_APPROVAL_PENDING", "BLOCKED", "FAILED", "SUCCEEDED", "CANCELLED",
 ]);
 
 type LocalGitState = Readonly<{
@@ -372,7 +372,7 @@ export function ProjectStudio({ projectId }: { projectId: string }) {
     const branchName = newBranchName.trim();
     if (!project?.localDirectory || !branchName || branchBusy
       || selectedWorkflowId !== null
-      || !["DRAFT", "SUCCEEDED", "FAILED", "CANCELLED"].includes(project.workflowState)) return;
+      || !["DRAFT", "BLOCKED", "SUCCEEDED", "FAILED", "CANCELLED"].includes(project.workflowState)) return;
     setBranchBusy(true);
     setLocalGitError(null);
     try {
@@ -864,9 +864,9 @@ export function ProjectStudio({ projectId }: { projectId: string }) {
   const discoveryFinishedAt = discoveryStage.view.kind === "completed"
     ? pipelineEventFinishedAt(viewedEvents, "SPEC_APPROVED")
     : null;
-  const deliveryActive = !["DRAFT", "RELEASE_APPROVAL_PENDING", "SUCCEEDED", "FAILED", "CANCELLED"].includes(project.workflowState);
-  const viewedDeliveryActive = !["DRAFT", "RELEASE_APPROVAL_PENDING", "SUCCEEDED", "FAILED", "CANCELLED"].includes(viewedWorkflowState);
-  const latestFailedJob = viewedWorkflowState === "FAILED"
+  const deliveryActive = !["DRAFT", "RELEASE_APPROVAL_PENDING", "BLOCKED", "SUCCEEDED", "FAILED", "CANCELLED"].includes(project.workflowState);
+  const viewedDeliveryActive = !["DRAFT", "RELEASE_APPROVAL_PENDING", "BLOCKED", "SUCCEEDED", "FAILED", "CANCELLED"].includes(viewedWorkflowState);
+  const latestFailedJob = ["BLOCKED", "FAILED"].includes(viewedWorkflowState)
     ? latestPipelineJobs(currentPipelineJobs(viewedJobs)).find(job => job.state === "FAILED") ?? null
     : null;
   const pipelineFailure = latestFailedJob ? jobFailurePresentation(latestFailedJob, text) : null;
@@ -877,8 +877,11 @@ export function ProjectStudio({ projectId }: { projectId: string }) {
   const canRerunStages = !viewingHistoricalIteration
     && RERUNNABLE_WORKFLOW_STATES.has(project.workflowState)
     && project.jobs.length > 0;
-  const rerunnableFailedStage = latestFailedJob && profileStages.has(latestFailedJob.kind)
-    ? latestFailedJob.kind
+  const failedPipelineStage = latestFailedJob?.kind === "AGENT_TURN" && latestFailedJob.agentRole === "TEST"
+    ? "E2E_PLATFORM_RUN"
+    : latestFailedJob?.kind;
+  const rerunnableFailedStage = failedPipelineStage && profileStages.has(failedPipelineStage)
+    ? failedPipelineStage
     : null;
   const assetItems = assetManifestView?.items ?? Object.freeze([]);
   const assetCompletion = assetManifestView?.completion;

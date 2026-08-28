@@ -72,6 +72,16 @@ test("Agent completion advances Design, Development and Test through one persist
   assert.doesNotMatch(complete, /repair_count|max_attempts/);
 });
 
+test("a blocked workflow can be reopened from an explicitly selected rerun stage", async () => {
+  const sql = await readFile(sqlUrl, "utf8");
+  const signal = functionSource(sql, "accept_workflow_signal");
+  assert.match(signal, /workflow\.state NOT IN \('RELEASE_APPROVAL_PENDING', 'BLOCKED', 'FAILED', 'SUCCEEDED', 'CANCELLED'\)/);
+  assert.match(signal, /current_test_plan_available boolean := false/);
+  assert.match(signal, /plan\.source_revision = \([\s\S]*ORDER BY source\.revision DESC[\s\S]*LIMIT 1/);
+  assert.match(signal, /WHEN rerun_stage = 'E2E_PLATFORM_RUN' AND NOT current_test_plan_available[\s\S]*THEN 'TEST_PLANNING'/);
+  assert.match(signal, /jsonb_build_object\('role', 'TEST', 'purpose', 'TEST_PLAN', 'manualRerun', true\)/);
+});
+
 test("completed Development and Test Agent turns publish durable player-facing messages", async () => {
   const sql = await readFile(sqlUrl, "utf8");
   const publish = functionSource(sql, "publish_development_agent_message");

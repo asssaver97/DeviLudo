@@ -896,7 +896,7 @@ export async function runApi(
       const workspace = await requireSelectedWorkspace(request, repository, principal);
       const project = await repository.readProject(workspace.id, request.params.projectId);
       if (!project) return reply.code(404).send({ code: "PROJECT_NOT_FOUND" });
-      if (!["DEVELOPING", "RELEASE_APPROVAL_PENDING", "SUCCEEDED", "FAILED", "CANCELLED"].includes(project.workflowState)) {
+      if (!["DEVELOPING", "RELEASE_APPROVAL_PENDING", "BLOCKED", "SUCCEEDED", "FAILED", "CANCELLED"].includes(project.workflowState)) {
         return reply.code(409).send({
           code: "ASSET_RERUN_UNAVAILABLE",
           message: "当前交付仍在运行；请等待该阶段完成或先取消交付，再重新生成素材",
@@ -1522,7 +1522,7 @@ export async function runApi(
     const idempotencyKey = requestIdempotencyKey(request, `stage-rerun:${stage}`);
     // Superseding downstream jobs would race executors that still hold leases,
     // so a rerun only makes sense once the delivery has come to rest.
-    if (!["RELEASE_APPROVAL_PENDING", "FAILED", "SUCCEEDED", "CANCELLED"].includes(project.workflowState)) {
+    if (!["RELEASE_APPROVAL_PENDING", "BLOCKED", "FAILED", "SUCCEEDED", "CANCELLED"].includes(project.workflowState)) {
       if (await repository.workflowSignalExists(workspace.id, project.workflowId, idempotencyKey)) {
         return reply.send({ accepted: false });
       }

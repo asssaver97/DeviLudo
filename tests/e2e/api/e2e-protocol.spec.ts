@@ -136,6 +136,60 @@ test("recoverable E2E infrastructure failure retries, then blocks at its attempt
 
   const staleCompletion = await completeResponse(stack, first);
   expect(staleCompletion.status()).toBe(400);
+
+  const rerun = await stack.web(`/api/projects/${project.id}/rerun-stage`, {
+    method: "POST",
+    headers: { "idempotency-key": `blocked-e2e-rerun:${randomUUID()}` },
+    data: { stage: "E2E_PLATFORM_RUN" },
+  });
+  expect(rerun.status(), await rerun.text()).toBe(202);
+  const restarted = await stack.waitForProject(project.id, value => value.workflowState === "TESTING"
+    && value.jobs.filter(job => job.kind === "E2E_PLATFORM_RUN" && job.state === "QUEUED").length === 3);
+  expect(restarted.jobs.filter(job => job.kind === "E2E_PLATFORM_RUN" && job.state === "QUEUED")).toHaveLength(3);
+});
+
+test("an E2E rerun regenerates a missing current-source Test Agent plan before platform work", async ({ stack }) => {
+  const { project } = await prepareE2eStage(stack);
+  const previousPlanJobs = new Set(project.jobs.filter(job => (
+    job.kind === "AGENT_TURN" && job.agentRole === "TEST" && job.agentPurpose === "TEST_PLAN"
+  )).map(job => job.id));
+
+  await stack.executeSql(`
+    BEGIN;
+    UPDATE deviludo.jobs
+       SET state = 'CANCELLED', lease_owner = NULL, lease_token = NULL,
+           lease_expires_at = NULL, heartbeat_at = NULL,
+           fencing_token = fencing_token + 1, updated_at = clock_timestamp()
+     WHERE workflow_id = '${project.workflowId}'::uuid
+       AND kind = 'E2E_PLATFORM_RUN'
+       AND state IN ('QUEUED', 'RUNNING', 'RETRY');
+    DELETE FROM deviludo.test_plans_v2
+     WHERE project_id = '${project.id}'::uuid;
+    UPDATE deviludo.workflow_instances
+       SET state = 'BLOCKED', version = version + 1, updated_at = clock_timestamp()
+     WHERE id = '${project.workflowId}'::uuid;
+    COMMIT;
+  `);
+
+  const rerun = await stack.web(`/api/projects/${project.id}/rerun-stage`, {
+    method: "POST",
+    headers: { "idempotency-key": `missing-plan-e2e-rerun:${randomUUID()}` },
+    data: { stage: "E2E_PLATFORM_RUN" },
+  });
+  expect(rerun.status(), await rerun.text()).toBe(202);
+
+  const restarted = await stack.waitForProject(project.id, value => value.jobs.some(job => (
+    job.kind === "AGENT_TURN"
+      && job.agentRole === "TEST"
+      && job.agentPurpose === "TEST_PLAN"
+      && !previousPlanJobs.has(job.id)
+  )), 120_000);
+  expect(restarted.jobs.some(job => (
+    job.kind === "AGENT_TURN"
+      && job.agentRole === "TEST"
+      && job.agentPurpose === "TEST_PLAN"
+      && !previousPlanJobs.has(job.id)
+  ))).toBe(true);
 });
 
 test("the scheduler recovers an expired lease and increments fencing on the next claim", async ({ stack }) => {

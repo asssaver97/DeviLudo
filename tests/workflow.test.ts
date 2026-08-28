@@ -137,6 +137,12 @@ test("stage reruns require a valid stage and terminal workflow", () => {
     () => transitionWorkflow(running, { kind: "STAGE_RERUN_REQUESTED", stage: "AGENT_TURN", signalId: "s" }),
     /requires a terminal workflow/,
   );
+  const blocked = Object.freeze({ ...running, state: "BLOCKED" as const });
+  const restarted = transitionWorkflow(blocked, {
+    kind: "STAGE_RERUN_REQUESTED", stage: "E2E_PLATFORM_RUN", signalId: "blocked-rerun",
+  });
+  assert.equal(restarted.snapshot.state, "TESTING");
+  assert.equal(restarted.enqueue.length, 1);
 });
 
 test("cancellation is terminal and enqueues no work", () => {

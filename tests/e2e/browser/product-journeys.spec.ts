@@ -142,7 +142,7 @@ test("the top delivery pipeline distinguishes completed, active and pending stag
   expect((await pipeline.boundingBox())?.y).toBeLessThan((await workspace.boundingBox())?.y ?? 0);
 });
 
-test("an Agent runtime failure is explained without exposing raw executor JSON", async ({ page, stack }) => {
+test("a blocked Agent runtime failure is explained and its failed stage can be rerun", async ({ page, stack }) => {
   const project = await stack.createProject({
     name: "失败原因面板",
     concept: "验证 Agent 生成失败时显示清晰原因和安全重试入口。",
@@ -151,25 +151,34 @@ test("an Agent runtime failure is explained without exposing raw executor JSON",
   const detail = await detailResponse.json() as { project: Record<string, unknown> };
   detail.project = {
     ...detail.project,
-    workflowState: "FAILED",
+    workflowState: "BLOCKED",
     jobs: [{
       id: randomUUID(), kind: "AGENT_TURN", poolKind: "CORE", targetOperatingSystem: null,
+      agentRole: "TEST", agentPurpose: "TEST_PLAN",
       state: "FAILED", attempt: 5,
       lastError: 'Sandbox executor failed: {"code":"EXECUTOR_REJECTED","message":"Runtime image is not in the signed release allowlist"}',
       createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(),
     }],
   };
+  let rerunStage: string | null = null;
   await page.route(new RegExp(`/api/projects/${project.id}$`), route => route.fulfill({ json: detail }));
+  await page.route(new RegExp(`/api/projects/${project.id}/rerun-stage$`), async route => {
+    rerunStage = (await route.request().postDataJSON() as { stage?: string }).stage ?? null;
+    await route.fulfill({ status: 202, json: { accepted: true, stage: rerunStage } });
+  });
   await page.goto(`/projects/${project.id}`);
 
   const failure = page.getByRole("alert", { name: "交付失败原因" });
   await expect(failure.getByText("Agent 生成失败", { exact: true })).toBeVisible();
   await expect(failure.getByText("任务引用的运行环境已被本地更新替换，旧镜像无法再安全启动。", { exact: true })).toBeVisible();
   await expect(failure.getByText("已尝试 5 次", { exact: true })).toBeVisible();
-  await expect(failure.getByRole("button", { name: "重跑失败阶段" })).toBeVisible();
+  const rerun = failure.getByRole("button", { name: "重跑失败阶段" });
+  await expect(rerun).toBeEnabled();
   await expect(failure).not.toContainText("Sandbox executor failed: {");
   await failure.getByText("技术详情", { exact: true }).click();
   await expect(failure.getByText("EXECUTOR_REJECTED: Runtime image is not in the signed release allowlist", { exact: true })).toBeVisible();
+  await rerun.click();
+  await expect.poll(() => rerunStage).toBe("E2E_PLATFORM_RUN");
 });
 
 test("a proposed requirement keeps the document unchanged until confirmation", async ({ page, stack }) => {

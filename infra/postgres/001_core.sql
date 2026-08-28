@@ -3102,6 +3102,7 @@ DECLARE
   stage_list deviludo.job_kind[];
   stage_index integer;
   downstream_stages deviludo.job_kind[];
+  current_test_plan_available boolean := false;
   repair_e2e_job_id uuid;
   repair_e2e_platform deviludo.server_os;
   repair_e2e_updated_at timestamptz;
@@ -3131,7 +3132,7 @@ BEGIN
     -- A rerun is only meaningful from a terminal workflow. While work is still
     -- in flight, superseding jobs would race the executors currently holding
     -- their leases, so require an explicit cancel first.
-    IF workflow.state NOT IN ('RELEASE_APPROVAL_PENDING', 'FAILED', 'SUCCEEDED', 'CANCELLED') THEN
+    IF workflow.state NOT IN ('RELEASE_APPROVAL_PENDING', 'BLOCKED', 'FAILED', 'SUCCEEDED', 'CANCELLED') THEN
       RAISE EXCEPTION 'Stage rerun requires a terminal workflow; cancel the running delivery first';
     END IF;
     BEGIN
@@ -3266,12 +3267,42 @@ BEGIN
      WHERE workspace_id = workflow.workspace_id AND workflow_id = workflow.id
        AND kind = ANY(downstream_stages)
        AND state IN ('QUEUED', 'RETRY', 'RUNNING');
+    IF rerun_stage = 'E2E_PLATFORM_RUN' THEN
+      SELECT EXISTS (
+        SELECT 1
+          FROM deviludo.test_plans_v2 plan
+         WHERE plan.workspace_id = workflow.workspace_id
+           AND plan.project_id = workflow.project_id
+           AND plan.source_revision = (
+             SELECT source.revision
+               FROM deviludo.project_source_revisions source
+              WHERE source.workspace_id = workflow.workspace_id
+                AND source.project_id = workflow.project_id
+              ORDER BY source.revision DESC
+              LIMIT 1
+           )
+      ) INTO current_test_plan_available;
+    END IF;
     UPDATE deviludo.workflow_instances
-       SET state = deviludo.stage_running_state(rerun_stage), version = version + 1,
+       SET state = CASE
+             WHEN rerun_stage = 'E2E_PLATFORM_RUN' AND NOT current_test_plan_available
+               THEN 'TEST_PLANNING'::deviludo.workflow_state
+             ELSE deviludo.stage_running_state(rerun_stage)
+           END,
+           version = version + 1,
            development_actor_id = (p_payload->>'requestedByActorId')::uuid,
            updated_at = clock_timestamp()
      WHERE workspace_id = workflow.workspace_id AND id = workflow.id;
-    IF rerun_stage = 'E2E_PLATFORM_RUN' THEN
+    IF rerun_stage = 'E2E_PLATFORM_RUN' AND NOT current_test_plan_available THEN
+      -- A platform run is defined by the current-source Test Agent plan. If
+      -- that prerequisite is missing, regenerate it and let the normal Test
+      -- Agent completion path fan out the platform jobs.
+      PERFORM deviludo.enqueue_job(
+        workflow.workspace_id, workflow.id, workflow.project_id, 'AGENT_TURN', NULL,
+        workflow.id::text || ':rerun:test-plan:' || inserted_id::text,
+        jsonb_build_object('role', 'TEST', 'purpose', 'TEST_PLAN', 'manualRerun', true)
+      );
+    ELSIF rerun_stage = 'E2E_PLATFORM_RUN' THEN
       -- Per-platform stages always rerun on every target platform. Skipping
       -- platforms that previously succeeded would leave results tied to the
       -- superseded upstream artifact.

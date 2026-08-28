@@ -197,7 +197,7 @@ export function transitionWorkflow(snapshot: WorkflowSnapshot, event: WorkflowEv
 }
 
 function rerunAssets(snapshot: WorkflowSnapshot): WorkflowTransition {
-  if (!["DEVELOPING", "RELEASE_APPROVAL_PENDING", "SUCCEEDED", "FAILED", "CANCELLED"].includes(snapshot.state)) {
+  if (!["DEVELOPING", "RELEASE_APPROVAL_PENDING", "BLOCKED", "SUCCEEDED", "FAILED", "CANCELLED"].includes(snapshot.state)) {
     throw new Error("Asset rerun requires an idle delivery or the active asset gate");
   }
   return result({ ...snapshot, state: "DEVELOPING", completedE2e: Object.freeze([]) }, []);
@@ -214,7 +214,7 @@ function rerunStage(snapshot: WorkflowSnapshot, stage: RerunStage, signalId: str
   if (!stages.includes(stage)) {
     throw new Error(`Stage ${stage} is not part of the ${snapshot.profile} delivery chain`);
   }
-  if (!["SUCCEEDED", "FAILED", "CANCELLED"].includes(snapshot.state)) {
+  if (!["RELEASE_APPROVAL_PENDING", "BLOCKED", "SUCCEEDED", "FAILED", "CANCELLED"].includes(snapshot.state)) {
     throw new Error("Stage rerun requires a terminal workflow; cancel the running delivery first");
   }
   const supersededFrom = stages.indexOf(stage);
