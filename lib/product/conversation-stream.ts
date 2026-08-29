@@ -174,8 +174,12 @@ export function startStreamingConversationReply(
   current: StreamingConversationReplies,
   agentRole: ProjectRuntimeRole,
 ): StreamingConversationReplies {
+  const visibleReplies: Partial<Record<ProjectRuntimeRole, StreamingConversationReply>> = { ...current };
+  if (agentRole !== "INTENT" && visibleReplies.INTENT?.phase === "COMPLETE") {
+    delete visibleReplies.INTENT;
+  }
   return Object.freeze({
-    ...current,
+    ...visibleReplies,
     [agentRole]: Object.freeze({
       content: current[agentRole]?.content ?? "",
       processEvents: current[agentRole]?.processEvents ?? Object.freeze([]),
@@ -302,7 +306,7 @@ export function streamingConversationReplyIsActive(reply: StreamingConversationR
 
 function isProjectRuntimeRole(value: unknown): value is ProjectRuntimeRole {
   return value === "INTENT" || value === "ANALYSIS" || value === "DESIGN"
-    || value === "DEVELOPMENT" || value === "TEST";
+    || value === "UI_DESIGN" || value === "DEVELOPMENT" || value === "TEST";
 }
 
 export function optimisticConversation(

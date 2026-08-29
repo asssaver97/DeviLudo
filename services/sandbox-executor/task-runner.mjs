@@ -105,7 +105,7 @@ async function materializeBuildAssets(plan) {
       || /(^|\/)\.{1,2}(\/|$)|\/\//.test(asset.assetKey) || asset.assetKey.endsWith("/")) {
       throw new Error("Build asset key is invalid");
     }
-    const extension = asset.key.match(/\.(png|jpg|webp)$/)?.[1];
+    const extension = asset.key.match(/\.(png|jpg|webp|mp3|ogg|wav)$/)?.[1];
     if (!extension) throw new Error("Build asset extension is invalid");
     const target = resolve(root, `${asset.assetKey}.${extension}`);
     if (!target.startsWith(`${root}/`)) throw new Error("Build asset path escaped the generated asset root");
@@ -123,11 +123,11 @@ async function materializeBuildAssets(plan) {
     items: manifestItems,
   }), "utf8");
   await assertBuildAssetsReferenced("/workspace/project", assets.map(asset => asset.assetKey));
-  emitProgress("PHASE", `已同步 ${assets.length} 个图片素材到构建源码`);
+  emitProgress("PHASE", `已同步 ${assets.length} 个素材到构建源码`);
 }
 
 function assetInputFilename(input) {
-  const extension = input.key.match(/\.(png|jpg|webp)$/)?.[1];
+  const extension = input.key.match(/\.(png|jpg|webp|mp3|ogg|wav)$/)?.[1];
   if (!extension) throw new Error("Build asset extension is invalid");
   return `asset-${createHash("sha256").update(input.key).digest("hex")}.${extension}`;
 }

@@ -641,7 +641,7 @@ function validatePlan(value: unknown): SandboxPlan {
     || job.inputObjects.some(input => input.kind !== "ASSET" && input.assetKey !== undefined)
     || assetInputs.some(input => typeof input.assetKey !== "string"
       || !input.key.startsWith(`${objectPrefix}assets/`)
-      || !/\.(?:png|jpg|webp)$/.test(input.key))
+      || !/\.(?:png|jpg|webp|mp3|ogg|wav)$/.test(input.key))
     || new Set(assetInputs.map(input => input.assetKey)).size !== assetInputs.length) {
     throw new Error("Build asset inputs do not satisfy the fixed materialization contract");
   }
@@ -665,7 +665,7 @@ function validatePlan(value: unknown): SandboxPlan {
 
 function inputFilename(input: SandboxPlan["job"]["inputObjects"][number]): string {
   if (input.kind !== "ASSET") return basename(input.key);
-  const extension = input.key.match(/\.(png|jpg|webp)$/)?.[1];
+  const extension = input.key.match(/\.(png|jpg|webp|mp3|ogg|wav)$/)?.[1];
   if (!extension) throw new Error("Build asset object extension is invalid");
   return `asset-${createHash("sha256").update(input.key).digest("hex")}.${extension}`;
 }

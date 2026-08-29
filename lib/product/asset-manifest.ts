@@ -2,8 +2,14 @@
 
 export const ASSET_MANIFEST_SCHEMA_VERSION = "deviludo.asset-manifest.v1" as const;
 
-export const ASSET_TYPES = ["sprite", "animation", "background", "ui", "icon", "tileset"] as const;
+export const ASSET_TYPES = ["sprite", "animation", "background", "ui", "icon", "tileset", "music"] as const;
 export type AssetType = typeof ASSET_TYPES[number];
+
+export const IMAGE_ASSET_TYPES = ASSET_TYPES.filter(type => type !== "music");
+
+export function isMusicAsset(item: Pick<AssetItem, "assetType">): boolean {
+  return item.assetType === "music";
+}
 
 export const ASSET_USAGE_CHECKPOINT_ROLES = ["START", "READY", "ACTION", "PROGRESS", "COMPLETION"] as const;
 export type AssetUsageCheckpointRole = typeof ASSET_USAGE_CHECKPOINT_ROLES[number];
@@ -81,6 +87,12 @@ export function validateAssetItem(value: unknown): value is AssetItem {
     && !item.sourcePath.startsWith("/")
     && !/(^|\/)\.{1,2}(\/|$)|\/\//.test(item.sourcePath)
   );
+  const musicFieldsValid = item.assetType !== "music" || (
+    item.generationPrompt === undefined
+    && item.frameCount === undefined
+    && item.dimensions === undefined
+    && item.sourcePath === undefined
+  );
 
   return typeof item.id === "string"
     && typeof item.manifestId === "string"
@@ -91,6 +103,7 @@ export function validateAssetItem(value: unknown): value is AssetItem {
     && typeof item.assetType === "string"
     && ASSET_TYPES.includes(item.assetType as AssetType)
     && typeof item.description === "string"
+    && musicFieldsValid
     && (item.usageTargets === undefined || validateAssetUsageTargets(item.usageTargets, true))
     && typeof item.status === "string"
     && ASSET_ITEM_STATUSES.includes(item.status as AssetItemStatus)

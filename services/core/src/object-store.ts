@@ -105,7 +105,7 @@ export class CoreObjectStore {
     content: Buffer;
   }>) {
     if (!isSafeAssetKey(input.assetKey)) throw new Error("Asset key is invalid");
-    if (!/^(?:png|jpg|webp)$/.test(input.extension)) throw new Error("Asset extension is invalid");
+    if (!/^(?:png|jpg|webp|mp3|ogg|wav)$/.test(input.extension)) throw new Error("Asset extension is invalid");
     const sha256 = `sha256:${createHash("sha256").update(input.content).digest("hex")}`;
     const key = newProjectAssetObjectKey({ ...input, sha256 });
     await this.client.send(new PutObjectCommand({

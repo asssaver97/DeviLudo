@@ -2,7 +2,7 @@
 
 import Image from "next/image";
 import { useCallback, useEffect, useRef, useState } from "react";
-import type { AssetManifest, AssetItem } from "@/lib/product/asset-manifest";
+import { isMusicAsset, type AssetManifest, type AssetItem } from "@/lib/product/asset-manifest";
 import { useLanguage } from "./i18n/LanguageProvider";
 
 type AssetManifestPanelProps = {
@@ -10,6 +10,7 @@ type AssetManifestPanelProps = {
   refreshKey?: number;
   onManifestChange?: (payload: AssetManifestPayload) => void;
   onOpenSourceImage?: (sourcePath: string) => Promise<void>;
+  mediaKind?: "image" | "music";
 };
 
 type AssetListFilter = "all" | "complete" | "generating" | "failed";
@@ -32,11 +33,22 @@ const EMPTY_COMPLETION: AssetCompletion = Object.freeze({
   total: 0, uploaded: 0, failed: 0, complete: false,
 });
 
+function completionOf(items: readonly AssetItem[]): AssetCompletion {
+  const uploaded = items.filter(item => ["existing", "generated", "uploaded"].includes(item.status)).length;
+  return Object.freeze({
+    total: items.length,
+    uploaded,
+    failed: items.filter(item => item.status === "failed").length,
+    complete: items.length > 0 && uploaded === items.length,
+  });
+}
+
 export function AssetManifestPanel({
   projectId,
   refreshKey = 0,
   onManifestChange,
   onOpenSourceImage,
+  mediaKind = "image",
 }: AssetManifestPanelProps) {
   const { errorText, text } = useLanguage();
   const [manifest, setManifest] = useState<AssetManifest | null>(null);
@@ -51,14 +63,16 @@ export function AssetManifestPanel({
   const [completion, setCompletion] = useState<AssetCompletion>(EMPTY_COMPLETION);
   const uploadInputRef = useRef<HTMLInputElement>(null);
   const uploadAssetKeyRef = useRef<string | null>(null);
+  const music = mediaKind === "music";
 
   const applyManifest = useCallback((data: AssetManifestPayload) => {
+    const selectedItems = (data.items ?? []).filter(item => isMusicAsset(item) === music);
     setManifest(data.manifest);
-    setItems(data.items ?? []);
+    setItems(selectedItems);
     setAutoGenerateEnabled(data.manifest?.autoGenerateEnabled ?? false);
-    setCompletion(data.completion ?? EMPTY_COMPLETION);
+    setCompletion(completionOf(selectedItems));
     onManifestChange?.(data);
-  }, [onManifestChange]);
+  }, [music, onManifestChange]);
 
   const loadManifest = useCallback(async () => {
     try {
@@ -93,6 +107,7 @@ export function AssetManifestPanel({
   // Generation settles in the background and gates artifact construction, so the
   // panel polls while work is outstanding and stops once it is not.
   const generationOutstanding = autoGenerateEnabled
+    && !music
     && items.some(item => item.status === "planned" || item.status === "generating");
   useEffect(() => {
     if (!generationOutstanding) return;
@@ -116,16 +131,20 @@ export function AssetManifestPanel({
       const response = await fetch(`/api/projects/${projectId}/asset-manifest/uploads`, {
         method: "POST",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify({ assetKey, contentType: file.type, content }),
+        body: JSON.stringify({ assetKey, contentType: file.type || contentTypeFromFilename(file.name), content }),
       });
       const payload = await response.json().catch(() => null);
       if (!response.ok) {
-        setUploadError(errorText(payload?.message, "素材上传失败，请确认格式为 PNG/JPEG/WebP", "Asset upload failed. Use a PNG, JPEG, or WebP image."));
+        setUploadError(errorText(
+          payload?.message,
+          music ? "音乐上传失败，请确认格式为 MP3/Ogg/WAV" : "素材上传失败，请确认格式为 PNG/JPEG/WebP",
+          music ? "Music upload failed. Use an MP3, Ogg, or WAV file." : "Asset upload failed. Use a PNG, JPEG, or WebP image.",
+        ));
         return;
       }
       await loadManifest();
     } catch {
-      setUploadError(text("素材上传失败，请稍后再试", "Asset upload failed. Try again shortly."));
+      setUploadError(text(music ? "音乐上传失败，请稍后再试" : "素材上传失败，请稍后再试", music ? "Music upload failed. Try again shortly." : "Asset upload failed. Try again shortly."));
     } finally {
       setUploading(false);
     }
@@ -162,7 +181,7 @@ export function AssetManifestPanel({
   }
 
   if (!manifest) {
-    return <div className="asset-manifest-empty">{text("项目尚未生成素材清单", "No asset manifest has been generated for this project")}</div>;
+    return <div className="asset-manifest-empty">{text(music ? "项目尚未规划音乐素材" : "项目尚未生成美术素材清单", music ? "No music assets have been planned for this project" : "No art manifest has been generated for this project")}</div>;
   }
 
   const generatingCount = items.filter(item => item.status === "generating").length;
@@ -179,20 +198,22 @@ export function AssetManifestPanel({
   return (
     <div className="asset-manifest-panel">
       <div className="asset-manifest-header">
-        <h3>{text("游戏素材", "GAME ASSETS")}</h3>
+        <h3>{text(music ? "音乐素材" : "美术素材", music ? "MUSIC ASSETS" : "ART ASSETS")}</h3>
       </div>
 
+      {music ? <p className="asset-manifest-note asset-manifest-upload-only">{text("音乐暂不支持 AI 生成。请根据每项用途说明，逐项上传 MP3、Ogg Vorbis 或 WAV 文件；上传内容会在下次制品构建时进入游戏。", "AI music generation is not available yet. Upload an MP3, Ogg Vorbis, or WAV file for each described cue; uploaded files enter the next artifact build.")}</p> : null}
+
       <div aria-label={text("按素材状态筛选", "Filter assets by status")} className="asset-manifest-status" role="group">
-        <button aria-controls="asset-image-list" aria-pressed={assetFilter === "all"} className={`asset-manifest-filter ${assetFilter === "all" ? "is-active" : ""}`} onClick={() => setAssetFilter("all")} type="button">
+        <button aria-controls={`asset-${mediaKind}-list`} aria-pressed={assetFilter === "all"} className={`asset-manifest-filter ${assetFilter === "all" ? "is-active" : ""}`} onClick={() => setAssetFilter("all")} type="button">
           {text("全部", "All")}: {completion.total}
         </button>
-        <button aria-controls="asset-image-list" aria-pressed={assetFilter === "complete"} className={`asset-manifest-filter complete ${assetFilter === "complete" ? "is-active" : ""}`} onClick={() => setAssetFilter("complete")} type="button">
-          {text("完成", "Complete")}: {completion.uploaded}
+        <button aria-controls={`asset-${mediaKind}-list`} aria-pressed={assetFilter === "complete"} className={`asset-manifest-filter complete ${assetFilter === "complete" ? "is-active" : ""}`} onClick={() => setAssetFilter("complete")} type="button">
+          {text(music ? "已上传" : "完成", music ? "Uploaded" : "Complete")}: {completion.uploaded}
         </button>
-        <button aria-controls="asset-image-list" aria-pressed={assetFilter === "generating"} className={`asset-manifest-filter generating ${assetFilter === "generating" ? "is-active" : ""}`} onClick={() => setAssetFilter("generating")} type="button">
+        {!music ? <button aria-controls="asset-image-list" aria-pressed={assetFilter === "generating"} className={`asset-manifest-filter generating ${assetFilter === "generating" ? "is-active" : ""}`} onClick={() => setAssetFilter("generating")} type="button">
           {text("生成中", "Generating")}: {generatingCount}
-        </button>
-        {completion.failed > 0 && <button aria-controls="asset-image-list" aria-pressed={assetFilter === "failed"} className={`asset-manifest-filter failed ${assetFilter === "failed" ? "is-active" : ""}`} onClick={() => setAssetFilter("failed")} type="button">{text("失败", "Failed")}: {completion.failed}</button>}
+        </button> : null}
+        {!music && completion.failed > 0 && <button aria-controls="asset-image-list" aria-pressed={assetFilter === "failed"} className={`asset-manifest-filter failed ${assetFilter === "failed" ? "is-active" : ""}`} onClick={() => setAssetFilter("failed")} type="button">{text("失败", "Failed")}: {completion.failed}</button>}
       </div>
       {/* A failed asset is not a dead end: the Art branch can requeue only
           unresolved entries, while upload remains available here. */}
@@ -214,15 +235,15 @@ export function AssetManifestPanel({
         className="asset-upload-picker"
         tabIndex={-1}
         type="file"
-        accept="image/png,image/jpeg,image/webp"
+        accept={music ? "audio/mpeg,audio/ogg,audio/wav,audio/x-wav,.mp3,.ogg,.wav" : "image/png,image/jpeg,image/webp"}
         onChange={event => {
           const file = event.target.files?.[0];
           const assetKey = uploadAssetKeyRef.current;
           if (file && assetKey) void handleUpload(assetKey, file);
         }}
       />
-      <div aria-label={text("图片素材列表", "Image asset list")} className="asset-items-list" id="asset-image-list" role="region" tabIndex={0}>
-        {filteredItems.length === 0 ? <p className="asset-items-empty">{text("该状态下没有图片素材", "No image assets match this status")}</p> : null}
+      <div aria-label={text(music ? "音乐素材列表" : "图片素材列表", music ? "Music asset list" : "Image asset list")} className="asset-items-list" id={`asset-${mediaKind}-list`} role="region" tabIndex={0}>
+        {filteredItems.length === 0 ? <p className="asset-items-empty">{text(music ? "尚未规划音乐素材，或当前筛选下没有内容" : "该状态下没有图片素材", music ? "No music assets have been planned or match this filter" : "No image assets match this status")}</p> : null}
         {filteredItems.map(item => (
           <div key={item.id} className={`asset-item asset-item-${item.status}`}>
             <div className="asset-item-header">
@@ -231,7 +252,7 @@ export function AssetManifestPanel({
               <span className="asset-status">{item.status}</span>
             </div>
             <div className="asset-description">{item.description}</div>
-            {item.sourcePath ? (
+            {!music && item.sourcePath ? (
               <button
                 aria-label={text(`打开源码图片 ${item.sourcePath}`, `Open source image ${item.sourcePath}`)}
                 className="asset-source-preview"
@@ -244,12 +265,12 @@ export function AssetManifestPanel({
                 <strong>{openingSourcePath === item.sourcePath ? text("打开中…", "OPENING…") : text("打开", "OPEN")}</strong>
               </button>
             ) : null}
-            {item.frameCount && (
+            {!music && item.frameCount && (
               <div className="asset-meta">
                 {text("动画帧数", "Animation frames")}: {item.frameCount} | {text("尺寸", "Size")}: {item.dimensions || text("自动", "Auto")}
               </div>
             )}
-            {item.generationPrompt && item.status !== "existing" && (
+            {!music && item.generationPrompt && item.status !== "existing" && (
               <div className="asset-prompt-box">
                 <div className="asset-prompt-label">{text("生成提示词", "Generation prompt")}:</div>
                 <div className="asset-prompt-content">{item.generationPrompt}</div>
@@ -270,7 +291,11 @@ export function AssetManifestPanel({
                   type="button"
                 >{item.status === "generated" || item.status === "uploaded" ? text("替换文件", "Replace file") : text("上传文件", "Upload file")}</button>
                 {item.status === "planned" && autoGenerateEnabled ? (
-                  <small className="asset-upload-hint">{text("排队自动生成中，也可以直接上传自备素材", "Queued for automatic generation; you can also upload your own asset")}</small>
+                  <small className="asset-upload-hint">{music
+                    ? text("仅支持用户上传，不会进入 AI 生成队列", "Upload only; this item never enters the AI generation queue")
+                    : text("排队自动生成中，也可以直接上传自备素材", "Queued for automatic generation; you can also upload your own asset")}</small>
+                ) : item.status === "planned" && music ? (
+                  <small className="asset-upload-hint">{text("仅支持用户上传，不会进入 AI 生成队列", "Upload only; this item never enters the AI generation queue")}</small>
                 ) : null}
                 {item.status === "generated" || item.status === "uploaded" ? (
                   <small className="asset-upload-hint">{text("已有素材，上传新文件会替换它", "An asset already exists; uploading a new file will replace it")}</small>
@@ -322,4 +347,15 @@ async function fileToBase64(file: File): Promise<string> {
     binary += String.fromCharCode(...bytes.subarray(offset, offset + 0x8000));
   }
   return btoa(binary);
+}
+
+function contentTypeFromFilename(filename: string): string {
+  const extension = filename.split(".").at(-1)?.toLowerCase();
+  if (extension === "mp3") return "audio/mpeg";
+  if (extension === "ogg") return "audio/ogg";
+  if (extension === "wav") return "audio/wav";
+  if (extension === "png") return "image/png";
+  if (extension === "jpg" || extension === "jpeg") return "image/jpeg";
+  if (extension === "webp") return "image/webp";
+  return "application/octet-stream";
 }

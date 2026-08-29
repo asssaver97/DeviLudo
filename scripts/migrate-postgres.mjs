@@ -61,6 +61,17 @@ const DEVELOPMENT_FUNCTION_REFRESHES = Object.freeze({
   }),
 });
 const DEVELOPMENT_SCHEMA_REFRESHES = Object.freeze({
+  "sha256:914ad147269c91486c8bc6eca5c238fad7053d65e53adf76bda97ea65a88dc4d": Object.freeze({
+    targetDigest: "sha256:4c51210e34a01b477f112ee82c9373d49cf949389894b9bc9a4ef084b1d11427",
+    schema: "UPLOAD_ONLY_MUSIC_ASSETS",
+    functions: Object.freeze([
+      "snapshot_artifact_build_assets",
+      "complete_agent_turn_job",
+      "claim_asset_generation",
+      "request_asset_rerun",
+      "advance_asset_workflows",
+    ]),
+  }),
   "sha256:c917b31e2773207375ba88cbb5c21dac430e21a2158c660f0824739250cb54a1": Object.freeze({
     targetDigest: "sha256:914ad147269c91486c8bc6eca5c238fad7053d65e53adf76bda97ea65a88dc4d",
     schema: "UI_DESIGN_ROLE",
@@ -195,6 +206,7 @@ function compatibleDevelopmentSchemaRefresh(current, ledger, targetDigest) {
 }
 
 async function prepareDevelopmentSchemaRefresh(database, schema) {
+  if (schema === "UPLOAD_ONLY_MUSIC_ASSETS") return;
   if (schema !== "UI_DESIGN_ROLE") throw new Error("Compatible development schema refresh is invalid");
   await database.query("BEGIN");
   try {
@@ -208,6 +220,18 @@ async function prepareDevelopmentSchemaRefresh(database, schema) {
 }
 
 async function applyDevelopmentSchemaRefresh(database, schema) {
+  if (schema === "UPLOAD_ONLY_MUSIC_ASSETS") {
+    await database.query("ALTER TABLE deviludo.asset_items DROP CONSTRAINT asset_items_asset_type_check");
+    await database.query(`ALTER TABLE deviludo.asset_items
+      ADD CONSTRAINT asset_items_asset_type_check CHECK (
+        asset_type IN ('sprite', 'animation', 'background', 'ui', 'icon', 'tileset', 'music')
+      ),
+      ADD CONSTRAINT asset_items_music_upload_only CHECK (
+        asset_type <> 'music'
+        OR (generation_prompt IS NULL AND frame_count IS NULL AND dimensions IS NULL AND source_path IS NULL)
+      )`);
+    return;
+  }
   if (schema !== "UI_DESIGN_ROLE") throw new Error("Compatible development schema refresh is invalid");
   await database.query("ALTER TABLE deviludo.instance_agent_settings DROP CONSTRAINT instance_agent_settings_model_overrides_check");
   await database.query(`UPDATE deviludo.instance_agent_settings

@@ -44,7 +44,7 @@ try {
       await writeFile(`${directory}/deviludo-fixture-game.txt`, `platform=${platform}\njob=${plan.job.jobId}\n`);
       const materialized = [];
       for (const asset of plan.job.inputObjects.filter(input => input.kind === "ASSET")) {
-        const extension = asset.key.match(/\.(png|jpg|webp)$/)?.[1];
+        const extension = asset.key.match(/\.(png|jpg|webp|mp3|ogg|wav)$/)?.[1];
         if (!extension || typeof asset.assetKey !== "string") throw new Error("Fixture build asset input is invalid");
         const relativePath = `assets/generated/${asset.assetKey}.${extension}`;
         const target = `${directory}/${relativePath}`;
@@ -72,7 +72,7 @@ try {
 }
 
 function assetInputFilename(input) {
-  const extension = input.key.match(/\.(png|jpg|webp)$/)?.[1];
+  const extension = input.key.match(/\.(png|jpg|webp|mp3|ogg|wav)$/)?.[1];
   if (!extension) throw new Error("Fixture build asset extension is invalid");
   return `asset-${createHash("sha256").update(input.key).digest("hex")}.${extension}`;
 }

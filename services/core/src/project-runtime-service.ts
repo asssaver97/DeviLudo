@@ -1216,20 +1216,34 @@ function normalizeAssetPlan(value: readonly Readonly<Record<string, unknown>>[])
   const keys = new Set<string>();
   return Object.freeze(value.map(asset => {
     const key = String(asset.key ?? "");
+    const assetType = String(asset.assetType ?? "").toLowerCase();
     const origin = String(asset.origin ?? "GENERATED").toUpperCase();
     const resource = String(asset.expectedResourcePath ?? "");
+    const music = assetType === "music";
+    const description = String(asset.description ?? "").trim();
+    const musicResourcePrefix = `res://assets/generated/${key}.`;
+    const musicResource = musicResourcePrefix.length < resource.length
+      && ["mp3", "ogg", "wav"].includes(resource.slice(musicResourcePrefix.length).toLowerCase());
+    const musicGenerationFields = ["generationPrompt", "prompt", "frameCount", "dimensions", "sourcePath"]
+      .some(field => asset[field] !== undefined && asset[field] !== null);
     if (!/^[a-z0-9][a-z0-9/_.-]{0,199}$/.test(key) || keys.has(key)
       || !["GENERATED", "USER_UPLOAD"].includes(origin)
-      || !/^res:\/\/[A-Za-z0-9][A-Za-z0-9._/-]{0,499}\.(?:png|jpe?g|webp|svg)$/i.test(resource)) {
+      || (music
+        ? origin !== "USER_UPLOAD"
+          || description.length < 1 || description.length > 2_000
+          || !musicResource
+          || musicGenerationFields
+        : !/^res:\/\/[A-Za-z0-9][A-Za-z0-9._/-]{0,499}\.(?:png|jpe?g|webp|svg)$/i.test(resource))) {
       throw new Error("Development Agent returned an invalid or duplicate asset plan item");
     }
     keys.add(key);
     const normalized = {
       ...asset,
       key,
+      ...(music ? { assetType: "music", description } : {}),
       origin,
       expectedResourcePath: resource,
-      sourcePath: assetSourcePath(asset) ?? resource.slice("res://".length),
+      ...(!music ? { sourcePath: assetSourcePath(asset) ?? resource.slice("res://".length) } : {}),
     };
     return Object.freeze(normalized);
   }));
@@ -1319,7 +1333,8 @@ function freezeTestPlan(value: Readonly<Record<string, unknown>>, context: Proje
     throw new Error("The Test Agent plan does not cover every current E2E goal ID");
   }
   const placement = boundedObject(value.assetPlacementPlan);
-  const plannedAssetKeys = context.assetPlan.map(asset => String(asset.key ?? asset.assetKey ?? "")).filter(Boolean).sort();
+  const visualAssetPlan = context.assetPlan.filter(asset => String(asset.assetType ?? "").toLowerCase() !== "music");
+  const plannedAssetKeys = visualAssetPlan.map(asset => String(asset.key ?? asset.assetKey ?? "")).filter(Boolean).sort();
   if (placement.schema !== "deviludo.asset-placement-plan"
     || !Array.isArray(placement.plannedAssetKeys)
     || !Array.isArray(placement.placements)

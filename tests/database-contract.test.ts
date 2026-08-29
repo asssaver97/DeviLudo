@@ -118,6 +118,20 @@ test("asset readiness cannot overtake an active Development Agent turn", async (
   assert.match(advance, /NOT EXISTS \([\s\S]*active_development\.state IN \('QUEUED', 'RUNNING', 'RETRY'\)[\s\S]*active_development\.payload->>'role'/);
 });
 
+test("music assets are upload-only and never enter image generation or block builds", async () => {
+  const sql = await readFile(sqlUrl, "utf8");
+  const claim = functionSource(sql, "claim_asset_generation");
+  const rerun = functionSource(sql, "request_asset_rerun");
+  const advance = functionSource(sql, "advance_asset_workflows");
+  const complete = functionSource(sql, "complete_agent_turn_job");
+  assert.match(sql, /asset_type IN \('sprite', 'animation', 'background', 'ui', 'icon', 'tileset', 'music'\)/);
+  assert.match(sql, /asset_type <> 'music'[\s\S]*generation_prompt IS NULL/);
+  assert.match(claim, /item\.asset_type <> 'music'/);
+  assert.match(rerun, /item\.asset_type <> 'music'/);
+  assert.match(advance, /item\.asset_type <> 'music'/);
+  assert.match(complete, /item\.asset_type <> 'music'/);
+});
+
 test("Test Agent jobs are semantically deduplicated and retry storms terminate", async () => {
   const sql = await readFile(sqlUrl, "utf8");
   const enqueue = lastFunctionSource(sql, "enqueue_job");
@@ -193,6 +207,9 @@ test("schema migration permits only exact reviewed development refreshes", async
   assert.match(migration, /ledger\.rows\[0\]\?\.checksum !== baselineDigest/);
   assert.match(migration, /ALTER TYPE deviludo\.workflow_state ADD VALUE IF NOT EXISTS 'UI_DESIGNING' BEFORE 'DEVELOPING'/);
   assert.match(migration, /ALTER TYPE deviludo\.agent_role ADD VALUE IF NOT EXISTS 'UI_DESIGN' BEFORE 'DEVELOPMENT'/);
+  assert.match(migration, /UPLOAD_ONLY_MUSIC_ASSETS/);
+  assert.match(migration, /DROP CONSTRAINT asset_items_asset_type_check/);
+  assert.match(migration, /ADD CONSTRAINT asset_items_music_upload_only/);
   assert.match(migration, /jsonb_set\(model_overrides, '\{uiDesign\}'/);
   assert.match(migration, /jsonb_set\(content, '\{uiDesign\}'/);
   assert.match(migration, /DROP CONSTRAINT project_documents_content_check/);

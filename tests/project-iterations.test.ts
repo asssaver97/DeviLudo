@@ -66,6 +66,9 @@ test("the project page separates continuing requirements from rerunning a comple
   assert.match(studio, /viewingHistoricalIteration[\s\S]*text\("历史只读", "READ ONLY"\)/);
   assert.match(studio, /disabled=\{viewingHistoricalIteration\}/);
   assert.match(studio, /assetPanelExpanded && !viewingHistoricalIteration/);
+  assert.match(studio, /musicPanelExpanded && !viewingHistoricalIteration/);
+  assert.match(studio, /<AssetManifestPanel mediaKind="music"/);
+  assert.doesNotMatch(studio, /尚未配置音乐生成模型/);
   assert.match(studio, /historicalIteration\.events/);
   assert.match(dashboard, /project\.iterationNumber/);
 });

@@ -107,7 +107,9 @@ import {
   implementationBrief as runtimeImplementationBrief,
   parseProjectRuntimeIntent,
   parseProjectRuntimeReply,
+  projectRuntimeContinuationIntent,
   projectRuntimeIntentPrompt,
+  projectRuntimeNewGameIntent,
   projectRuntimeSpecialistPrompt,
 } from "./project-runtime-conversation";
 import {
@@ -842,6 +844,19 @@ export async function runApi(
         sourcePaths,
       });
     }
+    const context = await projectRuntime.readContext(workspace.id, project.id);
+    const musicItems = context.assetPlan.flatMap(asset => {
+      if (String(asset.assetType ?? "").toLowerCase() !== "music") return [];
+      const assetKey = typeof asset.key === "string" ? asset.key : "";
+      const description = typeof asset.description === "string" ? asset.description.trim() : "";
+      return assetKey && description ? [Object.freeze({ assetKey, description })] : [];
+    });
+    await repository.assets.synchronizeMusicPlan({
+      workspaceId: workspace.id,
+      projectId: project.id,
+      workflowId: project.workflowId,
+      items: musicItems,
+    });
     const view = await repository.assets.read(workspace.id, project.id);
     // A project without a manifest is ordinary, not an error: the Agent has not
     // planned assets for it yet.
@@ -905,7 +920,8 @@ export async function runApi(
       }
       const manifest = await repository.assets.read(workspace.id, project.id);
       if (!manifest) return reply.code(404).send({ code: "ASSET_MANIFEST_NOT_FOUND" });
-      const unresolved = manifest.items.filter(item => ["planned", "generating", "failed"].includes(item.status));
+      const unresolved = manifest.items.filter(item => item.assetType !== "music"
+        && ["planned", "generating", "failed"].includes(item.status));
       if (unresolved.length === 0) {
         return reply.code(409).send({
           code: "ASSET_RERUN_NOT_NEEDED",
@@ -951,20 +967,26 @@ export async function runApi(
       const assetKey = typeof body.assetKey === "string" ? body.assetKey : "";
       const contentType = typeof body.contentType === "string" ? body.contentType : "";
       const encoded = typeof body.content === "string" ? body.content : "";
-      const extension = ASSET_CONTENT_TYPES[contentType];
-      if (!assetKey || assetKey.length > 200 || !extension || !encoded) {
+      const manifest = await repository.assets.read(workspace.id, project.id);
+      const planned = manifest?.items.find(item => item.assetKey === assetKey) ?? null;
+      const music = planned?.assetType === "music";
+      const extension = music ? MUSIC_CONTENT_TYPES[contentType] : IMAGE_ASSET_CONTENT_TYPES[contentType];
+      if (!assetKey || assetKey.length > 200 || !planned || !extension || !encoded) {
         return reply.code(400).send({
           code: "INVALID_ASSET_UPLOAD",
-          message: "请提供素材键名和受支持的图片内容 (PNG/JPEG/WebP)",
+          message: music
+            ? "请为已规划的音乐素材提供 MP3、Ogg Vorbis 或 WAV 文件"
+            : "请为已规划的美术素材提供 PNG、JPEG 或 WebP 图片",
         });
       }
       // Decoded length is what actually lands in the bucket, so bound that
       // rather than the base64 envelope.
       const content = Buffer.from(encoded, "base64");
-      if (content.length < 1 || content.length > MAX_ASSET_BYTES) {
+      const maxBytes = music ? MAX_MUSIC_ASSET_BYTES : MAX_IMAGE_ASSET_BYTES;
+      if (content.length < 1 || content.length > maxBytes) {
         return reply.code(413).send({
           code: "ASSET_TOO_LARGE",
-          message: `单个素材不能超过 ${MAX_ASSET_BYTES / (1024 * 1024)} MB`,
+          message: `单个素材不能超过 ${maxBytes / (1024 * 1024)} MB`,
         });
       }
       // Store first, then record: an orphaned object is harmless and gets swept
@@ -2332,29 +2354,7 @@ async function processConversationMessage(input: Readonly<{
       settings,
       source: null,
     });
-    input.stream?.onStart("INTENT");
-    const intentResult = await input.projectRuntime.turn({
-      workspaceId: targetWorkspace.id,
-      projectId,
-      role: "INTENT",
-      mode: "PRIMARY",
-      prompt: projectRuntimeIntentPrompt({
-        content: command.content,
-        hasAttachments: command.images.length > 0,
-        hasPendingChange: false,
-        workflowState: "DRAFT",
-        recentMessages: Object.freeze([]),
-        lastSpecialistRole: null,
-      }),
-      responseLanguage: command.responseLanguage,
-      settings,
-      sourceRevision: null,
-      sourceRelativePath: null,
-      attachments: command.images,
-      onEvent: event => { forwardConversationRuntimeProgress(input.stream, "INTENT", event); },
-    }).catch(error => { throw httpError(424, "INTENT_AGENT_FAILED", error instanceof Error ? error.message : "Intent Agent failed"); });
-    input.stream?.onComplete("INTENT");
-    const intentDecision = parseProjectRuntimeIntent(intentResult);
+    const intentDecision = projectRuntimeNewGameIntent(command.content);
     input.onStage?.("RESPONDING");
     const specialistRole = intentDecision.targetRole;
     let streamedSpecialistContent = "";
@@ -2531,29 +2531,38 @@ async function processConversationMessage(input: Readonly<{
     } : null,
   });
   input.onStage?.("RESPONDING");
-  input.stream?.onStart("INTENT");
-  const intentResult = await input.projectRuntime.turn({
-    workspaceId: workspace.id,
-    projectId,
-    role: "INTENT",
-    mode: "PRIMARY",
-    prompt: projectRuntimeIntentPrompt({
-      content: command.content,
-      hasAttachments: command.images.length > 0,
-      hasPendingChange: project.pendingImplementationChange !== null,
-      workflowState: project.workflowState,
-      recentMessages: existingConversation?.messages ?? Object.freeze([]),
-      lastSpecialistRole: lastConversationSpecialistRole(existingConversation),
-    }),
-    responseLanguage: command.responseLanguage,
-    settings,
-    sourceRevision: project.source?.revision ?? null,
-    sourceRelativePath: project.source?.relativePath ?? null,
-    attachments: command.images,
-    onEvent: event => { forwardConversationRuntimeProgress(input.stream, "INTENT", event); },
-  }).catch(error => { throw httpError(424, "INTENT_AGENT_FAILED", error instanceof Error ? error.message : "Intent Agent failed"); });
-  input.stream?.onComplete("INTENT");
-  const intentDecision = parseProjectRuntimeIntent(intentResult);
+  const pending = project.pendingImplementationChange;
+  const continuedIntent = project.workflowState === "DRAFT" && !pending
+    ? projectRuntimeContinuationIntent(existingConversation?.messages ?? Object.freeze([]), command.content)
+    : null;
+  let intentDecision: ConversationIntentDecision;
+  if (continuedIntent) {
+    intentDecision = continuedIntent;
+  } else {
+    input.stream?.onStart("INTENT");
+    const intentResult = await input.projectRuntime.turn({
+      workspaceId: workspace.id,
+      projectId,
+      role: "INTENT",
+      mode: "PRIMARY",
+      prompt: projectRuntimeIntentPrompt({
+        content: command.content,
+        hasAttachments: command.images.length > 0,
+        hasPendingChange: pending !== null,
+        workflowState: project.workflowState,
+        recentMessages: existingConversation?.messages ?? Object.freeze([]),
+        lastSpecialistRole: lastConversationSpecialistRole(existingConversation),
+      }),
+      responseLanguage: command.responseLanguage,
+      settings,
+      sourceRevision: project.source?.revision ?? null,
+      sourceRelativePath: project.source?.relativePath ?? null,
+      attachments: command.images,
+      onEvent: event => { forwardConversationRuntimeProgress(input.stream, "INTENT", event); },
+    }).catch(error => { throw httpError(424, "INTENT_AGENT_FAILED", error instanceof Error ? error.message : "Intent Agent failed"); });
+    input.stream?.onComplete("INTENT");
+    intentDecision = parseProjectRuntimeIntent(intentResult);
+  }
   const conversationId = command.conversationId ?? randomUUID();
   let userAttachments: ReturnType<typeof storeConversationImages> | null = null;
   const storedUserAttachments = () => {
@@ -2564,7 +2573,6 @@ async function processConversationMessage(input: Readonly<{
     }, command.images);
     return userAttachments;
   };
-  const pending = project.pendingImplementationChange;
   if (intentDecision.intent === "CONFIRM_CHANGE" || intentDecision.intent === "REJECT_CHANGE") {
     if (!pending) throw httpError(409, "CHANGE_REQUEST_NOT_FOUND", "当前没有等待确认的实现变更");
     const rejected = intentDecision.intent === "REJECT_CHANGE";
@@ -3031,20 +3039,28 @@ const MAX_POSTGRES_BIGINT = 9_223_372_036_854_775_807n;
 function isConversationMessageId(value: string): boolean {
   return /^[1-9]\d{0,18}$/.test(value) && BigInt(value) <= MAX_POSTGRES_BIGINT;
 }
-// Raster formats only, and the extension is derived here rather than taken from
-// the client filename so an upload cannot choose its own key suffix.
-const ASSET_CONTENT_TYPES: Readonly<Record<string, string>> = Object.freeze({
+// The extension is derived from a trusted media type rather than the client
+// filename, so an upload cannot choose its own object-key suffix.
+const IMAGE_ASSET_CONTENT_TYPES: Readonly<Record<string, string>> = Object.freeze({
   "image/png": "png",
   "image/jpeg": "jpg",
   "image/webp": "webp",
 });
-const MAX_ASSET_BYTES = 8 * 1024 * 1024;
+const MUSIC_CONTENT_TYPES: Readonly<Record<string, string>> = Object.freeze({
+  "audio/mpeg": "mp3",
+  "audio/mp3": "mp3",
+  "audio/ogg": "ogg",
+  "audio/wav": "wav",
+  "audio/x-wav": "wav",
+});
+const MAX_IMAGE_ASSET_BYTES = 8 * 1024 * 1024;
+const MAX_MUSIC_ASSET_BYTES = 32 * 1024 * 1024;
 /**
  * Transport budget for an asset upload. The bytes arrive base64-encoded inside a
  * JSON envelope, which inflates them by 4/3, so the route limit has to clear
- * that before `MAX_ASSET_BYTES` can be enforced on the decoded buffer.
+ * that before the media-specific decoded-byte limit can be enforced.
  */
-const MAX_ASSET_REQUEST_BYTES = Math.ceil(MAX_ASSET_BYTES * 4 / 3) + 4 * 1024;
+const MAX_ASSET_REQUEST_BYTES = Math.ceil(MAX_MUSIC_ASSET_BYTES * 4 / 3) + 4 * 1024;
 const authenticatedRequests = new WeakMap<FastifyRequest, CorePrincipal>();
 
 function productAccess(request: FastifyRequest, config: CoreConfig): CorePrincipal {

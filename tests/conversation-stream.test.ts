@@ -10,6 +10,7 @@ import {
   initialStreamingConversationReplies,
   optimisticConversation,
   replaceStreamingConversationReply,
+  sendConversationMessageStream,
   startStreamingConversationReply,
   streamingConversationReplyIsActive,
   updateStreamingConversationActivity,
@@ -60,6 +61,49 @@ test("completed Agent replies remain visible without a status while the next Age
     DESIGN: { content: "设计结论", processEvents: [], phase: "COMPLETE", activity: null, developmentLogs: [] },
     TEST: { content: "", processEvents: [], phase: "THINKING", activity: null, developmentLogs: [] },
   });
+});
+
+test("a UI Design stream replaces the completed transient Intent reply", () => {
+  const intentComplete = completeStreamingConversationReply(
+    startStreamingConversationReply(initialStreamingConversationReplies(), "INTENT"),
+    "INTENT",
+  );
+  assert.deepEqual(startStreamingConversationReply(intentComplete, "UI_DESIGN"), {
+    UI_DESIGN: { content: "", processEvents: [], phase: "THINKING", activity: null, developmentLogs: [] },
+  });
+});
+
+test("conversation SSE accepts UI Design Agent lifecycle events", async () => {
+  const originalFetch = globalThis.fetch;
+  const observed: string[] = [];
+  globalThis.fetch = async () => new Response([
+    JSON.stringify({ type: "agent_start", agentRole: "UI_DESIGN" }),
+    JSON.stringify({ type: "agent_process", agentRole: "UI_DESIGN", event: "正在规划界面" }),
+    JSON.stringify({ type: "agent_complete", agentRole: "UI_DESIGN" }),
+    JSON.stringify({
+      type: "complete",
+      workspace: { id: "workspace" },
+      project: { id: "project" },
+      conversation: { id: "conversation" },
+      intentDecision: { targetRole: "UI_DESIGN" },
+      workflowAction: "NONE",
+    }),
+    "",
+  ].join("\n"), { status: 200 });
+  try {
+    await sendConversationMessageStream({ content: "重新设计 UI" }, "request", {
+      onAgentStart: role => observed.push(`start:${role}`),
+      onAgentProcess: role => observed.push(`process:${role}`),
+      onAgentDelta: role => observed.push(`delta:${role}`),
+      onAgentReplace: role => observed.push(`replace:${role}`),
+      onAgentActivity: role => observed.push(`activity:${role}`),
+      onAgentDevelopmentLog: role => observed.push(`log:${role}`),
+      onAgentComplete: role => observed.push(`complete:${role}`),
+    });
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+  assert.deepEqual(observed, ["start:UI_DESIGN", "process:UI_DESIGN", "complete:UI_DESIGN"]);
 });
 
 test("completed tool activity clears immediately and final normalization can replace streamed text", () => {

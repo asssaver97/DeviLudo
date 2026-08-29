@@ -68,6 +68,51 @@ export function parseProjectRuntimeIntent(result: ProjectRuntimeTurnResult): Con
   });
 }
 
+export function projectRuntimeNewGameIntent(content: string): ConversationIntentDecision {
+  return Object.freeze({
+    intent: "CHANGE_REQUEST",
+    targetRole: "DESIGN",
+    explicitExecution: false,
+    actionable: true,
+    summary: content.trim().slice(0, 1_000),
+  });
+}
+
+/**
+ * Keep an option-driven Design conversation with the specialist that asked the
+ * question. This is conversation ownership, not semantic classification: once
+ * the specialist stops presenting choices, Core delegates routing back to the
+ * Intent Agent.
+ */
+export function projectRuntimeContinuationIntent(
+  messages: readonly ProductConversationMessage[],
+  content: string,
+): ConversationIntentDecision | null {
+  const latest = messages.at(-1);
+  if (!latest || latest.role !== "ASSISTANT") return null;
+  const role = latest.metadata.agentRole;
+  if (role !== "DESIGN" && role !== "UI_DESIGN") return null;
+  if (normalizeConversationReplyOptions(latest.metadata.options).length === 0) return null;
+  if ((role === "DESIGN" && latest.metadata.readyForUiDesign === true)
+    || (role === "UI_DESIGN" && latest.metadata.readyForDevelopment === true)) return null;
+  const previous = latest.metadata.intentDecision;
+  if (!previous || typeof previous !== "object" || Array.isArray(previous)) return null;
+  const decision = previous as Record<string, unknown>;
+  if (!["QUESTION", "CHANGE_REQUEST"].includes(String(decision.intent))
+    || decision.targetRole !== role
+    || typeof decision.explicitExecution !== "boolean"
+    || typeof decision.actionable !== "boolean") return null;
+  if (decision.intent !== "CHANGE_REQUEST" && (decision.explicitExecution || decision.actionable)) return null;
+  if (decision.intent === "CHANGE_REQUEST" && decision.explicitExecution && !decision.actionable) return null;
+  return Object.freeze({
+    intent: decision.intent as "QUESTION" | "CHANGE_REQUEST",
+    targetRole: role,
+    explicitExecution: decision.explicitExecution,
+    actionable: decision.actionable,
+    summary: content.trim().slice(0, 1_000),
+  });
+}
+
 export function projectRuntimeSpecialistPrompt(input: Readonly<{
   intent: ConversationIntentDecision;
   content: string;

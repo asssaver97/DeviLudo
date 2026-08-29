@@ -25,7 +25,9 @@ import {
   implementationChangeReady,
   parseProjectRuntimeIntent,
   parseProjectRuntimeReply,
+  projectRuntimeContinuationIntent,
   projectRuntimeIntentPrompt,
+  projectRuntimeNewGameIntent,
   projectRuntimeSpecialistPrompt,
 } from "@/services/core/src/project-runtime-conversation";
 import {
@@ -132,6 +134,55 @@ test("persistent Runtime intent selects exactly one role and rejects contradicto
   }), /Each option object needs a concise label and one short description/);
 });
 
+test("option-driven Design replies continue without another Intent Agent turn", () => {
+  const newGame = projectRuntimeNewGameIntent(
+    "读取公开素材，并制作同名游戏。游戏内容参考人物设定与故事大纲。",
+  );
+  assert.deepEqual(newGame, {
+    intent: "CHANGE_REQUEST",
+    targetRole: "DESIGN",
+    explicitExecution: false,
+    actionable: true,
+    summary: "读取公开素材，并制作同名游戏。游戏内容参考人物设定与故事大纲。",
+  });
+  assert.equal(designReplyAction({ ...newGame, targetRole: "UI_DESIGN" }, "UI_DESIGN"), "AWAITING_CONFIRMATION");
+  const message = (metadata: Readonly<Record<string, unknown>>): ProductConversationMessage => Object.freeze({
+    id: "choice",
+    role: "ASSISTANT",
+    content: "请选择设定方向。",
+    attachments: Object.freeze([]),
+    metadata,
+    createdAt: "2026-08-29T00:00:00.000Z",
+    completedAt: "2026-08-29T00:00:01.000Z",
+  });
+  const intentDecision = Object.freeze({
+    intent: "CHANGE_REQUEST",
+    targetRole: "DESIGN",
+    explicitExecution: false,
+    actionable: true,
+    summary: "Create a new game.",
+  });
+  assert.deepEqual(projectRuntimeContinuationIntent([message(Object.freeze({
+    agentRole: "DESIGN",
+    readyForUiDesign: false,
+    options: Object.freeze([Object.freeze({ label: "时间循环（推荐）", description: "每轮积累线索。" })]),
+    intentDecision,
+  }))], "我想让每轮保留一条记忆"), {
+    intent: "CHANGE_REQUEST",
+    targetRole: "DESIGN",
+    explicitExecution: false,
+    actionable: true,
+    summary: "我想让每轮保留一条记忆",
+  });
+  assert.equal(projectRuntimeContinuationIntent([message(Object.freeze({
+    agentRole: "DESIGN", readyForUiDesign: false, options: Object.freeze([]), intentDecision,
+  }))], "改做 UI"), null);
+  assert.equal(projectRuntimeContinuationIntent([message(Object.freeze({
+    agentRole: "DESIGN", readyForUiDesign: true,
+    options: Object.freeze([Object.freeze({ label: "继续", description: "已完成设计。" })]), intentDecision,
+  }))], "继续"), null);
+});
+
 test("Design discovery converges only after the player explicitly delegates remaining decisions", () => {
   const question = (id: string, label: string): ProductConversationMessage => Object.freeze({
     id,
@@ -232,7 +283,7 @@ test("development authorization labels remain explicit UI actions", () => {
   }, "UI_DESIGN"), "START_DEVELOPMENT");
 });
 
-test("every project message uses the LLM Intent Agent and UI design precedes implementation", async () => {
+test("Intent routes role boundaries while option-driven design replies preserve their specialist", async () => {
   const [api, conversation, intentSkill] = await Promise.all([
     readFile(new URL("../services/core/src/api.ts", import.meta.url), "utf8"),
     readFile(new URL("../services/core/src/project-runtime-conversation.ts", import.meta.url), "utf8"),
@@ -241,7 +292,11 @@ test("every project message uses the LLM Intent Agent and UI design precedes imp
   assert.doesNotMatch(api, /lightweightProjectRuntimeIntent/);
   assert.doesNotMatch(conversation, /lightweightProjectRuntimeIntent|const mutation =|const developmentRole =/);
   assert.match(api, /onStart\("INTENT"\)[\s\S]*role: "INTENT"[\s\S]*parseProjectRuntimeIntent/);
-  assert.match(intentSkill, /sole semantic router for every player message/);
+  assert.match(api, /const intentDecision = projectRuntimeNewGameIntent\(command\.content\)/);
+  assert.match(api, /project\.workflowState === "DRAFT" && !pending[\s\S]*projectRuntimeContinuationIntent/);
+  assert.match(intentSkill, /semantic router at ambiguous conversation entry points and role boundaries/);
+  assert.match(intentSkill, /assigns new-game creation directly to Design/);
+  assert.match(intentSkill, /preserve an active Design or UI Design choice conversation without invoking you/);
   assert.match(intentSkill, /UI\/UX redesign[\s\S]*even when the player also says to implement them/);
   assert.match(projectRuntimeIntentPrompt({
     content: "重新设计并实现游戏界面 UI",
@@ -780,6 +835,11 @@ test("Core has one Runtime path and controlled task images cannot execute Agent 
   assert.match(turn, /mcp_servers\.deviludo\.env_vars/);
   assert.match(turn, /ephemeralMcpConfig/);
   assert.match(turn, /request\.role === "INTENT"[\s\S]*model_reasoning_effort=low/);
+  assert.match(turn, /liveWebSearch = request\.role === "DESIGN" \|\| request\.role === "UI_DESIGN"/);
+  assert.match(turn, /liveWebSearch \? \["--search"\] : \[\]/);
+  assert.match(turn, /liveWebSearch \? "WebSearch," : ""/);
+  assert.match(turn, /WebFetch\$\{liveWebSearch \? "" : ",WebSearch"\}/);
+  assert.match(turn, /Live web search is not authorized for this role/);
   assert.match(turn, /child\.stderr\.on\("data"[\s\S]*runtimeErrors\.push\(text\)/);
   assert.doesNotMatch(turn, /--ignore-user-config/);
   assert.match(runtimeService, /workflow\.analysisTurnId !== result\.turnId/);

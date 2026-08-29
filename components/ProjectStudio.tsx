@@ -129,6 +129,7 @@ export function ProjectStudio({ projectId }: { projectId: string }) {
   const [editingDocument, setEditingDocument] = useState(false);
   const [documentDraft, setDocumentDraft] = useState({ introduction: "", gameplay: "", uiDesign: "", categories: "", features: "" });
   const [assetPanelExpanded, setAssetPanelExpanded] = useState(false);
+  const [musicPanelExpanded, setMusicPanelExpanded] = useState(false);
   const [assetManifestRefreshKey, setAssetManifestRefreshKey] = useState(0);
   const [assetManifestView, setAssetManifestView] = useState<AssetManifestPayload | null>(null);
   const [retryingAssets, setRetryingAssets] = useState(false);
@@ -893,27 +894,41 @@ export function ProjectStudio({ projectId }: { projectId: string }) {
     ? failedPipelineStage
     : null;
   const assetItems = assetManifestView?.items ?? Object.freeze([]);
+  const visualAssetItems = assetItems.filter(item => item.assetType !== "music");
+  const musicItems = assetItems.filter(item => item.assetType === "music");
   const assetCompletion = assetManifestView?.completion;
-  const assetOutstanding = assetItems.filter(item => ["planned", "generating", "failed"].includes(item.status)).length;
+  const assetOutstanding = visualAssetItems.filter(item => ["planned", "generating", "failed"].includes(item.status)).length;
   const assetRerunAvailable = !viewingHistoricalIteration
     && ASSET_RERUN_WORKFLOW_STATES.has(project.workflowState);
   const assetNodeStatus = !assetManifestView?.manifest
     ? "pending"
     : assetCompletion?.complete
       ? "completed"
-      : assetItems.some(item => item.status === "failed")
+      : visualAssetItems.some(item => item.status === "failed")
         ? "failed"
-        : assetItems.some(item => item.status === "planned" || item.status === "generating")
+        : visualAssetItems.some(item => item.status === "planned" || item.status === "generating")
           ? "active"
           : "pending";
   const assetNodeSymbol = assetNodeStatus === "completed" ? "✓" : assetNodeStatus === "failed" ? "!" : assetNodeStatus === "active" ? "●" : "○";
-  const assetNodeLabel = !assetManifestView?.manifest
+  const assetNodeLabel = !assetManifestView?.manifest || visualAssetItems.length === 0
     ? text("等待 Agent 规划", "WAITING FOR AGENT")
     : assetCompletion?.complete
       ? text("素材已就绪", "ASSETS READY")
       : assetNodeStatus === "failed"
         ? text("需要补齐", "NEEDS RETRY")
         : text("正在准备", "PREPARING");
+  const musicUploaded = musicItems.filter(item => item.status === "uploaded").length;
+  const musicNodeStatus = musicItems.length === 0
+    ? "pending"
+    : musicUploaded === musicItems.length
+      ? "completed"
+      : "active";
+  const musicNodeSymbol = musicNodeStatus === "completed" ? "✓" : musicNodeStatus === "active" ? "●" : "○";
+  const musicNodeLabel = musicItems.length === 0
+    ? text("等待 Agent 规划", "WAITING FOR AGENT")
+    : musicUploaded === musicItems.length
+      ? text("上传完成", "UPLOADS READY")
+      : text("等待上传", "AWAITING UPLOADS");
 
   return (
     <>
@@ -1141,7 +1156,10 @@ export function ProjectStudio({ projectId }: { projectId: string }) {
                     aria-expanded={!viewingHistoricalIteration && assetPanelExpanded}
                     className="product-delivery-material-disclosure"
                     disabled={viewingHistoricalIteration}
-                    onClick={() => setAssetPanelExpanded(value => !value)}
+                    onClick={() => {
+                      setAssetPanelExpanded(value => !value);
+                      setMusicPanelExpanded(false);
+                    }}
                     type="button"
                   >
                     <span aria-hidden="true" className="product-delivery-stage-marker product-delivery-stage-rerun-target">{viewingHistoricalIteration ? "—" : assetNodeSymbol}</span>
@@ -1164,13 +1182,24 @@ export function ProjectStudio({ projectId }: { projectId: string }) {
                     </button>
                   ) : null}
                 </li>
-                <li className="product-delivery-stage product-delivery-material-stage status-pending" data-stage-status="pending">
-                  <div className="product-delivery-material-static">
-                    <span aria-hidden="true" className="product-delivery-stage-marker">○</span>
+                <li className={`product-delivery-stage product-delivery-material-stage status-${viewingHistoricalIteration ? "pending" : musicNodeStatus}`} data-stage-status={viewingHistoricalIteration ? "pending" : musicNodeStatus}>
+                  <button
+                    aria-expanded={!viewingHistoricalIteration && musicPanelExpanded}
+                    className="product-delivery-material-disclosure"
+                    disabled={viewingHistoricalIteration}
+                    onClick={() => {
+                      setMusicPanelExpanded(value => !value);
+                      setAssetPanelExpanded(false);
+                    }}
+                    type="button"
+                  >
+                    <span aria-hidden="true" className="product-delivery-stage-marker">{viewingHistoricalIteration ? "—" : musicNodeSymbol}</span>
                     <b>{text("音乐", "MUSIC")}</b>
-                    <strong>{text("待规划", "NOT CONFIGURED")}</strong>
-                    <small>{text("尚未配置音乐生成模型", "No music generation model configured")}</small>
-                  </div>
+                    <strong>{viewingHistoricalIteration ? text("历史只读", "READ ONLY") : musicNodeLabel}</strong>
+                    <small>{viewingHistoricalIteration
+                      ? text("历史轮不展示当前音乐规划", "Current music is hidden for historical iterations")
+                      : `${musicUploaded}/${musicItems.length} · ${musicPanelExpanded ? text("收起音乐列表", "HIDE MUSIC LIST") : text("展开音乐列表", "VIEW MUSIC LIST")}`}</small>
+                  </button>
                 </li>
               </ol>
             </fieldset>
@@ -1237,6 +1266,9 @@ export function ProjectStudio({ projectId }: { projectId: string }) {
         ) : null}
         {assetPanelExpanded && !viewingHistoricalIteration ? (
           <div className="product-delivery-inline-assets"><AssetManifestPanel onManifestChange={setAssetManifestView} onOpenSourceImage={openSourceImage} projectId={projectId} refreshKey={assetManifestRefreshKey} /></div>
+        ) : null}
+        {musicPanelExpanded && !viewingHistoricalIteration ? (
+          <div className="product-delivery-inline-assets"><AssetManifestPanel mediaKind="music" onManifestChange={setAssetManifestView} projectId={projectId} refreshKey={assetManifestRefreshKey} /></div>
         ) : null}
       </section>
 

@@ -35,3 +35,14 @@ test("generated build assets must be referenced by runtime source", async () => 
     await rm(root, { recursive: true, force: true });
   }
 });
+
+test("uploaded music uses the same stable runtime reference gate", async () => {
+  const root = await mkdtemp(join(tmpdir(), "deviludo-music-usage-"));
+  try {
+    await mkdir(join(root, "scripts"), { recursive: true });
+    await writeFile(join(root, "scripts", "audio.gd"), "const MENU_MUSIC = \"res://assets/generated/music/main-menu.ogg\"\n");
+    assert.deepEqual(await missingBuildAssetReferences(root, ["music/main-menu"]), []);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});

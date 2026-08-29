@@ -1478,7 +1478,7 @@ CREATE TABLE deviludo.asset_items (
     AND asset_key !~ '/$'
   ),
   asset_type text NOT NULL
-    CHECK (asset_type IN ('sprite', 'animation', 'background', 'ui', 'icon', 'tileset')),
+    CHECK (asset_type IN ('sprite', 'animation', 'background', 'ui', 'icon', 'tileset', 'music')),
   description text NOT NULL CHECK (length(description) BETWEEN 1 AND 2000),
   generation_prompt text CHECK (generation_prompt IS NULL OR length(generation_prompt) BETWEEN 1 AND 4000),
   frame_count integer CHECK (frame_count IS NULL OR frame_count BETWEEN 1 AND 4096),
@@ -1509,7 +1509,11 @@ CREATE TABLE deviludo.asset_items (
     (status IN ('generated', 'uploaded'))
       = (object_key IS NOT NULL AND bucket IS NOT NULL AND sha256 IS NOT NULL AND size_bytes IS NOT NULL)
   ),
-  CHECK ((status = 'existing') = (source_path IS NOT NULL))
+  CHECK ((status = 'existing') = (source_path IS NOT NULL)),
+  CONSTRAINT asset_items_music_upload_only CHECK (
+    asset_type <> 'music'
+    OR (generation_prompt IS NULL AND frame_count IS NULL AND dimensions IS NULL AND source_path IS NULL)
+  )
 );
 
 -- Re-planning an existing-source item changes its status before the repository
@@ -1575,7 +1579,7 @@ CREATE TRIGGER asset_manifests_default_auto_generation
 BEFORE INSERT ON deviludo.asset_manifests
 FOR EACH ROW EXECUTE FUNCTION deviludo.default_asset_auto_generation();
 
--- Freeze the exact image objects into every artifact-build job. The builder
+-- Freeze the exact supplied asset objects into every artifact-build job. The builder
 -- reads this immutable snapshot rather than whichever upload happens to be the
 -- latest when a queued job is eventually claimed.
 CREATE OR REPLACE FUNCTION deviludo.snapshot_artifact_build_assets()
@@ -1602,32 +1606,7 @@ BEGIN
    WHERE manifest.workspace_id = NEW.workspace_id
      AND manifest.project_id = NEW.project_id
      AND manifest.workflow_id = NEW.workflow_id
-     AND item.status IN ('generated', 'uploaded')
-     -- Generated and user-supplied objects survive re-planning for reuse, but
-     -- only keys retained by the latest successful Agent plan belong to this
-     -- immutable build input set. This lets a repair remove an unnecessary
-     -- generated plan item without deleting its reusable object.
-     AND item.asset_key IN (
-       SELECT planned->>'assetKey'
-         FROM deviludo.jobs source_job
-         CROSS JOIN LATERAL jsonb_array_elements(
-           source_job.receipt #> '{assetManifest,items}'
-         ) planned
-        WHERE source_job.workspace_id = NEW.workspace_id
-          AND source_job.workflow_id = NEW.workflow_id
-          AND source_job.kind = 'AGENT_TURN'
-          AND source_job.state = 'SUCCEEDED'
-          AND source_job.id = (
-            SELECT latest_agent.id
-              FROM deviludo.jobs latest_agent
-             WHERE latest_agent.workspace_id = NEW.workspace_id
-               AND latest_agent.workflow_id = NEW.workflow_id
-               AND latest_agent.kind = 'AGENT_TURN'
-               AND latest_agent.state = 'SUCCEEDED'
-             ORDER BY latest_agent.updated_at DESC, latest_agent.created_at DESC, latest_agent.id DESC
-             LIMIT 1
-          )
-     );
+     AND item.status IN ('generated', 'uploaded');
   NEW.payload := NEW.payload || jsonb_build_object('assetInputs', inputs);
   RETURN NEW;
 END
@@ -1832,6 +1811,7 @@ BEGIN
              FROM deviludo.asset_items item
             WHERE item.workspace_id = manifest.workspace_id
               AND item.manifest_id = manifest.id
+              AND item.asset_type <> 'music'
               AND item.status NOT IN ('generated', 'uploaded', 'existing')
          )
     ) INTO assets_ready;
@@ -2660,6 +2640,7 @@ BEGIN
       JOIN deviludo.asset_manifests manifest
         ON manifest.workspace_id = item.workspace_id AND manifest.id = item.manifest_id
      WHERE manifest.auto_generate_enabled = true
+       AND item.asset_type <> 'music'
        AND item.generation_prompt IS NOT NULL
        AND item.generation_attempt < 3
        AND (
@@ -2811,6 +2792,7 @@ BEGIN
       FROM deviludo.asset_items item
      WHERE item.workspace_id = workflow.workspace_id
        AND item.manifest_id = asset_manifest_id
+       AND item.asset_type <> 'music'
        AND item.status IN ('planned', 'generating', 'failed');
     RETURN QUERY SELECT false, 0, remaining_count;
     RETURN;
@@ -2836,6 +2818,7 @@ BEGIN
     FROM deviludo.asset_items item
    WHERE item.workspace_id = workflow.workspace_id
      AND item.manifest_id = asset_manifest_id
+     AND item.asset_type <> 'music'
      AND item.status IN ('planned', 'generating', 'failed');
   IF remaining_count = 0 THEN RAISE EXCEPTION 'No unresolved assets remain'; END IF;
 
@@ -2854,6 +2837,7 @@ BEGIN
          updated_at = clock_timestamp()
    WHERE workspace_id = workflow.workspace_id
      AND manifest_id = asset_manifest_id
+     AND asset_type <> 'music'
      AND status = 'failed';
   GET DIAGNOSTICS queued_count = ROW_COUNT;
 
@@ -2881,6 +2865,7 @@ BEGIN
     FROM deviludo.asset_items item
    WHERE item.workspace_id = workflow.workspace_id
      AND item.manifest_id = asset_manifest_id
+     AND item.asset_type <> 'music'
      AND item.status IN ('planned', 'generating', 'failed');
   RETURN QUERY SELECT true, queued_count, remaining_count;
 END
@@ -2951,6 +2936,7 @@ BEGIN
            SELECT 1 FROM deviludo.asset_items item
             WHERE item.workspace_id = manifest.workspace_id
               AND item.manifest_id = manifest.id
+              AND item.asset_type <> 'music'
               AND item.status NOT IN ('generated', 'uploaded', 'existing')
          )
        )

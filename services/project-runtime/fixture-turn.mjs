@@ -357,11 +357,12 @@ function testManifest(goals) {
 }
 
 function assetPlacementPlan(assets) {
-  const plannedAssetKeys = assets.map(item => String(item?.key ?? item?.assetKey ?? "")).filter(Boolean).sort();
+  const visualAssets = assets.filter(item => String(item?.assetType ?? "").toLowerCase() !== "music");
+  const plannedAssetKeys = visualAssets.map(item => String(item?.key ?? item?.assetKey ?? "")).filter(Boolean).sort();
   return {
     schema: "deviludo.asset-placement-plan",
     plannedAssetKeys,
-    placements: assets.map((item, index) => ({
+    placements: visualAssets.map((item, index) => ({
       assetKey: String(item?.key ?? item?.assetKey ?? ""),
       targetId: stableId(String(item?.targetId ?? `asset-control-${index + 1}`), index),
       checkpointRole: ["START", "READY", "ACTION", "PROGRESS", "COMPLETION"].includes(String(item?.checkpointRole))
