@@ -554,7 +554,7 @@ type ConversationDisplayAgentRole = ProjectRuntimeRole;
 function messageAgentRole(message: ProductConversationMessage): ConversationDisplayAgentRole {
   const role = message.metadata.agentRole;
   if (role === "ANALYSIS" || message.metadata.source === "PROJECT_IMPORT_AGENT") return "ANALYSIS";
-  return role === "DEVELOPMENT" || role === "TEST" || role === "DESIGN" ? role : "DESIGN";
+  return role === "UI_DESIGN" || role === "DEVELOPMENT" || role === "TEST" || role === "DESIGN" ? role : "DESIGN";
 }
 
 function agentIdentity(
@@ -578,6 +578,12 @@ function agentIdentity(
     name: text("DeviLudo 开发 Agent", "DeviLudo Development Agent"),
     shortName: text("开发", "DEV"),
     responsibility: text("实现与工程", "Implementation"),
+  });
+  if (role === "UI_DESIGN") return Object.freeze({
+    avatar: "UI",
+    name: text("DeviLudo UI 设计 Agent", "DeviLudo UI Design Agent"),
+    shortName: text("UI 设计", "UI DESIGN"),
+    responsibility: text("界面与交互规格", "Interface design"),
   });
   if (role === "TEST") return Object.freeze({
     avatar: "QA",

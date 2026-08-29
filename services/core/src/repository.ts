@@ -963,10 +963,10 @@ export class CoreRepository {
     responseLanguage?: ResponseLanguage;
     assistantContent: string;
     assistantMetadata: Readonly<Record<string, unknown>>;
-    designAssistant: Readonly<{
+    designAssistants: ReadonlyArray<Readonly<{
       content: string;
       metadata: Readonly<Record<string, unknown>>;
-    }>;
+    }>>;
     discovery: ProjectDiscoveryReport;
     source: Readonly<{
       kind: "GIT" | "LOCAL_DIRECTORY";
@@ -1133,15 +1133,18 @@ export class CoreRepository {
           appliedToDraft: true,
         })],
       );
-      await client.query(
-        `INSERT INTO deviludo.conversation_messages(workspace_id, conversation_id, role, content, metadata)
-         VALUES ($1::uuid, $2::uuid, 'ASSISTANT', $3, $4::jsonb)`,
-        [input.workspaceId, conversationId, input.designAssistant.content, JSON.stringify({
-          ...input.designAssistant.metadata,
-          source: "PROJECT_IMPORT_DESIGN_AGENT",
-          importStage: "DESIGN",
-        })],
-      );
+      for (const assistant of input.designAssistants) {
+        const role = assistant.metadata.agentRole === "UI_DESIGN" ? "UI_DESIGN" : "DESIGN";
+        await client.query(
+          `INSERT INTO deviludo.conversation_messages(workspace_id, conversation_id, role, content, metadata)
+           VALUES ($1::uuid, $2::uuid, 'ASSISTANT', $3, $4::jsonb)`,
+          [input.workspaceId, conversationId, assistant.content, JSON.stringify({
+            ...assistant.metadata,
+            source: role === "UI_DESIGN" ? "PROJECT_IMPORT_UI_DESIGN_AGENT" : "PROJECT_IMPORT_DESIGN_AGENT",
+            importStage: role,
+          })],
+        );
+      }
       return true;
     });
   }
@@ -2220,7 +2223,7 @@ export class CoreRepository {
         [job.workspaceId, job.jobId, job.lease.token, job.lease.fencingToken, JSON.stringify(output)],
       );
       if (result.rows[0]?.completed !== true) return false;
-      if (output.role !== "DEVELOPMENT" && output.role !== "TEST") return true;
+      if (output.role !== "UI_DESIGN" && output.role !== "DEVELOPMENT" && output.role !== "TEST") return true;
 
       const responseLanguage = output.responseLanguage === "zh" ? "zh" : "en";
       await client.query(
@@ -2787,7 +2790,7 @@ export class CoreRepository {
              workspace_id, id, project_id, iteration_number, parent_workflow_id,
              development_actor_id, profile, target_platforms, state, state_data
            ) VALUES ($1::uuid, $2::uuid, $3::uuid, $4, $5::uuid, $6::uuid,
-                     $7::deviludo.workflow_profile, $8::deviludo.server_os[], 'DEVELOPING', $9::jsonb)`,
+                     $7::deviludo.workflow_profile, $8::deviludo.server_os[], 'DESIGNING', $9::jsonb)`,
           [input.workspaceId, targetWorkflowId, input.projectId, current.iteration_number + 1,
             current.id, input.actorId, current.profile, current.target_platforms, JSON.stringify(stateData)],
         );
@@ -2871,8 +2874,8 @@ export class CoreRepository {
         agentConfiguration: {
           runtime: agent.agent_runtime,
           baseUrl: agent.base_url,
-          model: typeof agent.model_overrides.development === "string"
-            ? agent.model_overrides.development : agent.primary_model,
+          model: typeof agent.model_overrides.design === "string"
+            ? agent.model_overrides.design : agent.primary_model,
           credentialRef: agent.credential_secret_ref,
           revision: Number(agent.revision),
         },
@@ -4628,7 +4631,7 @@ function productJobFromRow(job: ProductJobRow): ProductJob {
 
 function productJobAgentRole(role: string | null): ProductJob["agentRole"] {
   return role === "INTENT" || role === "ANALYSIS" || role === "DESIGN"
-    || role === "DEVELOPMENT" || role === "TEST" ? role : null;
+    || role === "UI_DESIGN" || role === "DEVELOPMENT" || role === "TEST" ? role : null;
 }
 
 function productEventFromRow(event: ProductEventRow): ProductEvent {
@@ -4664,6 +4667,11 @@ function workflowAgentConversationContent(
   if (authored) return authored.slice(0, 4_000);
   if (output.role === "TEST") {
     return workflowTestConversationContent(output, structured, responseLanguage);
+  }
+  if (output.role === "UI_DESIGN") {
+    return responseLanguage === "zh"
+      ? "UI 设计规格已确认并交给开发 Agent；界面代码仍将在游戏生成节点中实现。"
+      : "The UI specification is confirmed and handed to Development; UI code remains part of Game Generation.";
   }
   const summary = typeof objectValue(structured.handoff).summary === "string"
     ? String(objectValue(structured.handoff).summary).trim()

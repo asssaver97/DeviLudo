@@ -47,7 +47,7 @@ const settings: StoredInstanceAgentSettings = Object.freeze({
   agentRuntime: "CLAUDE_CODE" as const,
   baseUrl: "https://api.example.com/v1",
   primaryModel: "claude-primary",
-  modelOverrides: Object.freeze({ intent: null, analysis: null, design: null, development: null, test: null }),
+  modelOverrides: Object.freeze({ intent: null, analysis: null, design: null, uiDesign: null, development: null, test: null }),
   imageModel: "gpt-image-1",
   credentialSecretRef: "vault://instance/agent-runtime/api-key/versions/1",
   testPolicyReady: false,

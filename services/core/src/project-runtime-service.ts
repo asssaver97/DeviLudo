@@ -1,7 +1,8 @@
 import { lstat, mkdir, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import { createHash, randomUUID } from "node:crypto";
 import { join, relative, resolve, sep } from "node:path";
-import { PROJECT_RUNTIME_ROLES, type ProjectRuntimeRole } from "@/lib/product/contracts";
+import { PROJECT_RUNTIME_ROLES, type E2eGoal, type ProjectRuntimeRole } from "@/lib/product/contracts";
+import { parseProjectDocumentContent, type ProjectDocumentContent } from "@/lib/product/project-document";
 import {
   PROJECT_RUNTIME_SCHEMA,
   type ProjectRuntimeControlRequest,
@@ -29,6 +30,7 @@ const ROLE_TO_MODEL = Object.freeze({
   INTENT: "intent",
   ANALYSIS: "analysis",
   DESIGN: "design",
+  UI_DESIGN: "uiDesign",
   DEVELOPMENT: "development",
   TEST: "test",
 } as const);
@@ -37,6 +39,7 @@ const ROLE_TOOLS = Object.freeze({
   INTENT: new Set(["context.read", "conversation.reply", "workflow.intent_decision", "workflow.stop", "workflow.continue"]),
   ANALYSIS: new Set(["context.read", "source.list", "source.read", "diagnostics.run", "context.update_analysis", "conversation.reply"]),
   DESIGN: new Set(["context.read", "requirements.update", "project_document.update", "e2e_goals.update", "conversation.reply", "handoff.create"]),
+  UI_DESIGN: new Set(["context.read", "project_document.update", "e2e_goals.update", "conversation.reply", "handoff.create"]),
   DEVELOPMENT: new Set(["context.read", "source.list", "source.read", "source.checkpoint", "assets.plan", "assets.cleanup", "build.request", "conversation.reply", "handoff.create"]),
   TEST: new Set(["context.read", "source.list", "source.read", "test_plan.replace", "e2e.start", "e2e.observe", "evidence.read", "test.verdict", "conversation.reply", "handoff.create"]),
 });
@@ -224,8 +227,14 @@ export class ProjectRuntimeService {
       }
       if (input.role === "DESIGN" && input.mode === "PRIMARY") {
         const durable = await this.readContext(input.workspaceId, input.projectId);
-        if (!runtimeTurnHandoff(durable, result.turnId, "DESIGN", "DEVELOPMENT")) {
-          throw new Error("Design Agent completed without creating a DEVELOPMENT handoff");
+        if (!runtimeTurnHandoff(durable, result.turnId, "DESIGN", "UI_DESIGN")) {
+          throw new Error("Design Agent completed without creating a UI_DESIGN handoff");
+        }
+      }
+      if (input.role === "UI_DESIGN" && input.mode === "PRIMARY") {
+        const durable = await this.readContext(input.workspaceId, input.projectId);
+        if (!runtimeTurnHandoff(durable, result.turnId, "UI_DESIGN", "DEVELOPMENT")) {
+          throw new Error("UI Design Agent completed without creating a DEVELOPMENT handoff");
         }
       }
       const toolSummaries = summarizeRuntimeToolCalls(result.toolCalls);
@@ -556,14 +565,21 @@ export class ProjectRuntimeService {
         "requirements", arrayOfObjects(input.arguments.requirements));
     }
     if (input.name === "project_document.update") {
+      const document = parseProjectDocumentContent(input.arguments.document);
+      if (input.role === "UI_DESIGN") {
+        return this.updateUiDesignDocument(input.workspaceId, input.projectId, document);
+      }
       return this.confirmApprovedField(input.workspaceId, input.projectId,
-        "projectDocument", boundedObject(input.arguments.document));
+        "projectDocument", document);
     }
     if (input.name === "e2e_goals.update") {
-      const goals = arrayOfObjects(input.arguments.goals);
+      const goals = normalizeRuntimeE2eGoals(input.arguments.goals);
+      if (input.role === "UI_DESIGN") {
+        return this.replaceUiDesignGoals(input.workspaceId, input.projectId, goals);
+      }
       const current = await this.readContext(input.workspaceId, input.projectId);
       if (!sameJson(goals, current.e2e.goals)) {
-        throw new Error("Design Agent cannot change the approved E2E goal snapshot during execution");
+        throw new Error(`${input.role} Agent cannot change the approved E2E goal snapshot during execution`);
       }
       return Object.freeze({ accepted: true, contextRevision: current.revision,
         goalRevision: current.e2e.goalRevision });
@@ -774,6 +790,61 @@ export class ProjectRuntimeService {
       throw new Error(`Design Agent cannot change the approved ${field} snapshot during execution`);
     }
     return Object.freeze({ accepted: true, contextRevision: current.revision });
+  }
+
+  private async updateUiDesignDocument(
+    workspaceId: string,
+    projectId: string,
+    document: ProjectDocumentContent,
+  ): Promise<Readonly<Record<string, unknown>>> {
+    const current = await this.readContext(workspaceId, projectId);
+    const approved = parseProjectDocumentContent(current.projectDocument);
+    for (const field of ["introduction", "gameplay", "categories", "features"] as const) {
+      if (!sameJson(document[field], approved[field])) {
+        throw new Error(`UI Design Agent cannot change the approved ${field} snapshot`);
+      }
+    }
+    const persisted = await this.repository.updateUiDesignDocument({
+      workspaceId,
+      projectId,
+      expectedRevision: Number(current.workflow.documentRevision ?? 0),
+      document,
+      responseLanguage: current.language,
+    });
+    const updated = await this.mutateContext(workspaceId, projectId, context => updateProjectContext(context, {
+      projectDocument: document,
+      workflow: Object.freeze({ ...context.workflow, documentRevision: persisted.revision }),
+    }));
+    return Object.freeze({ accepted: true, contextRevision: updated.revision,
+      documentRevision: persisted.revision });
+  }
+
+  private async replaceUiDesignGoals(
+    workspaceId: string,
+    projectId: string,
+    goals: readonly E2eGoal[],
+  ): Promise<Readonly<Record<string, unknown>>> {
+    const current = await this.readContext(workspaceId, projectId);
+    const workflowId = String(current.workflow.id ?? "");
+    if (!/^[0-9a-f-]{36}$/i.test(workflowId)) throw new Error("UI Design workflow id is invalid");
+    const persisted = await this.repository.replaceUiDesignGoals({
+      workspaceId,
+      projectId,
+      workflowId,
+      expectedRevision: current.e2e.goalRevision,
+      goals,
+    });
+    const updated = await this.mutateContext(workspaceId, projectId, context => updateProjectContext(context, {
+      e2e: Object.freeze({ ...context.e2e, goalRevision: persisted.revision, goals }),
+      requirements: Object.freeze([
+        ...context.requirements.filter(requirement => requirement.source !== "CORE_LOOP"
+          && requirement.source !== "ACCEPTANCE"),
+        ...goals.map(goal => Object.freeze({ id: goal.id, text: goal.description, source: goal.source })),
+      ]),
+      workflow: Object.freeze({ ...context.workflow, goalRevision: persisted.revision }),
+    }));
+    return Object.freeze({ accepted: true, contextRevision: updated.revision,
+      goalRevision: persisted.revision });
   }
 
   private async replaceAssetPlan(
@@ -1115,6 +1186,23 @@ function sanitizeAuditValue(value: unknown, depth: number, key = ""): unknown {
 function arrayOfObjects(value: unknown): readonly Readonly<Record<string, unknown>>[] {
   if (!Array.isArray(value) || value.length > 1_000) throw new Error("Tool argument must be a bounded array");
   return Object.freeze(value.map(boundedObject));
+}
+
+function normalizeRuntimeE2eGoals(value: unknown): readonly E2eGoal[] {
+  const goals = arrayOfObjects(value);
+  const ids = new Set<string>();
+  return Object.freeze(goals.map(goal => {
+    const id = typeof goal.id === "string" ? goal.id : "";
+    const description = typeof goal.description === "string" ? goal.description.trim() : "";
+    const source = String(goal.source ?? "");
+    if (!/^[a-z0-9][a-z0-9-]{0,119}$/.test(id) || ids.has(id)
+      || !description || description.length > 2_000
+      || !["CORE_LOOP", "ACCEPTANCE"].includes(source)) {
+      throw new Error("UI Design Agent returned an invalid or duplicate E2E goal");
+    }
+    ids.add(id);
+    return Object.freeze({ id, description, source: source as E2eGoal["source"] });
+  }));
 }
 
 function arrayOfStrings(value: unknown): readonly string[] {

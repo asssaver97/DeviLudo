@@ -10,7 +10,7 @@ const workflowId = "10000000-0000-4000-8000-000000000001";
 const workspaceId = "10000000-0000-4000-8000-000000000002";
 const projectId = "10000000-0000-4000-8000-000000000003";
 
-test("the workflow runs Design, Development, Build, Test plan, every platform and Test verdict", () => {
+test("the workflow runs Design, UI Design, Development, Build, Test plan, every platform and Test verdict", () => {
   const snapshot = initialWorkflowSnapshot(
     workflowId, workspaceId, projectId, "RELEASE", ["linux", "windows", "macos"],
   );
@@ -18,6 +18,10 @@ test("the workflow runs Design, Development, Build, Test plan, every platform an
   assert.deepEqual(transition.enqueue.map(job => [job.agentRole, job.purpose]), [["DESIGN", "DESIGN"]]);
 
   transition = transitionWorkflow(transition.snapshot, agentSuccess("design-1", "DESIGN", "DESIGN"));
+  assert.equal(transition.snapshot.state, "UI_DESIGNING");
+  assert.deepEqual(transition.enqueue.map(job => [job.agentRole, job.purpose]), [["UI_DESIGN", "UI_DESIGN"]]);
+
+  transition = transitionWorkflow(transition.snapshot, agentSuccess("ui-design-1", "UI_DESIGN", "UI_DESIGN"));
   assert.equal(transition.snapshot.state, "DEVELOPING");
   assert.deepEqual(transition.enqueue.map(job => [job.agentRole, job.purpose]), [["DEVELOPMENT", "DEVELOPMENT"]]);
 
@@ -71,6 +75,7 @@ test("a Test plan configuration verdict replans without invoking Development", (
     { kind: "SPEC_APPROVED" },
   );
   transition = transitionWorkflow(transition.snapshot, agentSuccess("design", "DESIGN", "DESIGN"));
+  transition = transitionWorkflow(transition.snapshot, agentSuccess("ui-design", "UI_DESIGN", "UI_DESIGN"));
   transition = transitionWorkflow(transition.snapshot, agentSuccess("development", "DEVELOPMENT", "DEVELOPMENT"));
   transition = transitionWorkflow(transition.snapshot, jobSuccess("build", "BUILD"));
   transition = transitionWorkflow(transition.snapshot, agentSuccess("plan", "TEST", "TEST_PLAN"));
@@ -105,6 +110,45 @@ test("rerunning Build invalidates platform results and returns through Test plan
 
   transition = transitionWorkflow(transition.snapshot, agentSuccess("plan-rerun", "TEST", "TEST_PLAN"));
   assert.deepEqual(transition.enqueue.map(job => job.poolKind), ["E2E_MACOS"]);
+});
+
+test("rerunning Game Design restarts the complete Agent chain", () => {
+  const succeeded = transitionWorkflow(
+    reachReleasePending(initialWorkflowSnapshot(workflowId, workspaceId, projectId, "VALIDATE", ["macos"])),
+    { kind: "RELEASE_SKIPPED" },
+  ).snapshot;
+  let transition = transitionWorkflow(succeeded, {
+    kind: "STAGE_RERUN_REQUESTED", stage: "GAME_DESIGN", signalId: "design-rerun",
+  });
+  assert.equal(transition.snapshot.state, "DESIGNING");
+  assert.deepEqual(transition.enqueue.map(job => [job.agentRole, job.purpose]), [["DESIGN", "DESIGN"]]);
+
+  transition = transitionWorkflow(transition.snapshot, agentSuccess("design-rerun", "DESIGN", "DESIGN"));
+  assert.equal(transition.snapshot.state, "UI_DESIGNING");
+  assert.deepEqual(transition.enqueue.map(job => [job.agentRole, job.purpose]), [["UI_DESIGN", "UI_DESIGN"]]);
+});
+
+test("UI Design and Game Generation are independent rerun entry points", () => {
+  const succeeded = transitionWorkflow(
+    reachReleasePending(initialWorkflowSnapshot(workflowId, workspaceId, projectId, "VALIDATE", ["macos"])),
+    { kind: "RELEASE_SKIPPED" },
+  ).snapshot;
+
+  const uiDesign = transitionWorkflow(succeeded, {
+    kind: "STAGE_RERUN_REQUESTED", stage: "UI_DESIGN", signalId: "ui-design-rerun",
+  });
+  assert.equal(uiDesign.snapshot.state, "UI_DESIGNING");
+  assert.deepEqual(uiDesign.enqueue.map(job => [job.jobKind, job.agentRole, job.purpose]), [
+    ["AGENT_TURN", "UI_DESIGN", "UI_DESIGN"],
+  ]);
+
+  const development = transitionWorkflow(succeeded, {
+    kind: "STAGE_RERUN_REQUESTED", stage: "AGENT_TURN", signalId: "development-rerun",
+  });
+  assert.equal(development.snapshot.state, "DEVELOPING");
+  assert.deepEqual(development.enqueue.map(job => [job.jobKind, job.agentRole, job.purpose]), [
+    ["AGENT_TURN", "DEVELOPMENT", "DEVELOPMENT"],
+  ]);
 });
 
 test("asset readiness feeds Builder and then a new complete Test plan", () => {
@@ -178,6 +222,7 @@ test("cancellation is terminal and enqueues no work", () => {
 function reachReleasePending(initial: WorkflowSnapshot): WorkflowSnapshot {
   let transition = transitionWorkflow(initial, { kind: "SPEC_APPROVED" });
   transition = transitionWorkflow(transition.snapshot, agentSuccess("design", "DESIGN", "DESIGN"));
+  transition = transitionWorkflow(transition.snapshot, agentSuccess("ui-design", "UI_DESIGN", "UI_DESIGN"));
   transition = transitionWorkflow(transition.snapshot, agentSuccess("development", "DEVELOPMENT", "DEVELOPMENT"));
   transition = transitionWorkflow(transition.snapshot, jobSuccess("build", "BUILD"));
   transition = transitionWorkflow(transition.snapshot, agentSuccess("plan", "TEST", "TEST_PLAN"));
@@ -193,8 +238,8 @@ function reachReleasePending(initial: WorkflowSnapshot): WorkflowSnapshot {
 
 function agentSuccess(
   jobId: string,
-  agentRole: "DESIGN" | "DEVELOPMENT" | "TEST",
-  purpose: "DESIGN" | "DEVELOPMENT" | "TEST_PLAN" | "TEST_VERDICT",
+  agentRole: "DESIGN" | "UI_DESIGN" | "DEVELOPMENT" | "TEST",
+  purpose: "DESIGN" | "UI_DESIGN" | "DEVELOPMENT" | "TEST_PLAN" | "TEST_VERDICT",
 ) {
   return {
     kind: "JOB_SUCCEEDED" as const,

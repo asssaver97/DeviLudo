@@ -402,7 +402,7 @@ function validateEnsure(value: ProjectRuntimeEnsureRequest, images: ReadonlySet<
 
 function validateTurn(value: ProjectRuntimeTurnRequest, images: ReadonlySet<string>): void {
   validateControl(value);
-  if (!["INTENT", "ANALYSIS", "DESIGN", "DEVELOPMENT", "TEST"].includes(value.role)
+  if (!["INTENT", "ANALYSIS", "DESIGN", "UI_DESIGN", "DEVELOPMENT", "TEST"].includes(value.role)
     || !["PRIMARY", "READ_ONLY_BRANCH", "COMPACT"].includes(value.mode)
     || !["CLAUDE_CODE", "CODEX_CLI"].includes(value.runtime) || !images.has(value.runtimeImage)
     || !/^[0-9a-f-]{36}$/i.test(value.turnId) || !/^[A-Za-z0-9_-]{24,256}$/.test(value.leaseToken)

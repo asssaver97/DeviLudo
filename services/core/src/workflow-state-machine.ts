@@ -5,6 +5,7 @@ export const WORKFLOW_STATES = [
   "DRAFT",
   "ANALYZING",
   "DESIGNING",
+  "UI_DESIGNING",
   "DEVELOPING",
   "BUILDING",
   "TEST_PLANNING",
@@ -40,8 +41,8 @@ export type WorkflowEvent =
       kind: "JOB_SUCCEEDED";
       jobId: string;
       jobKind: JobKind;
-      agentRole?: "DESIGN" | "DEVELOPMENT" | "TEST";
-      purpose?: "DESIGN" | "DEVELOPMENT" | "TEST_PLAN" | "TEST_VERDICT";
+      agentRole?: "DESIGN" | "UI_DESIGN" | "DEVELOPMENT" | "TEST";
+      purpose?: "DESIGN" | "UI_DESIGN" | "DEVELOPMENT" | "TEST_PLAN" | "TEST_VERDICT";
       verdict?: "PASS" | "FAIL" | "BLOCKED" | "REPLAN";
       targetOperatingSystem: ServerOperatingSystem | null;
       /** Agent completion waits here only when this run has auto-generated art. */
@@ -55,6 +56,8 @@ export type WorkflowEvent =
  * it, so this order is load-bearing and must match `deviludo.delivery_stages`.
  */
 export const DELIVERY_STAGES = [
+  "GAME_DESIGN",
+  "UI_DESIGN",
   "AGENT_TURN",
   "BUILD",
   "E2E_PLATFORM_RUN",
@@ -69,6 +72,8 @@ export function deliveryStagesFor(profile: "VALIDATE" | "RELEASE"): readonly Rer
 
 // Workflow state a stage occupies while it runs.
 const STAGE_RUNNING_STATE: Readonly<Record<RerunStage, WorkflowState>> = Object.freeze({
+  GAME_DESIGN: "DESIGNING",
+  UI_DESIGN: "UI_DESIGNING",
   AGENT_TURN: "DEVELOPING",
   BUILD: "BUILDING",
   E2E_PLATFORM_RUN: "TESTING",
@@ -90,8 +95,8 @@ export type EnqueueCommand = Readonly<{
   requiredCapabilities: readonly string[];
   exclusive: boolean;
   idempotencyKey: string;
-  agentRole: "DESIGN" | "DEVELOPMENT" | "TEST" | null;
-  purpose: "DESIGN" | "DEVELOPMENT" | "TEST_PLAN" | "TEST_VERDICT" | null;
+  agentRole: "DESIGN" | "UI_DESIGN" | "DEVELOPMENT" | "TEST" | null;
+  purpose: "DESIGN" | "UI_DESIGN" | "DEVELOPMENT" | "TEST_PLAN" | "TEST_VERDICT" | null;
 }>;
 
 export type WorkflowTransition = Readonly<{
@@ -152,6 +157,12 @@ export function transitionWorkflow(snapshot: WorkflowSnapshot, event: WorkflowEv
   if (event.kind !== "JOB_SUCCEEDED") throw new Error(`Event ${event.kind} is invalid for ${snapshot.state}`);
 
   if (snapshot.state === "DESIGNING" && event.jobKind === "AGENT_TURN" && event.agentRole === "DESIGN") {
+    return result(
+      { ...snapshot, state: "UI_DESIGNING" },
+      [command(snapshot, "AGENT_TURN", null, `ui-design:after:${event.jobId}`, "UI_DESIGN", "UI_DESIGN")],
+    );
+  }
+  if (snapshot.state === "UI_DESIGNING" && event.jobKind === "AGENT_TURN" && event.agentRole === "UI_DESIGN") {
     return result(
       { ...snapshot, state: "DEVELOPING" },
       [command(snapshot, "AGENT_TURN", null, `development:after:${event.jobId}`, "DEVELOPMENT", "DEVELOPMENT")],
@@ -237,12 +248,26 @@ function rerunStage(snapshot: WorkflowSnapshot, stage: RerunStage, signalId: str
     const key = STAGE_PROGRESS_KEY[downstream];
     if (key) reset[key] = Object.freeze([]);
   }
-  const next = { ...snapshot, ...reset, state: STAGE_RUNNING_STATE[stage] } as WorkflowSnapshot;
+  const next = {
+    ...snapshot,
+    ...reset,
+    state: STAGE_RUNNING_STATE[stage],
+  } as WorkflowSnapshot;
   const platforms = PER_PLATFORM_STAGES.has(stage) ? snapshot.targetPlatforms : [null];
+  const agent = stage === "GAME_DESIGN"
+    ? Object.freeze({ role: "DESIGN" as const, purpose: "DESIGN" as const })
+    : stage === "UI_DESIGN"
+      ? Object.freeze({ role: "UI_DESIGN" as const, purpose: "UI_DESIGN" as const })
+      : stage === "AGENT_TURN"
+        ? Object.freeze({ role: "DEVELOPMENT" as const, purpose: "DEVELOPMENT" as const })
+        : null;
+  const jobKind: JobKind = stage === "GAME_DESIGN" || stage === "UI_DESIGN" ? "AGENT_TURN" : stage;
   return result(
     next,
     platforms.map(platform => command(
-      snapshot, stage, platform, `rerun:${stage}:${platform ?? "all"}:${signalId}`,
+      snapshot, jobKind, platform, `rerun:${stage}:${platform ?? "all"}:${signalId}`,
+      agent?.role ?? null,
+      agent?.purpose ?? null,
     )),
   );
 }

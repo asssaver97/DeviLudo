@@ -1,8 +1,10 @@
 import assert from "node:assert/strict";
-import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import test from "node:test";
+import { promisify } from "node:util";
+import { zstdCompress } from "node:zlib";
 import { isDevelopmentAuthorization, type ProductConversationMessage } from "@/lib/product/contracts";
 import type { ProjectRuntimeTurnResult } from "@/lib/product/project-runtime";
 import {
@@ -21,7 +23,6 @@ import {
   designConversationConvergence,
   designReplyAction,
   implementationChangeReady,
-  lightweightProjectRuntimeIntent,
   parseProjectRuntimeIntent,
   parseProjectRuntimeReply,
   projectRuntimeIntentPrompt,
@@ -43,6 +44,8 @@ import {
   runtimeEventText,
   structuredRuntimeOutput,
 } from "@/services/project-runtime/runtime-events.mjs";
+
+const compressProjectContext = promisify(zstdCompress);
 import {
   ProjectRuntimeSupervisor,
   runtimeProgressEvent,
@@ -78,16 +81,18 @@ test("Runtime turns wait through lifecycle compaction without consuming a workfl
   ), /Runtime backend failed/);
 });
 
-test("Design completion accepts only the current turn's durable Development handoff", () => {
+test("Design and UI Design completion accept only the current turn's durable next-stage handoff", () => {
   const context = updateProjectContext(createProjectContext({ workspaceId, projectId }), {
     handoffs: Object.freeze([
-      Object.freeze({ id: "old", fromRole: "DESIGN", toRole: "DEVELOPMENT", summary: "Old" }),
-      Object.freeze({ id: "current", fromRole: "DESIGN", toRole: "DEVELOPMENT", summary: "Implement it" }),
+      Object.freeze({ id: "old", fromRole: "DESIGN", toRole: "UI_DESIGN", summary: "Old gameplay" }),
+      Object.freeze({ id: "current", fromRole: "DESIGN", toRole: "UI_DESIGN", summary: "Design the interface" }),
+      Object.freeze({ id: "ui-current", fromRole: "UI_DESIGN", toRole: "DEVELOPMENT", summary: "Implement it" }),
     ]),
   });
-  assert.equal(runtimeTurnHandoff(context, "current", "DESIGN", "DEVELOPMENT")?.summary, "Implement it");
+  assert.equal(runtimeTurnHandoff(context, "current", "DESIGN", "UI_DESIGN")?.summary, "Design the interface");
+  assert.equal(runtimeTurnHandoff(context, "ui-current", "UI_DESIGN", "DEVELOPMENT")?.summary, "Implement it");
   assert.equal(runtimeTurnHandoff(context, "old", "DESIGN", "TEST"), null);
-  assert.equal(runtimeTurnHandoff(context, "missing", "DESIGN", "DEVELOPMENT"), null);
+  assert.equal(runtimeTurnHandoff(context, "missing", "DESIGN", "UI_DESIGN"), null);
 });
 
 test("persistent Runtime intent selects exactly one role and rejects contradictory mutation flags", () => {
@@ -135,6 +140,7 @@ test("Design discovery converges only after the player explicitly delegates rema
     attachments: Object.freeze([]),
     metadata: Object.freeze({
       agentRole: "DESIGN",
+      readyForUiDesign: false,
       readyForDevelopment: false,
       options: Object.freeze([Object.freeze({ label, description: "推荐方向" })]),
     }),
@@ -180,7 +186,8 @@ test("Design discovery converges only after the player explicitly delegates rema
     }),
   });
   assert.match(forcedPrompt, /Do not ask another question/);
-  assert.match(forcedPrompt, /set readyForDevelopment=true in this turn/);
+  assert.match(forcedPrompt, /set readyForUiDesign=true/);
+  assert.match(forcedPrompt, /keep readyForDevelopment=false/);
 
   const openPrompt = projectRuntimeSpecialistPrompt({
     intent: Object.freeze({
@@ -199,7 +206,7 @@ test("Design discovery converges only after the player explicitly delegates rema
   assert.match(openPrompt, /no automatic turn-count or recommended-selection convergence threshold/);
 });
 
-test("lightweight Intent routes common messages without a Runtime turn", () => {
+test("development authorization labels remain explicit UI actions", () => {
   for (const authorization of [
     "按此计划开发",
     "按当前计划开发（推荐）",
@@ -207,86 +214,42 @@ test("lightweight Intent routes common messages without a Runtime turn", () => {
     "BUILD CURRENT PLAN",
   ]) {
     assert.equal(isDevelopmentAuthorization(authorization), true);
-    assert.deepEqual(lightweightProjectRuntimeIntent({
-      content: authorization,
-      hasAttachments: false,
-      hasPendingChange: false,
-    }), {
-      intent: "CHANGE_REQUEST",
-      targetRole: "DEVELOPMENT",
-      explicitExecution: true,
-      actionable: true,
-      summary: "Start development from the approved current plan.",
-    });
   }
   assert.equal(isDevelopmentAuthorization("调整当前计划"), false);
-  assert.deepEqual(lightweightProjectRuntimeIntent({
-    content: "按此计划开发",
-    hasAttachments: false,
-    hasPendingChange: true,
-  }), {
-    intent: "CONFIRM_CHANGE",
-    targetRole: "DEVELOPMENT",
-    explicitExecution: false,
-    actionable: false,
-    summary: "Confirm the pending implementation change and start development.",
-  });
-  assert.deepEqual(lightweightProjectRuntimeIntent({
-    content: "都按照建议来",
-    hasAttachments: false,
-    hasPendingChange: false,
-  }), {
-    intent: "CHANGE_REQUEST",
-    targetRole: "DESIGN",
-    explicitExecution: true,
-    actionable: true,
-    summary: "Update the implementation according to the player's request.",
-  });
   assert.equal(designReplyAction({
     intent: "CHANGE_REQUEST",
     targetRole: "DESIGN",
     explicitExecution: true,
     actionable: true,
     summary: "Accept every recommended design choice and begin development.",
-  }, "DESIGN"), "START_DEVELOPMENT");
-  assert.deepEqual(lightweightProjectRuntimeIntent({
-    content: "当前测试进度是什么？",
-    hasAttachments: false,
-    hasPendingChange: true,
-  }), {
-    intent: "QUESTION",
-    targetRole: "TEST",
-    explicitExecution: false,
-    actionable: false,
-    summary: "Answer the player's question from the current project context.",
-  });
-  assert.deepEqual(lightweightProjectRuntimeIntent({
-    content: "能不能增加键盘和手柄都能完成核心循环的能力？",
-    hasAttachments: false,
-    hasPendingChange: false,
-  }), {
+  }, "DESIGN"), "NONE");
+  assert.equal(designReplyAction({
     intent: "CHANGE_REQUEST",
-    targetRole: "DESIGN",
-    explicitExecution: false,
+    targetRole: "UI_DESIGN",
+    explicitExecution: true,
     actionable: true,
-    summary: "Update the implementation according to the player's request.",
-  });
-  assert.equal(lightweightProjectRuntimeIntent({
-    content: "看看这个",
-    hasAttachments: true,
-    hasPendingChange: false,
-  }), null);
-  assert.deepEqual(lightweightProjectRuntimeIntent({
-    content: "都按照建议来",
+    summary: "Accept every recommended UI choice and begin development.",
+  }, "UI_DESIGN"), "START_DEVELOPMENT");
+});
+
+test("every project message uses the LLM Intent Agent and UI design precedes implementation", async () => {
+  const [api, conversation, intentSkill] = await Promise.all([
+    readFile(new URL("../services/core/src/api.ts", import.meta.url), "utf8"),
+    readFile(new URL("../services/core/src/project-runtime-conversation.ts", import.meta.url), "utf8"),
+    readFile(new URL("../services/project-runtime/skills/intent/SKILL.md", import.meta.url), "utf8"),
+  ]);
+  assert.doesNotMatch(api, /lightweightProjectRuntimeIntent/);
+  assert.doesNotMatch(conversation, /lightweightProjectRuntimeIntent|const mutation =|const developmentRole =/);
+  assert.match(api, /onStart\("INTENT"\)[\s\S]*role: "INTENT"[\s\S]*parseProjectRuntimeIntent/);
+  assert.match(intentSkill, /sole semantic router for every player message/);
+  assert.match(intentSkill, /UI\/UX redesign[\s\S]*even when the player also says to implement them/);
+  assert.match(projectRuntimeIntentPrompt({
+    content: "重新设计并实现游戏界面 UI",
     hasAttachments: false,
-    hasPendingChange: true,
-  }), {
-    intent: "CONFIRM_CHANGE",
-    targetRole: "DESIGN",
-    explicitExecution: false,
-    actionable: false,
-    summary: "Confirm the pending implementation change.",
-  });
+    hasPendingChange: false,
+    workflowState: "RELEASE_PENDING",
+    recentMessages: [],
+  }), /Route UI redesign or unresolved interface decisions to UI_DESIGN even when the player also says to implement them/);
 });
 
 test("specialist output is attributed to the real persistent role session", () => {
@@ -300,7 +263,7 @@ test("specialist output is attributed to the real persistent role session", () =
     agentRuntime: "CODEX_CLI",
     baseUrl: "https://chatgpt.com",
     primaryModel: "primary",
-    modelOverrides: { intent: null, analysis: null, design: null, development: null, test: "test-model" },
+    modelOverrides: { intent: null, analysis: null, design: null, uiDesign: null, development: null, test: "test-model" },
     imageModel: null,
     credentialSecretRef: "vault://instance/agent-runtime/api-key/versions/10000000-0000-4000-8000-000000000004",
     credentialVersion: "10000000-0000-4000-8000-000000000004",
@@ -317,12 +280,12 @@ test("specialist output is attributed to the real persistent role session", () =
   assert.equal(reply.model, "test-model");
 });
 
-test("ready Design replies end with a development plan and localized confirmation question", () => {
+test("ready UI Design replies end with one development plan and the localized final action", () => {
   const settings = {
     agentRuntime: "CODEX_CLI" as const,
     baseUrl: "https://chatgpt.com",
     primaryModel: "primary",
-    modelOverrides: { intent: null, analysis: null, design: null, development: null, test: null },
+    modelOverrides: { intent: null, analysis: null, design: null, uiDesign: null, development: null, test: null },
     imageModel: null,
     credentialSecretRef: "vault://instance/agent-runtime/api-key/versions/10000000-0000-4000-8000-000000000004",
     credentialVersion: "10000000-0000-4000-8000-000000000004",
@@ -336,6 +299,7 @@ test("ready Design replies end with a development plan and localized confirmatio
   };
   const discovery = parseProjectRuntimeReply(result("DESIGN", {
     content: "请选择核心循环方向。",
+    readyForUiDesign: false,
     readyForDevelopment: false,
     options: [
       { label: " 采用探索驱动方案（推荐） ", description: "通过探索发现持续改变后续路线的机会。" },
@@ -359,25 +323,40 @@ test("ready Design replies end with a development plan and localized confirmatio
   assert.equal(discovery.options.some(option => option.label === "自己输入意见"), false);
   assert.equal(discovery.options.some(option => option.label === "Enter my own answer"), false);
 
-  const reply = parseProjectRuntimeReply(result("DESIGN", {
-    content: "玩法和验收目标已经明确。",
+  const invalidDesignReadiness = parseProjectRuntimeReply(result("DESIGN", {
+    content: "玩法完成，但 UI 设计尚未完成。",
+    readyForUiDesign: true,
     readyForDevelopment: true,
     options: [],
-    implementationBrief: "先完成核心循环，再接入界面与验收测试。",
-    projectDocumentPatch: {},
-    e2eGoalDelta: { add: [], replace: [], retire: [] },
-  }), "DESIGN", settings, "zh", "AWAITING_CONFIRMATION");
-  assert.match(reply.content, /开发计划\n先完成核心循环，再接入界面与验收测试。/u);
-  assert.ok(reply.content.endsWith("是否按照当前计划开发？"));
-
-  const authorized = parseProjectRuntimeReply(result("DESIGN", {
-    content: "玩法和验收目标已经明确。\n\n## 实施计划（按风险排序）\n先完成核心循环。\n\n**开发计划**\n这段重复计划不应出现。\n\n是否按照当前计划开发？",
-    readyForDevelopment: true,
-    options: [],
-    implementationBrief: "先完成核心循环，再接入界面与验收测试。",
+    implementationBrief: "交给 UI 设计 Agent。",
     projectDocumentPatch: {},
     e2eGoalDelta: { add: [], replace: [], retire: [] },
   }), "DESIGN", settings, "zh", "START_DEVELOPMENT");
+  assert.equal(invalidDesignReadiness.readyForUiDesign, true);
+  assert.equal(invalidDesignReadiness.readyForDevelopment, false);
+  assert.doesNotMatch(invalidDesignReadiness.content, /开发计划|是否按照当前计划开发|开始开发/u);
+
+  const reply = parseProjectRuntimeReply(result("UI_DESIGN", {
+    content: "玩法、界面和验收目标已经明确。",
+    readyForUiDesign: false,
+    readyForDevelopment: true,
+    options: [],
+    implementationBrief: "先完成核心循环，再接入界面与验收测试。",
+    projectDocumentPatch: {},
+    e2eGoalDelta: { add: [], replace: [], retire: [] },
+  }), "UI_DESIGN", settings, "zh", "AWAITING_CONFIRMATION");
+  assert.match(reply.content, /开发计划\n先完成核心循环，再接入界面与验收测试。/u);
+  assert.ok(reply.content.endsWith("是否按照当前计划开发？"));
+
+  const authorized = parseProjectRuntimeReply(result("UI_DESIGN", {
+    content: "玩法、界面和验收目标已经明确。\n\n## 实施计划（按风险排序）\n先完成核心循环。\n\n**开发计划**\n这段重复计划不应出现。\n\n是否按照当前计划开发？",
+    readyForUiDesign: false,
+    readyForDevelopment: true,
+    options: [],
+    implementationBrief: "先完成核心循环，再接入界面与验收测试。",
+    projectDocumentPatch: {},
+    e2eGoalDelta: { add: [], replace: [], retire: [] },
+  }), "UI_DESIGN", settings, "zh", "START_DEVELOPMENT");
   assert.equal(authorized.content.match(/(?:开发|实施|实现|执行|落地)计划/gu)?.length, 1);
   assert.match(authorized.content, /## 开发计划（按风险排序）/u);
   assert.doesNotMatch(authorized.content, /这段重复计划不应出现/u);
@@ -605,6 +584,30 @@ test("project context is zstd-compressed, digest-verified, atomic durable state"
   }
 });
 
+test("project context materializes newly registered Agent role sessions", async () => {
+  const root = await mkdtemp(join(tmpdir(), "deviludo-context-role-"));
+  try {
+    const store = new ProjectContextStore(root);
+    const initial = createProjectContext({ workspaceId, projectId, concept: "A playable game" });
+    const storedShape = structuredClone(initial) as unknown as { roles: Record<string, unknown> };
+    delete storedShape.roles.UI_DESIGN;
+    const path = store.path(workspaceId, projectId);
+    await mkdir(dirname(path), { recursive: true });
+    await writeFile(path, await compressProjectContext(Buffer.from(JSON.stringify(storedShape), "utf8")));
+
+    const restored = (await store.read(workspaceId, projectId)).context;
+    assert.deepEqual(restored.roles.UI_DESIGN, {
+      sessionId: null,
+      summary: "",
+      lastTurnId: null,
+      updatedAt: null,
+    });
+    assert.deepEqual(restored.roles.DESIGN, initial.roles.DESIGN);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test("the Runtime lifecycle uses fixed five-minute pause and thirty-minute destruction windows", () => {
   assert.equal(PROJECT_RUNTIME_IDLE_MS, 5 * 60_000);
   assert.equal(PROJECT_RUNTIME_PAUSED_DESTROY_MS, 30 * 60_000);
@@ -631,6 +634,19 @@ test("Runtime exposes provider-safe native MCP names and maps them to authorized
   }
   assert.equal(nativeToolName("context.read"), "context_read");
   assert.equal(canonicalToolName("ANALYSIS", "source_checkpoint"), null);
+});
+
+test("UI Design persistence tools expose exact input contracts", () => {
+  const document = toolInputSchema("project_document.update") as {
+    required: readonly string[];
+    additionalProperties: boolean;
+  };
+  const goals = toolInputSchema("e2e_goals.update") as { required: readonly string[] };
+  const handoff = toolInputSchema("handoff.create") as { required: readonly string[] };
+  assert.deepEqual(document.required, ["document"]);
+  assert.equal(document.additionalProperties, false);
+  assert.deepEqual(goals.required, ["goals"]);
+  assert.deepEqual(handoff.required, ["toRole", "summary"]);
 });
 
 test("Analysis MCP advertises the complete canonical report schema", () => {
@@ -775,13 +791,23 @@ test("conversation persistence does not reject replies when the workflow advance
   assert.doesNotMatch(repository, /PROJECT_STATE_CHANGED|expectedWorkflowState/);
 });
 
-test("all five signed role Skills exist and define the intended boundary", async () => {
-  for (const role of ["intent", "analysis", "design", "development", "test"]) {
+test("all six signed role Skills exist and define the intended boundary", async () => {
+  for (const role of ["intent", "analysis", "design", "ui-design", "development", "test"]) {
     const skill = await readFile(new URL(`../services/project-runtime/skills/${role}/SKILL.md`, import.meta.url), "utf8");
     assert.match(skill, /^---\nname: deviludo-/);
     assert.match(skill, /\n# /);
     assert.match(skill, /MCP|tool/i);
   }
+  const designSkill = await readFile(new URL("../services/project-runtime/skills/design/SKILL.md", import.meta.url), "utf8");
+  assert.match(designSkill, /readyForUiDesign/);
+  assert.match(designSkill, /UI_DESIGN handoff/);
+  assert.match(designSkill, /Do not design screen layouts/);
+  assert.doesNotMatch(designSkill, /toRole":"DEVELOPMENT/);
+  const uiDesignSkill = await readFile(new URL("../services/project-runtime/skills/ui-design/SKILL.md", import.meta.url), "utf8");
+  assert.match(uiDesignSkill, /stable lowercase-hyphen control IDs/);
+  assert.match(uiDesignSkill, /subject-grounded aesthetic thesis/);
+  assert.match(uiDesignSkill, /DEVELOPMENT owns all UI code/);
+  assert.match(uiDesignSkill, /handoff_create\(\{\"toRole\":\"DEVELOPMENT\"/);
   const testSkill = await readFile(new URL("../services/project-runtime/skills/test/SKILL.md", import.meta.url), "utf8");
   assert.match(testSkill, /sole test-manifest contract/);
   assert.match(testSkill, /call `source_list` and then `source_read`/);
@@ -789,6 +815,15 @@ test("all five signed role Skills exist and define the intended boundary", async
   assert.doesNotMatch(testSkill, /"key":"loop"/);
   assert.match(testSkill, /validation rejection is a correctable plan-authoring error/);
   assert.match(testSkill, /must not call `test_verdict`, return BLOCKED, or return a null plan/);
+});
+
+test("UI Design uses the signed hyphenated Skill slug everywhere in the Runtime", async () => {
+  const runtimeTurn = await readFile(new URL("../services/project-runtime/turn.mjs", import.meta.url), "utf8");
+  assert.match(runtimeTurn, /UI_DESIGN: "ui-design"/);
+  assert.match(runtimeTurn, /skills\/\$\{roleSkillSlug\}\/SKILL\.md/);
+  assert.match(runtimeTurn, /deviludo-\$\{roleSkillSlug\}/);
+  assert.doesNotMatch(runtimeTurn, /request\.role\.toLowerCase\(\)/);
+  assert.doesNotMatch(runtimeTurn, /\["intent", "analysis", "design", "development", "test"\]/);
 });
 
 function result(role: ProjectRuntimeTurnResult["role"], structured: Readonly<Record<string, unknown>>): ProjectRuntimeTurnResult {

@@ -213,10 +213,16 @@ export async function runSandbox(
           }
           const context = await projectRuntime.readContext(job.workspaceId, job.projectId);
           const designHandoff = role === "DESIGN"
-            ? runtimeTurnHandoff(context, runtimeResult.turnId, "DESIGN", "DEVELOPMENT")
+            ? runtimeTurnHandoff(context, runtimeResult.turnId, "DESIGN", "UI_DESIGN")
             : null;
           if (role === "DESIGN" && !designHandoff) {
-            throw new Error("Design Agent completed without creating a DEVELOPMENT handoff");
+            throw new Error("Design Agent completed without creating a UI_DESIGN handoff");
+          }
+          const uiDesignHandoff = role === "UI_DESIGN"
+            ? runtimeTurnHandoff(context, runtimeResult.turnId, "UI_DESIGN", "DEVELOPMENT")
+            : null;
+          if (role === "UI_DESIGN" && !uiDesignHandoff) {
+            throw new Error("UI Design Agent completed without creating a DEVELOPMENT handoff");
           }
           if (role === "DEVELOPMENT") {
             const inputRevision = Number(job.payload.sourceRevision ?? 0);
@@ -255,13 +261,14 @@ export async function runSandbox(
             sourceRevision: context.source?.revision ?? null,
             planRevision: context.e2e.planRevision ?? null,
             verdict: structured.verdict ?? null,
-            handoff: designHandoff ?? structured.handoff ?? null,
+            handoff: designHandoff ?? uiDesignHandoff ?? structured.handoff ?? null,
             responseLanguage,
             agentRuntime: settings.agentRuntime,
             model: resolveAgentModel(
               settings.primaryModel,
               settings.modelOverrides,
-              role.toLowerCase() as "design" | "development" | "test",
+              role === "UI_DESIGN" ? "uiDesign"
+                : role.toLowerCase() as "design" | "development" | "test",
             ),
             settingsRevision: settings.revision,
           }));
@@ -361,7 +368,7 @@ export async function runSandbox(
 
 function runtimeJobRole(payload: Readonly<Record<string, unknown>>): ProjectRuntimeRole {
   const role = payload.role ?? "DEVELOPMENT";
-  if (!["DESIGN", "DEVELOPMENT", "TEST"].includes(String(role))) {
+  if (!["DESIGN", "UI_DESIGN", "DEVELOPMENT", "TEST"].includes(String(role))) {
     throw new Error("AGENT_TURN job role is invalid");
   }
   return role as ProjectRuntimeRole;
@@ -376,11 +383,19 @@ function responseLanguageFromJob(job: JobProtocolV4, fallback: "en" | "zh" = "en
 
 function runtimeJobPrompt(job: JobProtocolV4, role: ProjectRuntimeRole): string {
   const purpose = typeof job.payload.purpose === "string" ? job.payload.purpose : role;
-  const handoff = job.payload.testHandoff ?? job.payload.implementationBrief ?? null;
+  const handoff = job.payload.testHandoff ?? job.payload.uiDesignHandoff
+    ?? job.payload.designHandoff ?? job.payload.implementationBrief ?? null;
   if (role === "DESIGN") {
     return [
-      `Apply the approved requirement revision and create a complete DEVELOPMENT handoff. Purpose: ${purpose}.`,
+      `Apply the approved gameplay requirement revision and create a complete UI_DESIGN handoff. Purpose: ${purpose}.`,
       handoff ? `Approved design brief: ${JSON.stringify(handoff).slice(0, 40_000)}` : "",
+    ].filter(Boolean).join("\n");
+  }
+  if (role === "UI_DESIGN") {
+    return [
+      "Confirm the approved UI specification against the canonical gameplay and project document.",
+      "Create a complete DEVELOPMENT handoff. Do not edit source or implement UI code.",
+      handoff ? `Design handoff: ${JSON.stringify(handoff).slice(0, 40_000)}` : "",
     ].filter(Boolean).join("\n");
   }
   if (role === "DEVELOPMENT") {

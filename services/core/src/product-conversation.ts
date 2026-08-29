@@ -39,7 +39,9 @@ export type ProductConversationAgentReply = Readonly<{
   content: string;
   options: readonly ConversationReplyOption[];
   applyToDraft: boolean;
+  readyForUiDesign: boolean;
   readyForDevelopment: boolean;
+  implementationBrief: string;
   projectDocument: ProjectDocumentContent | null;
   projectDocumentPatch: Readonly<Record<string, unknown>> | null;
   runtime: AgentRuntimeKind;

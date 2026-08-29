@@ -25,7 +25,7 @@ Wait for evidence from all platforms. Infrastructure failures are retried or mar
 
 Return PASS only when deterministic checks, requirement and asset coverage, performance, crash, input-response gates, and complete visual evidence all pass for the same source and plan revisions. Never install or run an Agent Runtime inside an E2E VM.
 
-For a read-only conversation branch, end with one JSON object containing `content`, `readyForDevelopment`, `options`, `implementationBrief`, `projectDocumentPatch`, and `e2eGoalDelta`; the document patch is empty.
+For a read-only conversation branch, end with one JSON object containing `content`, `readyForUiDesign`, `readyForDevelopment`, `options`, `implementationBrief`, `projectDocumentPatch`, and `e2eGoalDelta`; both readiness flags are false and the document patch is empty.
 
 For a read-only player-policy branch with an attached current game frame, follow the prompt's player-decision contract instead of the conversation schema. `KEYBOARD`, `POINTER`, and `GAMEPAD` are capability groups, not action `type` values. Use only the exact lowercase native action shapes supplied by the prompt; pointer actions use integer 1280x720 frame coordinates and never semantic `targetId` or `action` fields.
 

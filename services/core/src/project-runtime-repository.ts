@@ -2,11 +2,15 @@ import { createHash, randomBytes, randomUUID } from "node:crypto";
 import type { PoolClient } from "pg";
 import type {
   AgentRuntimeKind,
+  E2eGoal,
   ProjectRuntimeRole,
   ProjectRuntimeState,
 } from "@/lib/product/contracts";
+import type { ProjectDocumentContent } from "@/lib/product/project-document";
+import { projectDocumentMarkdown } from "@/lib/product/project-document";
 import type { ProjectRuntimeTurnMode } from "@/lib/product/project-runtime";
 import type { Database } from "./database";
+import { e2eGoalsDigest } from "./e2e-goals";
 import type { StoredProjectContext } from "./project-context";
 
 export type RuntimeRecord = Readonly<{
@@ -381,6 +385,104 @@ export class ProjectRuntimeRepository {
     });
   }
 
+  async updateUiDesignDocument(input: Readonly<{
+    workspaceId: string;
+    projectId: string;
+    expectedRevision: number;
+    document: ProjectDocumentContent;
+    responseLanguage: "en" | "zh";
+  }>): Promise<Readonly<{ revision: number }>> {
+    return this.database.withWorkspace(input.workspaceId, async client => {
+      const selected = await client.query<{
+        name: string;
+        revision: string;
+        content: ProjectDocumentContent;
+      }>(
+        `SELECT project.name, document.revision::text, document.content
+           FROM deviludo.projects project
+           JOIN deviludo.project_documents document
+             ON document.workspace_id = project.workspace_id AND document.project_id = project.id
+          WHERE project.workspace_id = $1::uuid AND project.id = $2::uuid
+          FOR UPDATE OF document`,
+        [input.workspaceId, input.projectId],
+      );
+      const current = selected.rows[0];
+      if (!current) throw new Error("Project document does not exist");
+      if (sameProjectDocument(current.content, input.document)) {
+        return Object.freeze({ revision: Number(current.revision) });
+      }
+      if (Number(current.revision) !== input.expectedRevision) {
+        throw new Error("Project document changed while UI Design was running");
+      }
+      const revision = Number(current.revision) + 1;
+      const markdown = projectDocumentMarkdown(current.name, input.document, input.responseLanguage);
+      await client.query(
+        `UPDATE deviludo.project_documents
+            SET revision = $3::bigint, content = $4::jsonb, markdown = $5,
+                maintained_by = 'AGENT', updated_by_actor_id = NULL,
+                last_agent_maintained_at = clock_timestamp(), updated_at = clock_timestamp()
+          WHERE workspace_id = $1::uuid AND project_id = $2::uuid`,
+        [input.workspaceId, input.projectId, revision, JSON.stringify(input.document), markdown],
+      );
+      await client.query(
+        `INSERT INTO deviludo.project_document_revisions(
+           workspace_id, project_id, revision, content, markdown, source
+         ) VALUES ($1::uuid, $2::uuid, $3::bigint, $4::jsonb, $5, 'AGENT_CONVERSATION')`,
+        [input.workspaceId, input.projectId, revision, JSON.stringify(input.document), markdown],
+      );
+      return Object.freeze({ revision });
+    });
+  }
+
+  async replaceUiDesignGoals(input: Readonly<{
+    workspaceId: string;
+    projectId: string;
+    workflowId: string;
+    expectedRevision: number;
+    goals: readonly E2eGoal[];
+  }>): Promise<Readonly<{ revision: number }>> {
+    return this.database.withWorkspace(input.workspaceId, async client => {
+      const workflow = await client.query(
+        `SELECT id FROM deviludo.workflow_instances
+          WHERE workspace_id = $1::uuid AND id = $2::uuid AND project_id = $3::uuid
+          FOR UPDATE`,
+        [input.workspaceId, input.workflowId, input.projectId],
+      );
+      if (!workflow.rows[0]) throw new Error("UI Design workflow does not exist");
+      const selected = await client.query<{ revision: string; goals: readonly E2eGoal[] }>(
+        `SELECT revision::text, goals
+           FROM deviludo.workflow_e2e_goal_revisions
+          WHERE workspace_id = $1::uuid AND workflow_id = $2::uuid
+          ORDER BY revision DESC LIMIT 1 FOR UPDATE`,
+        [input.workspaceId, input.workflowId],
+      );
+      const currentRevision = Number(selected.rows[0]?.revision ?? 0);
+      if (selected.rows[0]?.goals
+        && e2eGoalsDigest(selected.rows[0].goals) === e2eGoalsDigest(input.goals)) {
+        return Object.freeze({ revision: currentRevision });
+      }
+      if (currentRevision !== input.expectedRevision) {
+        throw new Error("E2E goals changed while UI Design was running");
+      }
+      const revision = currentRevision + 1;
+      await client.query(
+        `INSERT INTO deviludo.workflow_e2e_goal_revisions(
+           workspace_id, workflow_id, revision, goals, goals_digest
+         ) VALUES ($1::uuid, $2::uuid, $3::bigint, $4::jsonb, $5)`,
+        [input.workspaceId, input.workflowId, revision, JSON.stringify(input.goals), e2eGoalsDigest(input.goals)],
+      );
+      await client.query(
+        `UPDATE deviludo.workflow_instances
+            SET state_data = coalesce(state_data, '{}'::jsonb)
+                  || jsonb_build_object('e2eGoalRevision', $3::bigint),
+                updated_at = clock_timestamp()
+          WHERE workspace_id = $1::uuid AND id = $2::uuid`,
+        [input.workspaceId, input.workflowId, revision],
+      );
+      return Object.freeze({ revision });
+    });
+  }
+
   async ensureContainer(workspaceId: string, projectId: string, runtime: AgentRuntimeKind): Promise<RuntimeRecord> {
     return this.database.withWorkspace(workspaceId, async client => {
       await client.query(
@@ -499,7 +601,7 @@ export class ProjectRuntimeRepository {
         await client.query(
           `UPDATE deviludo.workflow_instances
               SET state = CASE
-                    WHEN state_data->>'resumeState' IN ('ANALYZING','DESIGNING','DEVELOPING','BUILDING','TEST_PLANNING','TESTING')
+                    WHEN state_data->>'resumeState' IN ('ANALYZING','DESIGNING','UI_DESIGNING','DEVELOPING','BUILDING','TEST_PLANNING','TESTING')
                       THEN (state_data->>'resumeState')::deviludo.workflow_state
                     ELSE 'DEVELOPING'::deviludo.workflow_state END,
                   state_data = state_data - 'resumeState', version = version + 1,
@@ -515,6 +617,12 @@ export class ProjectRuntimeRepository {
               `SELECT deviludo.enqueue_job($1::uuid, $2::uuid, $3::uuid, 'AGENT_TURN', NULL, $4, $5::jsonb)`,
               [workspaceId, workflow.id, projectId, `${workflow.id}:resume:design:${resumedAt}`,
                 JSON.stringify({ role: "DESIGN", purpose: "DESIGN", resumed: true })],
+            );
+          } else if (resume === "UI_DESIGNING") {
+            await client.query(
+              `SELECT deviludo.enqueue_job($1::uuid, $2::uuid, $3::uuid, 'AGENT_TURN', NULL, $4, $5::jsonb)`,
+              [workspaceId, workflow.id, projectId, `${workflow.id}:resume:ui-design:${resumedAt}`,
+                JSON.stringify({ role: "UI_DESIGN", purpose: "UI_DESIGN", resumed: true })],
             );
           } else if (resume === "DEVELOPING") {
             await client.query(
@@ -895,6 +1003,14 @@ export class ProjectRuntimeRepository {
     );
     return result.rows[0]?.failed === true;
   }
+}
+
+function sameProjectDocument(left: ProjectDocumentContent, right: ProjectDocumentContent): boolean {
+  return left.introduction === right.introduction
+    && left.gameplay === right.gameplay
+    && left.uiDesign === right.uiDesign
+    && JSON.stringify(left.categories) === JSON.stringify(right.categories)
+    && JSON.stringify(left.features) === JSON.stringify(right.features);
 }
 
 function lifecycleClaim(row: Record<string, unknown> | undefined): RuntimeLifecycleClaim | null {

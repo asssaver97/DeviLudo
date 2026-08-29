@@ -8,7 +8,7 @@ function settings(agentRuntime: "CLAUDE_CODE" | "CODEX_CLI", baseUrl: string): S
     agentRuntime,
     baseUrl,
     primaryModel: agentRuntime === "CODEX_CLI" ? "xai/grok-4.6" : "claude-model",
-    modelOverrides: Object.freeze({ intent: null, analysis: null, design: null, development: null, test: null }),
+    modelOverrides: Object.freeze({ intent: null, analysis: null, design: null, uiDesign: null, development: null, test: null }),
     imageModel: null,
     credentialSecretRef: "vault://instance/agent-runtime/api-key/versions/10000000-0000-4000-8000-000000000001",
     testPolicyReady: false,

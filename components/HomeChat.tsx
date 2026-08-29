@@ -348,6 +348,7 @@ function workflowLabel(state: string, text: (chinese: string, english: string) =
     DRAFT: ["需求讨论中", "Requirements discussion"],
     ANALYZING: ["项目分析中", "Analyzing project"],
     DESIGNING: ["游戏设计中", "Designing game"],
+    UI_DESIGNING: ["UI 设计中", "Designing UI"],
     DEVELOPING: ["游戏生成中", "Developing game"],
     BUILDING: ["制品构建中", "Building artifacts"],
     TEST_PLANNING: ["测试规划中", "Planning tests"],

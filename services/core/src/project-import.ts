@@ -236,6 +236,9 @@ export function parseImportedProjectAnalysis(raw: string, responseLanguage: Resp
   const document = Object.freeze({
     introduction: report.introduction,
     gameplay: report.gameplay,
+    uiDesign: responseLanguage === "zh"
+      ? "待 UI 设计 Agent 在现有界面证据与已确认玩法基础上完成界面规格。"
+      : "The UI Design Agent will complete the interface specification from existing evidence and approved gameplay.",
     categories: report.categories,
     features: report.features,
   } satisfies ProjectDocumentContent);
@@ -281,6 +284,7 @@ export function normalizeImportedProjectAnalysisReport(value: unknown): Imported
   const document = parseProjectDocumentContent({
     introduction: result.introduction,
     gameplay: result.gameplay,
+    uiDesign: "Pending UI Design Agent specification.",
     categories: providerList(result.categories, "游戏分类", 1, 32),
     features: providerList(result.features, "主要特性", 1, 32),
   });

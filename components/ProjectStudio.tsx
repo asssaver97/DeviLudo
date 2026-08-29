@@ -53,14 +53,16 @@ import { localeTag, useLanguage } from "./i18n/LanguageProvider";
 // second-row branch at the Agent → build boundary because it is a build gate,
 // not a job kind in the serial workflow state machine.
 const PIPELINE = [
+  ["GAME_DESIGN", "游戏设计", "Game Design"],
+  ["UI_DESIGN", "UI 设计", "UI Design"],
   ["AGENT_TURN", "游戏生成", "Game Generation"],
   ["BUILD", "制品构建", "Artifact Build"],
   ["E2E_PLATFORM_RUN", "跨平台 E2E", "Cross-platform E2E"],
   ["STEAM_PUBLISH", "Steam 上传", "Steam Upload"],
 ] as const;
 const ACTIVE_PIPELINE_STAGE: Readonly<Record<string, (typeof PIPELINE)[number][0]>> = Object.freeze({
-  ANALYZING: "AGENT_TURN",
-  DESIGNING: "AGENT_TURN",
+  DESIGNING: "GAME_DESIGN",
+  UI_DESIGNING: "UI_DESIGN",
   DEVELOPING: "AGENT_TURN",
   BUILDING: "BUILD",
   TEST_PLANNING: "E2E_PLATFORM_RUN",
@@ -125,7 +127,7 @@ export function ProjectStudio({ projectId }: { projectId: string }) {
   const [deleteError, setDeleteError] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [editingDocument, setEditingDocument] = useState(false);
-  const [documentDraft, setDocumentDraft] = useState({ introduction: "", gameplay: "", categories: "", features: "" });
+  const [documentDraft, setDocumentDraft] = useState({ introduction: "", gameplay: "", uiDesign: "", categories: "", features: "" });
   const [assetPanelExpanded, setAssetPanelExpanded] = useState(false);
   const [assetManifestRefreshKey, setAssetManifestRefreshKey] = useState(0);
   const [assetManifestView, setAssetManifestView] = useState<AssetManifestPayload | null>(null);
@@ -702,6 +704,7 @@ export function ProjectStudio({ projectId }: { projectId: string }) {
     setDocumentDraft({
       introduction: project.document.content.introduction,
       gameplay: project.document.content.gameplay,
+      uiDesign: project.document.content.uiDesign,
       categories: project.document.content.categories.join("\n"),
       features: project.document.content.features.join("\n"),
     });
@@ -722,6 +725,7 @@ export function ProjectStudio({ projectId }: { projectId: string }) {
           content: {
             introduction: documentDraft.introduction.trim(),
             gameplay: documentDraft.gameplay.trim(),
+            uiDesign: documentDraft.uiDesign.trim(),
             categories: documentLines(documentDraft.categories),
             features: documentLines(documentDraft.features),
           },
@@ -849,7 +853,6 @@ export function ProjectStudio({ projectId }: { projectId: string }) {
   const viewedArtifacts = latestArtifactsByKindAndPlatform(
     viewingHistoricalIteration ? historicalIteration.artifacts : artifacts,
   );
-  const artifactsByStage = groupArtifactsByPipelineStage(viewedArtifacts);
   const discoveryStage = discoveryStageView({
     imported: project.localDirectory !== null,
     analysisStatus: project.analysisStatus,
@@ -877,8 +880,14 @@ export function ProjectStudio({ projectId }: { projectId: string }) {
   const canRerunStages = !viewingHistoricalIteration
     && RERUNNABLE_WORKFLOW_STATES.has(project.workflowState)
     && project.jobs.length > 0;
-  const failedPipelineStage = latestFailedJob?.kind === "AGENT_TURN" && latestFailedJob.agentRole === "TEST"
-    ? "E2E_PLATFORM_RUN"
+  const failedPipelineStage = latestFailedJob?.kind === "AGENT_TURN"
+    ? latestFailedJob.agentRole === "TEST"
+      ? "E2E_PLATFORM_RUN"
+      : latestFailedJob.agentRole === "UI_DESIGN"
+        ? "UI_DESIGN"
+        : latestFailedJob.agentRole === "DESIGN"
+          ? "GAME_DESIGN"
+          : "AGENT_TURN"
     : latestFailedJob?.kind;
   const rerunnableFailedStage = failedPipelineStage && profileStages.has(failedPipelineStage)
     ? failedPipelineStage
@@ -1055,7 +1064,6 @@ export function ProjectStudio({ projectId }: { projectId: string }) {
             </li>
             {PIPELINE.map(([kind, chineseLabel, englishLabel]) => {
               const jobs = latestPipelineJobs(currentPipelineJobs(pipelineJobsForStage(kind, viewedJobs)));
-              const stageArtifacts = artifactsByStage.get(kind) ?? Object.freeze([]);
               const inProfile = profileStages.has(kind);
               const state = aggregateJobState(jobs.map(job => job.state));
               const waitingForPredecessor = inProfile && pipelineStageWaitsForPredecessor(kind, viewedWorkflowState);
@@ -1063,6 +1071,7 @@ export function ProjectStudio({ projectId }: { projectId: string }) {
                 ? waitingForPredecessor ? waitingPipelineStageView(text) : pipelineStageView(state, text)
                 : OUT_OF_PROFILE_STAGE_VIEW(text);
               const finishedAt = inProfile && !waitingForPredecessor ? pipelineStageFinishedAt(jobs) : null;
+              const rerunnableKind = kind;
               return (
                 <li className={`product-delivery-stage status-${view.kind}`} data-stage-kind={kind} data-stage-status={view.kind} key={kind}>
                   <div className="product-delivery-stage-marker product-delivery-stage-rerun-target" aria-hidden="true">{view.symbol}</div>
@@ -1079,35 +1088,15 @@ export function ProjectStudio({ projectId }: { projectId: string }) {
                       {text("运行结束", "Finished")} · {formatConversationTime(finishedAt, localeTag(locale), text)}
                     </time>
                   ) : null}
-                  {stageArtifacts.length ? (
-                    <div className="product-delivery-stage-artifacts">
-                      {stageArtifacts.map(artifact => (
-                        <button
-                          aria-label={text(`打开${artifactLabel(artifact, text)}`, `Open ${artifactLabel(artifact, text)}`)}
-                          disabled={openingArtifactId !== null}
-                          key={artifact.id}
-                          onClick={() => void accessArtifact(artifact)}
-                          title={`${artifactLabel(artifact, text)} · ${artifact.targetPlatform ?? text("通用", "COMMON")} · ${formatArtifactSize(artifact.object.sizeBytes)}`}
-                          type="button"
-                        >
-                          <span>{artifact.targetPlatform ?? text("通用", "ALL")}</span>
-                          <b>{artifactLabel(artifact, text)}</b>
-                          <strong>{openingArtifactId === artifact.id
-                            ? text("打开中…", "OPENING…")
-                            : text("打开", "OPEN")}</strong>
-                        </button>
-                      ))}
-                    </div>
-                  ) : null}
-                  {!viewingHistoricalIteration && inProfile ? (
+                  {!viewingHistoricalIteration && inProfile && rerunnableKind ? (
                     <button
                       aria-label={text(
                         `从「${chineseLabel}」重新执行，之后的阶段都会重跑`,
                         `Re-run from ${englishLabel}; every later stage runs again`,
                       )}
                       className="product-delivery-stage-rerun-icon"
-                      disabled={busy || !canRerunStages || (kind === "STEAM_PUBLISH" && project.workflowState !== "FAILED")}
-                      onClick={() => void mutate("rerun-stage", { stage: kind })}
+                      disabled={busy || !canRerunStages || (rerunnableKind === "STEAM_PUBLISH" && project.workflowState !== "FAILED")}
+                      onClick={() => void mutate("rerun-stage", { stage: rerunnableKind })}
                       type="button"
                     >
                       <RerunIcon />
@@ -1118,6 +1107,32 @@ export function ProjectStudio({ projectId }: { projectId: string }) {
             })}
           </ol>
           <div className="product-delivery-material-branch">
+            {viewedArtifacts.length ? (
+              <fieldset className="product-delivery-artifacts-dock">
+                <legend>
+                  <span>{text("交付制品", "DELIVERY ARTIFACTS")}</span>
+                  <small>{text("需求、构建与验证报告", "REQUIREMENTS, BUILDS & REPORTS")}</small>
+                </legend>
+                <div className="product-delivery-artifact-grid">
+                  {viewedArtifacts.map(artifact => (
+                    <button
+                      aria-label={text(`打开${artifactLabel(artifact, text)}`, `Open ${artifactLabel(artifact, text)}`)}
+                      disabled={openingArtifactId !== null}
+                      key={artifact.id}
+                      onClick={() => void accessArtifact(artifact)}
+                      title={`${artifactLabel(artifact, text)} · ${artifact.targetPlatform ?? text("通用", "COMMON")} · ${formatArtifactSize(artifact.object.sizeBytes)}`}
+                      type="button"
+                    >
+                      <span>{artifact.targetPlatform ?? text("通用", "ALL")}</span>
+                      <b>{artifactLabel(artifact, text)}</b>
+                      <strong>{openingArtifactId === artifact.id
+                        ? text("打开中…", "OPENING…")
+                        : text("打开", "OPEN")}</strong>
+                    </button>
+                  ))}
+                </div>
+              </fieldset>
+            ) : null}
             <fieldset className="product-delivery-material-group">
               <legend><span>{text("素材生成", "ASSET GENERATION")}</span><small>{text("Agent 与构建之间的素材门禁", "ASSET GATE BETWEEN AGENT AND BUILD")}</small></legend>
               <ol className="product-delivery-material-stages">
@@ -1319,6 +1334,7 @@ export function ProjectStudio({ projectId }: { projectId: string }) {
                 <div className="product-document-sidebar-editor">
                   <label><span>{text("游戏介绍", "Game introduction")}</span><textarea value={documentDraft.introduction} onChange={event => setDocumentDraft(current => ({ ...current, introduction: event.target.value }))} /></label>
                   <label><span>{text("玩法", "Gameplay")}</span><textarea value={documentDraft.gameplay} onChange={event => setDocumentDraft(current => ({ ...current, gameplay: event.target.value }))} /></label>
+                  <label><span>{text("UI 设计", "UI design")}</span><textarea value={documentDraft.uiDesign} onChange={event => setDocumentDraft(current => ({ ...current, uiDesign: event.target.value }))} /></label>
                   <label><span>{text("游戏分类", "Categories")}</span><textarea value={documentDraft.categories} onChange={event => setDocumentDraft(current => ({ ...current, categories: event.target.value }))} /></label>
                   <label><span>{text("主要特性", "Key features")}</span><textarea value={documentDraft.features} onChange={event => setDocumentDraft(current => ({ ...current, features: event.target.value }))} /></label>
                 </div>
@@ -1331,6 +1347,7 @@ export function ProjectStudio({ projectId }: { projectId: string }) {
                 >
                   <article><span className="document-section-label">{text("游戏介绍", "GAME INTRODUCTION")}</span><p>{project.document.content.introduction}</p></article>
                   <article><span className="document-section-label">{text("玩法", "GAMEPLAY")}</span><p>{project.document.content.gameplay}</p></article>
+                  <article><span className="document-section-label">{text("UI 设计", "UI DESIGN")}</span><p>{project.document.content.uiDesign}</p></article>
                   <article><span className="document-section-label">{text("游戏分类", "CATEGORIES")}</span><div className="product-document-tags">{project.document.content.categories.map(category => <span key={category}>{category}</span>)}</div></article>
                   <article><span className="document-section-label">{text("主要特性", "KEY FEATURES")}</span><ul>{project.document.content.features.map(feature => <li key={feature}>{feature}</li>)}</ul></article>
                 </div>
@@ -1561,17 +1578,22 @@ export function currentPipelineJobs(jobs: ProductProjectDetail["jobs"]): Product
 }
 
 /**
- * Agent turns have three product roles but only two delivery nodes. Design and
- * Development belong to game generation; Test planning and verdicts belong to
- * cross-platform acceptance. Keeping that projection explicit prevents the
- * newest Test turn from lighting the Game Generation node.
+ * Agent turns share one durable job kind but own distinct delivery nodes.
+ * Keeping the role projection explicit prevents one Agent from lighting a
+ * different node while preserving the serial database job contract.
  */
 export function pipelineJobsForStage(
   stage: (typeof PIPELINE)[number][0],
   jobs: ProductProjectDetail["jobs"],
 ): ProductProjectDetail["jobs"] {
+  if (stage === "GAME_DESIGN") {
+    return Object.freeze(jobs.filter(job => job.kind === "AGENT_TURN" && job.agentRole === "DESIGN"));
+  }
+  if (stage === "UI_DESIGN") {
+    return Object.freeze(jobs.filter(job => job.kind === "AGENT_TURN" && job.agentRole === "UI_DESIGN"));
+  }
   if (stage === "AGENT_TURN") {
-    return Object.freeze(jobs.filter(job => job.kind === "AGENT_TURN" && job.agentRole !== "TEST"));
+    return Object.freeze(jobs.filter(job => job.kind === "AGENT_TURN" && job.agentRole === "DEVELOPMENT"));
   }
   if (stage === "E2E_PLATFORM_RUN") {
     return Object.freeze(jobs.filter(job => job.kind === "E2E_PLATFORM_RUN"
@@ -1801,26 +1823,6 @@ function latestArtifactsByKindAndPlatform(values: readonly ArtifactRecord[]): re
     right.createdAt.localeCompare(left.createdAt) || right.id.localeCompare(left.id)));
 }
 
-function groupArtifactsByPipelineStage(
-  values: readonly ArtifactRecord[],
-): ReadonlyMap<(typeof PIPELINE)[number][0], readonly ArtifactRecord[]> {
-  const grouped = new Map<(typeof PIPELINE)[number][0], ArtifactRecord[]>();
-  for (const artifact of values) {
-    const stage = artifactPipelineStage(artifact.kind);
-    const stageArtifacts = grouped.get(stage) ?? [];
-    stageArtifacts.push(artifact);
-    grouped.set(stage, stageArtifacts);
-  }
-  return grouped;
-}
-
-function artifactPipelineStage(kind: ArtifactRecord["kind"]): (typeof PIPELINE)[number][0] {
-  if (kind === "BUILD" || kind === "SIGNED_BUILD") return "BUILD";
-  if (kind === "E2E_REPORT" || kind === "CLEAN_INSTALL_REPORT") return "E2E_PLATFORM_RUN";
-  if (kind === "PUBLISH_RECEIPT") return "STEAM_PUBLISH";
-  return "AGENT_TURN";
-}
-
 function formatArtifactSize(sizeBytes: number): string {
   if (sizeBytes < 1024) return `${sizeBytes} B`;
   if (sizeBytes < 1024 ** 2) return `${(sizeBytes / 1024).toFixed(1)} KiB`;
@@ -1882,7 +1884,7 @@ function formatConversationTime(value: string, locale: string, text: (chinese: s
 function workflowLabel(state: string, text: (chinese: string, english: string) => string): string {
   const labels: Record<string, readonly [string, string]> = {
     DRAFT: ["需求讨论中", "Requirements discussion"], ANALYZING: ["项目分析中", "Analyzing project"],
-    DESIGNING: ["游戏设计中", "Designing game"], DEVELOPING: ["游戏生成中", "Developing game"],
+    DESIGNING: ["游戏设计中", "Designing game"], UI_DESIGNING: ["UI 设计中", "Designing UI"], DEVELOPING: ["游戏生成中", "Developing game"],
     BUILDING: ["制品构建中", "Building artifacts"], TEST_PLANNING: ["测试规划中", "Planning tests"],
     TESTING: ["跨平台测试中", "Cross-platform testing"], RELEASE_APPROVAL_PENDING: ["等待发布批准", "Awaiting release approval"],
     STEAM_PUBLISHING: ["Steam 发布中", "Publishing to Steam"], SUCCEEDED: ["交付完成", "Delivered"],
@@ -1905,19 +1907,20 @@ function runtimeStateLabel(state: string, text: (chinese: string, english: strin
 }
 
 function workflowNeedsPolling(state: string): boolean {
-  return ["ANALYZING", "DESIGNING", "DEVELOPING", "BUILDING", "TEST_PLANNING", "TESTING", "STEAM_PUBLISHING"].includes(state);
+  return ["ANALYZING", "DESIGNING", "UI_DESIGNING", "DEVELOPING", "BUILDING", "TEST_PLANNING", "TESTING", "STEAM_PUBLISHING"].includes(state);
 }
 
 function progressAgentRole(
   job: ProductProjectDetail["jobs"][number] | null,
   workflowState: string | undefined,
 ): ProjectAgentRole | "ANALYSIS" {
-  if (job?.agentRole === "ANALYSIS" || job?.agentRole === "DESIGN"
+  if (job?.agentRole === "ANALYSIS" || job?.agentRole === "DESIGN" || job?.agentRole === "UI_DESIGN"
     || job?.agentRole === "DEVELOPMENT" || job?.agentRole === "TEST") {
     return job.agentRole;
   }
   if (workflowState === "ANALYZING") return "ANALYSIS";
   if (workflowState === "DESIGNING") return "DESIGN";
+  if (workflowState === "UI_DESIGNING") return "UI_DESIGN";
   if (workflowState === "TEST_PLANNING") return "TEST";
   return "DEVELOPMENT";
 }

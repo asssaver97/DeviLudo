@@ -18,9 +18,19 @@ process.umask(0o002);
 
 const request = JSON.parse((await readStdin()).toString("utf8"));
 validateRequest(request);
+const roleSkillSlugs = Object.freeze({
+  INTENT: "intent",
+  ANALYSIS: "analysis",
+  DESIGN: "design",
+  UI_DESIGN: "ui-design",
+  DEVELOPMENT: "development",
+  TEST: "test",
+});
+const roleSkillSlug = roleSkillSlugs[request.role];
+const installedSkillSlugs = Object.freeze([...new Set(Object.values(roleSkillSlugs))]);
 const stateRoot = process.env.DEVILUDO_RUNTIME_STATE_ROOT ?? "/var/lib/deviludo-runtime";
-const sessionFile = `${stateRoot}/sessions/${request.role.toLowerCase()}.json`;
-const skillFile = `/opt/deviludo/skills/${request.role.toLowerCase()}/SKILL.md`;
+const sessionFile = `${stateRoot}/sessions/${roleSkillSlug}.json`;
+const skillFile = `/opt/deviludo/skills/${roleSkillSlug}/SKILL.md`;
 const credentialFile = process.env.DEVILUDO_PROVIDER_CREDENTIAL_FILE ?? "/run/deviludo/provider-credential";
 const mcpTokenFile = process.env.DEVILUDO_MCP_TOKEN_FILE ?? "/run/deviludo/mcp-token";
 const codexModelsCacheFile = process.env.DEVILUDO_CODEX_MODELS_CACHE_FILE
@@ -30,7 +40,7 @@ const previous = await readJson(sessionFile);
 const nativeSessionId = previous?.nativeSessionId ?? randomUUID();
 await verifySkillManifest();
 await installNativeSkills();
-const skillName = `deviludo-${request.role.toLowerCase()}`;
+const skillName = `deviludo-${roleSkillSlug}`;
 const skillInstructions = await readFile(skillFile, "utf8");
 const contextPath = process.env.DEVILUDO_PROJECT_CONTEXT_FILE ?? "/workspace/context/project-context.json.zst";
 const sourceDirectory = process.env.DEVILUDO_PROJECT_SOURCE_DIR ?? "/workspace/project";
@@ -265,7 +275,7 @@ async function readJson(path) {
 
 function validateRequest(value) {
   if (!value || value.schemaVersion !== "deviludo.project-runtime.v2"
-    || !["INTENT", "ANALYSIS", "DESIGN", "DEVELOPMENT", "TEST"].includes(value.role)
+    || !["INTENT", "ANALYSIS", "DESIGN", "UI_DESIGN", "DEVELOPMENT", "TEST"].includes(value.role)
     || !["PRIMARY", "READ_ONLY_BRANCH", "COMPACT"].includes(value.mode)
     || !["CLAUDE_CODE", "CODEX_CLI"].includes(value.runtime)
     || !/^[0-9a-f-]{36}$/i.test(value.turnId)
@@ -296,21 +306,21 @@ async function installNativeSkills() {
   ];
   for (const destination of destinations) {
     await mkdir(destination, { recursive: true, mode: 0o700 });
-    for (const role of ["intent", "analysis", "design", "development", "test"]) {
-      const target = `${destination}/deviludo-${role}`;
+    for (const slug of installedSkillSlugs) {
+      const target = `${destination}/deviludo-${slug}`;
       await rm(target, { recursive: true, force: true });
-      await cp(`${sourceRoot}/${role}`, target, { recursive: true });
+      await cp(`${sourceRoot}/${slug}`, target, { recursive: true });
     }
   }
 }
 
 async function prepareCodexHome(destination) {
   await mkdir(destination, { recursive: true, mode: 0o700 });
-  const saved = `${stateRoot}/codex-sessions/${request.role.toLowerCase()}`;
+  const saved = `${stateRoot}/codex-sessions/${roleSkillSlug}`;
   try { await cp(saved, `${destination}/sessions`, { recursive: true }); } catch {}
   await mkdir(`${destination}/skills`, { recursive: true, mode: 0o700 });
-  for (const role of ["intent", "analysis", "design", "development", "test"]) {
-    await cp(`/opt/deviludo/skills/${role}`, `${destination}/skills/deviludo-${role}`, { recursive: true });
+  for (const slug of installedSkillSlugs) {
+    await cp(`/opt/deviludo/skills/${slug}`, `${destination}/skills/deviludo-${slug}`, { recursive: true });
   }
 }
 
@@ -349,7 +359,7 @@ async function installCodexModelsCache(destination, source) {
 
 async function persistCodexSessions(source) {
   const sessions = `${source}/sessions`;
-  const destination = `${stateRoot}/codex-sessions/${request.role.toLowerCase()}`;
+  const destination = `${stateRoot}/codex-sessions/${roleSkillSlug}`;
   await rm(destination, { recursive: true, force: true });
   try {
     await mkdir(`${stateRoot}/codex-sessions`, { recursive: true, mode: 0o700 });

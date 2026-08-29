@@ -450,7 +450,7 @@ function formatDate(value: string, locale: string): string {
 function workflowLabel(state: string, text: (chinese: string, english: string) => string): string {
   const labels: Record<string, readonly [string, string]> = {
     DRAFT: ["需求讨论中", "Requirements discussion"], ANALYZING: ["项目分析中", "Analyzing project"],
-    DESIGNING: ["游戏设计中", "Designing game"], DEVELOPING: ["游戏生成中", "Developing game"],
+    DESIGNING: ["游戏设计中", "Designing game"], UI_DESIGNING: ["UI 设计中", "Designing UI"], DEVELOPING: ["游戏生成中", "Developing game"],
     BUILDING: ["制品构建中", "Building artifacts"], TEST_PLANNING: ["测试规划中", "Planning tests"],
     TESTING: ["跨平台测试中", "Cross-platform testing"], RELEASE_APPROVAL_PENDING: ["等待发布批准", "Awaiting release approval"],
     STEAM_PUBLISHING: ["Steam 发布中", "Publishing to Steam"], SUCCEEDED: ["交付完成", "Delivered"],

@@ -87,6 +87,15 @@ function toolDescription(name) {
   if (name === "source.read") {
     return "Read a UTF-8 source file from the current immutable revision. For files larger than 1 MiB, provide a 1-based startLine/endLine range spanning at most 1000 lines.";
   }
+  if (name === "project_document.update") {
+    return "Confirm the exact approved project document snapshot. Pass it in the required document object; do not use projectDocument, projectDocumentPatch, content, or expectedRevision fields.";
+  }
+  if (name === "e2e_goals.update") {
+    return "Confirm the exact frozen E2E goal snapshot. Pass the complete goal array in the required goals field.";
+  }
+  if (name === "handoff.create") {
+    return "Create the durable current-turn handoff. Pass the destination role in toRole and the complete implementation-facing handoff in summary.";
+  }
   if (name === "test_plan.replace") {
     return "Persist the complete current Test Agent plan. Follow this tool's input schema exactly and use only source-read Probe keys and semantic control IDs. A validation error is a correctable plan-authoring error: revise the payload and retry; it is not E2E infrastructure failure.";
   }

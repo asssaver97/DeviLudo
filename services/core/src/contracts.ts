@@ -115,6 +115,8 @@ export type WorkflowSignalInput = Readonly<{
  * and has to match `deviludo.delivery_stages` in the SQL baseline.
  */
 export const RERUNNABLE_STAGES = [
+  "GAME_DESIGN",
+  "UI_DESIGN",
   "AGENT_TURN",
   "BUILD",
   "E2E_PLATFORM_RUN",

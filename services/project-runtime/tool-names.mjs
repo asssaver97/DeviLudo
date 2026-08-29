@@ -2,6 +2,7 @@ export const ROLE_TO_CANONICAL_TOOLS = Object.freeze({
   INTENT: Object.freeze(["context.read", "conversation.reply", "workflow.intent_decision", "workflow.stop", "workflow.continue"]),
   ANALYSIS: Object.freeze(["context.read", "source.list", "source.read", "diagnostics.run", "context.update_analysis", "conversation.reply"]),
   DESIGN: Object.freeze(["context.read", "requirements.update", "project_document.update", "e2e_goals.update", "conversation.reply", "handoff.create"]),
+  UI_DESIGN: Object.freeze(["context.read", "project_document.update", "e2e_goals.update", "conversation.reply", "handoff.create"]),
   DEVELOPMENT: Object.freeze(["context.read", "source.list", "source.read", "source.checkpoint", "assets.plan", "assets.cleanup", "build.request", "conversation.reply", "handoff.create"]),
   TEST: Object.freeze(["context.read", "source.list", "source.read", "test_plan.replace", "e2e.start", "e2e.observe", "evidence.read", "test.verdict", "conversation.reply", "handoff.create"]),
 });
@@ -21,6 +22,44 @@ export function canonicalToolName(role, nativeName) {
 
 export function toolInputSchema(canonicalName) {
   nativeToolName(canonicalName);
+  if (canonicalName === "context.read") {
+    return Object.freeze({ type: "object", additionalProperties: false });
+  }
+  if (canonicalName === "project_document.update") {
+    return Object.freeze({
+      type: "object",
+      additionalProperties: false,
+      required: Object.freeze(["document"]),
+      properties: Object.freeze({
+        document: Object.freeze({ type: "object", additionalProperties: true }),
+      }),
+    });
+  }
+  if (canonicalName === "e2e_goals.update") {
+    return Object.freeze({
+      type: "object",
+      additionalProperties: false,
+      required: Object.freeze(["goals"]),
+      properties: Object.freeze({
+        goals: Object.freeze({
+          type: "array",
+          maxItems: 1_000,
+          items: Object.freeze({ type: "object", additionalProperties: true }),
+        }),
+      }),
+    });
+  }
+  if (canonicalName === "handoff.create") {
+    return Object.freeze({
+      type: "object",
+      additionalProperties: false,
+      required: Object.freeze(["toRole", "summary"]),
+      properties: Object.freeze({
+        toRole: Object.freeze({ enum: Object.freeze(["INTENT", "ANALYSIS", "DESIGN", "UI_DESIGN", "DEVELOPMENT", "TEST"]) }),
+        summary: Object.freeze({ type: "string", minLength: 1, maxLength: 64_000 }),
+      }),
+    });
+  }
   if (canonicalName === "source.read") {
     return Object.freeze({
       type: "object",

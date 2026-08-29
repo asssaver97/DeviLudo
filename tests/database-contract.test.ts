@@ -11,13 +11,13 @@ test("fresh baseline exposes only the persistent multi-Agent workflow contract",
     "AGENT_TURN", "BUILD", "E2E_PLATFORM_RUN", "STEAM_PUBLISH",
   ]);
   assert.deepEqual(enumValues(sql, "agent_role"), [
-    "INTENT", "ANALYSIS", "DESIGN", "DEVELOPMENT", "TEST",
+    "INTENT", "ANALYSIS", "DESIGN", "UI_DESIGN", "DEVELOPMENT", "TEST",
   ]);
   assert.deepEqual(enumValues(sql, "agent_container_state"), [
     "CREATING", "RUNNING", "PAUSING", "PAUSED", "COMPACTING", "DESTROYED", "STOPPED", "FAILED",
   ]);
   assert.deepEqual(enumValues(sql, "workflow_state"), [
-    "DRAFT", "ANALYZING", "DESIGNING", "DEVELOPING", "BUILDING", "TEST_PLANNING",
+    "DRAFT", "ANALYZING", "DESIGNING", "UI_DESIGNING", "DEVELOPING", "BUILDING", "TEST_PLANNING",
     "TESTING", "RELEASE_APPROVAL_PENDING", "STEAM_PUBLISHING",
     "SUCCEEDED", "BLOCKED", "STOPPED", "FAILED", "CANCELLED",
   ]);
@@ -25,7 +25,7 @@ test("fresh baseline exposes only the persistent multi-Agent workflow contract",
   assert.doesNotMatch(sql, /superseded[\s\S]{0,400}state <> 'CANCELLED'/i);
 });
 
-test("the new durable model stores contexts, five sessions, turns, handoffs, plans and evidence", async () => {
+test("the new durable model stores contexts, six sessions, turns, handoffs, plans and evidence", async () => {
   const sql = await readFile(sqlUrl, "utf8");
   for (const table of [
     "project_contexts", "agent_containers", "agent_sessions", "agent_turns",
@@ -35,6 +35,7 @@ test("the new durable model stores contexts, five sessions, turns, handoffs, pla
     assert.ok(sql.includes(`'${table}'`), `${table} must be covered by forced workspace RLS`);
   }
   assert.match(sql, /UNIQUE \(workspace_id, project_id, role, container_generation\)/);
+  assert.match(sql, /jsonb_typeof\(content->'uiDesign'\) = 'string'/);
   assert.match(sql, /active_turn_id uuid/);
   assert.match(sql, /mcp_token_hash text/);
   assert.match(sql, /fencing_token bigint/);
@@ -55,15 +56,17 @@ test("Runtime lifecycle claims exactly five-minute idle and thirty-minute paused
   assert.match(claim, /p_paused_seconds integer DEFAULT 1800/);
 });
 
-test("Agent completion advances Design, Development and Test through one persistent path", async () => {
+test("Agent completion advances Design, UI Design, Development and Test through one persistent path", async () => {
   const sql = await readFile(sqlUrl, "utf8");
   const complete = functionSource(sql, "complete_agent_turn_job");
   assert.match(complete, /role text;/);
   assert.match(complete, /purpose text;/);
   assert.match(complete, /role = 'DESIGN'/);
   assert.match(complete, /jsonb_typeof\(p_output->'handoff'\) IS DISTINCT FROM 'object'/);
-  assert.match(complete, /handoff,toRole.*IS DISTINCT FROM 'DEVELOPMENT'/);
-  assert.match(complete, /Design Agent did not create a complete DEVELOPMENT handoff/);
+  assert.match(complete, /handoff,toRole.*IS DISTINCT FROM 'UI_DESIGN'/);
+  assert.match(complete, /Design Agent did not create a complete UI_DESIGN handoff/);
+  assert.match(complete, /role = 'UI_DESIGN'/);
+  assert.match(complete, /UI Design Agent did not create a complete DEVELOPMENT handoff/);
   assert.match(complete, /role = 'DEVELOPMENT'/);
   assert.match(complete, /assets_ready boolean;/);
   assert.match(complete, /item\.status NOT IN \('generated', 'uploaded', 'existing'\)/);
@@ -86,16 +89,22 @@ test("a blocked workflow can be reopened from an explicitly selected rerun stage
   assert.match(signal, /current_test_plan_available boolean := false/);
   assert.match(signal, /plan\.source_revision = \([\s\S]*ORDER BY source\.revision DESC[\s\S]*LIMIT 1/);
   assert.match(signal, /WHEN rerun_stage = 'E2E_PLATFORM_RUN' AND NOT current_test_plan_available[\s\S]*THEN 'TEST_PLANNING'/);
+  assert.match(signal, /rerun_agent_role NOT IN \('DESIGN', 'UI_DESIGN', 'DEVELOPMENT'\)/);
+  assert.match(signal, /WHEN 'UI_DESIGN' THEN 'UI_DESIGNING'/);
+  assert.match(signal, /ELSE 'DEVELOPING'/);
   assert.match(signal, /jsonb_build_object\('role', 'TEST', 'purpose', 'TEST_PLAN', 'manualRerun', true\)/);
+  assert.match(signal, /'role', rerun_agent_role,[\s\S]*'purpose', rerun_agent_role/);
+  assert.match(signal, /WHEN 'UI_DESIGN' THEN 'uiDesign'/);
 });
 
-test("completed Development and Test Agent turns publish durable player-facing messages", async () => {
+test("completed UI Design, Development and Test Agent turns publish durable player-facing messages", async () => {
   const sql = await readFile(sqlUrl, "utf8");
   const publish = functionSource(sql, "publish_development_agent_message");
-  assert.match(publish, /IN \('DEVELOPMENT', 'TEST'\)/);
+  assert.match(publish, /IN \('UI_DESIGN', 'DEVELOPMENT', 'TEST'\)/);
   assert.match(publish, /turn_output->>'role' IS DISTINCT FROM agent_role/);
   assert.match(publish, /'agentRole', agent_role/);
   assert.match(publish, /WHEN 'TEST' THEN 'DeviLudo Test Agent'/);
+  assert.match(publish, /WHEN 'UI_DESIGN' THEN 'DeviLudo UI Design Agent'/);
   assert.match(publish, /'planRevision', turn_output->'planRevision'/);
   assert.match(publish, /'verdict', turn_output->'verdict'/);
 });
@@ -160,13 +169,14 @@ test("all target platforms must use the current source and frozen Test plan befo
   assert.match(completeAgent, /PASS contradicts deterministic platform evidence/);
 });
 
-test("schema migration permits only an exact development function refresh", async () => {
+test("schema migration permits only exact reviewed development refreshes", async () => {
   const migration = await readFile(new URL("../scripts/migrate-postgres.mjs", import.meta.url), "utf8");
   const reset = await readFile(new URL("../scripts/reset-self-hosted-baseline.mjs", import.meta.url), "utf8");
   assert.match(migration, /const BASELINE = "003"/);
   assert.match(migration, /const COMPATIBILITY = "deviludo-persistent-multi-agent-v3"/);
   assert.match(migration, /const VERSION = "001_persistent_multi_agent"/);
   assert.match(migration, /DEVELOPMENT_FUNCTION_REFRESHES/);
+  assert.match(migration, /DEVELOPMENT_SCHEMA_REFRESHES/);
   assert.match(migration, /process\.env\.NODE_ENV !== "development"/);
   assert.match(migration, /complete_agent_turn_job/);
   assert.match(migration, /advance_asset_workflows/);
@@ -181,8 +191,13 @@ test("schema migration permits only an exact development function refresh", asyn
   assert.match(migration, /WHERE version = \$2 AND checksum = \$3/);
   assert.match(migration, /ledger\.rows\.length !== 1/);
   assert.match(migration, /ledger\.rows\[0\]\?\.checksum !== baselineDigest/);
+  assert.match(migration, /ALTER TYPE deviludo\.workflow_state ADD VALUE IF NOT EXISTS 'UI_DESIGNING' BEFORE 'DEVELOPING'/);
+  assert.match(migration, /ALTER TYPE deviludo\.agent_role ADD VALUE IF NOT EXISTS 'UI_DESIGN' BEFORE 'DEVELOPMENT'/);
+  assert.match(migration, /jsonb_set\(model_overrides, '\{uiDesign\}'/);
+  assert.match(migration, /jsonb_set\(content, '\{uiDesign\}'/);
+  assert.match(migration, /DROP CONSTRAINT project_documents_content_check/);
   assert.match(migration, /INCOMPATIBLE_BASELINE_RESET_REQUIRED/);
-  assert.doesNotMatch(migration, /readdir|migrationsUrl|migration\.source|ALTER TABLE|ALTER TYPE/);
+  assert.doesNotMatch(migration, /readdir|migrationsUrl|migration\.source/);
   assert.match(reset, /DROP SCHEMA IF EXISTS deviludo CASCADE/);
   assert.match(reset, /deviludo\.kind=project-runtime/);
   assert.match(reset, /deviludo-runtime-/);
@@ -190,7 +205,7 @@ test("schema migration permits only an exact development function refresh", asyn
 
 test("database smoke settings cover every persistent Agent role", async () => {
   const smoke = await readFile(new URL("../scripts/local-database-smoke.mjs", import.meta.url), "utf8");
-  assert.match(smoke, /\{"intent":null,"analysis":null,"design":null,"development":null,"test":null\}/);
+  assert.match(smoke, /\{"intent":null,"analysis":null,"design":null,"uiDesign":null,"development":null,"test":null\}/);
 });
 
 test("workspace-owned Runtime tables use forced row isolation and scoped foreign keys", async () => {
