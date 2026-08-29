@@ -83,15 +83,35 @@ async function godotCommand(arguments_) {
   } catch (error) {
     const reason = error instanceof Error ? error.message : "Godot command failed";
     if (/SCRIPT ERROR|Parse Error|Failed to load script|Invalid call|Invalid assignment/i.test(reason)) {
-      throw new Error(`BUILD_PRODUCT: Godot project validation failed: ${reason}`, { cause: error });
+      const diagnostic = arguments_.includes("--import") ? await directGodotScriptDiagnostic() : null;
+      throw new Error(`BUILD_PRODUCT: Godot project validation failed: ${diagnostic ?? reason}`, { cause: error });
     }
     throw error;
   }
   const errors = godotErrorLines(result.stdout, result.stderr);
   if (errors.length > 0) {
-    throw new Error(`BUILD_PRODUCT: Godot reported script errors despite exit code 0: ${errors.join(" | ")}`);
+    const diagnostic = arguments_.includes("--import") ? await directGodotScriptDiagnostic() : null;
+    throw new Error(`BUILD_PRODUCT: Godot reported script errors despite exit code 0: ${diagnostic ?? errors.join(" | ")}`);
   }
   return result;
+}
+
+async function directGodotScriptDiagnostic() {
+  const { godotProjectScripts } = await import("./godot-build.mjs");
+  for (const script of await godotProjectScripts("/workspace/project")) {
+    try {
+      await command("godot", [
+        "--headless", "--path", "/workspace/project",
+        "--script", `res://${script}`, "--check-only",
+      ], godotEnvironment());
+    } catch (error) {
+      const reason = error instanceof Error ? error.message : "Godot script validation failed";
+      if (/SCRIPT ERROR|Parse Error|Failed to load script|Invalid call|Invalid assignment/i.test(reason)) {
+        return reason;
+      }
+    }
+  }
+  return null;
 }
 
 async function materializeBuildAssets(plan) {

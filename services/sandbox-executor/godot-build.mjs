@@ -1,4 +1,4 @@
-import { access, readFile, writeFile } from "node:fs/promises";
+import { access, readFile, readdir, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 
 const PLATFORM_PRESETS = Object.freeze({
@@ -16,12 +16,20 @@ export async function prepareGodotProject(projectDirectory, requestedPlatforms) 
   } catch {
     throw new Error("Generated source is not a Godot project: project.godot is missing");
   }
-  if (!/^config_version\s*=\s*5\s*$/m.test(project)) {
+  const declaredConfigVersion = project.match(/^\s*config_version\s*=\s*(\d+)\s*$/m)?.[1];
+  if (declaredConfigVersion !== undefined && declaredConfigVersion !== "5") {
     throw new Error("Generated source is not a supported Godot 4 project");
   }
   if (!/^run\/main_scene\s*=\s*"res:\/\/.+"\s*$/m.test(project)) {
     throw new Error("Generated Godot project does not declare application/run/main_scene");
   }
+  if (declaredConfigVersion === undefined) {
+    // Agent-generated Godot projects can omit the editor-managed config header.
+    // The remaining source is still valid Godot 4 input, so make the implicit
+    // version explicit before asking the pinned Godot 4 Builder to import it.
+    project = `config_version=5\n\n${project.trimStart()}`;
+  }
+  project = enableDesktopTextureCompression(project);
   project = await removeMissingOptionalResources(projectDirectory, project);
   await writeFile(projectFile, project, { encoding: "utf8", mode: 0o600 });
 
@@ -35,6 +43,39 @@ export async function prepareGodotProject(projectDirectory, requestedPlatforms) 
     { encoding: "utf8", mode: 0o600 },
   );
   return platforms;
+}
+
+export async function godotProjectScripts(projectDirectory) {
+  const scripts = [];
+  await collectGodotScripts(projectDirectory, "", scripts);
+  return Object.freeze(scripts);
+}
+
+function enableDesktopTextureCompression(project) {
+  const setting = "textures/vram_compression/import_s3tc_bptc=true";
+  if (/^textures\/vram_compression\/import_s3tc_bptc\s*=/m.test(project)) {
+    return project.replace(/^textures\/vram_compression\/import_s3tc_bptc\s*=.*$/m, setting);
+  }
+  if (/^\[rendering\]\s*$/m.test(project)) {
+    return project.replace(/^\[rendering\]\s*$/m, `[rendering]\n${setting}`);
+  }
+  return `${project.trimEnd()}\n\n[rendering]\n${setting}\n`;
+}
+
+async function collectGodotScripts(directory, relativeDirectory, scripts) {
+  const ignoredDirectories = new Set([".deviludo-e2e", ".deviludo-export", ".git", ".godot"]);
+  const entries = await readdir(directory, { withFileTypes: true });
+  entries.sort((left, right) => left.name.localeCompare(right.name));
+  for (const entry of entries) {
+    const relativePath = relativeDirectory ? `${relativeDirectory}/${entry.name}` : entry.name;
+    if (entry.isDirectory()) {
+      if (!ignoredDirectories.has(entry.name)) {
+        await collectGodotScripts(join(directory, entry.name), relativePath, scripts);
+      }
+    } else if (entry.isFile() && entry.name.endsWith(".gd")) {
+      scripts.push(relativePath);
+    }
+  }
 }
 
 async function removeMissingOptionalResources(projectDirectory, project) {
