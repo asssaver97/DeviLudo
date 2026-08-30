@@ -133,6 +133,113 @@ export class ProjectRuntimeRepository {
     });
   }
 
+  /**
+   * Materialize the persistent Runtime's canonical asset plan into the durable
+   * generation queue. The context file is the Agent-facing contract; these rows
+   * are the scheduler-facing contract. Keeping both in sync is what makes a
+   * planned GENERATED asset actually run instead of existing only as prose.
+   */
+  async replaceAssetManifestPlan(input: Readonly<{
+    workspaceId: string;
+    projectId: string;
+    workflowId: string;
+    assets: readonly Readonly<Record<string, unknown>>[];
+  }>): Promise<Readonly<{ manifestId: string; planned: number }>> {
+    return this.database.withWorkspace(input.workspaceId, async client => {
+      const manifest = await client.query<{ id: string }>(
+        `INSERT INTO deviludo.asset_manifests(
+           workspace_id, project_id, workflow_id, auto_generate_enabled
+         ) VALUES ($1::uuid, $2::uuid, $3::uuid, true)
+         ON CONFLICT (workspace_id, project_id) DO UPDATE
+           SET workflow_id = EXCLUDED.workflow_id, updated_at = clock_timestamp()
+         RETURNING id::text`,
+        [input.workspaceId, input.projectId, input.workflowId],
+      );
+      const manifestId = manifest.rows[0]?.id;
+      if (!manifestId) throw new Error("Asset manifest was not created");
+
+      const retainedKeys: string[] = [];
+      for (const asset of input.assets) {
+        const assetKey = String(asset.key);
+        const assetType = String(asset.assetType);
+        const description = String(asset.description);
+        const origin = String(asset.origin);
+        const generationPrompt = origin === "GENERATED" ? String(asset.generationPrompt) : null;
+        const frameCount = asset.frameCount === undefined ? null : Number(asset.frameCount);
+        const dimensions = asset.dimensions === undefined ? null : String(asset.dimensions);
+        retainedKeys.push(assetKey);
+        await client.query(
+          `INSERT INTO deviludo.asset_items(
+             workspace_id, manifest_id, asset_key, asset_type, description,
+             generation_prompt, frame_count, dimensions, status
+           ) VALUES ($1::uuid, $2::uuid, $3, $4, $5, $6, $7, $8, 'planned')
+           ON CONFLICT (workspace_id, manifest_id, asset_key) DO UPDATE
+             SET asset_type = EXCLUDED.asset_type,
+                 description = EXCLUDED.description,
+                 generation_prompt = EXCLUDED.generation_prompt,
+                 frame_count = EXCLUDED.frame_count,
+                 dimensions = EXCLUDED.dimensions,
+                 status = CASE
+                   WHEN deviludo.asset_items.asset_type = EXCLUDED.asset_type
+                    AND deviludo.asset_items.description = EXCLUDED.description
+                    AND deviludo.asset_items.generation_prompt IS NOT DISTINCT FROM EXCLUDED.generation_prompt
+                    AND deviludo.asset_items.frame_count IS NOT DISTINCT FROM EXCLUDED.frame_count
+                    AND deviludo.asset_items.dimensions IS NOT DISTINCT FROM EXCLUDED.dimensions
+                    AND deviludo.asset_items.status IN ('generated', 'uploaded', 'existing')
+                   THEN deviludo.asset_items.status ELSE 'planned' END,
+                 bucket = CASE
+                   WHEN deviludo.asset_items.asset_type = EXCLUDED.asset_type
+                    AND deviludo.asset_items.description = EXCLUDED.description
+                    AND deviludo.asset_items.generation_prompt IS NOT DISTINCT FROM EXCLUDED.generation_prompt
+                    AND deviludo.asset_items.frame_count IS NOT DISTINCT FROM EXCLUDED.frame_count
+                    AND deviludo.asset_items.dimensions IS NOT DISTINCT FROM EXCLUDED.dimensions
+                    AND deviludo.asset_items.status IN ('generated', 'uploaded')
+                   THEN deviludo.asset_items.bucket ELSE NULL END,
+                 object_key = CASE
+                   WHEN deviludo.asset_items.asset_type = EXCLUDED.asset_type
+                    AND deviludo.asset_items.description = EXCLUDED.description
+                    AND deviludo.asset_items.generation_prompt IS NOT DISTINCT FROM EXCLUDED.generation_prompt
+                    AND deviludo.asset_items.frame_count IS NOT DISTINCT FROM EXCLUDED.frame_count
+                    AND deviludo.asset_items.dimensions IS NOT DISTINCT FROM EXCLUDED.dimensions
+                    AND deviludo.asset_items.status IN ('generated', 'uploaded')
+                   THEN deviludo.asset_items.object_key ELSE NULL END,
+                 sha256 = CASE
+                   WHEN deviludo.asset_items.asset_type = EXCLUDED.asset_type
+                    AND deviludo.asset_items.description = EXCLUDED.description
+                    AND deviludo.asset_items.generation_prompt IS NOT DISTINCT FROM EXCLUDED.generation_prompt
+                    AND deviludo.asset_items.frame_count IS NOT DISTINCT FROM EXCLUDED.frame_count
+                    AND deviludo.asset_items.dimensions IS NOT DISTINCT FROM EXCLUDED.dimensions
+                    AND deviludo.asset_items.status IN ('generated', 'uploaded')
+                   THEN deviludo.asset_items.sha256 ELSE NULL END,
+                 size_bytes = CASE
+                   WHEN deviludo.asset_items.asset_type = EXCLUDED.asset_type
+                    AND deviludo.asset_items.description = EXCLUDED.description
+                    AND deviludo.asset_items.generation_prompt IS NOT DISTINCT FROM EXCLUDED.generation_prompt
+                    AND deviludo.asset_items.frame_count IS NOT DISTINCT FROM EXCLUDED.frame_count
+                    AND deviludo.asset_items.dimensions IS NOT DISTINCT FROM EXCLUDED.dimensions
+                    AND deviludo.asset_items.status IN ('generated', 'uploaded')
+                   THEN deviludo.asset_items.size_bytes ELSE NULL END,
+                 error_message = NULL,
+                 generation_attempt = CASE
+                   WHEN deviludo.asset_items.status IN ('generated', 'uploaded', 'existing') THEN deviludo.asset_items.generation_attempt
+                   ELSE 0 END,
+                 generation_lease_expires_at = NULL,
+                 generation_lease_token = NULL,
+                 updated_at = clock_timestamp()`,
+          [input.workspaceId, manifestId, assetKey, assetType, description,
+            generationPrompt, frameCount, dimensions],
+        );
+      }
+      await client.query(
+        `DELETE FROM deviludo.asset_items
+          WHERE workspace_id = $1::uuid AND manifest_id = $2::uuid
+            AND NOT (asset_key = ANY($3::text[]))`,
+        [input.workspaceId, manifestId, retainedKeys],
+      );
+      return Object.freeze({ manifestId, planned: input.assets.length });
+    });
+  }
+
   async recordTestPlan(input: Readonly<{
     workspaceId: string;
     projectId: string;

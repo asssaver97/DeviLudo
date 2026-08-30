@@ -266,6 +266,7 @@ test("the production Guest, relay, executor and node all wire the lifecycle guar
   assert.match(guest, /driver\("find-pid", \["--executable", executable\]/);
   assert.doesNotMatch(guest, /execute\("ps", \["-ax", "-o", "pid=,command="\]/);
   assert.match(guest, /POSTCONDITION_TRANSITION_MISSING/);
+  assert.match(guest, /checkpointAssertions = evaluateProbeAssertions[\s\S]*await delay\(CHECKPOINT_VISUAL_SETTLE_MS\);[\s\S]*testEnvironment\.capture\(screenshotPath\)/);
   assert.match(guest, /!transitionProven\) throw configurationFailure\([\s\S]*POSTCONDITION_TRANSITION_MISSING/);
   assert.match(guest, /missingChangedAssertionReferences\(event\.postconditions, before\)[\s\S]*TEST_PLAN_REFERENCE_MISSING/);
   assert.match(guest, /Project Runtime is completing a lifecycle transition/);

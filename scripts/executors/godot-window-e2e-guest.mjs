@@ -552,13 +552,19 @@ async function executeJourney(gamePackage, journey, runLabel, recordEvidence) {
       if (event.expectedOutput) {
         const observed = await waitForCheckpointOutput(event.expectedOutput, gameLogPath, checkpointOutputPath, CHECKPOINT_OUTPUT_TIMEOUT_MS);
         if (!observed) throw productFailure("CHECKPOINT_ASSERTION_FAILED", `${journey.id}/${event.id} 未观察到辅助标记 ${event.expectedOutput}`);
-        await delay(CHECKPOINT_VISUAL_SETTLE_MS);
       }
       currentProbe = await waitForProbeSnapshot(probePath, { sessionNonce, pid: launched.pid }, PROBE_TIMEOUT_MS);
       const checkpointAssertions = evaluateProbeAssertions(event.assertions, previousCheckpoint?.probe ?? currentProbe, currentProbe);
       if (checkpointAssertions.some(assertion => !assertion.passed)) {
         throw productFailure("CHECKPOINT_PROBE_FAILED", `${journey.id}/${event.id} Probe 状态断言失败`);
       }
+      // A Probe snapshot is written by the game thread after its layout frame,
+      // but the native window compositor can still expose the previous frame
+      // briefly. Capturing immediately produced impossible evidence where the
+      // Probe asserted RESULT while the PNG still showed the prior resolution
+      // step. Settle every checkpoint, not only those with auxiliary output,
+      // so pixels and semantic state describe the same moment.
+      await delay(CHECKPOINT_VISUAL_SETTLE_MS);
       const evidenceId = `${checkpointEvidenceId(journey.id, event.id)}${recordEvidence ? "" : "-replay"}`;
       const screenshotPath = join(workspace, "evidence-screenshots", `${evidenceId}.png`);
       await mkdir(dirname(screenshotPath), { recursive: true });
@@ -739,6 +745,11 @@ async function runAdaptiveRollout(gamePackage, manifest, rolloutIndex) {
   const probePath = join(workspace, "ui-probe", `${runId}.json`);
   const trajectoryPath = join(workspace, "evidence-trajectories", `${runId}.jsonl`);
   await Promise.all([gameLogPath, probePath, trajectoryPath].map(path => mkdir(dirname(path), { recursive: true })));
+  // A rollout can finish before its first policy decision (for example when
+  // the game exits while the initial Probe is being observed). The evidence
+  // bundle still records that attempted rollout, so materialize its trajectory
+  // eagerly instead of relying on the first append to create the file.
+  await writeFile(trajectoryPath, "", { mode: 0o600 });
   const sessionNonce = randomBytes(32).toString("hex");
   const seed = stableRolloutSeed(manifest, rolloutIndex);
   const environment = await isolatedGameEnvironment(runId, {

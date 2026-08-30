@@ -3745,7 +3745,7 @@ BEGIN
        WHERE workspace_id = workflow.workspace_id AND id = workflow.id;
       PERFORM deviludo.enqueue_job(job.workspace_id, job.workflow_id, job.project_id,
         'AGENT_TURN', NULL,
-        job.workflow_id::text || ':test-verdict:plan:' || v_plan_id::text,
+        job.workflow_id::text || ':test-verdict:e2e:' || job.id::text,
         jsonb_build_object('role', 'TEST', 'purpose', 'TEST_VERDICT',
           'testPlanId', v_plan_id));
     END IF;

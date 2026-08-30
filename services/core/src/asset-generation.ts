@@ -7,6 +7,7 @@
 // placeholder choice), then freezes the settled objects into BUILD.
 
 import type { AgentSecretStore } from "./agent-settings";
+import sharp from "sharp";
 import type { AssetGenerationLease } from "./asset-manifest";
 import { runCodexImage, type CodexImageRunner } from "./codex-cli";
 import {
@@ -152,7 +153,10 @@ async function generateOne(
     const image = backend.kind === "HTTP_IMAGES"
       ? await generateAssetImage(backend.target, request, fetchImpl)
       : await generateWithCodex(backend, request);
-    const extension = generatedImageExtension(image.contentType);
+    const normalized = image.contentType === "image/png" ? image.content : await sharp(image.content)
+      .png({ compressionLevel: 9 })
+      .toBuffer();
+    const extension = generatedImageExtension("image/png");
     if (!extension) throw new Error("生成的图片格式不受支持");
     // Store first, then record: an orphaned object is swept with the project,
     // whereas a row pointing at a missing object breaks the build that reads it.
@@ -161,8 +165,8 @@ async function generateOne(
       projectId: lease.projectId,
       assetKey: lease.assetKey,
       extension,
-      contentType: image.contentType,
-      content: image.content,
+      contentType: "image/png",
+      content: normalized,
     });
     return await repository.assets.completeGeneration({
       workspaceId: lease.workspaceId,

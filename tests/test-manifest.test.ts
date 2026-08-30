@@ -90,6 +90,19 @@ describe("test-manifest", () => {
     assert.equal(testManifestValidationError(manifest), null);
   });
 
+  test("rejects an adaptive failure oracle that is already true at the fresh menu", () => {
+    const manifest = completeManifest();
+    const invalid = {
+      ...manifest,
+      adaptivePlayer: {
+        ...manifest.adaptivePlayer,
+        failureAssertions: [{ source: "STATE", key: "session_active", operator: "EQUALS", value: false }],
+      },
+    };
+    assert.match(testManifestValidationError(invalid) ?? "", /must be false at the required fresh MENU start/);
+    assert.equal(validateTestManifest(invalid), false);
+  });
+
   test("returns actionable contract errors instead of misclassifying an invalid plan as infrastructure", () => {
     const manifest = completeManifest();
     assert.match(testManifestValidationError({

@@ -13,8 +13,9 @@ test("generated build assets must be referenced by runtime source", async () => 
   try {
     await mkdir(join(root, "scripts"), { recursive: true });
     await writeFile(join(root, "scripts", "main.gd"), [
-      "const MENU_ART = \"backgrounds/menu\"",
+      "const MENU_ART = \"res://assets/generated/backgrounds/menu.png\"",
       "var badge = load(\"res://assets/generated/ui/badge.png\")",
+      "const PROBE_ONLY = \"backgrounds/probe-only\"",
       "# \"skills/comment-only\" must not count",
     ].join("\n"));
     await mkdir(join(root, "tests"), { recursive: true });
@@ -24,9 +25,9 @@ test("generated build assets must be referenced by runtime source", async () => 
     } }));
 
     const missing = await missingBuildAssetReferences(root, [
-      "backgrounds/menu", "ui/badge", "skills/comment-only", "skills/test-only", "regions/manifest-only",
+      "backgrounds/menu", "ui/badge", "backgrounds/probe-only", "skills/comment-only", "skills/test-only", "regions/manifest-only",
     ]);
-    assert.deepEqual(missing, ["regions/manifest-only", "skills/comment-only", "skills/test-only"]);
+    assert.deepEqual(missing, ["backgrounds/probe-only", "regions/manifest-only", "skills/comment-only", "skills/test-only"]);
     await assert.rejects(
       assertBuildAssetsReferenced(root, ["backgrounds/menu", "regions/manifest-only"]),
       /BUILD_PRODUCT: Generated assets were materialized but are not referenced by runtime source: regions\/manifest-only/,

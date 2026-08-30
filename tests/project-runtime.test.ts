@@ -32,6 +32,11 @@ import {
 } from "@/services/core/src/project-runtime-conversation";
 import {
   bundledCjkFontValidationError,
+  latestEvidenceReport,
+  latestUiSpecification,
+  normalizeUiSpecification,
+  normalizeUiTestReview,
+  requiredUiAssetProblems,
   retryProjectRuntimeLifecycle,
   runtimeTurnHandoff,
   summarizeRuntimeToolCalls,
@@ -48,6 +53,7 @@ import {
   runtimeEventText,
   structuredRuntimeOutput,
 } from "@/services/project-runtime/runtime-events.mjs";
+import { formatProjectToolResult } from "@/services/project-runtime/mcp-content.mjs";
 
 const compressProjectContext = promisify(zstdCompress);
 import {
@@ -691,6 +697,73 @@ test("Runtime exposes provider-safe native MCP names and maps them to authorized
   }
   assert.equal(nativeToolName("context.read"), "context_read");
   assert.equal(canonicalToolName("ANALYSIS", "source_checkpoint"), null);
+  assert.deepEqual(
+    ROLE_TO_CANONICAL_TOOLS.UI_DESIGN.filter(name => ["source.list", "source.read", "evidence.read"].includes(name)),
+    ["source.list", "source.read", "evidence.read"],
+  );
+});
+
+test("evidence reports are selected from the newest run and preserve their verified object reference", () => {
+  const report = latestEvidenceReport([
+    Object.freeze({
+      id: "run-new",
+      targetPlatform: "macos",
+      evidenceSummary: Object.freeze({ outputObjects: Object.freeze([
+        Object.freeze({
+          kind: "E2E_REPORT",
+          bucket: "artifacts",
+          key: "workspaces/w/projects/p/e2e.zip",
+          sha256: `sha256:${"a".repeat(64)}`,
+          sizeBytes: 1234,
+        }),
+      ]) }),
+    }),
+    Object.freeze({
+      id: "run-old",
+      targetPlatform: "linux",
+      evidenceSummary: Object.freeze({ outputObjects: Object.freeze([]) }),
+    }),
+  ]);
+  assert.deepEqual(report, {
+    runId: "run-new",
+    targetPlatform: "macos",
+    object: {
+      bucket: "artifacts",
+      key: "workspaces/w/projects/p/e2e.zip",
+      sha256: `sha256:${"a".repeat(64)}`,
+      sizeBytes: 1234,
+    },
+  });
+});
+
+test("MCP evidence output carries native image blocks without printing base64 in text", () => {
+  const bytes = Buffer.from("small visual evidence");
+  const encoded = bytes.toString("base64");
+  const formatted = formatProjectToolResult({
+    runs: [{ id: "run-1" }],
+    evidenceImages: [{
+      runId: "run-1",
+      targetPlatform: "macos",
+      checkpointId: "ready",
+      checkpointRole: "READY",
+      mimeType: "image/jpeg",
+      sizeBytes: bytes.length,
+      data: encoded,
+    }],
+  });
+  assert.equal(formatted.content.length, 2);
+  assert.equal(formatted.content[0]?.type, "text");
+  assert.doesNotMatch(String(formatted.content[0]?.text), new RegExp(encoded));
+  assert.deepEqual(formatted.content[1], { type: "image", data: encoded, mimeType: "image/jpeg" });
+  assert.deepEqual((formatted.structuredContent?.evidenceImages as readonly Record<string, unknown>[])[0], {
+    runId: "run-1",
+    targetPlatform: "macos",
+    checkpointId: "ready",
+    checkpointRole: "READY",
+    mimeType: "image/jpeg",
+    sizeBytes: bytes.length,
+    contentIndex: 1,
+  });
 });
 
 test("UI Design persistence tools expose exact input contracts", () => {
@@ -699,11 +772,126 @@ test("UI Design persistence tools expose exact input contracts", () => {
     additionalProperties: boolean;
   };
   const goals = toolInputSchema("e2e_goals.update") as { required: readonly string[] };
-  const handoff = toolInputSchema("handoff.create") as { required: readonly string[] };
+  const handoff = toolInputSchema("handoff.create") as {
+    required: readonly string[];
+    properties: { uiSpecification: { required: readonly string[]; properties: Record<string, Record<string, unknown>> } };
+  };
   assert.deepEqual(document.required, ["document"]);
   assert.equal(document.additionalProperties, false);
   assert.deepEqual(goals.required, ["goals"]);
   assert.deepEqual(handoff.required, ["toRole", "summary"]);
+  assert.deepEqual(handoff.properties.uiSpecification.required, [
+    "schema", "visualThesis", "referenceCanvas", "checkpoints", "assets",
+  ]);
+  assert.equal(handoff.properties.uiSpecification.properties.checkpoints?.minItems, 4);
+  const verdict = toolInputSchema("test.verdict") as {
+    properties: { uiReview: { properties: { checkpoints: { minItems: number; items: {
+      required: readonly string[];
+    } } } } };
+  };
+  assert.equal(verdict.properties.uiReview.properties.checkpoints.minItems, 4);
+  assert.ok(verdict.properties.uiReview.properties.checkpoints.items.required
+    .includes("mostlyBlankUndecoratedPanelPresent"));
+});
+
+test("UI Design handoff freezes principal compositions and required visual assets", () => {
+  const asset = {
+    key: "ready-world-art",
+    assetType: "background",
+    origin: "GENERATED",
+    description: "A world-facing gameplay backdrop that carries the screen identity.",
+    generationPrompt: "A hand-painted game world backdrop with a strong focal subject, bounded action-safe area, coherent light, and no text or interface chrome.",
+    dimensions: "1280x720",
+    expectedResourcePath: "res://assets/generated/ready-world-art.png",
+    targetId: "ready-world",
+    checkpointRole: "READY",
+  };
+  const checkpoint = (role: string, primaryActionId: string, anchors: readonly Record<string, unknown>[]) => ({
+    role,
+    purpose: `Make ${role} understandable and visually distinct.`,
+    silhouette: "One dominant world region with a subordinate action edge.",
+    focalPoint: "The current game decision.",
+    primaryActionId,
+    regions: [{ id: `${role.toLowerCase()}-surface`, x: 0, y: 0, width: 1280, height: 720, layer: 0,
+      purpose: "Own the complete frame.", content: "Representative game content and controls.",
+      overflow: "Reflow copy without moving the primary action offscreen." }],
+    visualAnchors: anchors,
+    negativeSpaceIntent: "Protect the subject and decision rather than leaving an empty panel.",
+    contentStressCase: "Long localized labels and maximum status values remain visible.",
+    thumbnailRead: "The subject and action remain legible at thumbnail size.",
+    acceptanceCriteria: ["The focal hierarchy is visible across the whole frame."],
+    forbiddenFallbacks: ["Stock controls in an accidental empty canvas."],
+  });
+  const codeAnchor = (targetId: string) => [{ kind: "CODE_NATIVE", targetId,
+    description: "Distinctive authored geometry and material behavior." }];
+  const value = {
+    schema: "deviludo.ui-specification",
+    visualThesis: "The player's verbs shape a distinctive full-canvas game surface.",
+    referenceCanvas: { width: 1280, height: 720 },
+    checkpoints: [
+      checkpoint("START", "start-game", codeAnchor("start-world")),
+      checkpoint("READY", "primary-action", [{ kind: "ASSET", key: asset.key,
+        targetId: asset.targetId, description: "The generated world art visibly owns the gameplay frame." }]),
+      checkpoint("PROGRESS", "continue-action", codeAnchor("progress-world")),
+      checkpoint("COMPLETION", "return-action", codeAnchor("completion-world")),
+    ],
+    assets: [asset],
+  };
+  const specification = normalizeUiSpecification(value);
+  assert.deepEqual(requiredUiAssetProblems(specification, []), ["missing:ready-world-art"]);
+  assert.deepEqual(requiredUiAssetProblems(specification, specification.assets as readonly Record<string, unknown>[]), []);
+  const context = updateProjectContext(createProjectContext({ workspaceId, projectId }), {
+    handoffs: [{ id: "ui-turn", fromRole: "UI_DESIGN", toRole: "DEVELOPMENT", summary: "Implement it",
+      uiSpecification: value, createdAt: new Date().toISOString() }],
+  });
+  assert.equal(latestUiSpecification(context)?.schema, "deviludo.ui-specification");
+  const uiReview = {
+    checkpoints: (specification.checkpoints as readonly Record<string, unknown>[]).map(candidate => {
+      const expectedCriteria = candidate.acceptanceCriteria as readonly string[];
+      const expectedFallbacks = candidate.forbiddenFallbacks as readonly string[];
+      return {
+        role: candidate.role,
+        checkpointId: `${String(candidate.role).toLowerCase()}-screenshot`,
+        screenshotDescription: "The captured pixels visibly match the approved composition and content.",
+        silhouetteMatches: true,
+        focalPointVisible: true,
+        primaryActionVisible: true,
+        negativeSpaceCompliant: true,
+        thumbnailReadMatches: true,
+        stressCaseHandled: true,
+        visualAnchorsVisible: true,
+        mostlyBlankUndecoratedPanelPresent: false,
+        acceptanceCriteria: expectedCriteria.map(criterion => ({ criterion, status: "PASS", evidence: "Visible in the screenshot." })),
+        forbiddenFallbacks: expectedFallbacks.map(fallback => ({ fallback, present: false, evidence: "Absent from the screenshot." })),
+      };
+    }),
+  };
+  assert.equal((normalizeUiTestReview(uiReview, specification).checkpoints as readonly unknown[]).length, 4);
+  const blankProgress = { checkpoints: uiReview.checkpoints.map(checkpoint => checkpoint.role === "PROGRESS"
+    ? { ...checkpoint, mostlyBlankUndecoratedPanelPresent: true }
+    : checkpoint) };
+  assert.throws(() => normalizeUiTestReview(blankProgress, specification), /cannot PASS UI checkpoint PROGRESS/);
+  assert.throws(() => normalizeUiTestReview({ checkpoints: uiReview.checkpoints.slice(1) }, specification),
+    /every principal UI screenshot checkpoint/);
+  assert.throws(() => normalizeUiSpecification({ ...value, checkpoints: value.checkpoints.slice(0, 3) }),
+    /principal screenshot checkpoint/);
+});
+
+test("Development asset planning advertises the durable generation contract", () => {
+  const schema = toolInputSchema("assets.plan") as {
+    required: readonly string[];
+    additionalProperties: boolean;
+    properties: { assets: { items: { required: readonly string[]; properties: Record<string, Record<string, unknown>> } } };
+  };
+  assert.deepEqual(schema.required, ["assets"]);
+  assert.equal(schema.additionalProperties, false);
+  assert.deepEqual(schema.properties.assets.items.required, [
+    "key", "assetType", "origin", "description", "expectedResourcePath", "targetId", "checkpointRole",
+  ]);
+  assert.deepEqual(schema.properties.assets.items.properties.assetType?.enum, [
+    "sprite", "animation", "background", "ui", "icon", "tileset", "music",
+  ]);
+  assert.match(String(schema.properties.assets.items.properties.expectedResourcePath?.pattern), /assets\/generated/);
 });
 
 test("Analysis MCP advertises the complete canonical report schema", () => {

@@ -11,6 +11,7 @@ COPY services/project-runtime/fixture-turn.mjs /usr/local/bin/deviludo-project-t
 COPY services/project-runtime/io.mjs /usr/local/bin/deviludo-runtime-io
 COPY services/project-runtime/volume-init.mjs /usr/local/bin/deviludo-runtime-volume-init
 COPY services/project-runtime/mcp-server.mjs /usr/local/bin/deviludo-mcp
+COPY services/project-runtime/mcp-content.mjs /usr/local/bin/mcp-content.mjs
 COPY services/project-runtime/tool-names.mjs /usr/local/bin/tool-names.mjs
 COPY services/project-runtime/skills /opt/deviludo/skills
 RUN find /opt/deviludo/skills -type f -name SKILL.md -print0 \

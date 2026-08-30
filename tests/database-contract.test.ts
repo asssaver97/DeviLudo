@@ -166,6 +166,8 @@ test("Builder, platform tests and Steam are the only disposable job settlements"
   assert.match(complete, /job\.kind = 'STEAM_PUBLISH'/);
   assert.match(complete, /INSERT INTO deviludo\.platform_test_runs/);
   assert.match(complete, /INSERT INTO deviludo\.test_evidence/);
+  assert.match(complete, /':test-verdict:e2e:' \|\| job\.id::text/);
+  assert.doesNotMatch(complete, /':test-verdict:plan:' \|\| v_plan_id::text/);
   assert.match(fail, /position\('CONFIGURATION:' IN p_reason\)[\s\S]*position\('CREDENTIAL:' IN p_reason\)/);
   assert.match(fail, /state = 'BLOCKED'/);
   assert.match(fail, /attempts_exhausted/);

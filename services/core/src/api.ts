@@ -131,7 +131,7 @@ export async function runApi(
   const objectStore = new CoreObjectStore();
   const projectSources = new ProjectSourceStore(config.projectsRoot);
   const runtimeRepository = new ProjectRuntimeRepository(database);
-  const projectRuntime = new ProjectRuntimeService(runtimeRepository, config.projectsRoot);
+  const projectRuntime = new ProjectRuntimeService(runtimeRepository, config.projectsRoot, undefined, objectStore);
   const pki = new E2ePkiIssuer();
   const telemetry = new UsageTelemetry(config);
   const app = Fastify({

@@ -61,6 +61,7 @@ if (request.mode === "COMPACT") {
   await callTool("handoff.create", {
     toRole: "DEVELOPMENT",
     summary: "Implement the approved gameplay and complete UI specification in the game source.",
+    uiSpecification: fixtureUiSpecification(),
   });
   structured = { handoff: { toRole: "DEVELOPMENT", goalCount: goals.length } };
   content = JSON.stringify(structured);
@@ -205,6 +206,43 @@ function decision(intent, targetRole, explicitExecution, actionable, summary) {
   return { intent, targetRole, explicitExecution, actionable, summary, workflowAction: intent === "CHANGE_REQUEST"
     ? explicitExecution ? "START_DEVELOPMENT" : "AWAITING_CONFIRMATION"
     : intent === "STOP" ? "STOP" : intent === "CONTINUE" ? "CONTINUE" : "NONE" };
+}
+
+function fixtureUiSpecification() {
+  const checkpoint = (role, primaryActionId, purpose) => ({
+    role,
+    purpose,
+    silhouette: "A full-canvas authored game surface with one dominant play region and a subordinate action edge.",
+    focalPoint: "The current player decision and its immediate consequence.",
+    primaryActionId,
+    regions: [{
+      id: `${role.toLowerCase()}-surface`, x: 0, y: 0, width: 1280, height: 720, layer: 0,
+      purpose: "Own the complete game frame.",
+      content: "Representative gameplay state, readable status, and the current action without placeholder emptiness.",
+      overflow: "Reflow bounded copy inside the region while preserving the primary action.",
+    }],
+    visualAnchors: [{
+      kind: "CODE_NATIVE", targetId: `${role.toLowerCase()}-surface`,
+      description: "A deliberately themed engine-native composition rather than stock controls.",
+    }],
+    negativeSpaceIntent: "Space separates the focal action from supporting status and is never an empty placeholder panel.",
+    contentStressCase: "Long localized labels and maximum values remain readable without moving the primary action offscreen.",
+    thumbnailRead: "The current state and primary action remain distinct at thumbnail size.",
+    acceptanceCriteria: ["The complete 1280x720 frame has a clear focal hierarchy."],
+    forbiddenFallbacks: ["Stock engine controls or a centered utility panel in an accidental void."],
+  });
+  return {
+    schema: "deviludo.ui-specification",
+    visualThesis: "A readable fixture game surface whose hierarchy changes visibly across the core lifecycle.",
+    referenceCanvas: { width: 1280, height: 720 },
+    checkpoints: [
+      checkpoint("START", "start-button", "Introduce the game and expose one unmistakable start action."),
+      checkpoint("READY", "primary-control", "Present the playable state and its primary action."),
+      checkpoint("PROGRESS", "feature-control", "Show the visible consequence of the primary action."),
+      checkpoint("COMPLETION", "complete-control", "Show the completed loop and its next action."),
+    ],
+    assets: [],
+  };
 }
 
 function specialistReply(role, language) {

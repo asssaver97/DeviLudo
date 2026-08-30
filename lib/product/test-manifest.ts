@@ -177,6 +177,9 @@ export function testManifestValidationError(value: unknown): string | null {
     || !adaptive.failureAssertions.every(validateProbeAssertion)) {
     return `adaptivePlayer.failureAssertions must contain valid Probe assertions${retiredProbeScopeHint(adaptive.failureAssertions)}`;
   }
+  if (adaptive.failureAssertions.every(isFreshStartAssertion)) {
+    return "adaptivePlayer.failureAssertions must be false at the required fresh MENU start; use a terminal failure state instead of the normal inactive-session lifecycle fields";
+  }
   if (!Number.isInteger(adaptive.rolloutTimeoutMs)
     || Number(adaptive.rolloutTimeoutMs) < MIN_ADAPTIVE_ROLLOUT_TIMEOUT_MS
     || Number(adaptive.rolloutTimeoutMs) > MAX_ADAPTIVE_ROLLOUT_TIMEOUT_MS) {
@@ -609,6 +612,7 @@ function validateAdaptivePlayer(
       && ["CHANGED", "NOT_EQUALS", "GREATER_THAN", "GREATER_THAN_OR_EQUALS"].includes(assertion.operator))
     || !Array.isArray(adaptive.failureAssertions) || adaptive.failureAssertions.length < 1 || adaptive.failureAssertions.length > 32
     || !adaptive.failureAssertions.every(validateProbeAssertion)
+    || adaptive.failureAssertions.every(isFreshStartAssertion)
     || !Number.isInteger(adaptive.rolloutTimeoutMs)
     || Number(adaptive.rolloutTimeoutMs) < MIN_ADAPTIVE_ROLLOUT_TIMEOUT_MS
     || Number(adaptive.rolloutTimeoutMs) > MAX_ADAPTIVE_ROLLOUT_TIMEOUT_MS
@@ -621,6 +625,16 @@ function validateAdaptivePlayer(
 
 function isStableId(value: string): boolean {
   return /^[a-z0-9][a-z0-9-]{0,119}$/.test(value);
+}
+
+function isFreshStartAssertion(value: unknown): boolean {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+  const assertion = value as Record<string, unknown>;
+  if (assertion.source !== "STATE" || assertion.operator !== "EQUALS") return false;
+  return (assertion.key === "screen_mode" && assertion.value === "MENU")
+    || (assertion.key === "session_active" && assertion.value === false)
+    || (assertion.key === "gameplay_input_enabled" && assertion.value === false)
+    || (assertion.key === "blocking_layer_count" && assertion.value === 0);
 }
 
 function testPlanPlaceholder(value: unknown, path = "testManifest"): string | null {

@@ -10,6 +10,7 @@ COPY services/project-runtime/runtime.mjs /usr/local/bin/deviludo-project-runtim
 COPY services/project-runtime/turn.mjs /usr/local/bin/deviludo-project-turn
 COPY services/project-runtime/runtime-events.mjs /usr/local/bin/runtime-events.mjs
 COPY services/project-runtime/mcp-server.mjs /usr/local/bin/deviludo-mcp
+COPY services/project-runtime/mcp-content.mjs /usr/local/bin/mcp-content.mjs
 COPY services/project-runtime/tool-names.mjs /usr/local/bin/tool-names.mjs
 COPY services/project-runtime/io.mjs /usr/local/bin/deviludo-runtime-io
 COPY services/project-runtime/volume-init.mjs /usr/local/bin/deviludo-runtime-volume-init

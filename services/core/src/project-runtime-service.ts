@@ -1,6 +1,8 @@
-import { lstat, mkdir, readFile, readdir, rm, writeFile } from "node:fs/promises";
+import { lstat, mkdir, mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import { createHash, randomUUID } from "node:crypto";
 import { join, relative, resolve, sep } from "node:path";
+import { tmpdir } from "node:os";
+import sharp from "sharp";
 import { PROJECT_RUNTIME_ROLES, type E2eGoal, type ProjectRuntimeRole } from "@/lib/product/contracts";
 import { parseProjectDocumentContent, type ProjectDocumentContent } from "@/lib/product/project-document";
 import {
@@ -25,6 +27,7 @@ import { ProcessProjectRuntimeBackend, type ProjectRuntimeBackend } from "./proj
 import { ProjectRuntimeRepository, type ProjectContextSeed } from "./project-runtime-repository";
 import { ProjectSourceStore } from "./project-sources";
 import type { StoredInstanceAgentSettings } from "./repository";
+import { extractAndValidateEvidenceBundle } from "@/scripts/e2e-evidence.mjs";
 
 const ROLE_TO_MODEL = Object.freeze({
   INTENT: "intent",
@@ -39,7 +42,7 @@ const ROLE_TOOLS = Object.freeze({
   INTENT: new Set(["context.read", "conversation.reply", "workflow.intent_decision", "workflow.stop", "workflow.continue"]),
   ANALYSIS: new Set(["context.read", "source.list", "source.read", "diagnostics.run", "context.update_analysis", "conversation.reply"]),
   DESIGN: new Set(["context.read", "requirements.update", "project_document.update", "e2e_goals.update", "conversation.reply", "handoff.create"]),
-  UI_DESIGN: new Set(["context.read", "project_document.update", "e2e_goals.update", "conversation.reply", "handoff.create"]),
+  UI_DESIGN: new Set(["context.read", "source.list", "source.read", "evidence.read", "project_document.update", "e2e_goals.update", "conversation.reply", "handoff.create"]),
   DEVELOPMENT: new Set(["context.read", "source.list", "source.read", "source.checkpoint", "assets.plan", "assets.cleanup", "build.request", "conversation.reply", "handoff.create"]),
   TEST: new Set(["context.read", "source.list", "source.read", "test_plan.replace", "e2e.start", "e2e.observe", "evidence.read", "test.verdict", "conversation.reply", "handoff.create"]),
 });
@@ -50,6 +53,21 @@ const LIFECYCLE_RETRY_INTERVAL_MS = 1_000;
 // Match the scheduler's bounded lifecycle lease. A workflow attempt must not
 // be consumed while another owner can still be legitimately compacting it.
 const LIFECYCLE_RETRY_LIMIT = 900;
+const AGENT_EVIDENCE_ARCHIVE_MAX_BYTES = 128 * 1024 * 1024;
+const AGENT_EVIDENCE_IMAGE_MAX_BYTES = 3 * 1024 * 1024;
+const AGENT_EVIDENCE_ROLES = Object.freeze(["START", "READY", "PROGRESS", "COMPLETION"] as const);
+
+type ProjectArtifactReader = Readonly<{
+  readProjectArtifact(input: Readonly<{
+    workspaceId: string;
+    projectId: string;
+    bucket: string;
+    key: string;
+    sha256: string;
+    sizeBytes: number;
+    maximumBytes: number;
+  }>): Promise<Buffer>;
+}>;
 
 type ProjectRuntimeTurnInput = Readonly<{
   workspaceId: string;
@@ -76,6 +94,7 @@ export class ProjectRuntimeService {
     private readonly repository: ProjectRuntimeRepository,
     private readonly projectsRoot: string,
     private readonly backend: ProjectRuntimeBackend = new ProcessProjectRuntimeBackend(),
+    private readonly artifactReader?: ProjectArtifactReader,
   ) {
     this.contexts = new ProjectContextStore(projectsRoot);
     this.sources = new ProjectSourceStore(projectsRoot);
@@ -600,10 +619,16 @@ export class ProjectRuntimeService {
       if (!PROJECT_RUNTIME_ROLES.includes(toRole as ProjectRuntimeRole) || toRole === input.role || !summary) {
         throw new Error("Agent handoff requires a different valid role and a non-empty summary");
       }
+      const uiSpecification = input.role === "UI_DESIGN" && toRole === "DEVELOPMENT"
+        ? normalizeUiSpecification(handoff.uiSpecification)
+        : null;
+      if (handoff.uiSpecification !== undefined && !uiSpecification) {
+        throw new Error("Only UI Design may attach a UI specification to its Development handoff");
+      }
       return this.mutateResult(input.workspaceId, input.projectId, current => updateProjectContext(current, {
         handoffs: Object.freeze([...current.handoffs, Object.freeze({
           ...handoff, id: input.turnId, fromRole: input.role, toRole,
-          summary, createdAt: new Date().toISOString(),
+          summary, ...(uiSpecification ? { uiSpecification } : {}), createdAt: new Date().toISOString(),
         })].slice(-100)),
       }));
     }
@@ -643,14 +668,29 @@ export class ProjectRuntimeService {
         planSha256: stored.sha256,
       });
     }
-    if (input.name === "test.verdict") return this.updateField(input.workspaceId, input.projectId, "testSummary", boundedObject(input.arguments));
+    if (input.name === "test.verdict") {
+      const testSummary = boundedObject(input.arguments);
+      const current = await this.readContext(input.workspaceId, input.projectId);
+      const uiSpecification = latestUiSpecification(current);
+      if (String(testSummary.verdict ?? "") === "PASS" && uiSpecification) {
+        const uiReview = normalizeUiTestReview(testSummary.uiReview, uiSpecification);
+        return this.updateField(input.workspaceId, input.projectId, "testSummary",
+          Object.freeze({ ...testSummary, uiReview }));
+      }
+      return this.updateField(input.workspaceId, input.projectId, "testSummary", testSummary);
+    }
     if (input.name === "e2e.start") {
       const plan = await this.repository.readLatestTestPlan(input.workspaceId, input.projectId);
       if (!plan) throw new Error("The Test Agent must persist a complete plan before starting E2E");
       return Object.freeze({ accepted: true, plan, delegatedTo: "controlled-host-gateway" });
     }
-    if (input.name === "e2e.observe" || input.name === "evidence.read") {
+    if (input.name === "e2e.observe") {
       return Object.freeze({ runs: await this.repository.readTestEvidence(input.workspaceId, input.projectId) });
+    }
+    if (input.name === "evidence.read") {
+      const runs = await this.repository.readTestEvidence(input.workspaceId, input.projectId);
+      const visualEvidence = await this.readVisualEvidence(input.workspaceId, input.projectId, runs);
+      return Object.freeze({ runs, ...visualEvidence });
     }
     if (input.name === "diagnostics.run") {
       return Object.freeze({ accepted: true, delegatedTo: "controlled-host-gateway", bounded: true });
@@ -658,8 +698,90 @@ export class ProjectRuntimeService {
     throw new Error(`Project Runtime tool is not implemented: ${input.name}`);
   }
 
+  private async readVisualEvidence(
+    workspaceId: string,
+    projectId: string,
+    runs: readonly Readonly<Record<string, unknown>>[],
+  ): Promise<Readonly<Record<string, unknown>>> {
+    const selected = latestEvidenceReport(runs);
+    if (!selected) return Object.freeze({ visualEvidence: Object.freeze({ available: false, reason: "NO_E2E_REPORT" }) });
+    if (!this.artifactReader) {
+      return Object.freeze({ visualEvidence: Object.freeze({
+        available: false,
+        reason: "ARTIFACT_READER_UNAVAILABLE",
+        runId: selected.runId,
+      }) });
+    }
+    const archive = await this.artifactReader.readProjectArtifact({
+      workspaceId,
+      projectId,
+      ...selected.object,
+      maximumBytes: AGENT_EVIDENCE_ARCHIVE_MAX_BYTES,
+    });
+    const directory = await mkdtemp(join(tmpdir(), "deviludo-agent-evidence-"));
+    try {
+      const archivePath = join(directory, "evidence.zip");
+      const extractionRoot = join(directory, "extracted");
+      await writeFile(archivePath, archive, { mode: 0o600 });
+      const validated = await extractAndValidateEvidenceBundle(
+        archivePath,
+        extractionRoot,
+        AGENT_EVIDENCE_ARCHIVE_MAX_BYTES,
+      );
+      const reportCheckpoints = Array.isArray(validated.report.checkpoints)
+        ? validated.report.checkpoints
+        : [];
+      const evidenceImages: Readonly<Record<string, unknown>>[] = [];
+      for (const role of AGENT_EVIDENCE_ROLES) {
+        const checkpoint = reportCheckpoints.find(item => {
+          if (!item || typeof item !== "object" || Array.isArray(item)) return false;
+          const record = item as Record<string, unknown>;
+          return record.role === role && record.status === "PASSED" && typeof record.screenshot === "string";
+        }) as Record<string, unknown> | undefined;
+        if (!checkpoint) continue;
+        const relativeScreenshot = String(checkpoint.screenshot);
+        const screenshotPath = resolve(extractionRoot, relativeScreenshot);
+        const boundedPath = relative(extractionRoot, screenshotPath);
+        if (!boundedPath || boundedPath === ".." || boundedPath.startsWith(`..${sep}`)) {
+          throw new Error("E2E screenshot escaped the validated evidence root");
+        }
+        const original = await readFile(screenshotPath);
+        if (original.length < 1 || original.length > AGENT_EVIDENCE_IMAGE_MAX_BYTES) {
+          throw new Error("E2E screenshot size is invalid for Agent visual review");
+        }
+        const image = await sharp(original)
+          .resize({ width: 960, height: 540, fit: "inside", withoutEnlargement: true })
+          .jpeg({ quality: 84, chromaSubsampling: "4:4:4" })
+          .toBuffer();
+        evidenceImages.push(Object.freeze({
+          runId: selected.runId,
+          targetPlatform: selected.targetPlatform,
+          checkpointId: typeof checkpoint.checkpointId === "string" ? checkpoint.checkpointId : role.toLowerCase(),
+          checkpointRole: role,
+          mimeType: "image/jpeg",
+          sizeBytes: image.length,
+          data: image.toString("base64"),
+        }));
+      }
+      return Object.freeze({
+        visualEvidence: Object.freeze({
+          available: evidenceImages.length > 0,
+          runId: selected.runId,
+          targetPlatform: selected.targetPlatform,
+          reportOutcome: validated.report.outcome,
+          imageCount: evidenceImages.length,
+        }),
+        evidenceImages: Object.freeze(evidenceImages),
+      });
+    } finally {
+      await rm(directory, { recursive: true, force: true }).catch(() => undefined);
+    }
+  }
+
   private async checkpointSource(workspaceId: string, projectId: string): Promise<Readonly<Record<string, unknown>>> {
     const context = await this.readContext(workspaceId, projectId);
+    const uiSpecification = latestUiSpecification(context);
+    if (uiSpecification) assertRequiredUiAssets(uiSpecification, context.assetPlan);
     const revision = (context.source?.revision ?? 0) + 1;
     const directory = join(resolve(this.projectsRoot), "workspaces", workspaceId, "projects", projectId, "runtime", "worktree");
     await this.requireProbePublisher(directory);
@@ -891,6 +1013,8 @@ export class ProjectRuntimeService {
   ): Promise<Readonly<Record<string, unknown>>> {
     const next = normalizeAssetPlan(requested);
     const current = await this.readContext(workspaceId, projectId);
+    const uiSpecification = latestUiSpecification(current);
+    if (uiSpecification) assertRequiredUiAssets(uiSpecification, next);
     const nextKeys = new Set(next.map(asset => String(asset.key)));
     const nextPaths = new Set(next.map(asset => assetSourcePath(asset)).filter((path): path is string => path !== null));
     const retainedUploads = current.assetPlan.filter(asset => isUserUpload(asset) && !nextKeys.has(String(asset.key ?? "")));
@@ -907,6 +1031,11 @@ export class ProjectRuntimeService {
     });
     const contextAfter = await this.mutateContext(workspaceId, projectId,
       value => updateProjectContext(value, { assetPlan: retained }));
+    const workflowId = String(contextAfter.workflow.id ?? "");
+    if (!/^[0-9a-f-]{36}$/i.test(workflowId)) throw new Error("Asset plan workflow id is invalid");
+    const manifest = await this.repository.replaceAssetManifestPlan({
+      workspaceId, projectId, workflowId, assets: retained,
+    });
     const queuedObjects = await this.repository.queueGeneratedAssetCleanup({ workspaceId, objects });
     let removedFiles = 0;
     for (const asset of retired) {
@@ -919,6 +1048,8 @@ export class ProjectRuntimeService {
       contextRevision: contextAfter.revision,
       retainedUploads: retainedUploads.length,
       retiredAssets: retired.length,
+      manifestId: manifest.manifestId,
+      plannedAssets: manifest.planned,
       queuedObjects,
       removedFiles,
     });
@@ -1258,6 +1389,11 @@ function normalizeAssetPlan(value: readonly Readonly<Record<string, unknown>>[])
     const resource = String(asset.expectedResourcePath ?? "");
     const music = assetType === "music";
     const description = String(asset.description ?? "").trim();
+    const generationPrompt = String(asset.generationPrompt ?? "").trim();
+    const targetId = String(asset.targetId ?? "");
+    const checkpointRole = String(asset.checkpointRole ?? "").toUpperCase();
+    const visualTypes = ["sprite", "animation", "background", "ui", "icon", "tileset"];
+    const generatedResource = `res://assets/generated/${key}.png`;
     const musicResourcePrefix = `res://assets/generated/${key}.`;
     const musicResource = musicResourcePrefix.length < resource.length
       && ["mp3", "ogg", "wav"].includes(resource.slice(musicResourcePrefix.length).toLowerCase());
@@ -1270,14 +1406,25 @@ function normalizeAssetPlan(value: readonly Readonly<Record<string, unknown>>[])
           || description.length < 1 || description.length > 2_000
           || !musicResource
           || musicGenerationFields
-        : !/^res:\/\/[A-Za-z0-9][A-Za-z0-9._/-]{0,499}\.(?:png|jpe?g|webp|svg)$/i.test(resource))) {
-      throw new Error("Development Agent returned an invalid or duplicate asset plan item");
+        : !visualTypes.includes(assetType)
+          || description.length < 1 || description.length > 2_000
+          || !/^[a-z0-9][a-z0-9-]{0,119}$/.test(targetId)
+          || !["START", "READY", "ACTION", "PROGRESS", "COMPLETION"].includes(checkpointRole)
+          || resource !== generatedResource
+          || (origin === "GENERATED" && (generationPrompt.length < 20 || generationPrompt.length > 4_000))
+          || (origin === "USER_UPLOAD" && generationPrompt.length > 0)
+          || (asset.dimensions !== undefined && !/^\d{1,5}x\d{1,5}$/.test(String(asset.dimensions)))
+          || (asset.frameCount !== undefined
+            && (!Number.isSafeInteger(Number(asset.frameCount)) || Number(asset.frameCount) < 1 || Number(asset.frameCount) > 4_096)))) {
+      throw new Error("Agent returned an invalid or duplicate asset plan item");
     }
     keys.add(key);
     const normalized = {
       ...asset,
       key,
       ...(music ? { assetType: "music", description } : {}),
+      ...(!music ? { assetType, description, targetId, checkpointRole,
+        ...(origin === "GENERATED" ? { generationPrompt } : {}) } : {}),
       origin,
       expectedResourcePath: resource,
       ...(!music ? { sourcePath: assetSourcePath(asset) ?? resource.slice("res://".length) } : {}),
@@ -1286,8 +1433,309 @@ function normalizeAssetPlan(value: readonly Readonly<Record<string, unknown>>[])
   }));
 }
 
+const UI_SPECIFICATION_SCHEMA = "deviludo.ui-specification";
+const UI_SPECIFICATION_ROLES = Object.freeze(["START", "READY", "ACTION", "PROGRESS", "COMPLETION"]);
+const PRINCIPAL_UI_SPECIFICATION_ROLES = Object.freeze(["START", "READY", "PROGRESS", "COMPLETION"]);
+const UI_SPECIFICATION_ASSET_FIELDS = Object.freeze([
+  "key", "assetType", "origin", "description", "generationPrompt", "dimensions",
+  "frameCount", "expectedResourcePath", "targetId", "checkpointRole",
+]);
+
+export function normalizeUiSpecification(value: unknown): Readonly<Record<string, unknown>> {
+  const specification = boundedObject(value);
+  const canvas = boundedObject(specification.referenceCanvas);
+  if (specification.schema !== UI_SPECIFICATION_SCHEMA || canvas.width !== 1280 || canvas.height !== 720
+    || typeof specification.visualThesis !== "string" || !specification.visualThesis.trim()
+    || specification.visualThesis.length > 4_000) {
+    throw new Error("UI Design Agent returned an invalid UI specification header");
+  }
+  assertOnlyKeys(specification, ["schema", "visualThesis", "referenceCanvas", "checkpoints", "assets"], "UI specification");
+  assertOnlyKeys(canvas, ["width", "height"], "UI reference canvas");
+  if (!Array.isArray(specification.assets) || specification.assets.length > 500) {
+    throw new Error("UI Design Agent returned an invalid UI asset contract");
+  }
+  const assets = normalizeAssetPlan(arrayOfObjects(specification.assets));
+  if (assets.some(asset => asset.assetType === "music")) {
+    throw new Error("UI Design Agent cannot include upload-only music in its visual asset contract");
+  }
+  if (!Array.isArray(specification.checkpoints)
+    || specification.checkpoints.length < PRINCIPAL_UI_SPECIFICATION_ROLES.length
+    || specification.checkpoints.length > 32) {
+    throw new Error("UI Design Agent must specify every principal screenshot checkpoint");
+  }
+  const assetByKey = new Map(assets.map(asset => [String(asset.key), asset]));
+  const assetAnchors = new Set<string>();
+  const principalCounts = new Map(PRINCIPAL_UI_SPECIFICATION_ROLES.map(role => [role, 0]));
+  const checkpoints = specification.checkpoints.map(candidate => {
+    const checkpoint = boundedObject(candidate);
+    assertOnlyKeys(checkpoint, [
+      "role", "purpose", "silhouette", "focalPoint", "primaryActionId", "regions",
+      "visualAnchors", "negativeSpaceIntent", "contentStressCase", "thumbnailRead",
+      "acceptanceCriteria", "forbiddenFallbacks",
+    ], "UI checkpoint");
+    const role = String(checkpoint.role ?? "");
+    if (!UI_SPECIFICATION_ROLES.includes(role)) throw new Error("UI checkpoint role is invalid");
+    if (principalCounts.has(role)) principalCounts.set(role, Number(principalCounts.get(role)) + 1);
+    for (const field of ["purpose", "silhouette", "focalPoint", "negativeSpaceIntent", "contentStressCase", "thumbnailRead"]) {
+      requireUiSpecificationText(checkpoint[field], `UI checkpoint ${field}`, field === "contentStressCase" ? 4_000 : 2_000);
+    }
+    if (!isStableUiId(checkpoint.primaryActionId)) throw new Error("UI checkpoint primary action ID is invalid");
+    if (!Array.isArray(checkpoint.regions) || checkpoint.regions.length < 1 || checkpoint.regions.length > 32) {
+      throw new Error("UI checkpoint requires bounded spatial regions");
+    }
+    const regionIds = new Set<string>();
+    const regions = checkpoint.regions.map(candidateRegion => {
+      const region = boundedObject(candidateRegion);
+      assertOnlyKeys(region, ["id", "x", "y", "width", "height", "layer", "purpose", "content", "overflow"], "UI region");
+      const id = String(region.id ?? "");
+      const x = Number(region.x); const y = Number(region.y);
+      const width = Number(region.width); const height = Number(region.height); const layer = Number(region.layer);
+      if (!isStableUiId(id) || regionIds.has(id)
+        || ![x, y, width, height, layer].every(Number.isSafeInteger)
+        || x < 0 || y < 0 || width < 1 || height < 1 || layer < 0 || layer > 100
+        || x + width > 1280 || y + height > 720) {
+        throw new Error("UI checkpoint contains an invalid or out-of-canvas region");
+      }
+      regionIds.add(id);
+      requireUiSpecificationText(region.purpose, "UI region purpose");
+      requireUiSpecificationText(region.content, "UI region representative content", 4_000);
+      requireUiSpecificationText(region.overflow, "UI region overflow rule");
+      return Object.freeze({ ...region, id, x, y, width, height, layer });
+    });
+    if (!Array.isArray(checkpoint.visualAnchors)
+      || checkpoint.visualAnchors.length < 1 || checkpoint.visualAnchors.length > 32) {
+      throw new Error("Every UI checkpoint requires a visible identity anchor");
+    }
+    const visualAnchors = checkpoint.visualAnchors.map(candidateAnchor => {
+      const anchor = boundedObject(candidateAnchor);
+      assertOnlyKeys(anchor, ["kind", "key", "targetId", "description"], "UI visual anchor");
+      const kind = String(anchor.kind ?? "");
+      const targetId = String(anchor.targetId ?? "");
+      const key = typeof anchor.key === "string" ? anchor.key : null;
+      if (!["ASSET", "CODE_NATIVE"].includes(kind) || !isStableUiId(targetId)) {
+        throw new Error("UI checkpoint visual anchor is invalid");
+      }
+      requireUiSpecificationText(anchor.description, "UI visual anchor description");
+      if (kind === "ASSET") {
+        const asset = key ? assetByKey.get(key) : null;
+        if (!asset || asset.targetId !== targetId || asset.checkpointRole !== role) {
+          throw new Error("UI checkpoint asset anchor does not match its asset contract");
+        }
+        assetAnchors.add(key!);
+      } else if (key !== null) {
+        throw new Error("Code-native UI anchors cannot claim a generated asset key");
+      }
+      return Object.freeze({ ...anchor, kind, targetId, ...(key ? { key } : {}) });
+    });
+    const acceptanceCriteria = uiSpecificationTextList(checkpoint.acceptanceCriteria, "UI checkpoint acceptance criteria");
+    const forbiddenFallbacks = uiSpecificationTextList(checkpoint.forbiddenFallbacks, "UI checkpoint forbidden fallbacks");
+    return Object.freeze({ ...checkpoint, role, regions: Object.freeze(regions),
+      visualAnchors: Object.freeze(visualAnchors), acceptanceCriteria, forbiddenFallbacks });
+  });
+  if (PRINCIPAL_UI_SPECIFICATION_ROLES.some(role => principalCounts.get(role) !== 1)) {
+    throw new Error("UI specification must contain exactly one START, READY, PROGRESS, and COMPLETION checkpoint");
+  }
+  const unanchoredAssets = assets.filter(asset => !assetAnchors.has(String(asset.key))).map(asset => String(asset.key));
+  if (unanchoredAssets.length > 0) {
+    throw new Error(`UI asset contract is not visibly anchored at its checkpoint: ${unanchoredAssets.join(", ")}`);
+  }
+  return Object.freeze({
+    schema: UI_SPECIFICATION_SCHEMA,
+    visualThesis: specification.visualThesis.trim(),
+    referenceCanvas: Object.freeze({ width: 1280, height: 720 }),
+    checkpoints: Object.freeze(checkpoints),
+    assets,
+  });
+}
+
+export function latestUiSpecification(
+  context: Pick<ProjectContext, "handoffs">,
+): Readonly<Record<string, unknown>> | null {
+  for (let index = context.handoffs.length - 1; index >= 0; index -= 1) {
+    const handoff = context.handoffs[index];
+    if (handoff?.fromRole !== "UI_DESIGN" || handoff.toRole !== "DEVELOPMENT"
+      || handoff.uiSpecification === undefined) continue;
+    return normalizeUiSpecification(handoff.uiSpecification);
+  }
+  return null;
+}
+
+export function normalizeUiTestReview(
+  value: unknown,
+  specification: Readonly<Record<string, unknown>>,
+): Readonly<Record<string, unknown>> {
+  const review = boundedObject(value);
+  assertOnlyKeys(review, ["checkpoints"], "UI test review");
+  if (!Array.isArray(review.checkpoints) || review.checkpoints.length !== PRINCIPAL_UI_SPECIFICATION_ROLES.length) {
+    throw new Error("Test Agent cannot PASS without reviewing every principal UI screenshot checkpoint");
+  }
+  const specificationByRole = new Map(arrayOfObjects(specification.checkpoints)
+    .filter(checkpoint => PRINCIPAL_UI_SPECIFICATION_ROLES.includes(String(checkpoint.role ?? "")))
+    .map(checkpoint => [String(checkpoint.role), checkpoint]));
+  const seenRoles = new Set<string>();
+  const checkpoints = review.checkpoints.map(candidate => {
+    const checkpoint = boundedObject(candidate);
+    assertOnlyKeys(checkpoint, [
+      "role", "checkpointId", "screenshotDescription", "silhouetteMatches", "focalPointVisible",
+      "primaryActionVisible", "negativeSpaceCompliant", "thumbnailReadMatches", "stressCaseHandled",
+      "visualAnchorsVisible", "mostlyBlankUndecoratedPanelPresent", "acceptanceCriteria",
+      "forbiddenFallbacks",
+    ], "UI checkpoint review");
+    const role = String(checkpoint.role ?? "");
+    const expected = specificationByRole.get(role);
+    if (!expected || seenRoles.has(role)) {
+      throw new Error("Test Agent UI review has a missing, duplicate, or invalid principal checkpoint role");
+    }
+    seenRoles.add(role);
+    requireUiSpecificationText(checkpoint.checkpointId, "UI review screenshot checkpoint ID", 500);
+    requireUiSpecificationText(checkpoint.screenshotDescription, "UI review screenshot description", 4_000);
+    const passingBooleanFields = [
+      "silhouetteMatches", "focalPointVisible", "primaryActionVisible", "negativeSpaceCompliant",
+      "thumbnailReadMatches", "stressCaseHandled", "visualAnchorsVisible",
+    ];
+    const failedFields = passingBooleanFields.filter(field => checkpoint[field] !== true);
+    if (failedFields.length > 0 || checkpoint.mostlyBlankUndecoratedPanelPresent !== false) {
+      throw new Error(`Test Agent cannot PASS UI checkpoint ${role}: ${[
+        ...failedFields,
+        ...(checkpoint.mostlyBlankUndecoratedPanelPresent !== false
+          ? ["mostlyBlankUndecoratedPanelPresent"] : []),
+      ].join(", ")}`);
+    }
+    const expectedCriteria = uiSpecificationTextList(expected.acceptanceCriteria,
+      "UI checkpoint acceptance criteria");
+    const acceptanceCriteria = normalizeUiCriterionReview(
+      checkpoint.acceptanceCriteria,
+      expectedCriteria,
+      "criterion",
+      result => result.status === "PASS",
+      `UI checkpoint ${role} acceptance criterion`,
+    );
+    const expectedFallbacks = uiSpecificationTextList(expected.forbiddenFallbacks,
+      "UI checkpoint forbidden fallbacks");
+    const forbiddenFallbacks = normalizeUiCriterionReview(
+      checkpoint.forbiddenFallbacks,
+      expectedFallbacks,
+      "fallback",
+      result => result.present === false,
+      `UI checkpoint ${role} forbidden fallback`,
+    );
+    return Object.freeze({ ...checkpoint, role, acceptanceCriteria, forbiddenFallbacks });
+  });
+  if (PRINCIPAL_UI_SPECIFICATION_ROLES.some(role => !seenRoles.has(role))) {
+    throw new Error("Test Agent cannot PASS without reviewing every principal UI screenshot checkpoint");
+  }
+  return Object.freeze({ checkpoints: Object.freeze(checkpoints) });
+}
+
+function normalizeUiCriterionReview(
+  value: unknown,
+  expected: readonly string[],
+  textField: "criterion" | "fallback",
+  passes: (result: Readonly<Record<string, unknown>>) => boolean,
+  label: string,
+): readonly Readonly<Record<string, unknown>>[] {
+  if (!Array.isArray(value) || value.length !== expected.length) {
+    throw new Error(`${label} review must cover the approved contract exactly`);
+  }
+  return Object.freeze(value.map((candidate, index) => {
+    const result = boundedObject(candidate);
+    const keys = textField === "criterion"
+      ? ["criterion", "status", "evidence"]
+      : ["fallback", "present", "evidence"];
+    assertOnlyKeys(result, keys, label);
+    if (result[textField] !== expected[index]) {
+      throw new Error(`${label} review must preserve the approved contract text and order`);
+    }
+    requireUiSpecificationText(result.evidence, `${label} evidence`, 4_000);
+    if (!passes(result)) throw new Error(`Test Agent cannot PASS a failed ${label}`);
+    return Object.freeze({ ...result, [textField]: expected[index] });
+  }));
+}
+
+export function requiredUiAssetProblems(
+  specification: Readonly<Record<string, unknown>>,
+  candidatePlan: readonly Readonly<Record<string, unknown>>[],
+): readonly string[] {
+  const expected = arrayOfObjects(specification.assets);
+  const actualByKey = new Map(candidatePlan.map(asset => [String(asset.key ?? ""), asset]));
+  return Object.freeze(expected.flatMap(asset => {
+    const actual = actualByKey.get(String(asset.key));
+    if (!actual) return [`missing:${String(asset.key)}`];
+    const mismatch = UI_SPECIFICATION_ASSET_FIELDS.some(field => JSON.stringify(actual[field] ?? null) !== JSON.stringify(asset[field] ?? null));
+    return mismatch ? [`mismatch:${String(asset.key)}`] : [];
+  }));
+}
+
+function assertRequiredUiAssets(
+  specification: Readonly<Record<string, unknown>>,
+  candidatePlan: readonly Readonly<Record<string, unknown>>[],
+): void {
+  const problems = requiredUiAssetProblems(specification, candidatePlan);
+  if (problems.length > 0) {
+    throw new Error(`Development Agent asset plan does not implement the approved UI asset contract: ${problems.join(", ")}`);
+  }
+}
+
+function requireUiSpecificationText(value: unknown, label: string, maximum = 2_000): asserts value is string {
+  if (typeof value !== "string" || !value.trim() || value.length > maximum) throw new Error(`${label} is invalid`);
+}
+
+function uiSpecificationTextList(value: unknown, label: string): readonly string[] {
+  if (!Array.isArray(value) || value.length < 1 || value.length > 24) throw new Error(`${label} is invalid`);
+  const result = value.map(item => {
+    requireUiSpecificationText(item, label);
+    return item.trim();
+  });
+  return Object.freeze(result);
+}
+
+function isStableUiId(value: unknown): boolean {
+  return typeof value === "string" && /^[a-z0-9][a-z0-9-]{0,119}$/.test(value);
+}
+
+function assertOnlyKeys(value: Readonly<Record<string, unknown>>, keys: readonly string[], label: string): void {
+  const allowed = new Set(keys);
+  if (Object.keys(value).some(key => !allowed.has(key))) throw new Error(`${label} contains unsupported fields`);
+}
+
 function isUserUpload(asset: Readonly<Record<string, unknown>>): boolean {
   return String(asset.origin ?? "").toUpperCase() === "USER_UPLOAD";
+}
+
+export function latestEvidenceReport(
+  runs: readonly Readonly<Record<string, unknown>>[],
+): Readonly<{
+  runId: string;
+  targetPlatform: string;
+  object: Readonly<{
+    bucket: string;
+    key: string;
+    sha256: string;
+    sizeBytes: number;
+  }>;
+}> | null {
+  for (const run of runs) {
+    const summary = run.evidenceSummary;
+    if (!summary || typeof summary !== "object" || Array.isArray(summary)) continue;
+    const outputs = (summary as Record<string, unknown>).outputObjects;
+    if (!Array.isArray(outputs)) continue;
+    const report = outputs.find(candidate => candidate && typeof candidate === "object"
+      && !Array.isArray(candidate) && (candidate as Record<string, unknown>).kind === "E2E_REPORT") as Record<string, unknown> | undefined;
+    if (!report || typeof report.bucket !== "string" || typeof report.key !== "string"
+      || typeof report.sha256 !== "string" || !Number.isSafeInteger(report.sizeBytes)
+      || typeof run.id !== "string" || typeof run.targetPlatform !== "string") continue;
+    return Object.freeze({
+      runId: run.id,
+      targetPlatform: run.targetPlatform,
+      object: Object.freeze({
+        bucket: report.bucket,
+        key: report.key,
+        sha256: report.sha256,
+        sizeBytes: Number(report.sizeBytes),
+      }),
+    });
+  }
+  return null;
 }
 
 function assetSourcePath(asset: Readonly<Record<string, unknown>>): string | null {

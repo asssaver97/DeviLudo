@@ -179,6 +179,39 @@ export class CoreObjectStore {
     return Object.freeze({ content, contentType: image.contentType });
   }
 
+  /**
+   * Read a previously verified project artifact for an internal consumer.
+   * The caller supplies the durable object reference, but the store still
+   * re-checks tenant scope, size and digest before returning any bytes.
+   */
+  async readProjectArtifact(input: Readonly<{
+    workspaceId: string;
+    projectId: string;
+    bucket: string;
+    key: string;
+    sha256: string;
+    sizeBytes: number;
+    maximumBytes: number;
+  }>): Promise<Buffer> {
+    const prefix = `workspaces/${input.workspaceId}/projects/${input.projectId}/`;
+    if (input.bucket !== this.bucket || !input.key.startsWith(prefix)
+      || input.key.includes("\0") || input.key.split("/").includes("..")
+      || !/^sha256:[0-9a-f]{64}$/.test(input.sha256)
+      || !Number.isSafeInteger(input.sizeBytes) || input.sizeBytes < 1
+      || !Number.isSafeInteger(input.maximumBytes) || input.maximumBytes < 1
+      || input.sizeBytes > input.maximumBytes) {
+      throw new Error("Project artifact read boundary is invalid");
+    }
+    const result = await this.client.send(new GetObjectCommand({ Bucket: input.bucket, Key: input.key }));
+    if (!result.Body) throw new Error("Project artifact body is missing");
+    const content = Buffer.from(await result.Body.transformToByteArray());
+    if (content.length !== input.sizeBytes
+      || `sha256:${createHash("sha256").update(content).digest("hex")}` !== input.sha256) {
+      throw new Error("Project artifact digest or size is invalid");
+    }
+    return content;
+  }
+
   async deleteProjectObjects(workspaceId: string, projectId: string): Promise<void> {
     const prefix = `workspaces/${workspaceId}/projects/${projectId}/`;
     let continuationToken: string | undefined;
