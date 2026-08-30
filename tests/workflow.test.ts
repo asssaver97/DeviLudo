@@ -90,6 +90,24 @@ test("a Test plan configuration verdict replans without invoking Development", (
   assert.deepEqual(transition.enqueue.map(job => [job.agentRole, job.purpose]), [["TEST", "TEST_PLAN"]]);
 });
 
+test("a Test planning source-contract failure returns directly to Development", () => {
+  let transition = transitionWorkflow(
+    initialWorkflowSnapshot(workflowId, workspaceId, projectId, "RELEASE", ["linux", "windows", "macos"]),
+    { kind: "SPEC_APPROVED" },
+  );
+  transition = transitionWorkflow(transition.snapshot, agentSuccess("design", "DESIGN", "DESIGN"));
+  transition = transitionWorkflow(transition.snapshot, agentSuccess("ui-design", "UI_DESIGN", "UI_DESIGN"));
+  transition = transitionWorkflow(transition.snapshot, agentSuccess("development", "DEVELOPMENT", "DEVELOPMENT"));
+  transition = transitionWorkflow(transition.snapshot, jobSuccess("build", "BUILD"));
+  transition = transitionWorkflow(transition.snapshot, {
+    ...agentSuccess("test-plan", "TEST", "TEST_PLAN"),
+    verdict: "FAIL",
+  });
+  assert.equal(transition.snapshot.state, "DEVELOPING");
+  assert.deepEqual(transition.snapshot.completedE2e, []);
+  assert.deepEqual(transition.enqueue.map(job => [job.agentRole, job.purpose]), [["DEVELOPMENT", "DEVELOPMENT"]]);
+});
+
 test("rerunning Build invalidates platform results and returns through Test planning", () => {
   const succeeded = transitionWorkflow(
     reachReleasePending(initialWorkflowSnapshot(workflowId, workspaceId, projectId, "VALIDATE", ["macos"])),

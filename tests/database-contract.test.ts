@@ -73,11 +73,17 @@ test("Agent completion advances Design, UI Design, Development and Test through 
   assert.match(complete, /IF assets_ready THEN[\s\S]*state = 'BUILDING'[\s\S]*enqueue_job/);
   assert.match(complete, /jsonb_build_object\('targetPlatforms', workflow\.target_platforms\)/);
   assert.match(complete, /purpose = 'TEST_PLAN'/);
+  assert.match(complete, /current_test_plan_available boolean/);
+  assert.match(complete, /Test Agent did not persist the complete current-source plan or a DEVELOPMENT source-contract handoff/);
+  assert.match(complete, /development:test-plan-handoff:/);
   assert.match(complete, /verdict := upper/);
   assert.match(complete, /failure_class = 'CONFIGURATION'/);
   assert.match(complete, /verdict := 'REPLAN'/);
+  assert.match(complete, /ELSIF verdict = 'REPLAN' THEN/);
+  assert.doesNotMatch(complete, /verdict = 'REPLAN' AND configuration_failed/);
   assert.match(complete, /test-replan:plan:/);
   assert.match(complete, /'TEST_PLAN'[\s\S]*E2E_PLATFORM_RUN/);
+  assert.match(complete, /:e2e:[\s\S]*:source:[\s\S]*p_output->>'sourceRevision'[\s\S]*:plan:/);
   assert.match(complete, /verdict = 'FAIL'[\s\S]*'testHandoff'/);
   assert.doesNotMatch(complete, /repair_count|max_attempts/);
 });

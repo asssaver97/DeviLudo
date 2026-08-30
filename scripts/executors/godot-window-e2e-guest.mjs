@@ -691,7 +691,18 @@ async function captureFailedActionEvidence({ testEnvironment, journey, event, pr
   // regular checkpoints and native input. Calling the GUI driver directly here
   // allowed ScreenCaptureKit requests to overlap and intermittently rejected
   // the diagnostic screenshot, masking the original product assertion.
-  const capture = await testEnvironment.capture(screenshotPath);
+  let capture;
+  try {
+    capture = await testEnvironment.capture(screenshotPath);
+  } catch (error) {
+    // The screenshot is diagnostic evidence, not the verdict itself. The game
+    // may have exited or lost its window after the failed action. Preserve the
+    // original Probe/target/postcondition error instead of replacing it with a
+    // secondary GUI-driver failure that sends infrastructure down a false path.
+    const detail = error instanceof Error ? error.message : String(error);
+    stderrLogs.push(`FAILURE_EVIDENCE_CAPTURE_SKIPPED: ${journey.id}/${event.stepId}: ${detail.slice(0, 1_900)}`);
+    return;
+  }
   let screenshot;
   try { screenshot = await inspectScreenshot(screenshotPath); }
   catch (error) { throw productFailure("SCREENSHOT_INVALID", `${journey.id}/${event.stepId} 失败现场截图无效：${error.message}`); }

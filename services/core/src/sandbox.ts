@@ -233,8 +233,12 @@ export async function runSandbox(
               throw new Error("Development Agent completed without requesting the controlled build");
             }
           }
+          const testPlanningHandoff = role === "TEST" && job.payload.purpose === "TEST_PLAN"
+            ? runtimeTurnHandoff(context, runtimeResult.turnId, "TEST", "DEVELOPMENT")
+            : null;
+          const hasCurrentTestPlan = Boolean(context.e2e.planRevision && context.e2e.plan);
           if (role === "TEST" && job.payload.purpose === "TEST_PLAN"
-            && (!context.e2e.planRevision || !context.e2e.plan)) {
+            && !hasCurrentTestPlan && !testPlanningHandoff) {
             throw new Error("Test Agent completed without persisting a complete test plan");
           }
           const testRuns = context.testSummary && Array.isArray(context.testSummary.runs)
@@ -243,7 +247,16 @@ export async function runSandbox(
           const configurationReplan = role === "TEST" && job.payload.purpose === "TEST_VERDICT"
             && testRuns.some(run => run && typeof run === "object"
               && (run as Record<string, unknown>).failureClass === "CONFIGURATION");
-          const structured = configurationReplan
+          const structured = testPlanningHandoff && !hasCurrentTestPlan
+            ? Object.freeze({
+                verdict: "FAIL",
+                handoff: Object.freeze({
+                  toRole: "DEVELOPMENT",
+                  summary: String(testPlanningHandoff.summary),
+                }),
+                reason: "SOURCE_PROBE_CONTRACT_MISSING",
+              })
+            : configurationReplan
             ? Object.freeze({
                 verdict: "REPLAN",
                 handoff: null,
@@ -261,7 +274,7 @@ export async function runSandbox(
             sourceRevision: context.source?.revision ?? null,
             planRevision: context.e2e.planRevision ?? null,
             verdict: structured.verdict ?? null,
-            handoff: designHandoff ?? uiDesignHandoff ?? structured.handoff ?? null,
+            handoff: designHandoff ?? uiDesignHandoff ?? testPlanningHandoff ?? structured.handoff ?? null,
             responseLanguage,
             agentRuntime: settings.agentRuntime,
             model: resolveAgentModel(

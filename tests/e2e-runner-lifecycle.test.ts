@@ -304,6 +304,7 @@ test("the production Guest, relay, executor and node all wire the lifecycle guar
   assert.match(guest, /const detail = stderr \|\| message \|\| String\(error \?\? ""\)\.trim\(\) \|\| `GUI driver \$\{command\} failed without diagnostics`/);
   assert.match(guest, /throw new Error\(`INFRASTRUCTURE: GUI driver \$\{command\} failed:/);
   assert.match(guest, /captureFailedActionEvidence\(\{[\s\S]*testEnvironment, journey,[\s\S]*await testEnvironment\.capture\(screenshotPath\)/);
+  assert.match(guest, /Preserve the[\s\S]*original Probe\/target\/postcondition error[\s\S]*FAILURE_EVIDENCE_CAPTURE_SKIPPED:/);
   assert.match(guest, /failureCode: "ACTION_TARGET_UNAVAILABLE"[\s\S]*`\$\{journey\.id\}\/\$\{event\.stepId\}: \$\{detail\}`/);
   assert.match(guest, /failureCode: "PROBE_NOT_UPDATED"[\s\S]*await captureFailedActionEvidence\(\{/);
   assert.match(guest, /failureDetail: detail/);

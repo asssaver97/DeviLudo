@@ -6,6 +6,7 @@ export const E2E_CLIENT_WIDTH = 1280;
 export const E2E_CLIENT_HEIGHT = 720;
 const CONTROL_SCOPES = new Set(["NAVIGATION", "GAMEPLAY", "OVERLAY", "STATUS"]);
 const SCREEN_MODES = new Set(["MENU", "PLAYING", "PAUSED", "RESULT"]);
+const MIN_NATIVE_INPUT_EXTENT = 2;
 
 export async function readProbeSnapshot(path, expected) {
   let value;
@@ -47,6 +48,10 @@ export function probeSnapshotValidationError(value, expected = {}) {
     if (!CONTROL_SCOPES.has(control.scope)) return `control ${label} scope is invalid`;
     if (typeof control.visible !== "boolean" || typeof control.enabled !== "boolean") return `control ${label} visibility or enabled state is invalid`;
     if (!validRect(control.rect)) return `control ${label} rectangle ${rectDiagnostic(control.rect)} must be positive and remain inside 1280x720`;
+    if (control.visible && control.enabled && control.scope !== "STATUS"
+      && (control.rect.width < MIN_NATIVE_INPUT_EXTENT || control.rect.height < MIN_NATIVE_INPUT_EXTENT)) {
+      return `control ${label} rectangle ${rectDiagnostic(control.rect)} is too small for truthful native input; publish the live unclamped bounds`;
+    }
     if (control.text !== undefined && (typeof control.text !== "string" || control.text.length > 2_000)) return `control ${label} text exceeds the probe contract`;
     if (control.value !== undefined && !primitive(control.value)) return `control ${label} value must be primitive`;
     ids.add(control.id);

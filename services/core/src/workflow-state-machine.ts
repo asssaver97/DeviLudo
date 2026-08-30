@@ -183,6 +183,12 @@ export function transitionWorkflow(snapshot: WorkflowSnapshot, event: WorkflowEv
   }
   if (snapshot.state === "TEST_PLANNING" && event.jobKind === "AGENT_TURN"
     && event.agentRole === "TEST" && event.purpose === "TEST_PLAN") {
+    if (event.verdict === "FAIL") {
+      return result(
+        { ...snapshot, state: "DEVELOPING", completedE2e: Object.freeze([]) },
+        [command(snapshot, "AGENT_TURN", null, `development:test-plan-handoff:${event.jobId}`, "DEVELOPMENT", "DEVELOPMENT")],
+      );
+    }
     return result(
       { ...snapshot, state: "TESTING" },
       snapshot.targetPlatforms.map(platform => command(

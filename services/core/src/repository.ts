@@ -4694,6 +4694,15 @@ function workflowTestConversationContent(
     ? responseLanguage === "zh" ? `（计划版本 ${planRevision}）` : ` (plan revision ${planRevision})`
     : "";
   if (purpose === "TEST_PLAN") {
+    const verdict = String(output.verdict ?? structured.verdict ?? "").toUpperCase();
+    const handoff = objectValue(output.handoff ?? structured.handoff);
+    const summary = typeof handoff.summary === "string" ? handoff.summary.trim() : "";
+    if (verdict === "FAIL" && handoff.toRole === "DEVELOPMENT") {
+      const transition = responseLanguage === "zh"
+        ? "测试规划发现游戏源码缺少完成跨平台 E2E 所需的运行时契约，修复项已交回开发 Agent；修复并重新构建后会自动重新规划测试。"
+        : "Test planning found that the game source is missing the runtime contract required for cross-platform E2E. The repair has been handed back to Development; planning will resume after a new build.";
+      return `${summary ? `${summary}\n\n` : ""}${transition}`.slice(0, 4_000);
+    }
     return responseLanguage === "zh"
       ? `测试计划已完成并冻结${planLabel}，现在开始在所有目标平台执行 E2E 测试。`
       : `The test plan is complete and frozen${planLabel}. E2E testing is now starting on every target platform.`;

@@ -31,10 +31,12 @@ import {
   projectRuntimeSpecialistPrompt,
 } from "@/services/core/src/project-runtime-conversation";
 import {
+  bundledCjkFontValidationError,
   retryProjectRuntimeLifecycle,
   runtimeTurnHandoff,
   summarizeRuntimeToolCalls,
   summarizeToolAuditValue,
+  unobservedTestPlanAssetPlacements,
   unpublishedTestPlanProbeReferences,
 } from "@/services/core/src/project-runtime-service";
 import {
@@ -763,6 +765,7 @@ test("Test plans cannot freeze Probe references absent from the current publishe
       },
       features: [{ interactionScript: { events: [
         { type: "click", targetId: "reachable-hex", postconditions: [{ source: "CONTROL", targetId: "move", property: "enabled", operator: "EQUALS", value: true }] },
+        { type: "click", targetId: "relationship-xiaotian", postconditions: [{ source: "STATE", key: "screen_mode", operator: "EQUALS", value: "PLAYING" }] },
         { type: "click", targetId: "move-target", postconditions: [{ source: "PROGRESS", key: "owned_tiles", operator: "CHANGED" }] },
         { type: "checkpoint", changeTargetId: "resource-food-icon", assertions: [{ source: "STATE", key: "screen_mode", operator: "EQUALS", value: "PLAYING" }] },
       ] } }],
@@ -770,13 +773,47 @@ test("Test plans cannot freeze Probe references absent from the current publishe
     assetPlacementPlan: { placements: [] },
   };
   const publisher = `
+    # Container descendants receive the engine's settled sizes.
+    var narrative = "${"x".repeat(500)}"
+    var empty = ""
     { "schema": "deviludo.e2e-ui-probe", "state": { "screen_mode": "PLAYING" },
       "progress": { "move_budget": 2, "owned_tiles": 1 },
-      "controls": ["reachable-hex", "move", "resource-%s-icon"] }
+      "controls": ["reachable-", "relationship-xiaotian", "move", "resource-%s-icon"] }
+    # The publisher's atomic replacement is complete.
   `;
   assert.deepEqual(unpublishedTestPlanProbeReferences(plan, [publisher]), [
     { kind: "CONTROL", value: "move-target" },
   ]);
+});
+
+test("cross-platform CJK UI requires a bundled and runtime-bound font", () => {
+  const ui = 'title.text = "新建人生线"';
+  assert.match(bundledCjkFontValidationError([ui], []) ?? "", /does not bundle/);
+  assert.match(bundledCjkFontValidationError([ui], ["assets/fonts/game.ttf"]) ?? "", /does not reference/);
+  assert.equal(bundledCjkFontValidationError([
+    `${ui}\nvar font = load("res://assets/fonts/game.ttf")`,
+  ], ["assets/fonts/game.ttf"]), null);
+  assert.equal(bundledCjkFontValidationError(['# 中文注释\ntitle.text = "New game"'], []), null);
+});
+
+test("conditional asset placements require an explicit scripted observation at their checkpoint", () => {
+  const plan = {
+    testManifest: { features: [{ interactionScript: { events: [
+      { type: "checkpoint", role: "READY", assertions: [] },
+      { type: "checkpoint", role: "COMPLETION", changeTargetId: "next-event", assertions: [] },
+    ] } }] },
+    assetPlacementPlan: { placements: [
+      { targetId: "relationship-xiaotian", checkpointRole: "READY" },
+      { targetId: "ending-perfect-concealment", checkpointRole: "COMPLETION" },
+    ] },
+  };
+  assert.deepEqual(unobservedTestPlanAssetPlacements(plan), [
+    { targetId: "ending-perfect-concealment", checkpointRole: "COMPLETION" },
+  ]);
+  plan.testManifest.features[0].interactionScript.events[1].assertions.push({
+    source: "CONTROL", targetId: "ending-perfect-concealment", property: "visible", operator: "EQUALS", value: true,
+  } as never);
+  assert.deepEqual(unobservedTestPlanAssetPlacements(plan), []);
 });
 
 test("MCP audit records summarize large tool results and redact credentials", () => {
@@ -826,7 +863,7 @@ test("Core has one Runtime path and controlled task images cannot execute Agent 
   assert.doesNotMatch(fixture, /AGENT_TURN/);
   assert.match(supervisor, /--cap-drop=ALL/);
   assert.match(supervisor, /--security-opt=no-new-privileges/);
-  assert.match(supervisor, /size=64m/);
+  assert.match(supervisor, /size=256m/);
   assert.match(supervisor, /existing\.imageId !== runtimeImageId/);
   assert.doesNotMatch(supervisor, /docker\.sock|hypervisor|\/dev\/kvm/);
   assert.match(turn, /--dangerously-bypass-approvals-and-sandbox/);
@@ -869,12 +906,46 @@ test("all six signed role Skills exist and define the intended boundary", async 
   assert.match(uiDesignSkill, /DEVELOPMENT owns all UI code/);
   assert.match(uiDesignSkill, /handoff_create\(\{\"toRole\":\"DEVELOPMENT\"/);
   const testSkill = await readFile(new URL("../services/project-runtime/skills/test/SKILL.md", import.meta.url), "utf8");
+  const developmentSkill = await readFile(new URL("../services/project-runtime/skills/development/SKILL.md", import.meta.url), "utf8");
+  assert.match(developmentSkill, /Every generated game must publish the real-window E2E Probe/);
+  assert.match(developmentSkill, /deviludo\.e2e-ui-probe/);
+  assert.match(developmentSkill, /screen_mode.*session_active.*gameplay_input_enabled.*blocking_layer_count/s);
+  assert.match(developmentSkill, /schedule one coalesced publication after the next `SceneTree\.process_frame`/);
+  assert.match(developmentSkill, /do not sample construction-frame rectangles, sleep for a fixed duration, or invoke `NOTIFICATION_SORT_CHILDREN` manually/);
+  assert.match(developmentSkill, /Every published interactive control must remain in the client root's `CanvasItem` ancestry/);
+  assert.match(developmentSkill, /never publish a child control of a separate native `Window` as though its rectangle belonged to the main client/);
+  assert.match(developmentSkill, /Each live stable ID must occur exactly once in every snapshot/);
+  assert.match(developmentSkill, /generated gameplay IDs in a namespace disjoint from reserved navigation and overlay IDs/);
+  assert.match(developmentSkill, /choice-\$\{domainId\}[\s\S]*choice-confirm/);
+  assert.match(developmentSkill, /Give each native action exactly one activation authority/);
+  assert.match(developmentSkill, /never let a `BaseButton` receive normal GUI handling[\s\S]*also calls `pressed\.emit\(\)`/);
+  assert.match(developmentSkill, /Treat a repeated invalid rectangle sampled after the normal layout frame as conclusive layout evidence/);
+  assert.match(developmentSkill, /native-input client coordinate space/);
+  assert.match(developmentSkill, /start with `control\.get_transform\(\)`/);
+  assert.match(developmentSkill, /left-multiplying each parent's `get_transform\(\)`/);
+  assert.match(developmentSkill, /Do not derive this matrix from `Control\.get_global_rect\(\)`, `get_global_transform\(\)`/);
+  assert.match(developmentSkill, /Do not convert client geometry through `get_screen_transform\(\)`/);
+  assert.match(developmentSkill, /Do not substitute `get_stretch_transform\(\)`/);
+  assert.match(developmentSkill, /do not move the rendered UI to compensate/);
   assert.match(testSkill, /sole test-manifest contract/);
   assert.match(testSkill, /call `source_list` and then `source_read`/);
   assert.match(testSkill, /return REPLAN without a Development handoff/);
+  assert.match(testSkill, /preserve that exit activation and assert the lifecycle field it changes/);
+  assert.match(testSkill, /A checkpoint role label alone does not prove that a conditional ending, overlay, or result screen was reached/);
+  assert.match(testSkill, /do not ask DEVELOPMENT to expose an ending asset on an unrelated earlier screen/);
+  assert.match(testSkill, /`inputProfiles` contains one or both unique values `KEYBOARD_MOUSE` and `GAMEPAD`/);
+  assert.match(testSkill, /`PROJECT_CONCEPT` is design context only/);
+  assert.match(testSkill, /Every interactive feature includes integer `timeoutMs` from 1 through 300000/);
+  assert.match(testSkill, /Supply every `adaptivePlayer` field in the first call/);
+  assert.match(testSkill, /Write `launchProfile` as the object/);
+  assert.match(testSkill, /Never emit `event`, `eventType`, `captureMode`, `actions`, or `requirementIds` aliases/);
+  assert.match(testSkill, /Never use an empty or partial plan to probe validation/);
+  assert.match(testSkill, /never batch or parallelize alternative plan submissions/);
+  assert.match(testSkill, /SOURCE_PROBE_CONTRACT_MISSING/);
+  assert.match(testSkill, /Call `handoff_create` once with `toRole: "DEVELOPMENT"`/);
   assert.doesNotMatch(testSkill, /"key":"loop"/);
   assert.match(testSkill, /validation rejection is a correctable plan-authoring error/);
-  assert.match(testSkill, /must not call `test_verdict`, return BLOCKED, or return a null plan/);
+  assert.match(testSkill, /only no-plan completion is the durable `SOURCE_PROBE_CONTRACT_MISSING` Development handoff/);
 });
 
 test("UI Design uses the signed hyphenated Skill slug everywhere in the Runtime", async () => {

@@ -171,11 +171,11 @@ export function testManifestValidationError(value: unknown): string | null {
     || !adaptive.successAssertions.some(assertion => assertion && typeof assertion === "object"
       && assertion.source === "PROGRESS"
       && ["CHANGED", "NOT_EQUALS", "GREATER_THAN", "GREATER_THAN_OR_EQUALS"].includes(assertion.operator))) {
-    return "adaptivePlayer.successAssertions must contain valid Probe assertions including one progress-changing assertion";
+    return `adaptivePlayer.successAssertions must contain valid Probe assertions including one progress-changing assertion${retiredProbeScopeHint(adaptive.successAssertions)}`;
   }
   if (!Array.isArray(adaptive.failureAssertions) || adaptive.failureAssertions.length < 1
     || !adaptive.failureAssertions.every(validateProbeAssertion)) {
-    return "adaptivePlayer.failureAssertions must contain valid Probe assertions";
+    return `adaptivePlayer.failureAssertions must contain valid Probe assertions${retiredProbeScopeHint(adaptive.failureAssertions)}`;
   }
   if (!Number.isInteger(adaptive.rolloutTimeoutMs)
     || Number(adaptive.rolloutTimeoutMs) < MIN_ADAPTIVE_ROLLOUT_TIMEOUT_MS
@@ -202,15 +202,27 @@ export function testManifestValidationError(value: unknown): string | null {
     if (typeof item.requirementId !== "string" || !isStableId(item.requirementId)) {
       return `requirements[${index}].requirementId must match ^[a-z0-9][a-z0-9-]{0,119}$`;
     }
+    if (typeof item.description !== "string" || item.description.trim().length < 1 || item.description.length > 2_000) {
+      return `requirements[${index}].description must contain 1-2000 characters`;
+    }
     if (!["CORE_LOOP", "ACCEPTANCE"].includes(String(item.source))) {
       return `requirements[${index}].source must be CORE_LOOP or ACCEPTANCE`;
     }
     if (!["PLAYER_INTERACTION", "SYSTEM"].includes(String(item.verificationClass))) {
       return `requirements[${index}].verificationClass must be PLAYER_INTERACTION or SYSTEM`;
     }
-    if (item.verificationClass === "SYSTEM"
-      && (!Object.hasOwn(item, "systemCategory") || !Object.hasOwn(item, "exemptionReason"))) {
-      return `requirements[${index}] SYSTEM verification requires systemCategory and exemptionReason`;
+    if (item.verificationClass === "SYSTEM") {
+      if (item.source !== "ACCEPTANCE") {
+        return `requirements[${index}] CORE_LOOP requirements must use PLAYER_INTERACTION verification`;
+      }
+      if (!["DATA", "RUNTIME", "NETWORK"].includes(String(item.systemCategory))) {
+        return `requirements[${index}].systemCategory must be DATA, RUNTIME, or NETWORK`;
+      }
+      if (typeof item.exemptionReason !== "string" || item.exemptionReason.trim().length < 10 || item.exemptionReason.length > 1_000) {
+        return `requirements[${index}].exemptionReason must contain 10-1000 characters`;
+      }
+    } else if (item.systemCategory !== undefined || item.exemptionReason !== undefined) {
+      return `requirements[${index}] PLAYER_INTERACTION verification must omit systemCategory and exemptionReason`;
     }
   }
   if (!Array.isArray(manifest.features) || manifest.features.length < 1) {
@@ -261,6 +273,9 @@ export function testManifestValidationError(value: unknown): string | null {
         if (postEntryActions.length < 3 || !actions.some(action => action.intent === "FEATURE_ACTION")) {
           return `features[${index}] coreJourney must contain at least three post-entry actions including PRIMARY_ACTION, FEATURE_ACTION, and COMPLETE_LOOP`;
         }
+        if (!validateCoreJourneyLifecycle(item.interactionScript as InteractionScript)) {
+          return `features[${index}] coreJourney lifecycle must be START checkpoint -> one START_SESSION action -> READY checkpoint -> PRIMARY_ACTION -> PROGRESS checkpoint -> COMPLETE_LOOP -> COMPLETION checkpoint; START and READY must contain the standard MENU/PLAYING assertions and START_SESSION.postconditions must contain all standard PLAYING assertions`;
+        }
       }
     }
     if (item.verificationMethod === "unit") {
@@ -268,6 +283,100 @@ export function testManifestValidationError(value: unknown): string | null {
         .filter(field => !Object.hasOwn(item, field));
       if (unitFields.length) return `features[${index}] unit verification is missing: ${unitFields.join(", ")}`;
     }
+  }
+  const requirementItems = manifest.requirements as Record<string, unknown>[];
+  const requirementIds = requirementItems.map(item => String(item.requirementId));
+  const duplicateRequirementId = requirementIds.find((id, index) => requirementIds.indexOf(id) !== index);
+  if (duplicateRequirementId) return `requirements contains duplicate requirementId: ${duplicateRequirementId}`;
+  const requirementIdSet = new Set(requirementIds);
+  const playerRequirementIds = new Set(requirementItems
+    .filter(item => item.verificationClass === "PLAYER_INTERACTION")
+    .map(item => String(item.requirementId)));
+  const coreRequirementIds = new Set(requirementItems
+    .filter(item => item.source === "CORE_LOOP")
+    .map(item => String(item.requirementId)));
+  const adaptiveRequirementIds = adaptive.requirementIds as unknown[];
+  const invalidAdaptiveRequirement = adaptiveRequirementIds.find(id => typeof id !== "string"
+    || !requirementIdSet.has(id) || !playerRequirementIds.has(id));
+  if (invalidAdaptiveRequirement !== undefined) {
+    return `adaptivePlayer.requirementIds contains an unknown or non-player requirement: ${String(invalidAdaptiveRequirement)}`;
+  }
+  const duplicateAdaptiveRequirement = adaptiveRequirementIds.find((id, index) => adaptiveRequirementIds.indexOf(id) !== index);
+  if (duplicateAdaptiveRequirement !== undefined) {
+    return `adaptivePlayer.requirementIds contains a duplicate: ${String(duplicateAdaptiveRequirement)}`;
+  }
+  const missingAdaptiveCore = [...coreRequirementIds].filter(id => !adaptiveRequirementIds.includes(id));
+  if (missingAdaptiveCore.length) {
+    return `adaptivePlayer.requirementIds is missing CORE_LOOP requirements: ${boundedIdList(missingAdaptiveCore)}`;
+  }
+  const allowedActions = adaptive.allowedActions as unknown[];
+  const duplicateAllowedAction = allowedActions.find((action, index) => allowedActions.indexOf(action) !== index);
+  if (duplicateAllowedAction !== undefined) {
+    return `adaptivePlayer.allowedActions contains a duplicate: ${String(duplicateAllowedAction)}`;
+  }
+  if (allowedActions.includes("GAMEPAD") !== manifest.inputProfiles.includes("GAMEPAD")
+    || (allowedActions.includes("KEYBOARD") || allowedActions.includes("POINTER")) !== manifest.inputProfiles.includes("KEYBOARD_MOUSE")) {
+    return "adaptivePlayer.allowedActions must match inputProfiles exactly: GAMEPAD for GAMEPAD and KEYBOARD and/or POINTER for KEYBOARD_MOUSE";
+  }
+
+  const featureIds = new Set<string>();
+  const automatedCoverage = new Set<string>();
+  const interactiveCoverage = new Set<string>();
+  const exercisedInputProfiles = new Set<TestInputProfile>();
+  let checkpointCount = 0;
+  let coreJourneys = 0;
+  for (const [index, feature] of (manifest.features as Record<string, unknown>[]).entries()) {
+    const id = String(feature.id);
+    if (featureIds.has(id)) return `features contains duplicate id: ${id}`;
+    featureIds.add(id);
+    const featureRequirementIds = feature.requirementIds as unknown[];
+    const invalidFeatureRequirement = featureRequirementIds.find(requirementId => typeof requirementId !== "string"
+      || !requirementIdSet.has(requirementId));
+    if (invalidFeatureRequirement !== undefined) {
+      return `features[${index}].requirementIds contains an unknown requirement: ${String(invalidFeatureRequirement)}`;
+    }
+    if (feature.verificationMethod !== "manual") {
+      for (const requirementId of featureRequirementIds as string[]) automatedCoverage.add(requirementId);
+    }
+    if (feature.verificationMethod !== "interactive") continue;
+    const script = feature.interactionScript as InteractionScript;
+    checkpointCount += interactionCheckpointCount(script);
+    const actions = interactionActionEvents(script);
+    for (const action of actions) {
+      exercisedInputProfiles.add(action.type.startsWith("gamepad_") ? "GAMEPAD" : "KEYBOARD_MOUSE");
+      for (const requirementId of action.coversRequirementIds) {
+        if (!featureRequirementIds.includes(requirementId)) {
+          return `features[${index}] action ${action.stepId} covers ${requirementId}, but the feature does not list that requirementId`;
+        }
+        if (!playerRequirementIds.has(requirementId)) {
+          return `features[${index}] action ${action.stepId} covers non-player requirement ${requirementId}`;
+        }
+        interactiveCoverage.add(requirementId);
+      }
+    }
+    if (feature.coreJourney === true) {
+      if (feature.category !== "core-loop" || (feature.launchProfile as { type?: unknown }).type !== "FRESH") {
+        return `features[${index}] coreJourney must use category core-loop and launchProfile {"type":"FRESH"}`;
+      }
+      coreJourneys += 1;
+    }
+  }
+  if (coreJourneys < 1) return "features must contain one interactive FRESH coreJourney with category core-loop";
+  if (checkpointCount < 3 || checkpointCount > MAX_SCREENSHOT_CHECKPOINTS) {
+    return `interactive features must contain 3-${MAX_SCREENSHOT_CHECKPOINTS} checkpoints in total; received ${checkpointCount}`;
+  }
+  const missingInputProfiles = (manifest.inputProfiles as TestInputProfile[])
+    .filter(profile => !exercisedInputProfiles.has(profile));
+  if (missingInputProfiles.length) {
+    return `interactive actions do not exercise selected inputProfiles: ${missingInputProfiles.join(", ")}`;
+  }
+  const missingAutomatedCoverage = requirementIds.filter(id => !automatedCoverage.has(id));
+  if (missingAutomatedCoverage.length) {
+    return `non-manual features do not cover requirements: ${boundedIdList(missingAutomatedCoverage)}`;
+  }
+  const missingInteractiveCoverage = [...playerRequirementIds].filter(id => !interactiveCoverage.has(id));
+  if (missingInteractiveCoverage.length) {
+    return `native interaction actions do not cover player requirements: ${boundedIdList(missingInteractiveCoverage)}`;
   }
   if (!validateTestManifest(value)) {
     return "manifest semantics are invalid: provide one FRESH core-loop journey ordered START -> START_SESSION -> READY -> PRIMARY_ACTION -> PROGRESS -> COMPLETE_LOOP -> COMPLETION; every action needs unique stepId, intent, coversRequirementIds, and postconditions; cover every player requirement with real actions and every requirement with a non-manual feature";
@@ -561,4 +670,18 @@ function firstActionWithoutTransitionOracle(value: unknown): string | null {
 function isSafeGodotTestPath(value: string): boolean {
   return /^res:\/\/[A-Za-z0-9][A-Za-z0-9._/-]{0,219}\.gd$/.test(value)
     && !/(^|\/)\.{1,2}(\/|$)|\/\//.test(value.slice("res://".length));
+}
+
+function retiredProbeScopeHint(value: unknown): string {
+  if (!Array.isArray(value)) return "";
+  const index = value.findIndex(assertion => assertion && typeof assertion === "object"
+    && !Array.isArray(assertion)
+    && Object.hasOwn(assertion, "scope")
+    && !Object.hasOwn(assertion, "source"));
+  return index < 0 ? "" : `; assertion ${index} uses retired scope, use source`;
+}
+
+function boundedIdList(ids: readonly string[]): string {
+  const shown = ids.slice(0, 12).join(", ");
+  return ids.length <= 12 ? shown : `${shown} (+${ids.length - 12} more)`;
 }

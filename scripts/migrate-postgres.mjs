@@ -12,6 +12,18 @@ const VERSION = "001_persistent_multi_agent";
 // Unknown snapshots, production databases, and all structural changes still
 // require the explicit destructive reset.
 const DEVELOPMENT_FUNCTION_REFRESHES = Object.freeze({
+  "sha256:1b9e6ffa40a5c90c341775d4da28a2118700b938221fa3b50c6d04312d0b30cc": Object.freeze({
+    targetDigest: "sha256:569dff1f7cd504d55a92df68d55e66c1b051f087a5257e5b81e0c84843e2a82e",
+    functions: Object.freeze(["complete_agent_turn_job"]),
+  }),
+  "sha256:250908699fd180b98c6b15ad6442c64b59df98a07f6caa88453dee88999d69b9": Object.freeze({
+    targetDigest: "sha256:1b9e6ffa40a5c90c341775d4da28a2118700b938221fa3b50c6d04312d0b30cc",
+    functions: Object.freeze(["complete_agent_turn_job"]),
+  }),
+  "sha256:4c51210e34a01b477f112ee82c9373d49cf949389894b9bc9a4ef084b1d11427": Object.freeze({
+    targetDigest: "sha256:250908699fd180b98c6b15ad6442c64b59df98a07f6caa88453dee88999d69b9",
+    functions: Object.freeze(["complete_agent_turn_job"]),
+  }),
   "sha256:5c47efde535b0775f73ca65a50bb30db24ad53e07ecb5af2c46bab6f652285e6": Object.freeze({
     targetDigest: "sha256:914ad147269c91486c8bc6eca5c238fad7053d65e53adf76bda97ea65a88dc4d",
     functions: Object.freeze(["accept_workflow_signal"]),

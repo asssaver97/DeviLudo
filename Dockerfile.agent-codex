@@ -2,7 +2,7 @@
 FROM node:22.22.0-bookworm-slim
 ARG CODEX_CLI_VERSION=0.149.0
 ARG NPM_CONFIG_REGISTRY=https://registry.npmjs.org/
-RUN --mount=type=cache,target=/root/.npm apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends ca-certificates git ripgrep unzip \
+RUN --mount=type=cache,target=/root/.npm apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends ca-certificates fonts-noto-cjk git ripgrep unzip \
  && rm -rf /var/lib/apt/lists/* \
  && npm install --global --no-audit --no-fund "@openai/codex@${CODEX_CLI_VERSION}" \
  && useradd --create-home --uid 10001 task

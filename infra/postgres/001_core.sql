@@ -1741,6 +1741,7 @@ DECLARE
   verdict_plan_id uuid;
   configuration_failed boolean;
   assets_ready boolean;
+  current_test_plan_available boolean;
 BEGIN
   SELECT * INTO job FROM deviludo.jobs
    WHERE workspace_id = p_workspace_id AND id = p_job_id FOR UPDATE;
@@ -1827,21 +1828,38 @@ BEGIN
       END IF;
     END IF;
   ELSIF purpose = 'TEST_PLAN' THEN
-    IF NOT EXISTS (
+    SELECT EXISTS (
       SELECT 1 FROM deviludo.test_plans_v2 plan
        WHERE plan.workspace_id = job.workspace_id AND plan.project_id = job.project_id
          AND plan.source_revision = (p_output->>'sourceRevision')::bigint
          AND plan.plan_revision = (p_output->>'planRevision')::bigint
          AND plan.created_by_turn_id = (p_output->>'turnId')::uuid
-    ) THEN RAISE EXCEPTION 'Test Agent did not persist the complete current-source plan'; END IF;
-    UPDATE deviludo.workflow_instances SET state = 'TESTING', version = version + 1,
-      updated_at = clock_timestamp() WHERE workspace_id = job.workspace_id AND id = job.workflow_id;
-    FOREACH platform IN ARRAY workflow.target_platforms LOOP
-      PERFORM deviludo.enqueue_job(job.workspace_id, job.workflow_id, job.project_id,
-        'E2E_PLATFORM_RUN', platform,
-        job.workflow_id::text || ':e2e:' || platform::text || ':plan:' || coalesce(p_output->>'planRevision', '0'),
-        jsonb_build_object('planRevision', coalesce((p_output->>'planRevision')::bigint, 0)));
-    END LOOP;
+    ) INTO current_test_plan_available;
+    IF current_test_plan_available THEN
+      UPDATE deviludo.workflow_instances SET state = 'TESTING', version = version + 1,
+        updated_at = clock_timestamp() WHERE workspace_id = job.workspace_id AND id = job.workflow_id;
+      FOREACH platform IN ARRAY workflow.target_platforms LOOP
+        PERFORM deviludo.enqueue_job(job.workspace_id, job.workflow_id, job.project_id,
+          'E2E_PLATFORM_RUN', platform,
+          job.workflow_id::text || ':e2e:' || platform::text
+            || ':source:' || coalesce(p_output->>'sourceRevision', '0')
+            || ':plan:' || coalesce(p_output->>'planRevision', '0'),
+          jsonb_build_object('planRevision', coalesce((p_output->>'planRevision')::bigint, 0)));
+      END LOOP;
+    ELSE
+      verdict := upper(coalesce(p_output->>'verdict', p_output #>> '{structured,verdict}', ''));
+      IF verdict <> 'FAIL'
+        OR p_output #>> '{handoff,toRole}' IS DISTINCT FROM 'DEVELOPMENT'
+        OR length(btrim(coalesce(p_output #>> '{handoff,summary}', ''))) = 0 THEN
+        RAISE EXCEPTION 'Test Agent did not persist the complete current-source plan or a DEVELOPMENT source-contract handoff';
+      END IF;
+      UPDATE deviludo.workflow_instances SET state = 'DEVELOPING', version = version + 1,
+        updated_at = clock_timestamp() WHERE workspace_id = job.workspace_id AND id = job.workflow_id;
+      PERFORM deviludo.enqueue_job(job.workspace_id, job.workflow_id, job.project_id, 'AGENT_TURN', NULL,
+        job.workflow_id::text || ':development:test-plan-handoff:' || job.id::text,
+        jsonb_build_object('role', 'DEVELOPMENT', 'purpose', 'DEVELOPMENT',
+          'testHandoff', p_output->'handoff'));
+    END IF;
   ELSE
     verdict := upper(coalesce(p_output->>'verdict', p_output #>> '{structured,verdict}', ''));
     verdict_plan_id := nullif(job.payload->>'testPlanId', '')::uuid;
@@ -1879,7 +1897,7 @@ BEGIN
     ELSIF verdict = 'BLOCKED' THEN
       UPDATE deviludo.workflow_instances SET state = 'BLOCKED', version = version + 1,
         updated_at = clock_timestamp() WHERE workspace_id = job.workspace_id AND id = job.workflow_id;
-    ELSIF verdict = 'REPLAN' AND configuration_failed THEN
+    ELSIF verdict = 'REPLAN' THEN
       UPDATE deviludo.workflow_instances SET state = 'TEST_PLANNING', version = version + 1,
         updated_at = clock_timestamp() WHERE workspace_id = job.workspace_id AND id = job.workflow_id;
       PERFORM deviludo.enqueue_job(job.workspace_id, job.workflow_id, job.project_id, 'AGENT_TURN', NULL,

@@ -662,13 +662,16 @@ export class ProjectRuntimeService {
     const context = await this.readContext(workspaceId, projectId);
     const revision = (context.source?.revision ?? 0) + 1;
     const directory = join(resolve(this.projectsRoot), "workspaces", workspaceId, "projects", projectId, "runtime", "worktree");
+    await this.requireProbePublisher(directory);
     // ProjectSourceStore validates every path and rejects links while publishing.
     const stored = await this.sources.publishDirectory({ workspaceId, projectId, revision, directory });
     await this.repository.recordSourceRevision({ workspaceId, projectId, revision,
       relativePath: stored.relativePath, digest: stored.digest, fileCount: stored.fileCount, totalBytes: stored.totalBytes });
-    await this.mutateContext(workspaceId, projectId, current => updateProjectContext(current, { source: Object.freeze({
-      revision, sha256: stored.digest, relativePath: stored.relativePath,
-    }) }));
+    await this.mutateContext(workspaceId, projectId, current => updateProjectContext(current, {
+      source: Object.freeze({ revision, sha256: stored.digest, relativePath: stored.relativePath }),
+      e2e: Object.freeze({ ...current.e2e, planRevision: null, plan: null }),
+      testSummary: null,
+    }));
     return Object.freeze({ revision, sha256: stored.digest, relativePath: stored.relativePath });
   }
 
@@ -729,25 +732,59 @@ export class ProjectRuntimeService {
     plan: Readonly<Record<string, unknown>>,
   ): Promise<void> {
     const root = await this.sourceRoot(workspaceId, projectId);
-    const publisherTexts: string[] = [];
-    for (const path of await this.listSource(workspaceId, projectId)) {
-      if (!/\.(?:gd|cs|js|mjs|cjs|ts|tsx|lua|py)$/i.test(path)) continue;
-      const target = resolve(root, normalizeProjectPath(path));
-      const info = await lstat(target);
-      if (!info.isFile() || info.isSymbolicLink() || info.size > 16 * 1024 * 1024) continue;
-      const bytes = await readFile(target);
-      if (bytes.includes(0)) continue;
-      const text = bytes.toString("utf8");
-      if (text.includes("deviludo.e2e-ui-probe")) publisherTexts.push(text);
-    }
-    if (publisherTexts.length === 0) {
-      throw new Error("The current source does not publish the deviludo.e2e-ui-probe contract required by an interactive test plan");
-    }
+    const publisherTexts = await this.requireProbePublisher(root);
     const missing = unpublishedTestPlanProbeReferences(plan, publisherTexts);
     if (missing.length > 0) {
       throw new Error(`The Test Agent plan references values not published by the current Probe source: ${missing
         .map(reference => `${reference.kind}:${reference.value}`).join(", ")}`);
     }
+  }
+
+  private async requireProbePublisher(root: string): Promise<readonly string[]> {
+    const publisherTexts: string[] = [];
+    const projectTexts: string[] = [];
+    const fontPaths: string[] = [];
+    const visit = async (directory: string): Promise<void> => {
+      for (const entry of await readdir(directory, { withFileTypes: true })) {
+        if (entry.isSymbolicLink()) continue;
+        const target = join(directory, entry.name);
+        if (entry.isDirectory()) {
+          await visit(target);
+          continue;
+        }
+        if (!entry.isFile()) continue;
+        const projectPath = relative(root, target).split(sep).join("/");
+        if (/\.(?:tt[cf]|ot[cf]|woff2?)$/i.test(entry.name)) {
+          fontPaths.push(projectPath);
+          continue;
+        }
+        if (!/\.(?:gd|cs|js|mjs|cjs|ts|tsx|lua|py|tscn|tres|theme|css|html|json|ya?ml)$/i.test(entry.name)) continue;
+        const info = await lstat(target);
+        if (info.size > 16 * 1024 * 1024) continue;
+        const bytes = await readFile(target);
+        if (bytes.includes(0)) continue;
+        const text = bytes.toString("utf8");
+        projectTexts.push(text);
+        if (text.includes("deviludo.e2e-ui-probe")) publisherTexts.push(text);
+      }
+    };
+    await visit(root);
+    const fontError = bundledCjkFontValidationError(projectTexts, fontPaths);
+    if (fontError) throw new Error(fontError);
+    if (publisherTexts.length === 0) {
+      throw new Error("The current source does not publish the deviludo.e2e-ui-probe contract required by cross-platform E2E");
+    }
+    const publication = publisherTexts.join("\n");
+    const missingFields = [
+      "DEVILUDO_E2E_UI_PROBE_FILE", "DEVILUDO_E2E_SESSION_NONCE",
+      "sessionNonce", "pid", "sequence", "sceneId", "state",
+      "screen_mode", "session_active", "gameplay_input_enabled", "blocking_layer_count",
+      "progress", "controls",
+    ].filter(field => !publication.includes(field));
+    if (missingFields.length > 0) {
+      throw new Error(`The current E2E Probe publisher is missing required fields: ${missingFields.join(", ")}`);
+    }
+    return Object.freeze(publisherTexts);
   }
 
   private async sourceRoot(workspaceId: string, projectId: string): Promise<string> {
@@ -1303,20 +1340,92 @@ export function unpublishedTestPlanProbeReferences(
   return Object.freeze(testPlanProbeReferences(plan).filter(reference => !published.matches(reference.value)));
 }
 
+export function bundledCjkFontValidationError(
+  texts: readonly string[],
+  fontPaths: readonly string[],
+): string | null {
+  const cjkLiteral = /"(?:\\.|[^"\\\r\n])*[\p{Script=Han}\p{Script=Hiragana}\p{Script=Katakana}\p{Script=Hangul}](?:\\.|[^"\\\r\n])*"|'(?:\\.|[^'\\\r\n])*[\p{Script=Han}\p{Script=Hiragana}\p{Script=Katakana}\p{Script=Hangul}](?:\\.|[^'\\\r\n])*'/u;
+  if (!texts.some(text => cjkLiteral.test(text))) return null;
+  if (fontPaths.length === 0) {
+    return "Project source displays CJK text but does not bundle a TTF, TTC, OTF, OTC, WOFF, or WOFF2 font; cross-platform builds must not depend on host fallback fonts";
+  }
+  const publication = texts.join("\n").toLowerCase();
+  const referenced = fontPaths.some(path => {
+    const normalized = path.toLowerCase();
+    const basename = normalized.split("/").at(-1) ?? normalized;
+    return publication.includes(normalized) || publication.includes(`res://${normalized}`)
+      || publication.includes(basename);
+  });
+  return referenced ? null
+    : "Project source bundles a CJK font but does not reference it from the runtime UI or theme";
+}
+
+export function unobservedTestPlanAssetPlacements(
+  plan: Readonly<Record<string, unknown>>,
+): readonly Readonly<{ targetId: string; checkpointRole: string }>[] {
+  const manifest = boundedObject(plan.testManifest);
+  const events: Readonly<Record<string, unknown>>[] = [];
+  if (Array.isArray(manifest.features)) {
+    for (const feature of manifest.features) {
+      const script = boundedObject(boundedObject(feature).interactionScript);
+      if (Array.isArray(script.events)) events.push(...script.events.map(boundedObject));
+    }
+  }
+  const referencesTarget = (value: unknown, targetId: string): boolean => {
+    if (!Array.isArray(value)) return false;
+    return value.some(candidate => boundedObject(candidate).source === "CONTROL"
+      && boundedObject(candidate).targetId === targetId);
+  };
+  const placementObserved = (targetId: string, checkpointRole: string): boolean => {
+    if (checkpointRole === "ACTION") {
+      return events.some(event => (event.type !== "checkpoint" && event.type !== "wait"
+        && [event.targetId, event.fromTargetId, event.toTargetId].includes(targetId))
+        || referencesTarget(event.postconditions, targetId));
+    }
+    return events.some(event => event.type === "checkpoint" && event.role === checkpointRole
+      && (checkpointRole === "START" || checkpointRole === "READY"
+        || event.changeTargetId === targetId
+        || referencesTarget(event.assertions, targetId)));
+  };
+  const placement = boundedObject(plan.assetPlacementPlan);
+  if (!Array.isArray(placement.placements)) return Object.freeze([]);
+  return Object.freeze(placement.placements.flatMap(candidate => {
+    const item = boundedObject(candidate);
+    const targetId = typeof item.targetId === "string" ? item.targetId : "";
+    const checkpointRole = typeof item.checkpointRole === "string" ? item.checkpointRole : "";
+    return targetId && checkpointRole && !placementObserved(targetId, checkpointRole)
+      ? [Object.freeze({ targetId, checkpointRole })]
+      : [];
+  }));
+}
+
 function probePublisherLiterals(texts: readonly string[]): Readonly<{ matches(value: string): boolean }> {
   const exact = new Set<string>();
   const patterns: RegExp[] = [];
-  const literal = /"((?:\\.|[^"\\]){1,240})"|'((?:\\.|[^'\\]){1,240})'/g;
+  const register = (value: string): void => {
+    if (value.length > 240) return;
+    exact.add(value);
+    if (/%[sdif]/i.test(value)) {
+      const expression = value
+        .replace(/[.*+?^${}()|[\]\\]/g, "\\$&")
+        .replace(/%[sdif]/gi, "[a-z0-9_.-]+");
+      patterns.push(new RegExp(`^${expression}$`));
+    }
+    if (value.endsWith("-") && /^[a-z0-9][a-z0-9_.-]*-$/.test(value)) {
+      patterns.push(new RegExp(`^${value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}[a-z0-9_.-]+$`));
+    }
+  };
+  const literal = /"((?:\\.|[^"\\\r\n]){0,240})"|'((?:\\.|[^'\\\r\n]){0,240})'/g;
+  const stableLiteral = /(["'])((?:[a-z0-9_.-]|%[sdif]){1,240})\1/gi;
   for (const text of texts) {
+    // Probe references are stable IDs/paths. Extract those bounded literals
+    // independently so an apostrophe in a comment (for example `engine's`)
+    // cannot make a language-agnostic quote matcher consume the rest of the
+    // source and hide otherwise explicit publisher keys.
+    for (const match of text.matchAll(stableLiteral)) register(String(match[2] ?? ""));
     for (const match of text.matchAll(literal)) {
       const value = String(match[1] ?? match[2] ?? "").replace(/\\(["'\\])/g, "$1");
-      exact.add(value);
-      if (/%[sdif]/i.test(value)) {
-        const expression = value
-          .replace(/[.*+?^${}()|[\]\\]/g, "\\$&")
-          .replace(/%[sdif]/gi, "[a-z0-9_.-]+");
-        patterns.push(new RegExp(`^${expression}$`));
-      }
+      register(value);
     }
   }
   return Object.freeze({ matches: (value: string) => exact.has(value) || patterns.some(pattern => pattern.test(value)) });
@@ -1356,6 +1465,11 @@ function freezeTestPlan(value: Readonly<Record<string, unknown>>, context: Proje
     mapped.add(String(item.assetKey));
   }
   if (plannedAssetKeys.some(key => !mapped.has(key))) throw new Error("The Test Agent plan leaves a planned asset untested");
+  const unobservedPlacements = unobservedTestPlanAssetPlacements(value);
+  if (unobservedPlacements.length > 0) {
+    throw new Error(`The Test Agent plan does not explicitly observe conditional asset targets at their planned checkpoint roles: ${unobservedPlacements
+      .map(item => `${item.targetId}@${item.checkpointRole}`).join(", ")}`);
+  }
   const coverage = Object.freeze(Object.fromEntries(manifest.requirements.map(requirement => [
     requirement.requirementId,
     Object.freeze(manifest.features.filter(feature => feature.requirementIds.includes(requirement.requirementId)).map(feature => feature.id)),

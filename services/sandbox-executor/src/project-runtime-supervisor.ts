@@ -77,7 +77,7 @@ export class ProjectRuntimeSupervisor {
     const args = [
       "create", "--name", name, "--read-only", "--cap-drop=ALL",
       "--security-opt=no-new-privileges", "--pids-limit=512", "--memory=6g", "--cpus=2.00",
-      "--tmpfs=/run/deviludo:rw,noexec,nosuid,nodev,size=64m,mode=0700,uid=10001,gid=10001",
+      "--tmpfs=/run/deviludo:rw,noexec,nosuid,nodev,size=256m,mode=0700,uid=10001,gid=10001",
       "--tmpfs=/tmp:rw,noexec,nosuid,nodev,size=256m,mode=0700,uid=10001,gid=10001",
       // Runtime owns its private state by UID, while project source is shared
       // through the Core/Executor project group for validated checkpoints and
