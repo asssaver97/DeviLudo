@@ -77,7 +77,7 @@ export class ProjectRuntimeSupervisor {
     const args = [
       "create", "--name", name, "--read-only", "--cap-drop=ALL",
       "--security-opt=no-new-privileges", "--pids-limit=512", "--memory=6g", "--cpus=2.00",
-      "--tmpfs=/run/deviludo:rw,noexec,nosuid,nodev,size=64m,mode=0700,uid=10001,gid=10001",
+      "--tmpfs=/run/deviludo:rw,noexec,nosuid,nodev,size=256m,mode=0700,uid=10001,gid=10001",
       "--tmpfs=/tmp:rw,noexec,nosuid,nodev,size=256m,mode=0700,uid=10001,gid=10001",
       // Runtime owns its private state by UID, while project source is shared
       // through the Core/Executor project group for validated checkpoints and
@@ -402,7 +402,7 @@ function validateEnsure(value: ProjectRuntimeEnsureRequest, images: ReadonlySet<
 
 function validateTurn(value: ProjectRuntimeTurnRequest, images: ReadonlySet<string>): void {
   validateControl(value);
-  if (!["INTENT", "ANALYSIS", "DESIGN", "DEVELOPMENT", "TEST"].includes(value.role)
+  if (!["INTENT", "ANALYSIS", "DESIGN", "UI_DESIGN", "DEVELOPMENT", "TEST"].includes(value.role)
     || !["PRIMARY", "READ_ONLY_BRANCH", "COMPACT"].includes(value.mode)
     || !["CLAUDE_CODE", "CODEX_CLI"].includes(value.runtime) || !images.has(value.runtimeImage)
     || !/^[0-9a-f-]{36}$/i.test(value.turnId) || !/^[A-Za-z0-9_-]{24,256}$/.test(value.leaseToken)

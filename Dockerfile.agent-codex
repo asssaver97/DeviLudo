@@ -2,7 +2,7 @@
 FROM node:22.22.0-bookworm-slim
 ARG CODEX_CLI_VERSION=0.149.0
 ARG NPM_CONFIG_REGISTRY=https://registry.npmjs.org/
-RUN --mount=type=cache,target=/root/.npm apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends ca-certificates git ripgrep unzip \
+RUN --mount=type=cache,target=/root/.npm apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends ca-certificates fonts-noto-cjk git ripgrep unzip \
  && rm -rf /var/lib/apt/lists/* \
  && npm install --global --no-audit --no-fund "@openai/codex@${CODEX_CLI_VERSION}" \
  && useradd --create-home --uid 10001 task
@@ -10,6 +10,7 @@ COPY services/project-runtime/runtime.mjs /usr/local/bin/deviludo-project-runtim
 COPY services/project-runtime/turn.mjs /usr/local/bin/deviludo-project-turn
 COPY services/project-runtime/runtime-events.mjs /usr/local/bin/runtime-events.mjs
 COPY services/project-runtime/mcp-server.mjs /usr/local/bin/deviludo-mcp
+COPY services/project-runtime/mcp-content.mjs /usr/local/bin/mcp-content.mjs
 COPY services/project-runtime/tool-names.mjs /usr/local/bin/tool-names.mjs
 COPY services/project-runtime/io.mjs /usr/local/bin/deviludo-runtime-io
 COPY services/project-runtime/volume-init.mjs /usr/local/bin/deviludo-runtime-volume-init

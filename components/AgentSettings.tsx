@@ -408,6 +408,7 @@ export function AgentSettings() {
                 <div className="agent-model-expanded">
                   <ModelInput disabled={loading || saving} inheritLabel={text("继承主模型", "Inherits primary")} label={text("项目分析 Agent", "Project Analysis Agent")} onChange={value => updateModelOverride("analysis", value)} placeholder={primaryModel} value={modelOverrides.analysis ?? ""} />
                   <ModelInput disabled={loading || saving} inheritLabel={text("继承主模型", "Inherits primary")} label={text("设计 Agent", "Design Agent")} onChange={value => updateModelOverride("design", value)} placeholder={primaryModel} value={modelOverrides.design ?? ""} />
+                  <ModelInput disabled={loading || saving} inheritLabel={text("继承主模型", "Inherits primary")} label={text("UI 设计 Agent", "UI Design Agent")} onChange={value => updateModelOverride("uiDesign", value)} placeholder={primaryModel} value={modelOverrides.uiDesign ?? ""} />
                   <ModelInput disabled={loading || saving} inheritLabel={text("继承主模型", "Inherits primary")} label={text("开发 Agent", "Development Agent")} onChange={value => updateModelOverride("development", value)} placeholder={primaryModel} value={modelOverrides.development ?? ""} />
                   <ModelInput disabled={loading || saving} inheritLabel={text("继承主模型", "Inherits primary")} label={text("测试 Agent", "Test Agent")} onChange={value => updateModelOverride("test", value)} placeholder={primaryModel} value={modelOverrides.test ?? ""} />
                 </div>
@@ -625,5 +626,5 @@ function connectionFromClaudeSettingsJson(
 }
 
 function emptyModelOverrides(): AgentModelOverrides {
-  return Object.freeze({ intent: null, analysis: null, design: null, development: null, test: null });
+  return Object.freeze({ intent: null, analysis: null, design: null, uiDesign: null, development: null, test: null });
 }

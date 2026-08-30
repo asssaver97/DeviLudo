@@ -151,6 +151,7 @@ html[data-theme="light"] .workspace-switcher {
 html[data-theme="light"] .workspace-avatar,
 html[data-theme="light"] .agent-member i,
 html[data-theme="light"] .conversation-box-message.role-design .message-avatar,
+html[data-theme="light"] .conversation-box-message.role-ui_design .message-avatar,
 html[data-theme="light"] .conversation-box-message.role-analysis .message-avatar {
   background: #e4f4fa;
   border-color: var(--blue);
@@ -317,7 +318,8 @@ html[data-theme="light"] .product-delivery-config-toggle-icon {
   background: rgba(8, 127, 167, .1);
 }
 
-html[data-theme="light"] .product-delivery-material-group > legend {
+html[data-theme="light"] .product-delivery-material-group > legend,
+html[data-theme="light"] .product-delivery-artifacts-dock > legend {
   background: #ffffff;
   color: #075f7c;
 }
@@ -338,10 +340,11 @@ html[data-theme="light"] :is(
   .product-delivery-pipeline-header,
   .product-iteration-selector select,
   .product-delivery-material-group,
+  .product-delivery-artifacts-dock,
   .product-delivery-material-disclosure,
   .product-delivery-stage-marker,
   .product-delivery-stage-rerun-icon,
-  .product-delivery-stage-artifacts button,
+  .product-delivery-artifact-grid button,
   .product-delivery-configuration-grid,
   .project-delivery-asset-settings,
   .project-delivery-git-settings,

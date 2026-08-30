@@ -67,7 +67,7 @@ async function runtimeSourceFiles(root) {
 
 function containsAssetReference(source, assetKey) {
   const escaped = assetKey.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-  return new RegExp(`(?:^|[^A-Za-z0-9._/-])(?:res://assets/generated/)?${escaped}(?:\\.(?:png|jpg|webp))?(?=$|[^A-Za-z0-9._/-])`).test(source);
+  return new RegExp(`(?:^|[^A-Za-z0-9._/-])res://assets/generated/${escaped}\\.(?:png|jpg|webp|mp3|ogg|wav)(?=$|[^A-Za-z0-9._/-])`).test(source);
 }
 
 function stripSourceComments(source) {

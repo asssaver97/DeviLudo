@@ -94,6 +94,10 @@ describe("deviludo.e2e-ui-probe", () => {
     assert.equal(validateProbeSnapshot(duplicate), false);
     assert.equal(validateProbeSnapshot(snapshot({ controls: [{ ...snapshot().controls[0], rect: { x: 1270, y: 0, width: 20, height: 10 } }] })), false);
     assert.equal(
+      probeSnapshotValidationError(snapshot({ controls: [{ ...snapshot().controls[0], id: "clipped-action", rect: { x: 24, y: 719, width: 405, height: 1 } }] })),
+      "control clipped-action rectangle {\"x\":24,\"y\":719,\"width\":405,\"height\":1} is too small for truthful native input; publish the live unclamped bounds",
+    );
+    assert.equal(
       probeSnapshotValidationError(snapshot({ controls: [{ ...snapshot().controls[0], id: "player-label", rect: { x: 9, y: 5, width: 231, height: 0 } }] })),
       "control player-label rectangle {\"x\":9,\"y\":5,\"width\":231,\"height\":0} must be positive and remain inside 1280x720",
     );

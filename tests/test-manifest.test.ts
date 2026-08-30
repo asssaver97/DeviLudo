@@ -90,6 +90,19 @@ describe("test-manifest", () => {
     assert.equal(testManifestValidationError(manifest), null);
   });
 
+  test("rejects an adaptive failure oracle that is already true at the fresh menu", () => {
+    const manifest = completeManifest();
+    const invalid = {
+      ...manifest,
+      adaptivePlayer: {
+        ...manifest.adaptivePlayer,
+        failureAssertions: [{ source: "STATE", key: "session_active", operator: "EQUALS", value: false }],
+      },
+    };
+    assert.match(testManifestValidationError(invalid) ?? "", /must be false at the required fresh MENU start/);
+    assert.equal(validateTestManifest(invalid), false);
+  });
+
   test("returns actionable contract errors instead of misclassifying an invalid plan as infrastructure", () => {
     const manifest = completeManifest();
     assert.match(testManifestValidationError({
@@ -118,6 +131,13 @@ describe("test-manifest", () => {
     }) ?? "", /unresolved placeholder.*PROGRESS|unresolved placeholder.*key/);
     assert.match(testManifestValidationError({
       ...manifest,
+      adaptivePlayer: {
+        ...manifest.adaptivePlayer,
+        successAssertions: [{ scope: "PROGRESS", key: "turn", operator: "CHANGED" }],
+      },
+    }) ?? "", /assertion 0 uses retired scope, use source/);
+    assert.match(testManifestValidationError({
+      ...manifest,
       features: [{ ...manifest.features[0], interactionScript: { events: [] } }],
     }) ?? "", /interactionScript is invalid/);
     const equalityOnly = manifest.features[0]!.interactionScript!.events.map(event =>
@@ -142,6 +162,29 @@ describe("test-manifest", () => {
         },
       }, ...manifest.features.slice(1)],
     }) ?? "", /PRIMARY_ACTION, FEATURE_ACTION, and COMPLETE_LOOP/);
+    const incompleteStart = coreFeature.interactionScript!.events.map(event => event.type === "click" && event.intent === "START_SESSION"
+      ? { ...event, postconditions: [{ source: "STATE", key: "screen_mode", operator: "EQUALS", value: "PLAYING" }] }
+      : event);
+    assert.match(testManifestValidationError({
+      ...manifest,
+      features: [{ ...coreFeature, interactionScript: { events: incompleteStart } }, ...manifest.features.slice(1)],
+    }) ?? "", /START_SESSION\.postconditions must contain all standard PLAYING assertions/);
+    assert.match(testManifestValidationError({
+      ...manifest,
+      adaptivePlayer: {
+        ...manifest.adaptivePlayer,
+        requirementIds: manifest.adaptivePlayer.requirementIds.filter(id => id !== "req-core-loop"),
+      },
+    }) ?? "", /missing CORE_LOOP requirements: req-core-loop/);
+    const pauseAsUnit = {
+      ...manifest.features[1], verificationMethod: "unit" as const,
+      interactionScript: undefined, launchProfile: undefined,
+      gdsTestPath: "res://tests/pause.gd", checkNames: ["pause-contract"], timeoutMs: 30_000,
+    };
+    assert.match(testManifestValidationError({
+      ...manifest,
+      features: [coreFeature, pauseAsUnit, ...manifest.features.slice(2)],
+    }) ?? "", /native interaction actions do not cover player requirements: req-pause/);
   });
 
   test("rejects versioned contracts and blind raw-key launch contracts", () => {
@@ -189,7 +232,9 @@ describe("test-manifest", () => {
 
   test("requires valid SYSTEM category and a concrete exemption reason", () => {
     const manifest = completeManifest();
-    assert.equal(validateTestManifest({ ...manifest, requirements: manifest.requirements.map(item => item.requirementId === "req-save-data" ? { ...item, systemCategory: "UI", exemptionReason: "短" } : item) }), false);
+    const invalid = { ...manifest, requirements: manifest.requirements.map(item => item.requirementId === "req-save-data" ? { ...item, systemCategory: "PLATFORM", exemptionReason: "短" } : item) };
+    assert.equal(validateTestManifest(invalid), false);
+    assert.match(testManifestValidationError(invalid) ?? "", /systemCategory must be DATA, RUNTIME, or NETWORK/);
   });
 
   test("supports action, turn-strategy, pointer and narrative semantic player contracts", () => {

@@ -157,7 +157,7 @@ export class StackHarness {
         baseUrl: "https://api.example.com",
         apiKey: "sk-e2e-instance-secret",
         primaryModel: "claude-primary",
-        modelOverrides: { intent: null, analysis: null, design: null, development: null, test: null },
+        modelOverrides: { intent: null, analysis: null, design: null, uiDesign: null, development: null, test: null },
         imageModel: null,
       },
     });

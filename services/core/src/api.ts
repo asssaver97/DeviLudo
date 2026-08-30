@@ -105,10 +105,11 @@ import {
   designReplyAction,
   implementationChangeReady,
   implementationBrief as runtimeImplementationBrief,
-  lightweightProjectRuntimeIntent,
   parseProjectRuntimeIntent,
   parseProjectRuntimeReply,
+  projectRuntimeContinuationIntent,
   projectRuntimeIntentPrompt,
+  projectRuntimeNewGameIntent,
   projectRuntimeSpecialistPrompt,
 } from "./project-runtime-conversation";
 import {
@@ -130,7 +131,7 @@ export async function runApi(
   const objectStore = new CoreObjectStore();
   const projectSources = new ProjectSourceStore(config.projectsRoot);
   const runtimeRepository = new ProjectRuntimeRepository(database);
-  const projectRuntime = new ProjectRuntimeService(runtimeRepository, config.projectsRoot);
+  const projectRuntime = new ProjectRuntimeService(runtimeRepository, config.projectsRoot, undefined, objectStore);
   const pki = new E2ePkiIssuer();
   const telemetry = new UsageTelemetry(config);
   const app = Fastify({
@@ -231,7 +232,7 @@ export async function runApi(
     const role = body.role;
     if (!UUID.test(String(body.workspaceId)) || !UUID.test(String(body.projectId))
       || !UUID.test(String(body.turnId))
-      || !["INTENT", "ANALYSIS", "DESIGN", "DEVELOPMENT", "TEST"].includes(String(role))
+      || !["INTENT", "ANALYSIS", "DESIGN", "UI_DESIGN", "DEVELOPMENT", "TEST"].includes(String(role))
       || typeof body.name !== "string" || !/^[a-z][a-z0-9_.]{2,100}$/.test(body.name)
       || !body.arguments || typeof body.arguments !== "object" || Array.isArray(body.arguments)
       || !/^[A-Za-z0-9_-]{32,512}$/.test(token)) {
@@ -843,6 +844,19 @@ export async function runApi(
         sourcePaths,
       });
     }
+    const context = await projectRuntime.readContext(workspace.id, project.id);
+    const musicItems = context.assetPlan.flatMap(asset => {
+      if (String(asset.assetType ?? "").toLowerCase() !== "music") return [];
+      const assetKey = typeof asset.key === "string" ? asset.key : "";
+      const description = typeof asset.description === "string" ? asset.description.trim() : "";
+      return assetKey && description ? [Object.freeze({ assetKey, description })] : [];
+    });
+    await repository.assets.synchronizeMusicPlan({
+      workspaceId: workspace.id,
+      projectId: project.id,
+      workflowId: project.workflowId,
+      items: musicItems,
+    });
     const view = await repository.assets.read(workspace.id, project.id);
     // A project without a manifest is ordinary, not an error: the Agent has not
     // planned assets for it yet.
@@ -906,7 +920,8 @@ export async function runApi(
       }
       const manifest = await repository.assets.read(workspace.id, project.id);
       if (!manifest) return reply.code(404).send({ code: "ASSET_MANIFEST_NOT_FOUND" });
-      const unresolved = manifest.items.filter(item => ["planned", "generating", "failed"].includes(item.status));
+      const unresolved = manifest.items.filter(item => item.assetType !== "music"
+        && ["planned", "generating", "failed"].includes(item.status));
       if (unresolved.length === 0) {
         return reply.code(409).send({
           code: "ASSET_RERUN_NOT_NEEDED",
@@ -952,20 +967,26 @@ export async function runApi(
       const assetKey = typeof body.assetKey === "string" ? body.assetKey : "";
       const contentType = typeof body.contentType === "string" ? body.contentType : "";
       const encoded = typeof body.content === "string" ? body.content : "";
-      const extension = ASSET_CONTENT_TYPES[contentType];
-      if (!assetKey || assetKey.length > 200 || !extension || !encoded) {
+      const manifest = await repository.assets.read(workspace.id, project.id);
+      const planned = manifest?.items.find(item => item.assetKey === assetKey) ?? null;
+      const music = planned?.assetType === "music";
+      const extension = music ? MUSIC_CONTENT_TYPES[contentType] : IMAGE_ASSET_CONTENT_TYPES[contentType];
+      if (!assetKey || assetKey.length > 200 || !planned || !extension || !encoded) {
         return reply.code(400).send({
           code: "INVALID_ASSET_UPLOAD",
-          message: "请提供素材键名和受支持的图片内容 (PNG/JPEG/WebP)",
+          message: music
+            ? "请为已规划的音乐素材提供 MP3、Ogg Vorbis 或 WAV 文件"
+            : "请为已规划的美术素材提供 PNG、JPEG 或 WebP 图片",
         });
       }
       // Decoded length is what actually lands in the bucket, so bound that
       // rather than the base64 envelope.
       const content = Buffer.from(encoded, "base64");
-      if (content.length < 1 || content.length > MAX_ASSET_BYTES) {
+      const maxBytes = music ? MAX_MUSIC_ASSET_BYTES : MAX_IMAGE_ASSET_BYTES;
+      if (content.length < 1 || content.length > maxBytes) {
         return reply.code(413).send({
           code: "ASSET_TOO_LARGE",
-          message: `单个素材不能超过 ${MAX_ASSET_BYTES / (1024 * 1024)} MB`,
+          message: `单个素材不能超过 ${maxBytes / (1024 * 1024)} MB`,
         });
       }
       // Store first, then record: an orphaned object is harmless and gets swept
@@ -1294,19 +1315,24 @@ export async function runApi(
           source: project.source ? { revision: project.source.revision, digest: project.source.digest, relativePath: project.source.relativePath } : null,
         });
         const replannedResult = await projectRuntime.turn({
-          workspaceId: workspace.id, projectId: project.id, role: "DESIGN", mode: "READ_ONLY_BRANCH",
+          workspaceId: workspace.id, projectId: project.id, role: "UI_DESIGN", mode: "READ_ONLY_BRANCH",
           prompt: projectRuntimeSpecialistPrompt({
-            intent: Object.freeze({ intent: "CHANGE_REQUEST", targetRole: "DESIGN", explicitExecution: false,
+            intent: Object.freeze({ intent: "CHANGE_REQUEST", targetRole: "UI_DESIGN", explicitExecution: false,
               actionable: true, summary: changeRequest.summary }),
             content: `Re-plan the pending change against the current document. ${changeRequest.implementationBrief}`,
             confirmed: false,
+            upstreamDesign: Object.freeze({
+              implementationBrief: changeRequest.implementationBrief,
+              projectDocumentPatch: changeRequest.documentPatch,
+              e2eGoalDelta: changeRequest.e2eGoalDelta,
+            }),
           }),
           responseLanguage, settings,
           sourceRevision: project.source?.revision ?? null,
           sourceRelativePath: project.source?.relativePath ?? null,
         });
         const replannedReply = parseProjectRuntimeReply(
-          replannedResult, "DESIGN", settings, responseLanguage, "AWAITING_CONFIRMATION",
+          replannedResult, "UI_DESIGN", settings, responseLanguage, "AWAITING_CONFIRMATION",
         );
         const replacement = await repository.createImplementationChangeRequest({
           workspaceId: workspace.id,
@@ -1533,7 +1559,14 @@ export async function runApi(
         message: "流程正在运行中，请先取消当前交付再选择重跑节点",
       });
     }
-    if (stage === "AGENT_TURN") {
+    const agentRole = stage === "GAME_DESIGN"
+      ? "DESIGN"
+      : stage === "UI_DESIGN"
+        ? "UI_DESIGN"
+        : stage === "AGENT_TURN"
+          ? "DEVELOPMENT"
+          : null;
+    if (agentRole) {
       if(host.mode==="managed")await agentConnection(host,principal,"development",repository,agentSecrets);
       else if(!await repository.readAgentSettings())return reply.code(424).send({
           code: "AGENT_CONFIG_REQUIRED",
@@ -1544,7 +1577,8 @@ export async function runApi(
       kind: "STAGE_RERUN_REQUESTED",
       idempotencyKey,
       payload: {
-        stage,
+        stage: agentRole ? "AGENT_TURN" : stage,
+        ...(agentRole ? { agentRole } : {}),
         requestedBy: principal.actorLabel,
         requestedByActorId: principal.actorId,
         responseLanguage: parseResponseLanguage(body.responseLanguage),
@@ -2320,35 +2354,7 @@ async function processConversationMessage(input: Readonly<{
       settings,
       source: null,
     });
-    let intentDecision = lightweightProjectRuntimeIntent({
-      content: command.content,
-      hasAttachments: command.images.length > 0,
-      hasPendingChange: false,
-    });
-    if (!intentDecision) {
-      input.stream?.onStart("INTENT");
-      const intentResult = await input.projectRuntime.turn({
-        workspaceId: targetWorkspace.id,
-        projectId,
-        role: "INTENT",
-        mode: "PRIMARY",
-        prompt: projectRuntimeIntentPrompt({
-          content: command.content,
-          hasAttachments: command.images.length > 0,
-          hasPendingChange: false,
-          workflowState: "DRAFT",
-          recentMessages: Object.freeze([]),
-        }),
-        responseLanguage: command.responseLanguage,
-        settings,
-        sourceRevision: null,
-        sourceRelativePath: null,
-        attachments: command.images,
-        onEvent: event => { forwardConversationRuntimeProgress(input.stream, "INTENT", event); },
-      }).catch(error => { throw httpError(424, "INTENT_AGENT_FAILED", error instanceof Error ? error.message : "Intent Agent failed"); });
-      input.stream?.onComplete("INTENT");
-      intentDecision = parseProjectRuntimeIntent(intentResult);
-    }
+    const intentDecision = projectRuntimeNewGameIntent(command.content);
     input.onStage?.("RESPONDING");
     const specialistRole = intentDecision.targetRole;
     let streamedSpecialistContent = "";
@@ -2387,7 +2393,62 @@ async function processConversationMessage(input: Readonly<{
       streamedContent: streamedSpecialistContent, hasStreamedProcess: hasStreamedSpecialistProcess,
       signal: input.signal,
     });
-    input.stream?.onComplete(specialistRole);
+    let effectiveIntent = intentDecision;
+    let effectiveResult = specialistResult;
+    let effectiveReply = specialistReply;
+    const assistantMessages: Array<Readonly<{ content: string; metadata: Readonly<Record<string, unknown>> }>> = [Object.freeze({
+      content: specialistReply.content,
+      metadata: Object.freeze({ ...conversationAgentMetadata(specialistReply), intentDecision,
+        runtimeTurnId: specialistResult.turnId, runtimeSessionId: specialistResult.sessionId }),
+    })];
+    if (specialistRole === "DESIGN" && specialistReply.readyForUiDesign) {
+      input.stream?.onComplete("DESIGN");
+      const uiIntent = Object.freeze({ ...intentDecision, targetRole: "UI_DESIGN" as const });
+      let streamedUiContent = "";
+      let hasStreamedUiProcess = false;
+      input.stream?.onStart("UI_DESIGN");
+      const uiResult = await input.projectRuntime.turn({
+        workspaceId: targetWorkspace.id,
+        projectId,
+        role: "UI_DESIGN",
+        mode: "READ_ONLY_BRANCH",
+        prompt: projectRuntimeSpecialistPrompt({
+          intent: uiIntent,
+          content: command.content,
+          confirmed: intentDecision.intent === "CHANGE_REQUEST" && intentDecision.explicitExecution,
+          upstreamDesign: conversationDesignHandoff(specialistReply),
+        }),
+        responseLanguage: command.responseLanguage,
+        settings,
+        sourceRevision: null,
+        sourceRelativePath: null,
+        attachments: command.images,
+        onEvent: event => {
+          const forwarded = forwardConversationRuntimeProgress(input.stream, "UI_DESIGN", event);
+          streamedUiContent += forwarded.content;
+          hasStreamedUiProcess ||= forwarded.process;
+        },
+      }).catch(error => { throw httpError(424, "UI_DESIGN_AGENT_FAILED", error instanceof Error ? error.message : "UI Design Agent failed"); });
+      const uiReply = parseProjectRuntimeReply(
+        uiResult, "UI_DESIGN", settings, command.responseLanguage, designReplyAction(uiIntent, "UI_DESIGN"),
+      );
+      await deliverValidatedConversationReply({
+        stream: input.stream, role: "UI_DESIGN", content: uiReply.content,
+        streamedContent: streamedUiContent, hasStreamedProcess: hasStreamedUiProcess,
+        signal: input.signal,
+      });
+      input.stream?.onComplete("UI_DESIGN");
+      assistantMessages.push(Object.freeze({
+        content: uiReply.content,
+        metadata: Object.freeze({ ...conversationAgentMetadata(uiReply), intentDecision: uiIntent,
+          runtimeTurnId: uiResult.turnId, runtimeSessionId: uiResult.sessionId }),
+      }));
+      effectiveIntent = uiIntent;
+      effectiveResult = uiResult;
+      effectiveReply = uiReply;
+    } else {
+      input.stream?.onComplete(specialistRole);
+    }
     input.onStage?.("SAVING");
     const userAttachments = await storeConversationImages(objectStore, {
       workspaceId: targetWorkspace.id,
@@ -2400,11 +2461,7 @@ async function processConversationMessage(input: Readonly<{
       conversationId,
       userContent: command.content,
       userAttachments,
-      assistantMessages: [Object.freeze({
-        content: specialistReply.content,
-        metadata: Object.freeze({ ...conversationAgentMetadata(specialistReply), intentDecision,
-          runtimeTurnId: specialistResult.turnId, runtimeSessionId: specialistResult.sessionId }),
-      })],
+      assistantMessages,
       assistantApplyToDraft: false,
       assistantProjectDocument: null,
       resolveImportAnalysis: false,
@@ -2415,23 +2472,23 @@ async function processConversationMessage(input: Readonly<{
     let createdProject = await repository.readProject(targetWorkspace.id, projectId) ?? shell.project;
     let changeRequest: ImplementationChangeRequest | undefined;
     let initialWorkflowAction: ConversationWorkflowAction = "NONE";
-    if (implementationChangeReady(intentDecision, specialistReply.readyForDevelopment)) {
+    if (implementationChangeReady(effectiveIntent, effectiveReply.readyForDevelopment)) {
       changeRequest = await repository.createImplementationChangeRequest({
         workspaceId: targetWorkspace.id,
         projectId,
         workflowId,
         conversationId,
-        summary: intentDecision.summary,
-        implementationBrief: runtimeImplementationBrief(specialistResult, specialistReply.content),
-        projectDocumentPatch: specialistReply.projectDocumentPatch ?? Object.freeze({}),
-        e2eGoalDelta: specialistReply.e2eGoalDelta,
-        explicitExecution: intentDecision.explicitExecution,
+        summary: effectiveIntent.summary,
+        implementationBrief: runtimeImplementationBrief(effectiveResult, effectiveReply.content),
+        projectDocumentPatch: effectiveReply.projectDocumentPatch ?? Object.freeze({}),
+        e2eGoalDelta: effectiveReply.e2eGoalDelta,
+        explicitExecution: effectiveIntent.explicitExecution,
         idempotencyKey: requestIdempotencyKey(request, "implementation-change"),
       });
     }
     if (createdProject.workflowState === "DRAFT" && createdProject.analysisStatus === "READY"
-      && intentDecision.intent === "CHANGE_REQUEST" && intentDecision.explicitExecution
-      && intentDecision.actionable && specialistReply.readyForDevelopment && changeRequest) {
+      && effectiveIntent.intent === "CHANGE_REQUEST" && effectiveIntent.explicitExecution
+      && effectiveIntent.actionable && effectiveReply.readyForDevelopment && changeRequest) {
       initialWorkflowAction = await applyConfirmedConversationChange({
         repository, objectStore, workspaceId: targetWorkspace.id, project: createdProject,
         changeRequest, actorId: principal.actorId, responseLanguage: command.responseLanguage,
@@ -2474,12 +2531,14 @@ async function processConversationMessage(input: Readonly<{
     } : null,
   });
   input.onStage?.("RESPONDING");
-  let intentDecision = lightweightProjectRuntimeIntent({
-    content: command.content,
-    hasAttachments: command.images.length > 0,
-    hasPendingChange: project.pendingImplementationChange !== null,
-  });
-  if (!intentDecision) {
+  const pending = project.pendingImplementationChange;
+  const continuedIntent = project.workflowState === "DRAFT" && !pending
+    ? projectRuntimeContinuationIntent(existingConversation?.messages ?? Object.freeze([]), command.content)
+    : null;
+  let intentDecision: ConversationIntentDecision;
+  if (continuedIntent) {
+    intentDecision = continuedIntent;
+  } else {
     input.stream?.onStart("INTENT");
     const intentResult = await input.projectRuntime.turn({
       workspaceId: workspace.id,
@@ -2489,9 +2548,10 @@ async function processConversationMessage(input: Readonly<{
       prompt: projectRuntimeIntentPrompt({
         content: command.content,
         hasAttachments: command.images.length > 0,
-        hasPendingChange: project.pendingImplementationChange !== null,
+        hasPendingChange: pending !== null,
         workflowState: project.workflowState,
         recentMessages: existingConversation?.messages ?? Object.freeze([]),
+        lastSpecialistRole: lastConversationSpecialistRole(existingConversation),
       }),
       responseLanguage: command.responseLanguage,
       settings,
@@ -2513,7 +2573,6 @@ async function processConversationMessage(input: Readonly<{
     }, command.images);
     return userAttachments;
   };
-  const pending = project.pendingImplementationChange;
   if (intentDecision.intent === "CONFIRM_CHANGE" || intentDecision.intent === "REJECT_CHANGE") {
     if (!pending) throw httpError(409, "CHANGE_REQUEST_NOT_FOUND", "当前没有等待确认的实现变更");
     const rejected = intentDecision.intent === "REJECT_CHANGE";
@@ -2522,12 +2581,17 @@ async function processConversationMessage(input: Readonly<{
       const replannedResult = await input.projectRuntime.turn({
         workspaceId: workspace.id,
         projectId,
-        role: "DESIGN",
+        role: "UI_DESIGN",
         mode: "READ_ONLY_BRANCH",
         prompt: projectRuntimeSpecialistPrompt({
-          intent: Object.freeze({ ...intentDecision, intent: "CHANGE_REQUEST", targetRole: "DESIGN", explicitExecution: false, actionable: true }),
+          intent: Object.freeze({ ...intentDecision, intent: "CHANGE_REQUEST", targetRole: "UI_DESIGN", explicitExecution: false, actionable: true }),
           content: `Re-plan the pending change against the current document. Pending change: ${pending.summary}`,
           confirmed: false,
+          upstreamDesign: Object.freeze({
+            implementationBrief: pending.implementationBrief,
+            projectDocumentPatch: pending.documentPatch,
+            e2eGoalDelta: pending.e2eGoalDelta,
+          }),
         }),
         responseLanguage: command.responseLanguage,
         settings,
@@ -2535,7 +2599,7 @@ async function processConversationMessage(input: Readonly<{
         sourceRelativePath: project.source?.relativePath ?? null,
       });
       const replannedReply = parseProjectRuntimeReply(
-        replannedResult, "DESIGN", settings, command.responseLanguage, "AWAITING_CONFIRMATION",
+        replannedResult, "UI_DESIGN", settings, command.responseLanguage, "AWAITING_CONFIRMATION",
       );
       input.onStage?.("SAVING");
       const conversation = await repository.appendConversationTurn({
@@ -2592,8 +2656,8 @@ async function processConversationMessage(input: Readonly<{
               : "The current plan is confirmed. Development is starting."),
         metadata: Object.freeze({
           source: "INTENT_AGENT",
-          agentRole: rejected ? "DESIGN" : "DEVELOPMENT",
-          agentName: rejected ? "DeviLudo Design Agent" : "DeviLudo Development Agent",
+          agentRole: rejected ? "UI_DESIGN" : "DEVELOPMENT",
+          agentName: rejected ? "DeviLudo UI Design Agent" : "DeviLudo Development Agent",
           intentDecision,
         }),
       })],
@@ -2653,7 +2717,7 @@ async function processConversationMessage(input: Readonly<{
   }
 
   const specialistRole = intentDecision.targetRole;
-  const designConvergence = specialistRole === "DESIGN"
+  const designConvergence = ["DESIGN", "UI_DESIGN"].includes(specialistRole)
     ? designConversationConvergence(existingConversation?.messages ?? Object.freeze([]), command.content)
     : undefined;
   let streamedSpecialistContent = "";
@@ -2669,6 +2733,9 @@ async function processConversationMessage(input: Readonly<{
       content: command.content,
       confirmed: intentDecision.intent === "CHANGE_REQUEST" && intentDecision.explicitExecution,
       designConvergence,
+      upstreamDesign: specialistRole === "UI_DESIGN"
+        ? conversationDesignHandoff(existingConversation)
+        : null,
     }),
     responseLanguage: command.responseLanguage,
     settings,
@@ -2693,7 +2760,63 @@ async function processConversationMessage(input: Readonly<{
     streamedContent: streamedSpecialistContent, hasStreamedProcess: hasStreamedSpecialistProcess,
     signal: input.signal,
   });
-  input.stream?.onComplete(specialistRole);
+  let effectiveIntent = intentDecision;
+  let effectiveResult = specialistResult;
+  let effectiveReply = specialistReply;
+  const assistantMessages: Array<Readonly<{ content: string; metadata: Readonly<Record<string, unknown>> }>> = [Object.freeze({
+    content: specialistReply.content,
+    metadata: Object.freeze({ ...conversationAgentMetadata(specialistReply), intentDecision,
+      runtimeTurnId: specialistResult.turnId, runtimeSessionId: specialistResult.sessionId }),
+  })];
+  if (specialistRole === "DESIGN" && specialistReply.readyForUiDesign) {
+    input.stream?.onComplete("DESIGN");
+    const uiIntent = Object.freeze({ ...intentDecision, targetRole: "UI_DESIGN" as const });
+    let streamedUiContent = "";
+    let hasStreamedUiProcess = false;
+    input.stream?.onStart("UI_DESIGN");
+    const uiResult = await input.projectRuntime.turn({
+      workspaceId: workspace.id,
+      projectId,
+      role: "UI_DESIGN",
+      mode: "READ_ONLY_BRANCH",
+      prompt: projectRuntimeSpecialistPrompt({
+        intent: uiIntent,
+        content: command.content,
+        confirmed: intentDecision.intent === "CHANGE_REQUEST" && intentDecision.explicitExecution,
+        designConvergence,
+        upstreamDesign: conversationDesignHandoff(specialistReply),
+      }),
+      responseLanguage: command.responseLanguage,
+      settings,
+      sourceRevision: project.source?.revision ?? null,
+      sourceRelativePath: project.source?.relativePath ?? null,
+      attachments: command.images,
+      onEvent: event => {
+        const forwarded = forwardConversationRuntimeProgress(input.stream, "UI_DESIGN", event);
+        streamedUiContent += forwarded.content;
+        hasStreamedUiProcess ||= forwarded.process;
+      },
+    }).catch(error => { throw httpError(424, "UI_DESIGN_AGENT_FAILED", error instanceof Error ? error.message : "UI Design Agent failed"); });
+    const uiReply = parseProjectRuntimeReply(
+      uiResult, "UI_DESIGN", settings, command.responseLanguage, designReplyAction(uiIntent, "UI_DESIGN"),
+    );
+    await deliverValidatedConversationReply({
+      stream: input.stream, role: "UI_DESIGN", content: uiReply.content,
+      streamedContent: streamedUiContent, hasStreamedProcess: hasStreamedUiProcess,
+      signal: input.signal,
+    });
+    input.stream?.onComplete("UI_DESIGN");
+    assistantMessages.push(Object.freeze({
+      content: uiReply.content,
+      metadata: Object.freeze({ ...conversationAgentMetadata(uiReply), intentDecision: uiIntent,
+        runtimeTurnId: uiResult.turnId, runtimeSessionId: uiResult.sessionId }),
+    }));
+    effectiveIntent = uiIntent;
+    effectiveResult = uiResult;
+    effectiveReply = uiReply;
+  } else {
+    input.stream?.onComplete(specialistRole);
+  }
   input.onStage?.("SAVING");
   const conversation = await repository.appendConversationTurn({
     workspaceId: workspace.id,
@@ -2701,17 +2824,13 @@ async function processConversationMessage(input: Readonly<{
     projectId,
     userContent: command.content,
     userAttachments: await storedUserAttachments(),
-    assistantMessages: [Object.freeze({
-      content: specialistReply.content,
-      metadata: Object.freeze({ ...conversationAgentMetadata(specialistReply), intentDecision,
-        runtimeTurnId: specialistResult.turnId, runtimeSessionId: specialistResult.sessionId }),
-    })],
+    assistantMessages,
     assistantApplyToDraft: false,
     assistantProjectDocument: null,
     resolveImportAnalysis: false,
     responseLanguage: command.responseLanguage,
   });
-  if (!implementationChangeReady(intentDecision, specialistReply.readyForDevelopment)) {
+  if (!implementationChangeReady(effectiveIntent, effectiveReply.readyForDevelopment)) {
     const updatedProject = await repository.readProject(workspace.id, projectId) ?? project;
     return Object.freeze({
       statusCode: created ? 201 : 200, setWorkspaceCookie: false,
@@ -2724,14 +2843,14 @@ async function processConversationMessage(input: Readonly<{
     projectId,
     workflowId: project.workflowId,
     conversationId,
-    summary: intentDecision.summary,
-    implementationBrief: runtimeImplementationBrief(specialistResult, specialistReply.content),
-    projectDocumentPatch: specialistReply.projectDocumentPatch ?? Object.freeze({}),
-    e2eGoalDelta: specialistReply.e2eGoalDelta,
-    explicitExecution: intentDecision.explicitExecution,
+    summary: effectiveIntent.summary,
+    implementationBrief: runtimeImplementationBrief(effectiveResult, effectiveReply.content),
+    projectDocumentPatch: effectiveReply.projectDocumentPatch ?? Object.freeze({}),
+    e2eGoalDelta: effectiveReply.e2eGoalDelta,
+    explicitExecution: effectiveIntent.explicitExecution,
     idempotencyKey: requestIdempotencyKey(request, "implementation-change"),
   });
-  if (!intentDecision.explicitExecution) {
+  if (!effectiveIntent.explicitExecution) {
     const updatedProject = await repository.readProject(workspace.id, projectId) ?? project;
     return Object.freeze({
       statusCode: created ? 201 : 200, setWorkspaceCookie: false,
@@ -2920,20 +3039,28 @@ const MAX_POSTGRES_BIGINT = 9_223_372_036_854_775_807n;
 function isConversationMessageId(value: string): boolean {
   return /^[1-9]\d{0,18}$/.test(value) && BigInt(value) <= MAX_POSTGRES_BIGINT;
 }
-// Raster formats only, and the extension is derived here rather than taken from
-// the client filename so an upload cannot choose its own key suffix.
-const ASSET_CONTENT_TYPES: Readonly<Record<string, string>> = Object.freeze({
+// The extension is derived from a trusted media type rather than the client
+// filename, so an upload cannot choose its own object-key suffix.
+const IMAGE_ASSET_CONTENT_TYPES: Readonly<Record<string, string>> = Object.freeze({
   "image/png": "png",
   "image/jpeg": "jpg",
   "image/webp": "webp",
 });
-const MAX_ASSET_BYTES = 8 * 1024 * 1024;
+const MUSIC_CONTENT_TYPES: Readonly<Record<string, string>> = Object.freeze({
+  "audio/mpeg": "mp3",
+  "audio/mp3": "mp3",
+  "audio/ogg": "ogg",
+  "audio/wav": "wav",
+  "audio/x-wav": "wav",
+});
+const MAX_IMAGE_ASSET_BYTES = 8 * 1024 * 1024;
+const MAX_MUSIC_ASSET_BYTES = 32 * 1024 * 1024;
 /**
  * Transport budget for an asset upload. The bytes arrive base64-encoded inside a
  * JSON envelope, which inflates them by 4/3, so the route limit has to clear
- * that before `MAX_ASSET_BYTES` can be enforced on the decoded buffer.
+ * that before the media-specific decoded-byte limit can be enforced.
  */
-const MAX_ASSET_REQUEST_BYTES = Math.ceil(MAX_ASSET_BYTES * 4 / 3) + 4 * 1024;
+const MAX_ASSET_REQUEST_BYTES = Math.ceil(MAX_MUSIC_ASSET_BYTES * 4 / 3) + 4 * 1024;
 const authenticatedRequests = new WeakMap<FastifyRequest, CorePrincipal>();
 
 function productAccess(request: FastifyRequest, config: CoreConfig): CorePrincipal {
@@ -3271,7 +3398,7 @@ async function processHostedProjectImport(input: Readonly<{
       model: resolveAgentModel(settings.primaryModel, settings.modelOverrides, "analysis"),
       settingsRevision: settings.revision,
     });
-    const designAssistant = await designImportedProject({
+    const designAssistants = await designImportedProject({
       projectRuntime: input.projectRuntime,
       workspaceId: input.principal.workspace.id,
       projectId,
@@ -3298,7 +3425,7 @@ async function processHostedProjectImport(input: Readonly<{
         model: analysis.model,
         settingsRevision: analysis.settingsRevision,
       },
-      designAssistant,
+      designAssistants,
       discovery: analysis.discovery,
       source: {
         kind: "GIT",
@@ -3332,7 +3459,7 @@ async function designImportedProject(input: Readonly<{
   settings: StoredInstanceAgentSettings;
   sourceRevision: number;
   sourceRelativePath: string;
-}>): Promise<Readonly<{ content: string; metadata: Readonly<Record<string, unknown>> }>> {
+}>): Promise<ReadonlyArray<Readonly<{ content: string; metadata: Readonly<Record<string, unknown>> }>>> {
   const result = await input.projectRuntime.turn({
     workspaceId: input.workspaceId,
     projectId: input.projectId,
@@ -3343,7 +3470,7 @@ async function designImportedProject(input: Readonly<{
       "Read that report first, then continue as the Design Agent. Preserve verified working behavior and turn the analysis findings into a coherent, playable game design.",
       "Resolve design gaps when evidence supports a reversible default; ask only high-impact player questions that remain unresolved.",
       "Do not edit source or durable project state in this read-only branch.",
-      "Return the standard Design Agent JSON response and decide readyForDevelopment from the completed design, not from analysis completion.",
+      "Return the standard Design Agent JSON response. Set readyForUiDesign from gameplay completeness and always keep readyForDevelopment=false.",
     ].join("\n"),
     responseLanguage: input.responseLanguage,
     settings: input.settings,
@@ -3353,14 +3480,50 @@ async function designImportedProject(input: Readonly<{
   const reply = parseProjectRuntimeReply(
     result, "DESIGN", input.settings, input.responseLanguage, "AWAITING_CONFIRMATION",
   );
-  return Object.freeze({
+  const assistants: Array<Readonly<{ content: string; metadata: Readonly<Record<string, unknown>> }>> = [Object.freeze({
     content: reply.content,
     metadata: Object.freeze({
       ...conversationAgentMetadata(reply),
       runtimeTurnId: result.turnId,
       runtimeSessionId: result.sessionId,
     }),
+  })];
+  if (!reply.readyForUiDesign) return Object.freeze(assistants);
+  const intent = Object.freeze({
+    intent: "CHANGE_REQUEST" as const,
+    targetRole: "UI_DESIGN" as const,
+    explicitExecution: false,
+    actionable: true,
+    summary: "Design the interface for the analyzed project's completed gameplay proposal.",
   });
+  const uiResult = await input.projectRuntime.turn({
+    workspaceId: input.workspaceId,
+    projectId: input.projectId,
+    role: "UI_DESIGN",
+    mode: "READ_ONLY_BRANCH",
+    prompt: projectRuntimeSpecialistPrompt({
+      intent,
+      content: "Continue from the imported-project analysis and completed gameplay proposal.",
+      confirmed: false,
+      upstreamDesign: conversationDesignHandoff(reply),
+    }),
+    responseLanguage: input.responseLanguage,
+    settings: input.settings,
+    sourceRevision: input.sourceRevision,
+    sourceRelativePath: input.sourceRelativePath,
+  });
+  const uiReply = parseProjectRuntimeReply(
+    uiResult, "UI_DESIGN", input.settings, input.responseLanguage, "AWAITING_CONFIRMATION",
+  );
+  assistants.push(Object.freeze({
+    content: uiReply.content,
+    metadata: Object.freeze({
+      ...conversationAgentMetadata(uiReply),
+      runtimeTurnId: uiResult.turnId,
+      runtimeSessionId: uiResult.sessionId,
+    }),
+  }));
+  return Object.freeze(assistants);
 }
 
 async function runProjectImportAnalysisWorker(input: Readonly<{
@@ -3441,7 +3604,7 @@ async function runProjectImportAnalysisWorker(input: Readonly<{
         model: resolveAgentModel(settings.primaryModel, settings.modelOverrides, "analysis"),
         settingsRevision: settings.revision,
       });
-      const designAssistant = await designImportedProject({
+      const designAssistants = await designImportedProject({
         projectRuntime: input.projectRuntime,
         workspaceId: claimed.workspaceId,
         projectId: claimed.projectId,
@@ -3468,7 +3631,7 @@ async function runProjectImportAnalysisWorker(input: Readonly<{
           settingsRevision: analysis.settingsRevision,
           analyzedProjectName: analysis.name,
         },
-        designAssistant,
+        designAssistants,
         discovery: analysis.discovery,
         source: {
           kind: source.sourceKind as "GIT" | "LOCAL_DIRECTORY",
@@ -3542,7 +3705,7 @@ function conversationIntentDecision(conversation: ProductConversation): Conversa
   const decision = value as Record<string, unknown>;
   if (!["QUESTION", "CHANGE_REQUEST", "CONFIRM_CHANGE", "REJECT_CHANGE", "STOP", "CONTINUE"].includes(String(decision.intent))
     || typeof decision.explicitExecution !== "boolean" || typeof decision.actionable !== "boolean"
-    || !["DESIGN", "DEVELOPMENT", "TEST"].includes(String(decision.targetRole))
+    || !["DESIGN", "UI_DESIGN", "DEVELOPMENT", "TEST"].includes(String(decision.targetRole))
     || typeof decision.summary !== "string" || !decision.summary.trim()) {
     throw new Error("Persisted Intent Agent decision is invalid");
   }
@@ -3560,13 +3723,55 @@ function conversationAgentMetadata(reply: ProductConversationGroupReply): Readon
     source: "AI_AGENT",
     agentRole: reply.agentRole,
     agentName: reply.agentRole === "DESIGN" ? "DeviLudo Design Agent"
-      : reply.agentRole === "DEVELOPMENT" ? "DeviLudo Development Agent" : "DeviLudo Test Agent",
+      : reply.agentRole === "UI_DESIGN" ? "DeviLudo UI Design Agent"
+        : reply.agentRole === "DEVELOPMENT" ? "DeviLudo Development Agent" : "DeviLudo Test Agent",
     agentRuntime: reply.runtime,
     model: reply.model,
     settingsRevision: reply.settingsRevision,
     readyForDevelopment: reply.readyForDevelopment,
+    readyForUiDesign: reply.readyForUiDesign,
+    ...(reply.readyForUiDesign ? {
+      designHandoff: Object.freeze({
+        implementationBrief: reply.implementationBrief,
+        projectDocumentPatch: reply.projectDocumentPatch ?? Object.freeze({}),
+        e2eGoalDelta: reply.e2eGoalDelta,
+      }),
+    } : {}),
     options: reply.options,
   });
+}
+
+function lastConversationSpecialistRole(conversation: ProductConversation | null): ProjectAgentRole | null {
+  const role = [...(conversation?.messages ?? [])]
+    .reverse()
+    .find(message => message.role === "ASSISTANT" && typeof message.metadata.agentRole === "string")
+    ?.metadata.agentRole;
+  return role === "DESIGN" || role === "UI_DESIGN" || role === "DEVELOPMENT" || role === "TEST"
+    ? role
+    : null;
+}
+
+function conversationDesignHandoff(
+  source: ProductConversation | ProductConversationGroupReply | null,
+): Readonly<Record<string, unknown>> | null {
+  if (!source) return null;
+  if ("agentRole" in source) {
+    if (source.agentRole !== "DESIGN" || !source.readyForUiDesign) return null;
+    return Object.freeze({
+      implementationBrief: source.implementationBrief,
+      projectDocumentPatch: source.projectDocumentPatch ?? Object.freeze({}),
+      e2eGoalDelta: source.e2eGoalDelta,
+    });
+  }
+  const candidate = [...source.messages].reverse().find(message => (
+    message.role === "ASSISTANT"
+    && message.metadata.agentRole === "DESIGN"
+    && message.metadata.designHandoff !== undefined
+  ));
+  const handoff = candidate?.metadata.designHandoff;
+  return handoff && typeof handoff === "object" && !Array.isArray(handoff)
+    ? Object.freeze(handoff as Record<string, unknown>)
+    : null;
 }
 
 function httpError(statusCode: number, code: string, message: string): Error & { statusCode: number; code: string } {
@@ -3596,6 +3801,7 @@ function publicAgentSettings(
       intent: null,
       analysis: null,
       design: null,
+      uiDesign: null,
       development: null,
       test: null,
     }),

@@ -37,11 +37,11 @@ const PROJECT_DELETE_TIMEOUT_MS = 10 * 60 * 1_000;
 // aborts before the durable conversation/approval receipt reaches the browser.
 const CONVERSATION_STREAM_TIMEOUT_MS = 12 * 60 * 1_000;
 /**
- * Asset uploads carry an 8 MB image base64-encoded in JSON, so the envelope is
+ * Asset uploads carry up to 32 MB of music base64-encoded in JSON, so the envelope is
  * 4/3 the size of the file. Core enforces the real per-asset ceiling on the
  * decoded bytes; this only has to be loose enough to let a legal upload through.
  */
-const MAX_ASSET_UPLOAD_BYTES = 12 * 1024 * 1024;
+const MAX_ASSET_UPLOAD_BYTES = 44 * 1024 * 1024;
 const ASSET_UPLOAD_PATH = /^projects\/[^/]+\/asset-manifest\/uploads$/;
 const MAX_CONVERSATION_MESSAGE_BYTES = 18 * 1024 * 1024;
 const CONVERSATION_MESSAGE_PATH = /^conversations\/messages(?:\/stream)?$/;

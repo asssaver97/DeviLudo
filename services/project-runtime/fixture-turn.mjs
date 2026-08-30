@@ -49,8 +49,19 @@ if (request.mode === "COMPACT") {
   });
   await callTool("e2e_goals.update", { goals });
   await callTool("handoff.create", {
+    toRole: "UI_DESIGN",
+    summary: "Turn the complete approved gameplay and E2E goal snapshot into an implementation-ready UI specification.",
+  });
+  structured = { handoff: { toRole: "UI_DESIGN", goalCount: goals.length } };
+  content = JSON.stringify(structured);
+} else if (request.role === "UI_DESIGN") {
+  const goals = Array.isArray(context?.e2e?.goals) ? context.e2e.goals : [];
+  await callTool("project_document.update", { document: context?.projectDocument ?? {} });
+  await callTool("e2e_goals.update", { goals });
+  await callTool("handoff.create", {
     toRole: "DEVELOPMENT",
-    summary: "Implement the complete approved requirement and E2E goal snapshot.",
+    summary: "Implement the approved gameplay and complete UI specification in the game source.",
+    uiSpecification: fixtureUiSpecification(),
   });
   structured = { handoff: { toRole: "DEVELOPMENT", goalCount: goals.length } };
   content = JSON.stringify(structured);
@@ -173,7 +184,8 @@ function classifyIntent(prompt) {
   const tentative = /能不能|可不可以|如果|是否可以|请确认.*(?:可以|是否)|判断是否|建议(?:改|调整)|待专业 Agent 判断/.test(message);
   const testRole = /(?:E2E|测试|证据|用例|报告)/i.test(message) && !/(?:修复|修改|增加|删除|实现)/.test(message);
   const developmentRole = /(?:代码|源码|输入|无法操作|bug|错误|修复|生成游戏|实现)/i.test(message);
-  const role = testRole ? "TEST" : developmentRole ? "DEVELOPMENT" : "DESIGN";
+  const uiDesignRole = /(?:UI|UX|界面|菜单|HUD|按钮|布局|字体|配色|动效|焦点|导航)/i.test(message);
+  const role = testRole ? "TEST" : developmentRole ? "DEVELOPMENT" : uiDesignRole ? "UI_DESIGN" : "DESIGN";
   // A mutation verb can describe the subject of a question (for example,
   // "why does this increase pressure?").  Question syntax wins unless the
   // player is explicitly discussing a hypothetical implementation change.
@@ -196,15 +208,53 @@ function decision(intent, targetRole, explicitExecution, actionable, summary) {
     : intent === "STOP" ? "STOP" : intent === "CONTINUE" ? "CONTINUE" : "NONE" };
 }
 
+function fixtureUiSpecification() {
+  const checkpoint = (role, primaryActionId, purpose) => ({
+    role,
+    purpose,
+    silhouette: "A full-canvas authored game surface with one dominant play region and a subordinate action edge.",
+    focalPoint: "The current player decision and its immediate consequence.",
+    primaryActionId,
+    regions: [{
+      id: `${role.toLowerCase()}-surface`, x: 0, y: 0, width: 1280, height: 720, layer: 0,
+      purpose: "Own the complete game frame.",
+      content: "Representative gameplay state, readable status, and the current action without placeholder emptiness.",
+      overflow: "Reflow bounded copy inside the region while preserving the primary action.",
+    }],
+    visualAnchors: [{
+      kind: "CODE_NATIVE", targetId: `${role.toLowerCase()}-surface`,
+      description: "A deliberately themed engine-native composition rather than stock controls.",
+    }],
+    negativeSpaceIntent: "Space separates the focal action from supporting status and is never an empty placeholder panel.",
+    contentStressCase: "Long localized labels and maximum values remain readable without moving the primary action offscreen.",
+    thumbnailRead: "The current state and primary action remain distinct at thumbnail size.",
+    acceptanceCriteria: ["The complete 1280x720 frame has a clear focal hierarchy."],
+    forbiddenFallbacks: ["Stock engine controls or a centered utility panel in an accidental void."],
+  });
+  return {
+    schema: "deviludo.ui-specification",
+    visualThesis: "A readable fixture game surface whose hierarchy changes visibly across the core lifecycle.",
+    referenceCanvas: { width: 1280, height: 720 },
+    checkpoints: [
+      checkpoint("START", "start-button", "Introduce the game and expose one unmistakable start action."),
+      checkpoint("READY", "primary-control", "Present the playable state and its primary action."),
+      checkpoint("PROGRESS", "feature-control", "Show the visible consequence of the primary action."),
+      checkpoint("COMPLETION", "complete-control", "Show the completed loop and its next action."),
+    ],
+    assets: [],
+  };
+}
+
 function specialistReply(role, language) {
   const names = language === "zh"
-    ? { DESIGN: "测试设计 Agent", DEVELOPMENT: "测试开发 Agent", TEST: "测试测试 Agent" }
-    : { DESIGN: "Fixture Design Agent", DEVELOPMENT: "Fixture Development Agent", TEST: "Fixture Test Agent" };
+    ? { DESIGN: "测试设计 Agent", UI_DESIGN: "测试 UI 设计 Agent", DEVELOPMENT: "测试开发 Agent", TEST: "测试测试 Agent" }
+    : { DESIGN: "Fixture Design Agent", UI_DESIGN: "Fixture UI Design Agent", DEVELOPMENT: "Fixture Development Agent", TEST: "Fixture Test Agent" };
   return {
     content: language === "zh"
       ? `${names[role]} 已结合项目上下文生成回复。`
       : `${names[role]} answered from the current project context.`,
-    readyForDevelopment: true,
+    readyForUiDesign: role === "DESIGN",
+    readyForDevelopment: role === "UI_DESIGN",
     options: language === "zh"
       ? [
           { label: "采用强化资源管理方案（推荐）", description: "强调资源来源、消耗与风险之间的持续取舍。" },
@@ -218,6 +268,7 @@ function specialistReply(role, language) {
     projectDocumentPatch: {
       introduction: language === "zh" ? "测试设计 Agent 已整理当前游戏需求。" : "The Design Agent organized the current game requirements.",
       gameplay: language === "zh" ? "围绕玩家确认的核心循环进行操作、反馈与结算。" : "Play, feedback, and resolution follow the confirmed core loop.",
+      uiDesign: language === "zh" ? "采用清晰的主流程、稳定控件标识、键鼠与手柄焦点导航，以及可验证的 HUD 状态反馈。" : "Use a clear primary journey, stable control IDs, keyboard/mouse and gamepad focus navigation, and verifiable HUD state feedback.",
       categories: language === "zh" ? ["自动化测试", "游戏设计"] : ["automated testing", "game design"],
       features: language === "zh" ? ["需求对话实时同步", "可执行的核心循环"] : ["live requirement conversation", "playable core loop"],
     },
@@ -344,11 +395,12 @@ function testManifest(goals) {
 }
 
 function assetPlacementPlan(assets) {
-  const plannedAssetKeys = assets.map(item => String(item?.key ?? item?.assetKey ?? "")).filter(Boolean).sort();
+  const visualAssets = assets.filter(item => String(item?.assetType ?? "").toLowerCase() !== "music");
+  const plannedAssetKeys = visualAssets.map(item => String(item?.key ?? item?.assetKey ?? "")).filter(Boolean).sort();
   return {
     schema: "deviludo.asset-placement-plan",
     plannedAssetKeys,
-    placements: assets.map((item, index) => ({
+    placements: visualAssets.map((item, index) => ({
       assetKey: String(item?.key ?? item?.assetKey ?? ""),
       targetId: stableId(String(item?.targetId ?? `asset-control-${index + 1}`), index),
       checkpointRole: ["START", "READY", "ACTION", "PROGRESS", "COMPLETION"].includes(String(item?.checkpointRole))
@@ -412,7 +464,7 @@ async function readStdin() {
 
 function validateRequest(value) {
   if (!value || value.schemaVersion !== "deviludo.project-runtime.v2"
-    || !["INTENT", "ANALYSIS", "DESIGN", "DEVELOPMENT", "TEST"].includes(value.role)
+    || !["INTENT", "ANALYSIS", "DESIGN", "UI_DESIGN", "DEVELOPMENT", "TEST"].includes(value.role)
     || !["PRIMARY", "READ_ONLY_BRANCH", "COMPACT"].includes(value.mode)
     || !["CLAUDE_CODE", "CODEX_CLI"].includes(value.runtime)
     || !/^[0-9a-f-]{36}$/i.test(value.turnId)) {

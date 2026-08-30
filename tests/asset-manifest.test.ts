@@ -117,6 +117,22 @@ describe("Asset manifest validation", () => {
     assert.ok(!validateAssetItem(item));
   });
 
+  it("accepts upload-only music and rejects image-generation fields on it", () => {
+    const music = {
+      id: "item-music",
+      manifestId: "manifest-1",
+      assetKey: "music/main-menu",
+      assetType: "music",
+      description: "Calm main-menu theme that establishes the game's tone.",
+      status: "planned",
+      createdAt: "2024-01-01T00:00:00Z",
+      updatedAt: "2024-01-01T00:00:00Z",
+    };
+    assert.equal(validateAssetItem(music), true);
+    assert.equal(validateAssetItem({ ...music, generationPrompt: "compose a theme" }), false);
+    assert.equal(validateAssetItem({ ...music, dimensions: "32x32" }), false);
+  });
+
   it("rejects an asset key that could escape the generated asset directory", () => {
     assert.equal(validateAssetItem({
       id: "item-1",
@@ -305,6 +321,20 @@ describe("Asset manifest store", () => {
     assert.deepEqual(view?.completion, { total: 1, uploaded: 1, failed: 0, complete: true });
   });
 
+  it("keeps upload-only music out of visual completion and generation status", async () => {
+    const { database } = fakeDatabase(call => call.text.includes("asset_manifests")
+      ? { rows: [{ ...manifestRow, auto_generate_enabled: true }] }
+      : { rows: [
+        itemRow({ status: "uploaded", object_key: "assets/a.png" }),
+        itemRow({ id: "music-1", asset_key: "music/menu", asset_type: "music", description: "Menu theme", generation_prompt: null, frame_count: null, dimensions: null }),
+      ] });
+    const view = await new AssetManifestStore(database).read(workspaceId, projectId);
+    assert.equal(view?.manifest.status, "complete");
+    assert.deepEqual(view?.completion, { total: 1, uploaded: 1, failed: 0, complete: true });
+    assert.equal(view?.items[1].assetType, "music");
+    assert.ok(view?.items[1] && validateAssetItem(view.items[1]));
+  });
+
   it("counts images discovered in the published source as complete", async () => {
     const { database } = fakeDatabase(call => call.text.includes("asset_manifests")
       ? { rows: [{ ...manifestRow, auto_generate_enabled: true }] }
@@ -328,6 +358,45 @@ describe("Asset manifest store", () => {
     assert.deepEqual(found.calls[0].values, [projectId, true]);
     const missing = fakeDatabase(() => ({ rows: [], rowCount: 0 }));
     assert.equal(await new AssetManifestStore(missing.database).setAutoGenerate(workspaceId, projectId, true), false);
+  });
+
+  it("persists music descriptions as upload-only manifest items", async () => {
+    const { database, calls } = fakeDatabase(call => {
+      if (call.text.includes("INSERT INTO deviludo.asset_manifests")) return { rows: [{ id: manifestId }], rowCount: 1 };
+      if (call.text.includes("DELETE FROM deviludo.asset_items")) return { rows: [], rowCount: 0 };
+      return { rows: [{ id: "music-item" }], rowCount: 1 };
+    });
+    const changed = await new AssetManifestStore(database).synchronizeMusicPlan({
+      workspaceId,
+      projectId,
+      workflowId: "20000000-0000-4000-8000-000000000004",
+      items: [{ assetKey: "music/main-menu", description: "Measured strategy theme for the title screen." }],
+    });
+    assert.equal(changed, 1);
+    assert.equal(calls.length, 3);
+    assert.match(calls[0].text, /workflow_id = EXCLUDED\.workflow_id/);
+    assert.match(calls[1].text, /'music'[\s\S]*generation_prompt[\s\S]*NULL/);
+    assert.deepEqual(calls[1].values, [
+      workspaceId, manifestId, "music/main-menu", "Measured strategy theme for the title screen.",
+    ]);
+    assert.deepEqual(calls[2].values, [workspaceId, manifestId, ["music/main-menu"]]);
+  });
+
+  it("removes obsolete music entries without creating an empty manifest", async () => {
+    const { database, calls } = fakeDatabase(call => call.text.includes("SELECT id::text")
+      ? { rows: [{ id: manifestId }], rowCount: 1 }
+      : { rows: [], rowCount: 2 });
+    const changed = await new AssetManifestStore(database).synchronizeMusicPlan({
+      workspaceId,
+      projectId,
+      workflowId: "20000000-0000-4000-8000-000000000004",
+      items: [],
+    });
+    assert.equal(changed, 2);
+    assert.equal(calls.length, 2);
+    assert.doesNotMatch(calls[0].text, /INSERT INTO deviludo\.asset_manifests/);
+    assert.match(calls[1].text, /asset_type = 'music'/);
+    assert.deepEqual(calls[1].values, [workspaceId, manifestId, []]);
   });
 
   it("atomically reopens the asset gate and preserves supplied images", async () => {

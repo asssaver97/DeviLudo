@@ -17,6 +17,12 @@ const decompress = promisify(zstdDecompress);
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const SHA256 = /^sha256:[0-9a-f]{64}$/;
 const FORBIDDEN_KEYS = /(?:credential|api.?key|auth.?token|password|secret|full.?prompt|raw.?log|image.?bytes)/i;
+const EMPTY_ROLE_CONTEXT = Object.freeze({
+  sessionId: null,
+  summary: "",
+  lastTurnId: null,
+  updatedAt: null,
+});
 
 export type ProjectRoleContext = Readonly<{
   sessionId: string | null;
@@ -67,12 +73,8 @@ export function createProjectContext(input: Readonly<{
 }>): ProjectContext {
   assertId(input.workspaceId, "workspace");
   assertId(input.projectId, "project");
-  const roles = Object.fromEntries(PROJECT_RUNTIME_ROLES.map(role => [role, Object.freeze({
-    sessionId: null,
-    summary: "",
-    lastTurnId: null,
-    updatedAt: null,
-  })])) as Record<ProjectRuntimeRole, ProjectRoleContext>;
+  const roles = Object.fromEntries(PROJECT_RUNTIME_ROLES.map(role => [role, EMPTY_ROLE_CONTEXT])) as
+    Record<ProjectRuntimeRole, ProjectRoleContext>;
   return freezeContext({
     schemaVersion: PROJECT_CONTEXT_SCHEMA,
     workspaceId: input.workspaceId,
@@ -180,20 +182,33 @@ async function ensureSharedContextTree(root: string, workspaceId: string, projec
 }
 
 function freezeContext(value: ProjectContext): ProjectContext {
-  if (!value || typeof value !== "object" || value.schemaVersion !== PROJECT_CONTEXT_SCHEMA
-    || !UUID.test(value.workspaceId) || !UUID.test(value.projectId)
-    || !Number.isSafeInteger(value.revision) || value.revision < 1
-    || !["en", "zh"].includes(value.language)
-    || !value.roles || typeof value.roles !== "object"
-    || PROJECT_RUNTIME_ROLES.some(role => !value.roles[role])
-    || !Number.isFinite(Date.parse(value.updatedAt))) {
+  const normalized = normalizeRoleContexts(value);
+  if (!normalized || typeof normalized !== "object" || normalized.schemaVersion !== PROJECT_CONTEXT_SCHEMA
+    || !UUID.test(normalized.workspaceId) || !UUID.test(normalized.projectId)
+    || !Number.isSafeInteger(normalized.revision) || normalized.revision < 1
+    || !["en", "zh"].includes(normalized.language)
+    || !normalized.roles || typeof normalized.roles !== "object"
+    || PROJECT_RUNTIME_ROLES.some(role => !normalized.roles[role])
+    || !Number.isFinite(Date.parse(normalized.updatedAt))) {
     throw new Error("Project context is invalid");
   }
-  rejectSensitiveData(value);
-  if (value.source && (!Number.isSafeInteger(value.source.revision) || value.source.revision < 1 || !SHA256.test(value.source.sha256))) {
+  rejectSensitiveData(normalized);
+  if (normalized.source && (!Number.isSafeInteger(normalized.source.revision) || normalized.source.revision < 1 || !SHA256.test(normalized.source.sha256))) {
     throw new Error("Project context source revision is invalid");
   }
-  return deepFreeze(structuredClone(value));
+  return deepFreeze(structuredClone(normalized));
+}
+
+function normalizeRoleContexts(value: ProjectContext): ProjectContext {
+  if (!value || typeof value !== "object" || !value.roles || typeof value.roles !== "object") return value;
+  if (PROJECT_RUNTIME_ROLES.every(role => value.roles[role])) return value;
+  return {
+    ...value,
+    roles: Object.freeze(Object.fromEntries(PROJECT_RUNTIME_ROLES.map(role => [
+      role,
+      value.roles[role] ?? EMPTY_ROLE_CONTEXT,
+    ]))) as Readonly<Record<ProjectRuntimeRole, ProjectRoleContext>>,
+  };
 }
 
 function rejectSensitiveData(value: unknown, key = "root", depth = 0): void {

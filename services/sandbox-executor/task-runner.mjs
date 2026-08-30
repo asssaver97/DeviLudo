@@ -83,15 +83,35 @@ async function godotCommand(arguments_) {
   } catch (error) {
     const reason = error instanceof Error ? error.message : "Godot command failed";
     if (/SCRIPT ERROR|Parse Error|Failed to load script|Invalid call|Invalid assignment/i.test(reason)) {
-      throw new Error(`BUILD_PRODUCT: Godot project validation failed: ${reason}`, { cause: error });
+      const diagnostic = arguments_.includes("--import") ? await directGodotScriptDiagnostic() : null;
+      throw new Error(`BUILD_PRODUCT: Godot project validation failed: ${diagnostic ?? reason}`, { cause: error });
     }
     throw error;
   }
   const errors = godotErrorLines(result.stdout, result.stderr);
   if (errors.length > 0) {
-    throw new Error(`BUILD_PRODUCT: Godot reported script errors despite exit code 0: ${errors.join(" | ")}`);
+    const diagnostic = arguments_.includes("--import") ? await directGodotScriptDiagnostic() : null;
+    throw new Error(`BUILD_PRODUCT: Godot reported script errors despite exit code 0: ${diagnostic ?? errors.join(" | ")}`);
   }
   return result;
+}
+
+async function directGodotScriptDiagnostic() {
+  const { godotProjectScripts } = await import("./godot-build.mjs");
+  for (const script of await godotProjectScripts("/workspace/project")) {
+    try {
+      await command("godot", [
+        "--headless", "--path", "/workspace/project",
+        "--script", `res://${script}`, "--check-only",
+      ], godotEnvironment());
+    } catch (error) {
+      const reason = error instanceof Error ? error.message : "Godot script validation failed";
+      if (/SCRIPT ERROR|Parse Error|Failed to load script|Invalid call|Invalid assignment/i.test(reason)) {
+        return reason;
+      }
+    }
+  }
+  return null;
 }
 
 async function materializeBuildAssets(plan) {
@@ -105,7 +125,7 @@ async function materializeBuildAssets(plan) {
       || /(^|\/)\.{1,2}(\/|$)|\/\//.test(asset.assetKey) || asset.assetKey.endsWith("/")) {
       throw new Error("Build asset key is invalid");
     }
-    const extension = asset.key.match(/\.(png|jpg|webp)$/)?.[1];
+    const extension = asset.key.match(/\.(png|jpg|webp|mp3|ogg|wav)$/)?.[1];
     if (!extension) throw new Error("Build asset extension is invalid");
     const target = resolve(root, `${asset.assetKey}.${extension}`);
     if (!target.startsWith(`${root}/`)) throw new Error("Build asset path escaped the generated asset root");
@@ -123,11 +143,11 @@ async function materializeBuildAssets(plan) {
     items: manifestItems,
   }), "utf8");
   await assertBuildAssetsReferenced("/workspace/project", assets.map(asset => asset.assetKey));
-  emitProgress("PHASE", `已同步 ${assets.length} 个图片素材到构建源码`);
+  emitProgress("PHASE", `已同步 ${assets.length} 个素材到构建源码`);
 }
 
 function assetInputFilename(input) {
-  const extension = input.key.match(/\.(png|jpg|webp)$/)?.[1];
+  const extension = input.key.match(/\.(png|jpg|webp|mp3|ogg|wav)$/)?.[1];
   if (!extension) throw new Error("Build asset extension is invalid");
   return `asset-${createHash("sha256").update(input.key).digest("hex")}.${extension}`;
 }

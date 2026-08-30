@@ -40,7 +40,7 @@ CREATE TYPE deviludo.server_node_state AS ENUM (
   'PROVISIONING', 'ACTIVE', 'DRAINING', 'DISABLED', 'REIMAGING'
 );
 CREATE TYPE deviludo.workflow_state AS ENUM (
-  'DRAFT', 'ANALYZING', 'DESIGNING', 'DEVELOPING', 'BUILDING', 'TEST_PLANNING',
+  'DRAFT', 'ANALYZING', 'DESIGNING', 'UI_DESIGNING', 'DEVELOPING', 'BUILDING', 'TEST_PLANNING',
   'TESTING', 'RELEASE_APPROVAL_PENDING', 'STEAM_PUBLISHING',
   'SUCCEEDED', 'BLOCKED', 'STOPPED', 'FAILED', 'CANCELLED'
 );
@@ -54,7 +54,7 @@ CREATE TYPE deviludo.operation_state AS ENUM (
   'REGISTERED', 'IN_PROGRESS', 'RECEIPTED', 'RECONCILIATION_REQUIRED', 'VOID'
 );
 CREATE TYPE deviludo.agent_runtime AS ENUM ('CLAUDE_CODE', 'CODEX_CLI');
-CREATE TYPE deviludo.agent_role AS ENUM ('INTENT', 'ANALYSIS', 'DESIGN', 'DEVELOPMENT', 'TEST');
+CREATE TYPE deviludo.agent_role AS ENUM ('INTENT', 'ANALYSIS', 'DESIGN', 'UI_DESIGN', 'DEVELOPMENT', 'TEST');
 CREATE TYPE deviludo.agent_container_state AS ENUM (
   'CREATING', 'RUNNING', 'PAUSING', 'PAUSED', 'COMPACTING', 'DESTROYED', 'STOPPED', 'FAILED'
 );
@@ -234,11 +234,12 @@ CREATE TABLE deviludo.instance_agent_settings (
   primary_model text NOT NULL CHECK (primary_model ~ '^[A-Za-z0-9][A-Za-z0-9._:/-]{0,199}$'),
   model_overrides jsonb NOT NULL CHECK (
     jsonb_typeof(model_overrides) = 'object'
-    AND model_overrides ?& ARRAY['intent', 'analysis', 'design', 'development', 'test']
-    AND model_overrides - ARRAY['intent', 'analysis', 'design', 'development', 'test']::text[] = '{}'::jsonb
+    AND model_overrides ?& ARRAY['intent', 'analysis', 'design', 'uiDesign', 'development', 'test']
+    AND model_overrides - ARRAY['intent', 'analysis', 'design', 'uiDesign', 'development', 'test']::text[] = '{}'::jsonb
     AND (model_overrides->'intent' = 'null'::jsonb OR (model_overrides->>'intent') ~ '^[A-Za-z0-9][A-Za-z0-9._:/-]{0,199}$')
     AND (model_overrides->'analysis' = 'null'::jsonb OR (model_overrides->>'analysis') ~ '^[A-Za-z0-9][A-Za-z0-9._:/-]{0,199}$')
     AND (model_overrides->'design' = 'null'::jsonb OR (model_overrides->>'design') ~ '^[A-Za-z0-9][A-Za-z0-9._:/-]{0,199}$')
+    AND (model_overrides->'uiDesign' = 'null'::jsonb OR (model_overrides->>'uiDesign') ~ '^[A-Za-z0-9][A-Za-z0-9._:/-]{0,199}$')
     AND (model_overrides->'development' = 'null'::jsonb OR (model_overrides->>'development') ~ '^[A-Za-z0-9][A-Za-z0-9._:/-]{0,199}$')
     AND (model_overrides->'test' = 'null'::jsonb OR (model_overrides->>'test') ~ '^[A-Za-z0-9][A-Za-z0-9._:/-]{0,199}$')
   ),
@@ -326,6 +327,7 @@ CREATE TABLE deviludo.project_documents (
     jsonb_typeof(content) = 'object'
     AND jsonb_typeof(content->'introduction') = 'string'
     AND jsonb_typeof(content->'gameplay') = 'string'
+    AND jsonb_typeof(content->'uiDesign') = 'string'
     AND jsonb_typeof(content->'categories') = 'array'
     AND jsonb_array_length(content->'categories') BETWEEN 1 AND 32
     AND jsonb_typeof(content->'features') = 'array'
@@ -1476,7 +1478,7 @@ CREATE TABLE deviludo.asset_items (
     AND asset_key !~ '/$'
   ),
   asset_type text NOT NULL
-    CHECK (asset_type IN ('sprite', 'animation', 'background', 'ui', 'icon', 'tileset')),
+    CHECK (asset_type IN ('sprite', 'animation', 'background', 'ui', 'icon', 'tileset', 'music')),
   description text NOT NULL CHECK (length(description) BETWEEN 1 AND 2000),
   generation_prompt text CHECK (generation_prompt IS NULL OR length(generation_prompt) BETWEEN 1 AND 4000),
   frame_count integer CHECK (frame_count IS NULL OR frame_count BETWEEN 1 AND 4096),
@@ -1507,7 +1509,11 @@ CREATE TABLE deviludo.asset_items (
     (status IN ('generated', 'uploaded'))
       = (object_key IS NOT NULL AND bucket IS NOT NULL AND sha256 IS NOT NULL AND size_bytes IS NOT NULL)
   ),
-  CHECK ((status = 'existing') = (source_path IS NOT NULL))
+  CHECK ((status = 'existing') = (source_path IS NOT NULL)),
+  CONSTRAINT asset_items_music_upload_only CHECK (
+    asset_type <> 'music'
+    OR (generation_prompt IS NULL AND frame_count IS NULL AND dimensions IS NULL AND source_path IS NULL)
+  )
 );
 
 -- Re-planning an existing-source item changes its status before the repository
@@ -1573,7 +1579,7 @@ CREATE TRIGGER asset_manifests_default_auto_generation
 BEFORE INSERT ON deviludo.asset_manifests
 FOR EACH ROW EXECUTE FUNCTION deviludo.default_asset_auto_generation();
 
--- Freeze the exact image objects into every artifact-build job. The builder
+-- Freeze the exact supplied asset objects into every artifact-build job. The builder
 -- reads this immutable snapshot rather than whichever upload happens to be the
 -- latest when a queued job is eventually claimed.
 CREATE OR REPLACE FUNCTION deviludo.snapshot_artifact_build_assets()
@@ -1600,32 +1606,7 @@ BEGIN
    WHERE manifest.workspace_id = NEW.workspace_id
      AND manifest.project_id = NEW.project_id
      AND manifest.workflow_id = NEW.workflow_id
-     AND item.status IN ('generated', 'uploaded')
-     -- Generated and user-supplied objects survive re-planning for reuse, but
-     -- only keys retained by the latest successful Agent plan belong to this
-     -- immutable build input set. This lets a repair remove an unnecessary
-     -- generated plan item without deleting its reusable object.
-     AND item.asset_key IN (
-       SELECT planned->>'assetKey'
-         FROM deviludo.jobs source_job
-         CROSS JOIN LATERAL jsonb_array_elements(
-           source_job.receipt #> '{assetManifest,items}'
-         ) planned
-        WHERE source_job.workspace_id = NEW.workspace_id
-          AND source_job.workflow_id = NEW.workflow_id
-          AND source_job.kind = 'AGENT_TURN'
-          AND source_job.state = 'SUCCEEDED'
-          AND source_job.id = (
-            SELECT latest_agent.id
-              FROM deviludo.jobs latest_agent
-             WHERE latest_agent.workspace_id = NEW.workspace_id
-               AND latest_agent.workflow_id = NEW.workflow_id
-               AND latest_agent.kind = 'AGENT_TURN'
-               AND latest_agent.state = 'SUCCEEDED'
-             ORDER BY latest_agent.updated_at DESC, latest_agent.created_at DESC, latest_agent.id DESC
-             LIMIT 1
-          )
-     );
+     AND item.status IN ('generated', 'uploaded');
   NEW.payload := NEW.payload || jsonb_build_object('assetInputs', inputs);
   RETURN NEW;
 END
@@ -1760,6 +1741,7 @@ DECLARE
   verdict_plan_id uuid;
   configuration_failed boolean;
   assets_ready boolean;
+  current_test_plan_available boolean;
 BEGIN
   SELECT * INTO job FROM deviludo.jobs
    WHERE workspace_id = p_workspace_id AND id = p_job_id FOR UPDATE;
@@ -1769,9 +1751,10 @@ BEGIN
   END IF;
   role := coalesce(job.payload->>'role', 'DEVELOPMENT');
   purpose := coalesce(job.payload->>'purpose', CASE role
-    WHEN 'DESIGN' THEN 'DESIGN' WHEN 'TEST' THEN 'TEST_PLAN' ELSE 'DEVELOPMENT' END);
-  IF role NOT IN ('DESIGN', 'DEVELOPMENT', 'TEST')
-    OR purpose NOT IN ('DESIGN', 'DEVELOPMENT', 'TEST_PLAN', 'TEST_VERDICT')
+    WHEN 'DESIGN' THEN 'DESIGN' WHEN 'UI_DESIGN' THEN 'UI_DESIGN'
+    WHEN 'TEST' THEN 'TEST_PLAN' ELSE 'DEVELOPMENT' END);
+  IF role NOT IN ('DESIGN', 'UI_DESIGN', 'DEVELOPMENT', 'TEST')
+    OR purpose NOT IN ('DESIGN', 'UI_DESIGN', 'DEVELOPMENT', 'TEST_PLAN', 'TEST_VERDICT')
     OR jsonb_typeof(p_output) <> 'object' THEN
     RAISE EXCEPTION 'invalid persistent Agent turn completion';
   END IF;
@@ -1779,10 +1762,17 @@ BEGIN
    WHERE workspace_id = job.workspace_id AND id = job.workflow_id FOR UPDATE;
   IF role = 'DESIGN' AND (
     jsonb_typeof(p_output->'handoff') IS DISTINCT FROM 'object'
+    OR p_output #>> '{handoff,toRole}' IS DISTINCT FROM 'UI_DESIGN'
+    OR length(btrim(coalesce(p_output #>> '{handoff,summary}', ''))) = 0
+  ) THEN
+    RAISE EXCEPTION 'Design Agent did not create a complete UI_DESIGN handoff';
+  END IF;
+  IF role = 'UI_DESIGN' AND (
+    jsonb_typeof(p_output->'handoff') IS DISTINCT FROM 'object'
     OR p_output #>> '{handoff,toRole}' IS DISTINCT FROM 'DEVELOPMENT'
     OR length(btrim(coalesce(p_output #>> '{handoff,summary}', ''))) = 0
   ) THEN
-    RAISE EXCEPTION 'Design Agent did not create a complete DEVELOPMENT handoff';
+    RAISE EXCEPTION 'UI Design Agent did not create a complete DEVELOPMENT handoff';
   END IF;
   UPDATE deviludo.jobs SET state = 'SUCCEEDED', receipt = jsonb_build_object('agentTurn', p_output),
       lease_owner = NULL, lease_token = NULL, lease_expires_at = NULL, heartbeat_at = NULL,
@@ -1796,11 +1786,19 @@ BEGIN
   ON CONFLICT (workspace_id, workflow_id, idempotency_key) DO NOTHING;
 
   IF role = 'DESIGN' THEN
+    UPDATE deviludo.workflow_instances SET state = 'UI_DESIGNING', version = version + 1,
+      updated_at = clock_timestamp() WHERE workspace_id = job.workspace_id AND id = job.workflow_id;
+    PERFORM deviludo.enqueue_job(job.workspace_id, job.workflow_id, job.project_id, 'AGENT_TURN', NULL,
+      job.workflow_id::text || ':ui-design:after:' || job.id::text,
+      jsonb_build_object('role', 'UI_DESIGN', 'purpose', 'UI_DESIGN',
+        'designHandoff', p_output->'handoff'));
+  ELSIF role = 'UI_DESIGN' THEN
     UPDATE deviludo.workflow_instances SET state = 'DEVELOPING', version = version + 1,
       updated_at = clock_timestamp() WHERE workspace_id = job.workspace_id AND id = job.workflow_id;
     PERFORM deviludo.enqueue_job(job.workspace_id, job.workflow_id, job.project_id, 'AGENT_TURN', NULL,
       job.workflow_id::text || ':development:after:' || job.id::text,
-      jsonb_build_object('role', 'DEVELOPMENT', 'purpose', 'DEVELOPMENT'));
+      jsonb_build_object('role', 'DEVELOPMENT', 'purpose', 'DEVELOPMENT',
+        'uiDesignHandoff', p_output->'handoff'));
   ELSIF role = 'DEVELOPMENT' THEN
     SELECT NOT EXISTS (
       SELECT 1
@@ -1814,6 +1812,7 @@ BEGIN
              FROM deviludo.asset_items item
             WHERE item.workspace_id = manifest.workspace_id
               AND item.manifest_id = manifest.id
+              AND item.asset_type <> 'music'
               AND item.status NOT IN ('generated', 'uploaded', 'existing')
          )
     ) INTO assets_ready;
@@ -1829,21 +1828,38 @@ BEGIN
       END IF;
     END IF;
   ELSIF purpose = 'TEST_PLAN' THEN
-    IF NOT EXISTS (
+    SELECT EXISTS (
       SELECT 1 FROM deviludo.test_plans_v2 plan
        WHERE plan.workspace_id = job.workspace_id AND plan.project_id = job.project_id
          AND plan.source_revision = (p_output->>'sourceRevision')::bigint
          AND plan.plan_revision = (p_output->>'planRevision')::bigint
          AND plan.created_by_turn_id = (p_output->>'turnId')::uuid
-    ) THEN RAISE EXCEPTION 'Test Agent did not persist the complete current-source plan'; END IF;
-    UPDATE deviludo.workflow_instances SET state = 'TESTING', version = version + 1,
-      updated_at = clock_timestamp() WHERE workspace_id = job.workspace_id AND id = job.workflow_id;
-    FOREACH platform IN ARRAY workflow.target_platforms LOOP
-      PERFORM deviludo.enqueue_job(job.workspace_id, job.workflow_id, job.project_id,
-        'E2E_PLATFORM_RUN', platform,
-        job.workflow_id::text || ':e2e:' || platform::text || ':plan:' || coalesce(p_output->>'planRevision', '0'),
-        jsonb_build_object('planRevision', coalesce((p_output->>'planRevision')::bigint, 0)));
-    END LOOP;
+    ) INTO current_test_plan_available;
+    IF current_test_plan_available THEN
+      UPDATE deviludo.workflow_instances SET state = 'TESTING', version = version + 1,
+        updated_at = clock_timestamp() WHERE workspace_id = job.workspace_id AND id = job.workflow_id;
+      FOREACH platform IN ARRAY workflow.target_platforms LOOP
+        PERFORM deviludo.enqueue_job(job.workspace_id, job.workflow_id, job.project_id,
+          'E2E_PLATFORM_RUN', platform,
+          job.workflow_id::text || ':e2e:' || platform::text
+            || ':source:' || coalesce(p_output->>'sourceRevision', '0')
+            || ':plan:' || coalesce(p_output->>'planRevision', '0'),
+          jsonb_build_object('planRevision', coalesce((p_output->>'planRevision')::bigint, 0)));
+      END LOOP;
+    ELSE
+      verdict := upper(coalesce(p_output->>'verdict', p_output #>> '{structured,verdict}', ''));
+      IF verdict <> 'FAIL'
+        OR p_output #>> '{handoff,toRole}' IS DISTINCT FROM 'DEVELOPMENT'
+        OR length(btrim(coalesce(p_output #>> '{handoff,summary}', ''))) = 0 THEN
+        RAISE EXCEPTION 'Test Agent did not persist the complete current-source plan or a DEVELOPMENT source-contract handoff';
+      END IF;
+      UPDATE deviludo.workflow_instances SET state = 'DEVELOPING', version = version + 1,
+        updated_at = clock_timestamp() WHERE workspace_id = job.workspace_id AND id = job.workflow_id;
+      PERFORM deviludo.enqueue_job(job.workspace_id, job.workflow_id, job.project_id, 'AGENT_TURN', NULL,
+        job.workflow_id::text || ':development:test-plan-handoff:' || job.id::text,
+        jsonb_build_object('role', 'DEVELOPMENT', 'purpose', 'DEVELOPMENT',
+          'testHandoff', p_output->'handoff'));
+    END IF;
   ELSE
     verdict := upper(coalesce(p_output->>'verdict', p_output #>> '{structured,verdict}', ''));
     verdict_plan_id := nullif(job.payload->>'testPlanId', '')::uuid;
@@ -1881,7 +1897,7 @@ BEGIN
     ELSIF verdict = 'BLOCKED' THEN
       UPDATE deviludo.workflow_instances SET state = 'BLOCKED', version = version + 1,
         updated_at = clock_timestamp() WHERE workspace_id = job.workspace_id AND id = job.workflow_id;
-    ELSIF verdict = 'REPLAN' AND configuration_failed THEN
+    ELSIF verdict = 'REPLAN' THEN
       UPDATE deviludo.workflow_instances SET state = 'TEST_PLANNING', version = version + 1,
         updated_at = clock_timestamp() WHERE workspace_id = job.workspace_id AND id = job.workflow_id;
       PERFORM deviludo.enqueue_job(job.workspace_id, job.workflow_id, job.project_id, 'AGENT_TURN', NULL,
@@ -1940,7 +1956,7 @@ BEGIN
     FROM deviludo.jobs candidate
    WHERE candidate.workspace_id = p_workspace_id AND candidate.id = p_job_id
      AND candidate.kind = 'AGENT_TURN' AND candidate.state = 'SUCCEEDED'
-     AND coalesce(candidate.payload->>'role', 'DEVELOPMENT') IN ('DEVELOPMENT', 'TEST');
+     AND coalesce(candidate.payload->>'role', 'DEVELOPMENT') IN ('UI_DESIGN', 'DEVELOPMENT', 'TEST');
   turn_output := job.receipt->'agentTurn';
   agent_role := coalesce(job.payload->>'role', 'DEVELOPMENT');
   IF job.id IS NULL OR jsonb_typeof(turn_output) <> 'object'
@@ -1980,8 +1996,8 @@ BEGIN
       job.project_id,
       'PROJECT_FEEDBACK',
       CASE WHEN response_language = 'zh'
-        THEN project_name || CASE agent_role WHEN 'TEST' THEN ' · 测试' ELSE ' · 游戏生成' END
-        ELSE project_name || CASE agent_role WHEN 'TEST' THEN ' · Testing' ELSE ' · Game generation' END
+        THEN project_name || CASE agent_role WHEN 'TEST' THEN ' · 测试' WHEN 'UI_DESIGN' THEN ' · UI 设计' ELSE ' · 游戏生成' END
+        ELSE project_name || CASE agent_role WHEN 'TEST' THEN ' · Testing' WHEN 'UI_DESIGN' THEN ' · UI design' ELSE ' · Game generation' END
       END
     );
   END IF;
@@ -1995,6 +2011,7 @@ BEGIN
            'agentRole', agent_role,
            'agentName', CASE agent_role
              WHEN 'TEST' THEN 'DeviLudo Test Agent'
+             WHEN 'UI_DESIGN' THEN 'DeviLudo UI Design Agent'
              ELSE 'DeviLudo Development Agent'
            END,
            'agentRuntime', turn_output->'agentRuntime',
@@ -2641,6 +2658,7 @@ BEGIN
       JOIN deviludo.asset_manifests manifest
         ON manifest.workspace_id = item.workspace_id AND manifest.id = item.manifest_id
      WHERE manifest.auto_generate_enabled = true
+       AND item.asset_type <> 'music'
        AND item.generation_prompt IS NOT NULL
        AND item.generation_attempt < 3
        AND (
@@ -2792,6 +2810,7 @@ BEGIN
       FROM deviludo.asset_items item
      WHERE item.workspace_id = workflow.workspace_id
        AND item.manifest_id = asset_manifest_id
+       AND item.asset_type <> 'music'
        AND item.status IN ('planned', 'generating', 'failed');
     RETURN QUERY SELECT false, 0, remaining_count;
     RETURN;
@@ -2817,6 +2836,7 @@ BEGIN
     FROM deviludo.asset_items item
    WHERE item.workspace_id = workflow.workspace_id
      AND item.manifest_id = asset_manifest_id
+     AND item.asset_type <> 'music'
      AND item.status IN ('planned', 'generating', 'failed');
   IF remaining_count = 0 THEN RAISE EXCEPTION 'No unresolved assets remain'; END IF;
 
@@ -2835,6 +2855,7 @@ BEGIN
          updated_at = clock_timestamp()
    WHERE workspace_id = workflow.workspace_id
      AND manifest_id = asset_manifest_id
+     AND asset_type <> 'music'
      AND status = 'failed';
   GET DIAGNOSTICS queued_count = ROW_COUNT;
 
@@ -2862,6 +2883,7 @@ BEGIN
     FROM deviludo.asset_items item
    WHERE item.workspace_id = workflow.workspace_id
      AND item.manifest_id = asset_manifest_id
+     AND item.asset_type <> 'music'
      AND item.status IN ('planned', 'generating', 'failed');
   RETURN QUERY SELECT true, queued_count, remaining_count;
 END
@@ -2932,6 +2954,7 @@ BEGIN
            SELECT 1 FROM deviludo.asset_items item
             WHERE item.workspace_id = manifest.workspace_id
               AND item.manifest_id = manifest.id
+              AND item.asset_type <> 'music'
               AND item.status NOT IN ('generated', 'uploaded', 'existing')
          )
        )
@@ -3130,6 +3153,7 @@ DECLARE
   inserted_id uuid;
   platform deviludo.server_os;
   rerun_stage deviludo.job_kind;
+  rerun_agent_role text;
   stage_list deviludo.job_kind[];
   stage_index integer;
   downstream_stages deviludo.job_kind[];
@@ -3177,46 +3201,52 @@ BEGIN
       RAISE EXCEPTION 'Stage % is not part of the % delivery chain', rerun_stage, workflow.profile;
     END IF;
     IF rerun_stage = 'AGENT_TURN' THEN
+      rerun_agent_role := p_payload->>'agentRole';
+      IF rerun_agent_role NOT IN ('DESIGN', 'UI_DESIGN', 'DEVELOPMENT') THEN
+        RAISE EXCEPTION 'Agent stage rerun requires DESIGN, UI_DESIGN, or DEVELOPMENT role';
+      END IF;
       SELECT * INTO agent_settings
         FROM deviludo.instance_agent_settings
        WHERE singleton = true;
       IF agent_settings.singleton IS NULL THEN
         RAISE EXCEPTION 'Agent configuration is required before rerunning development';
       END IF;
-      -- A manual Agent rerun after a product-level E2E failure starts a fresh
-      -- repair cycle, but must retain the evidence that explains the failure.
-      -- Infrastructure failures deliberately never enter the source-repair path.
-      SELECT failed_job.id, failed_job.target_operating_system, failed_job.updated_at
-        INTO repair_e2e_job_id, repair_e2e_platform, repair_e2e_updated_at
-        FROM deviludo.jobs failed_job
-       WHERE failed_job.workspace_id = workflow.workspace_id
-         AND failed_job.workflow_id = workflow.id
-         AND failed_job.kind = 'E2E_PLATFORM_RUN'
-         AND failed_job.receipt #>> '{execution,outcome}' = 'FAILED'
-         AND failed_job.receipt #>> '{execution,failureDomain}' = 'PRODUCT'
-         AND EXISTS (
-           SELECT 1
-             FROM deviludo.artifacts evidence
-            WHERE evidence.workspace_id = failed_job.workspace_id
-              AND evidence.producing_job_id = failed_job.id
-              AND evidence.kind = 'E2E_REPORT'
-         )
-       ORDER BY failed_job.updated_at DESC, failed_job.created_at DESC, failed_job.id DESC
-       LIMIT 1;
-      SELECT failed_job.id, left(failed_job.last_error, 1800), failed_job.updated_at
-        INTO repair_build_job_id, repair_build_summary, repair_build_updated_at
-        FROM deviludo.jobs failed_job
-       WHERE failed_job.workspace_id = workflow.workspace_id
-         AND failed_job.workflow_id = workflow.id
-         AND failed_job.kind = 'BUILD'
-         AND failed_job.state = 'FAILED'
-         AND length(coalesce(failed_job.last_error, '')) > 0
-       ORDER BY failed_job.updated_at DESC, failed_job.created_at DESC, failed_job.id DESC
-       LIMIT 1;
-      IF repair_build_updated_at > coalesce(repair_e2e_updated_at, '-infinity'::timestamptz) THEN
-        repair_e2e_job_id := NULL;
-      ELSE
-        repair_build_job_id := NULL;
+      IF rerun_agent_role = 'DEVELOPMENT' THEN
+        -- A manual Development rerun after a product-level E2E failure starts
+        -- a fresh repair cycle and retains the evidence that explains it.
+        -- Infrastructure failures deliberately never enter source repair.
+        SELECT failed_job.id, failed_job.target_operating_system, failed_job.updated_at
+          INTO repair_e2e_job_id, repair_e2e_platform, repair_e2e_updated_at
+          FROM deviludo.jobs failed_job
+         WHERE failed_job.workspace_id = workflow.workspace_id
+           AND failed_job.workflow_id = workflow.id
+           AND failed_job.kind = 'E2E_PLATFORM_RUN'
+           AND failed_job.receipt #>> '{execution,outcome}' = 'FAILED'
+           AND failed_job.receipt #>> '{execution,failureDomain}' = 'PRODUCT'
+           AND EXISTS (
+             SELECT 1
+               FROM deviludo.artifacts evidence
+              WHERE evidence.workspace_id = failed_job.workspace_id
+                AND evidence.producing_job_id = failed_job.id
+                AND evidence.kind = 'E2E_REPORT'
+           )
+         ORDER BY failed_job.updated_at DESC, failed_job.created_at DESC, failed_job.id DESC
+         LIMIT 1;
+        SELECT failed_job.id, left(failed_job.last_error, 1800), failed_job.updated_at
+          INTO repair_build_job_id, repair_build_summary, repair_build_updated_at
+          FROM deviludo.jobs failed_job
+         WHERE failed_job.workspace_id = workflow.workspace_id
+           AND failed_job.workflow_id = workflow.id
+           AND failed_job.kind = 'BUILD'
+           AND failed_job.state = 'FAILED'
+           AND length(coalesce(failed_job.last_error, '')) > 0
+         ORDER BY failed_job.updated_at DESC, failed_job.created_at DESC, failed_job.id DESC
+         LIMIT 1;
+        IF repair_build_updated_at > coalesce(repair_e2e_updated_at, '-infinity'::timestamptz) THEN
+          repair_e2e_job_id := NULL;
+        ELSE
+          repair_build_job_id := NULL;
+        END IF;
       END IF;
     END IF;
     IF rerun_stage = 'STEAM_PUBLISH' AND NOT EXISTS (
@@ -3277,7 +3307,7 @@ BEGIN
         'agentConfiguration', jsonb_build_object(
           'runtime', agent_settings.agent_runtime::text,
           'baseUrl', agent_settings.base_url,
-          'model', coalesce(agent_settings.model_overrides->>'development', agent_settings.primary_model),
+          'model', coalesce(agent_settings.model_overrides->>'design', agent_settings.primary_model),
           'credentialRef', agent_settings.credential_secret_ref,
           'revision', agent_settings.revision
         )
@@ -3315,9 +3345,15 @@ BEGIN
       ) INTO current_test_plan_available;
     END IF;
     UPDATE deviludo.workflow_instances
-       SET state = CASE
+           SET state = CASE
              WHEN rerun_stage = 'E2E_PLATFORM_RUN' AND NOT current_test_plan_available
                THEN 'TEST_PLANNING'::deviludo.workflow_state
+             WHEN rerun_stage = 'AGENT_TURN'
+               THEN CASE rerun_agent_role
+                 WHEN 'DESIGN' THEN 'DESIGNING'::deviludo.workflow_state
+                 WHEN 'UI_DESIGN' THEN 'UI_DESIGNING'::deviludo.workflow_state
+                 ELSE 'DEVELOPING'::deviludo.workflow_state
+               END
              ELSE deviludo.stage_running_state(rerun_stage)
            END,
            version = version + 1,
@@ -3350,13 +3386,17 @@ BEGIN
         workflow.workspace_id, workflow.id, workflow.project_id, 'AGENT_TURN', NULL,
         workflow.id::text || ':rerun:agent:' || inserted_id::text,
         jsonb_build_object(
-          'role', 'DESIGN',
-          'purpose', 'DESIGN',
+          'role', rerun_agent_role,
+          'purpose', rerun_agent_role,
           'manualRerun', true,
           'agentConfiguration', jsonb_build_object(
             'runtime', agent_settings.agent_runtime::text,
             'baseUrl', agent_settings.base_url,
-            'model', coalesce(agent_settings.model_overrides->>'development', agent_settings.primary_model),
+            'model', coalesce(agent_settings.model_overrides->>(CASE rerun_agent_role
+              WHEN 'DESIGN' THEN 'design'
+              WHEN 'UI_DESIGN' THEN 'uiDesign'
+              ELSE 'development'
+            END), agent_settings.primary_model),
             'credentialRef', agent_settings.credential_secret_ref,
             'revision', agent_settings.revision
           )
@@ -3705,7 +3745,7 @@ BEGIN
        WHERE workspace_id = workflow.workspace_id AND id = workflow.id;
       PERFORM deviludo.enqueue_job(job.workspace_id, job.workflow_id, job.project_id,
         'AGENT_TURN', NULL,
-        job.workflow_id::text || ':test-verdict:plan:' || v_plan_id::text,
+        job.workflow_id::text || ':test-verdict:e2e:' || job.id::text,
         jsonb_build_object('role', 'TEST', 'purpose', 'TEST_VERDICT',
           'testPlanId', v_plan_id));
     END IF;

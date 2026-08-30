@@ -6,6 +6,7 @@ import {
   ROLE_TO_CANONICAL_TOOLS,
   toolInputSchema,
 } from "./tool-names.mjs";
+import { formatProjectToolResult } from "./mcp-content.mjs";
 
 const role = process.env.DEVILUDO_AGENT_ROLE ?? "";
 const turnId = process.env.DEVILUDO_AGENT_TURN_ID ?? "";
@@ -64,7 +65,7 @@ async function handle(message) {
       });
       const result = await response.json();
       if (!response.ok) throw new Error(typeof result?.message === "string" ? result.message : `MCP Gateway returned ${response.status}`);
-      return send(message.id, { content: [{ type: "text", text: JSON.stringify(result) }], structuredContent: result });
+      return send(message.id, formatProjectToolResult(result));
     } catch (error) {
       return send(message.id, { content: [{ type: "text", text: error instanceof Error ? error.message : String(error) }], isError: true });
     }
@@ -87,8 +88,26 @@ function toolDescription(name) {
   if (name === "source.read") {
     return "Read a UTF-8 source file from the current immutable revision. For files larger than 1 MiB, provide a 1-based startLine/endLine range spanning at most 1000 lines.";
   }
+  if (name === "project_document.update") {
+    return role === "UI_DESIGN"
+      ? "Persist the complete current project document after UI Design. Preserve introduction, gameplay, categories, and features exactly; replace uiDesign with the complete approved implementation-facing UI specification."
+      : "Confirm the exact approved project document snapshot. Pass it in the required document object; do not use projectDocument, projectDocumentPatch, content, or expectedRevision fields.";
+  }
+  if (name === "e2e_goals.update") {
+    return role === "UI_DESIGN"
+      ? "Persist the complete E2E goal snapshot after UI Design. Preserve gameplay coverage and add or refine only observable interface and visual acceptance goals justified by the UI specification."
+      : "Confirm the exact frozen E2E goal snapshot. Pass the complete goal array in the required goals field.";
+  }
+  if (name === "handoff.create") {
+    return role === "UI_DESIGN"
+      ? "Create the durable UI Design to Development handoff. Pass toRole, the concise implementation summary, and the complete schema-valid uiSpecification; Development is contractually bound to its assets and checkpoints."
+      : "Create the durable current-turn handoff. Pass the destination role in toRole and the complete implementation-facing handoff in summary.";
+  }
   if (name === "test_plan.replace") {
     return "Persist the complete current Test Agent plan. Follow this tool's input schema exactly and use only source-read Probe keys and semantic control IDs. A validation error is a correctable plan-authoring error: revise the payload and retry; it is not E2E infrastructure failure.";
+  }
+  if (name === "test.verdict") {
+    return "Persist the evidence-backed Test Agent verdict. PASS requires an exact per-checkpoint UI review whenever the latest UI Design handoff includes a structured UI specification; describe visible screenshot pixels and fail any blank undecorated content panel or approved fallback violation.";
   }
   return `DeviLudo built-in ${name} tool. Access is enforced for the ${role} role and audited by turn.`;
 }

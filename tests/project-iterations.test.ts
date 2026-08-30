@@ -49,6 +49,8 @@ test("iteration base revisions are captured from the current source at creation 
   const repository = await readFile(new URL("../services/core/src/repository.ts", import.meta.url), "utf8");
   assert.match(repository, /baseSourceRevision: latestSource/);
   assert.match(repository, /baseDocumentRevision: Number\(document/);
+  assert.match(repository, /workflow_profile, \$8::deviludo\.server_os\[\], 'DESIGNING'/);
+  assert.match(repository, /model_overrides\.design/);
   assert.doesNotMatch(repository, /source\.created_at <= child\.created_at/);
 });
 
@@ -60,10 +62,13 @@ test("the project page separates continuing requirements from rerunning a comple
   assert.match(studio, /body: JSON\.stringify\(\{ baseWorkflowId: project\.workflowId, responseLanguage: locale \}\)/);
   assert.match(studio, /text\("继续修改", "CONTINUE EDITING"\)/);
   assert.match(studio, /text\("调整需求并重新开发", "REVISE & DEVELOP AGAIN"\)/);
-  assert.match(studio, /mutate\("rerun-stage", \{ stage: kind \}\)/);
+  assert.match(studio, /mutate\("rerun-stage", \{ stage: rerunnableKind \}\)/);
   assert.match(studio, /viewingHistoricalIteration[\s\S]*text\("历史只读", "READ ONLY"\)/);
   assert.match(studio, /disabled=\{viewingHistoricalIteration\}/);
   assert.match(studio, /assetPanelExpanded && !viewingHistoricalIteration/);
+  assert.match(studio, /musicPanelExpanded && !viewingHistoricalIteration/);
+  assert.match(studio, /<AssetManifestPanel mediaKind="music"/);
+  assert.doesNotMatch(studio, /尚未配置音乐生成模型/);
   assert.match(studio, /historicalIteration\.events/);
   assert.match(dashboard, /project\.iterationNumber/);
 });
@@ -79,12 +84,13 @@ test("current artifact queries no longer mix evidence from older iterations", as
   assert.match(repository, /WHERE artifact\.project_id = \$1::uuid AND artifact\.workflow_id = \$2::uuid[\s\S]*artifact\.created_at DESC/);
 });
 
-test("the artifact panel keeps only the newest item for each kind and platform", async () => {
+test("the delivery artifact dock keeps only the newest item for each kind and platform", async () => {
   const studio = await readFile(new URL("../components/ProjectStudio.tsx", import.meta.url), "utf8");
   assert.match(studio, /latestArtifactsByKindAndPlatform\([\s\S]*historicalIteration\.artifacts : artifacts/);
   assert.match(studio, /const key = `\$\{artifact\.kind\}:\$\{artifact\.targetPlatform \?\? "common"\}`/);
   assert.match(studio, /artifact\.createdAt > current\.createdAt/);
-  assert.match(studio, /groupArtifactsByPipelineStage\(viewedArtifacts\)/);
-  assert.match(studio, /artifactPipelineStage\(artifact\.kind\)/);
+  assert.match(studio, /className="product-delivery-artifacts-dock"/);
+  assert.match(studio, /className="product-delivery-artifact-grid"/);
+  assert.doesNotMatch(studio, /product-delivery-stage-artifacts/);
   assert.doesNotMatch(studio, /className="product-artifacts-panel"/);
 });

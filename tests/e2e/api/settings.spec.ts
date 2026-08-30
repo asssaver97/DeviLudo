@@ -9,7 +9,7 @@ test("instance Agent settings persist safely and freeze into workspace jobs", as
       agentRuntime: "CLAUDE_CODE",
       baseUrl: "https://api.anthropic.com",
       primaryModel: "claude-sonnet-4-5",
-      modelOverrides: { intent: null, analysis: null, design: null, development: null, test: null },
+      modelOverrides: { intent: null, analysis: null, design: null, uiDesign: null, development: null, test: null },
       imageModel: null,
       imageGenerationBackend: null,
       apiKeyConfigured: false,
@@ -143,7 +143,7 @@ test("custom Codex Responses settings persist as one protected connection", asyn
       baseUrl: "https://api.x.ai/v1/",
       apiKey,
       primaryModel: "xai/grok-4.6",
-      modelOverrides: { intent: null, analysis: null, design: null, development: "xai/grok-code-fast-1", test: null },
+      modelOverrides: { intent: null, analysis: null, design: null, uiDesign: null, development: "xai/grok-code-fast-1", test: null },
     },
   });
   const text = await response.text();
@@ -153,7 +153,7 @@ test("custom Codex Responses settings persist as one protected connection", asyn
     agentRuntime: "CODEX_CLI",
     baseUrl: "https://api.x.ai/v1",
     primaryModel: "xai/grok-4.6",
-    modelOverrides: { intent: null, analysis: null, design: null, development: "xai/grok-code-fast-1", test: null },
+    modelOverrides: { intent: null, analysis: null, design: null, uiDesign: null, development: "xai/grok-code-fast-1", test: null },
     apiKeyConfigured: true,
     apiKeyMasked: "xai********cret",
     imageGenerationBackend: "CODEX_IMAGEGEN",

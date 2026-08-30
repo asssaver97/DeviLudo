@@ -2,6 +2,7 @@ export const ROLE_TO_CANONICAL_TOOLS = Object.freeze({
   INTENT: Object.freeze(["context.read", "conversation.reply", "workflow.intent_decision", "workflow.stop", "workflow.continue"]),
   ANALYSIS: Object.freeze(["context.read", "source.list", "source.read", "diagnostics.run", "context.update_analysis", "conversation.reply"]),
   DESIGN: Object.freeze(["context.read", "requirements.update", "project_document.update", "e2e_goals.update", "conversation.reply", "handoff.create"]),
+  UI_DESIGN: Object.freeze(["context.read", "source.list", "source.read", "evidence.read", "project_document.update", "e2e_goals.update", "conversation.reply", "handoff.create"]),
   DEVELOPMENT: Object.freeze(["context.read", "source.list", "source.read", "source.checkpoint", "assets.plan", "assets.cleanup", "build.request", "conversation.reply", "handoff.create"]),
   TEST: Object.freeze(["context.read", "source.list", "source.read", "test_plan.replace", "e2e.start", "e2e.observe", "evidence.read", "test.verdict", "conversation.reply", "handoff.create"]),
 });
@@ -21,6 +22,45 @@ export function canonicalToolName(role, nativeName) {
 
 export function toolInputSchema(canonicalName) {
   nativeToolName(canonicalName);
+  if (canonicalName === "context.read") {
+    return Object.freeze({ type: "object", additionalProperties: false });
+  }
+  if (canonicalName === "project_document.update") {
+    return Object.freeze({
+      type: "object",
+      additionalProperties: false,
+      required: Object.freeze(["document"]),
+      properties: Object.freeze({
+        document: Object.freeze({ type: "object", additionalProperties: true }),
+      }),
+    });
+  }
+  if (canonicalName === "e2e_goals.update") {
+    return Object.freeze({
+      type: "object",
+      additionalProperties: false,
+      required: Object.freeze(["goals"]),
+      properties: Object.freeze({
+        goals: Object.freeze({
+          type: "array",
+          maxItems: 1_000,
+          items: Object.freeze({ type: "object", additionalProperties: true }),
+        }),
+      }),
+    });
+  }
+  if (canonicalName === "handoff.create") {
+    return Object.freeze({
+      type: "object",
+      additionalProperties: false,
+      required: Object.freeze(["toRole", "summary"]),
+      properties: Object.freeze({
+        toRole: Object.freeze({ enum: Object.freeze(["INTENT", "ANALYSIS", "DESIGN", "UI_DESIGN", "DEVELOPMENT", "TEST"]) }),
+        summary: Object.freeze({ type: "string", minLength: 1, maxLength: 64_000 }),
+        uiSpecification: uiSpecificationSchema(),
+      }),
+    });
+  }
   if (canonicalName === "source.read") {
     return Object.freeze({
       type: "object",
@@ -33,7 +73,9 @@ export function toolInputSchema(canonicalName) {
       }),
     });
   }
+  if (canonicalName === "assets.plan") return assetPlanInputSchema();
   if (canonicalName === "test_plan.replace") return testPlanReplaceInputSchema();
+  if (canonicalName === "test.verdict") return testVerdictInputSchema();
   if (canonicalName !== "context.update_analysis") {
     return Object.freeze({ type: "object", additionalProperties: true });
   }
@@ -76,6 +118,204 @@ export function toolInputSchema(canonicalName) {
         }),
       }),
     }),
+  });
+}
+
+function testVerdictInputSchema() {
+  const evidenceText = { type: "string", minLength: 1, maxLength: 4_000 };
+  const criterionResult = {
+    type: "object",
+    additionalProperties: false,
+    required: ["criterion", "status", "evidence"],
+    properties: {
+      criterion: { type: "string", minLength: 1, maxLength: 2_000 },
+      status: { enum: ["PASS", "FAIL"] },
+      evidence: evidenceText,
+    },
+  };
+  const fallbackResult = {
+    type: "object",
+    additionalProperties: false,
+    required: ["fallback", "present", "evidence"],
+    properties: {
+      fallback: { type: "string", minLength: 1, maxLength: 2_000 },
+      present: { type: "boolean" },
+      evidence: evidenceText,
+    },
+  };
+  return Object.freeze({
+    type: "object",
+    additionalProperties: false,
+    required: ["verdict", "handoff"],
+    properties: {
+      verdict: { enum: ["PASS", "FAIL", "REPLAN", "BLOCKED"] },
+      handoff: {
+        anyOf: [
+          { type: "null" },
+          { type: "object", additionalProperties: true },
+        ],
+      },
+      reason: { type: "string", minLength: 1, maxLength: 64_000 },
+      uiReview: {
+        type: "object",
+        additionalProperties: false,
+        required: ["checkpoints"],
+        properties: {
+          checkpoints: {
+            type: "array",
+            minItems: 4,
+            maxItems: 32,
+            items: {
+              type: "object",
+              additionalProperties: false,
+              required: [
+                "role", "checkpointId", "screenshotDescription", "silhouetteMatches",
+                "focalPointVisible", "primaryActionVisible", "negativeSpaceCompliant",
+                "thumbnailReadMatches", "stressCaseHandled", "visualAnchorsVisible",
+                "mostlyBlankUndecoratedPanelPresent", "acceptanceCriteria", "forbiddenFallbacks",
+              ],
+              properties: {
+                role: { enum: ["START", "READY", "ACTION", "PROGRESS", "COMPLETION"] },
+                checkpointId: { type: "string", minLength: 1, maxLength: 500 },
+                screenshotDescription: evidenceText,
+                silhouetteMatches: { type: "boolean" },
+                focalPointVisible: { type: "boolean" },
+                primaryActionVisible: { type: "boolean" },
+                negativeSpaceCompliant: { type: "boolean" },
+                thumbnailReadMatches: { type: "boolean" },
+                stressCaseHandled: { type: "boolean" },
+                visualAnchorsVisible: { type: "boolean" },
+                mostlyBlankUndecoratedPanelPresent: { type: "boolean" },
+                acceptanceCriteria: {
+                  type: "array", minItems: 1, maxItems: 24, items: criterionResult,
+                },
+                forbiddenFallbacks: {
+                  type: "array", minItems: 1, maxItems: 24, items: fallbackResult,
+                },
+              },
+            },
+          },
+        },
+      },
+    },
+  });
+}
+
+function assetPlanInputSchema() {
+  return Object.freeze({
+    type: "object",
+    additionalProperties: false,
+    required: ["assets"],
+    properties: {
+      assets: {
+        type: "array",
+        maxItems: 500,
+        items: assetPlanItemSchema(true),
+      },
+    },
+  });
+}
+
+function assetPlanItemSchema(includeMusic) {
+  return Object.freeze({
+    type: "object",
+    additionalProperties: false,
+    required: ["key", "assetType", "origin", "description", "expectedResourcePath", "targetId", "checkpointRole"],
+    properties: {
+      key: { type: "string", pattern: "^[a-z0-9][a-z0-9/_.-]{0,199}$" },
+      assetType: { enum: includeMusic
+        ? ["sprite", "animation", "background", "ui", "icon", "tileset", "music"]
+        : ["sprite", "animation", "background", "ui", "icon", "tileset"] },
+      origin: { enum: ["GENERATED", "USER_UPLOAD"] },
+      description: { type: "string", minLength: 1, maxLength: 2000 },
+      generationPrompt: { type: "string", minLength: 20, maxLength: 4000 },
+      dimensions: { type: "string", pattern: "^[0-9]{1,5}x[0-9]{1,5}$" },
+      frameCount: { type: "integer", minimum: 1, maximum: 4096 },
+      expectedResourcePath: { type: "string", pattern: includeMusic
+        ? "^res://assets/generated/[a-z0-9][a-z0-9/_.-]{0,199}\\.(png|mp3|ogg|wav)$"
+        : "^res://assets/generated/[a-z0-9][a-z0-9/_.-]{0,199}\\.png$" },
+      targetId: { type: "string", pattern: "^[a-z0-9][a-z0-9-]{0,119}$" },
+      checkpointRole: { enum: ["START", "READY", "ACTION", "PROGRESS", "COMPLETION"] },
+    },
+  });
+}
+
+function uiSpecificationSchema() {
+  const shortText = (maxLength = 2_000) => ({ type: "string", minLength: 1, maxLength });
+  const stableId = { type: "string", pattern: "^[a-z0-9][a-z0-9-]{0,119}$" };
+  const textList = (maxItems = 24) => ({
+    type: "array", minItems: 1, maxItems, items: shortText(),
+  });
+  return Object.freeze({
+    type: "object",
+    additionalProperties: false,
+    required: ["schema", "visualThesis", "referenceCanvas", "checkpoints", "assets"],
+    properties: {
+      schema: { const: "deviludo.ui-specification" },
+      visualThesis: shortText(4_000),
+      referenceCanvas: {
+        type: "object", additionalProperties: false, required: ["width", "height"],
+        properties: { width: { const: 1280 }, height: { const: 720 } },
+      },
+      checkpoints: {
+        type: "array", minItems: 4, maxItems: 32,
+        items: {
+          type: "object",
+          additionalProperties: false,
+          required: [
+            "role", "purpose", "silhouette", "focalPoint", "primaryActionId", "regions",
+            "visualAnchors", "negativeSpaceIntent", "contentStressCase", "thumbnailRead",
+            "acceptanceCriteria", "forbiddenFallbacks",
+          ],
+          properties: {
+            role: { enum: ["START", "READY", "ACTION", "PROGRESS", "COMPLETION"] },
+            purpose: shortText(),
+            silhouette: shortText(),
+            focalPoint: shortText(),
+            primaryActionId: stableId,
+            regions: {
+              type: "array", minItems: 1, maxItems: 32,
+              items: {
+                type: "object", additionalProperties: false,
+                required: ["id", "x", "y", "width", "height", "layer", "purpose", "content", "overflow"],
+                properties: {
+                  id: stableId,
+                  x: { type: "integer", minimum: 0, maximum: 1279 },
+                  y: { type: "integer", minimum: 0, maximum: 719 },
+                  width: { type: "integer", minimum: 1, maximum: 1280 },
+                  height: { type: "integer", minimum: 1, maximum: 720 },
+                  layer: { type: "integer", minimum: 0, maximum: 100 },
+                  purpose: shortText(),
+                  content: shortText(4_000),
+                  overflow: shortText(),
+                },
+              },
+            },
+            visualAnchors: {
+              type: "array", minItems: 1, maxItems: 32,
+              items: {
+                type: "object", additionalProperties: false,
+                required: ["kind", "targetId", "description"],
+                properties: {
+                  kind: { enum: ["ASSET", "CODE_NATIVE"] },
+                  key: { type: "string", pattern: "^[a-z0-9][a-z0-9/_.-]{0,199}$" },
+                  targetId: stableId,
+                  description: shortText(),
+                },
+              },
+            },
+            negativeSpaceIntent: shortText(),
+            contentStressCase: shortText(4_000),
+            thumbnailRead: shortText(),
+            acceptanceCriteria: textList(),
+            forbiddenFallbacks: textList(),
+          },
+        },
+      },
+      assets: {
+        type: "array", maxItems: 500, items: assetPlanItemSchema(false),
+      },
+    },
   });
 }
 

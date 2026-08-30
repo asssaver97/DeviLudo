@@ -7,12 +7,13 @@
 import { createHash } from "node:crypto";
 import type { PoolClient } from "pg";
 import type { Database } from "./database";
-import type {
-  AssetItem,
-  AssetItemStatus,
-  AssetManifest,
-  AssetManifestStatus,
-  AssetType,
+import {
+  isMusicAsset,
+  type AssetItem,
+  type AssetItemStatus,
+  type AssetManifest,
+  type AssetManifestStatus,
+  type AssetType,
 } from "@/lib/product/asset-manifest";
 
 type AssetManifestRow = Readonly<{
@@ -118,19 +119,21 @@ function itemFromRow(row: AssetItemRow): AssetItem {
  * the items it summarizes.
  */
 function manifestStatus(items: readonly AssetItem[]): AssetManifestStatus {
-  if (items.length === 0) return "planning";
-  const settled = items.filter(item => ["generated", "uploaded", "existing"].includes(item.status));
-  if (settled.length === items.length) return "complete";
+  const images = items.filter(item => !isMusicAsset(item));
+  if (images.length === 0) return "planning";
+  const settled = images.filter(item => ["generated", "uploaded", "existing"].includes(item.status));
+  if (settled.length === images.length) return "complete";
   return settled.length > 0 ? "partial" : "ready";
 }
 
 function completionOf(items: readonly AssetItem[]): AssetCompletion {
-  const uploaded = items.filter(item => ["generated", "uploaded", "existing"].includes(item.status)).length;
+  const images = items.filter(item => !isMusicAsset(item));
+  const uploaded = images.filter(item => ["generated", "uploaded", "existing"].includes(item.status)).length;
   return Object.freeze({
-    total: items.length,
+    total: images.length,
     uploaded,
-    failed: items.filter(item => item.status === "failed").length,
-    complete: items.length > 0 && uploaded === items.length,
+    failed: images.filter(item => item.status === "failed").length,
+    complete: images.length > 0 && uploaded === images.length,
   });
 }
 
@@ -237,7 +240,7 @@ export class AssetManifestStore {
            workspace_id, project_id, workflow_id, auto_generate_enabled
          ) VALUES ($1::uuid, $2::uuid, $3::uuid, false)
          ON CONFLICT (workspace_id, project_id) DO UPDATE
-           SET updated_at = deviludo.asset_manifests.updated_at
+           SET workflow_id = EXCLUDED.workflow_id, updated_at = clock_timestamp()
          RETURNING id::text`,
         [input.workspaceId, input.projectId, input.workflowId],
       );
@@ -301,6 +304,66 @@ export class AssetManifestStore {
         occupied.add(assetKey);
         changed += result.rowCount ?? 0;
       }
+      return changed;
+    });
+  }
+
+  /**
+   * Persist the Development Agent's upload-only music brief beside visual
+   * assets. Music deliberately has no generation prompt and is never an image
+   * gate; this list exists so each requested cue has a durable description and
+   * one stable upload target.
+   */
+  async synchronizeMusicPlan(input: Readonly<{
+    workspaceId: string;
+    projectId: string;
+    workflowId: string;
+    items: readonly Readonly<{ assetKey: string; description: string }>[];
+  }>): Promise<number> {
+    return this.database.withWorkspace(input.workspaceId, async client => {
+      const manifest = input.items.length > 0
+        ? await client.query<{ id: string }>(
+          `INSERT INTO deviludo.asset_manifests(
+             workspace_id, project_id, workflow_id, auto_generate_enabled
+           ) VALUES ($1::uuid, $2::uuid, $3::uuid, false)
+           ON CONFLICT (workspace_id, project_id) DO UPDATE
+             SET workflow_id = EXCLUDED.workflow_id, updated_at = clock_timestamp()
+           RETURNING id::text`,
+          [input.workspaceId, input.projectId, input.workflowId],
+        )
+        : await client.query<{ id: string }>(
+          `SELECT id::text
+             FROM deviludo.asset_manifests
+            WHERE workspace_id = $1::uuid AND project_id = $2::uuid`,
+          [input.workspaceId, input.projectId],
+        );
+      const manifestId = manifest.rows[0]?.id;
+      if (!manifestId) return 0;
+      let changed = 0;
+      for (const item of input.items) {
+        const result = await client.query(
+          `INSERT INTO deviludo.asset_items(
+             workspace_id, manifest_id, asset_key, asset_type, description,
+             generation_prompt, status
+           ) VALUES ($1::uuid, $2::uuid, $3, 'music', $4, NULL, 'planned')
+           ON CONFLICT (workspace_id, manifest_id, asset_key) DO UPDATE
+             SET description = EXCLUDED.description, asset_type = 'music',
+                 generation_prompt = NULL, frame_count = NULL, dimensions = NULL,
+                 updated_at = clock_timestamp()
+           WHERE deviludo.asset_items.asset_type = 'music'
+         RETURNING id`,
+          [input.workspaceId, manifestId, item.assetKey, item.description],
+        );
+        changed += result.rowCount ?? 0;
+      }
+      const removed = await client.query(
+        `DELETE FROM deviludo.asset_items
+          WHERE workspace_id = $1::uuid AND manifest_id = $2::uuid
+            AND asset_type = 'music'
+            AND NOT (asset_key = ANY($3::text[]))`,
+        [input.workspaceId, manifestId, input.items.map(item => item.assetKey)],
+      );
+      changed += removed.rowCount ?? 0;
       return changed;
     });
   }

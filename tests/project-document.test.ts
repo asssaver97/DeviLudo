@@ -15,17 +15,18 @@ test("new projects receive a structured collaborative game document", () => {
   }, "zh");
   assert.equal(content.introduction, "一款时间循环解谜冒险游戏");
   assert.match(content.gameplay, /探索场景/);
+  assert.match(content.uiDesign, /UI 设计 Agent/);
   assert.deepEqual(content.categories, ["待 Agent 分类"]);
   assert.deepEqual(content.features, ["可完成一轮循环"]);
   const markdown = projectDocumentMarkdown("时间群岛", content, "zh");
-  for (const heading of ["游戏介绍", "玩法", "游戏分类", "主要特性"]) assert.match(markdown, new RegExp(heading));
+  for (const heading of ["游戏介绍", "玩法", "UI 设计", "游戏分类", "主要特性"]) assert.match(markdown, new RegExp(heading));
 });
 
 test("project documents default to English when no UI language is supplied", () => {
   const content = createInitialProjectDocument("Untitled", "A new game", {});
   assert.deepEqual(content.categories, ["Pending Agent classification"]);
   const markdown = projectDocumentMarkdown("Untitled", content);
-  for (const heading of ["Game overview", "Gameplay", "Categories", "Key features"]) {
+  for (const heading of ["Game overview", "Gameplay", "UI design", "Categories", "Key features"]) {
     assert.match(markdown, new RegExp(heading));
   }
 });
@@ -34,12 +35,14 @@ test("project documents fail closed when required collaboration fields are missi
   assert.throws(() => parseProjectDocumentContent({
     introduction: "游戏介绍",
     gameplay: "核心玩法",
+    uiDesign: "完整 UI 规格",
     categories: [],
     features: ["特性"],
   }), /游戏分类/);
   assert.throws(() => parseProjectDocumentContent({
     introduction: "游戏介绍",
     gameplay: "",
+    uiDesign: "完整 UI 规格",
     categories: ["冒险"],
     features: ["特性"],
   }), /玩法/);
@@ -50,6 +53,7 @@ test("verbose Agent document items are split to the strict storage contract", ()
   const content = normalizeAgentProjectDocumentContent({
     introduction: "游戏介绍",
     gameplay: "核心玩法",
+    uiDesign: "完整 UI 规格",
     categories: ["策略"],
     features: [verboseFeature],
   });
@@ -68,6 +72,7 @@ test("development approval freezes the current project document into E2E require
   }, {
     introduction: "一款可发布的航行游戏",
     gameplay: "从互斥主菜单开始新游戏。驾驶飞船收集三个目标；跨越终点后结算胜利。",
+    uiDesign: "主菜单与 HUD 使用稳定控件标识并支持键鼠和手柄焦点导航。",
     categories: ["冒险"],
     features: ["菜单不得显示活动游戏内容", "真实输入可以完成核心循环"],
   });

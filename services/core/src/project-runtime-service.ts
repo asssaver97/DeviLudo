@@ -1,7 +1,10 @@
-import { lstat, mkdir, readFile, readdir, rm, writeFile } from "node:fs/promises";
+import { lstat, mkdir, mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import { createHash, randomUUID } from "node:crypto";
 import { join, relative, resolve, sep } from "node:path";
-import { PROJECT_RUNTIME_ROLES, type ProjectRuntimeRole } from "@/lib/product/contracts";
+import { tmpdir } from "node:os";
+import sharp from "sharp";
+import { PROJECT_RUNTIME_ROLES, type E2eGoal, type ProjectRuntimeRole } from "@/lib/product/contracts";
+import { parseProjectDocumentContent, type ProjectDocumentContent } from "@/lib/product/project-document";
 import {
   PROJECT_RUNTIME_SCHEMA,
   type ProjectRuntimeControlRequest,
@@ -24,11 +27,13 @@ import { ProcessProjectRuntimeBackend, type ProjectRuntimeBackend } from "./proj
 import { ProjectRuntimeRepository, type ProjectContextSeed } from "./project-runtime-repository";
 import { ProjectSourceStore } from "./project-sources";
 import type { StoredInstanceAgentSettings } from "./repository";
+import { extractAndValidateEvidenceBundle } from "@/scripts/e2e-evidence.mjs";
 
 const ROLE_TO_MODEL = Object.freeze({
   INTENT: "intent",
   ANALYSIS: "analysis",
   DESIGN: "design",
+  UI_DESIGN: "uiDesign",
   DEVELOPMENT: "development",
   TEST: "test",
 } as const);
@@ -37,6 +42,7 @@ const ROLE_TOOLS = Object.freeze({
   INTENT: new Set(["context.read", "conversation.reply", "workflow.intent_decision", "workflow.stop", "workflow.continue"]),
   ANALYSIS: new Set(["context.read", "source.list", "source.read", "diagnostics.run", "context.update_analysis", "conversation.reply"]),
   DESIGN: new Set(["context.read", "requirements.update", "project_document.update", "e2e_goals.update", "conversation.reply", "handoff.create"]),
+  UI_DESIGN: new Set(["context.read", "source.list", "source.read", "evidence.read", "project_document.update", "e2e_goals.update", "conversation.reply", "handoff.create"]),
   DEVELOPMENT: new Set(["context.read", "source.list", "source.read", "source.checkpoint", "assets.plan", "assets.cleanup", "build.request", "conversation.reply", "handoff.create"]),
   TEST: new Set(["context.read", "source.list", "source.read", "test_plan.replace", "e2e.start", "e2e.observe", "evidence.read", "test.verdict", "conversation.reply", "handoff.create"]),
 });
@@ -47,6 +53,21 @@ const LIFECYCLE_RETRY_INTERVAL_MS = 1_000;
 // Match the scheduler's bounded lifecycle lease. A workflow attempt must not
 // be consumed while another owner can still be legitimately compacting it.
 const LIFECYCLE_RETRY_LIMIT = 900;
+const AGENT_EVIDENCE_ARCHIVE_MAX_BYTES = 128 * 1024 * 1024;
+const AGENT_EVIDENCE_IMAGE_MAX_BYTES = 3 * 1024 * 1024;
+const AGENT_EVIDENCE_ROLES = Object.freeze(["START", "READY", "PROGRESS", "COMPLETION"] as const);
+
+type ProjectArtifactReader = Readonly<{
+  readProjectArtifact(input: Readonly<{
+    workspaceId: string;
+    projectId: string;
+    bucket: string;
+    key: string;
+    sha256: string;
+    sizeBytes: number;
+    maximumBytes: number;
+  }>): Promise<Buffer>;
+}>;
 
 type ProjectRuntimeTurnInput = Readonly<{
   workspaceId: string;
@@ -73,6 +94,7 @@ export class ProjectRuntimeService {
     private readonly repository: ProjectRuntimeRepository,
     private readonly projectsRoot: string,
     private readonly backend: ProjectRuntimeBackend = new ProcessProjectRuntimeBackend(),
+    private readonly artifactReader?: ProjectArtifactReader,
   ) {
     this.contexts = new ProjectContextStore(projectsRoot);
     this.sources = new ProjectSourceStore(projectsRoot);
@@ -224,8 +246,14 @@ export class ProjectRuntimeService {
       }
       if (input.role === "DESIGN" && input.mode === "PRIMARY") {
         const durable = await this.readContext(input.workspaceId, input.projectId);
-        if (!runtimeTurnHandoff(durable, result.turnId, "DESIGN", "DEVELOPMENT")) {
-          throw new Error("Design Agent completed without creating a DEVELOPMENT handoff");
+        if (!runtimeTurnHandoff(durable, result.turnId, "DESIGN", "UI_DESIGN")) {
+          throw new Error("Design Agent completed without creating a UI_DESIGN handoff");
+        }
+      }
+      if (input.role === "UI_DESIGN" && input.mode === "PRIMARY") {
+        const durable = await this.readContext(input.workspaceId, input.projectId);
+        if (!runtimeTurnHandoff(durable, result.turnId, "UI_DESIGN", "DEVELOPMENT")) {
+          throw new Error("UI Design Agent completed without creating a DEVELOPMENT handoff");
         }
       }
       const toolSummaries = summarizeRuntimeToolCalls(result.toolCalls);
@@ -556,14 +584,21 @@ export class ProjectRuntimeService {
         "requirements", arrayOfObjects(input.arguments.requirements));
     }
     if (input.name === "project_document.update") {
+      const document = parseProjectDocumentContent(input.arguments.document);
+      if (input.role === "UI_DESIGN") {
+        return this.updateUiDesignDocument(input.workspaceId, input.projectId, document);
+      }
       return this.confirmApprovedField(input.workspaceId, input.projectId,
-        "projectDocument", boundedObject(input.arguments.document));
+        "projectDocument", document);
     }
     if (input.name === "e2e_goals.update") {
-      const goals = arrayOfObjects(input.arguments.goals);
+      const goals = normalizeRuntimeE2eGoals(input.arguments.goals);
+      if (input.role === "UI_DESIGN") {
+        return this.replaceUiDesignGoals(input.workspaceId, input.projectId, goals);
+      }
       const current = await this.readContext(input.workspaceId, input.projectId);
       if (!sameJson(goals, current.e2e.goals)) {
-        throw new Error("Design Agent cannot change the approved E2E goal snapshot during execution");
+        throw new Error(`${input.role} Agent cannot change the approved E2E goal snapshot during execution`);
       }
       return Object.freeze({ accepted: true, contextRevision: current.revision,
         goalRevision: current.e2e.goalRevision });
@@ -584,10 +619,16 @@ export class ProjectRuntimeService {
       if (!PROJECT_RUNTIME_ROLES.includes(toRole as ProjectRuntimeRole) || toRole === input.role || !summary) {
         throw new Error("Agent handoff requires a different valid role and a non-empty summary");
       }
+      const uiSpecification = input.role === "UI_DESIGN" && toRole === "DEVELOPMENT"
+        ? normalizeUiSpecification(handoff.uiSpecification)
+        : null;
+      if (handoff.uiSpecification !== undefined && !uiSpecification) {
+        throw new Error("Only UI Design may attach a UI specification to its Development handoff");
+      }
       return this.mutateResult(input.workspaceId, input.projectId, current => updateProjectContext(current, {
         handoffs: Object.freeze([...current.handoffs, Object.freeze({
           ...handoff, id: input.turnId, fromRole: input.role, toRole,
-          summary, createdAt: new Date().toISOString(),
+          summary, ...(uiSpecification ? { uiSpecification } : {}), createdAt: new Date().toISOString(),
         })].slice(-100)),
       }));
     }
@@ -627,14 +668,29 @@ export class ProjectRuntimeService {
         planSha256: stored.sha256,
       });
     }
-    if (input.name === "test.verdict") return this.updateField(input.workspaceId, input.projectId, "testSummary", boundedObject(input.arguments));
+    if (input.name === "test.verdict") {
+      const testSummary = boundedObject(input.arguments);
+      const current = await this.readContext(input.workspaceId, input.projectId);
+      const uiSpecification = latestUiSpecification(current);
+      if (String(testSummary.verdict ?? "") === "PASS" && uiSpecification) {
+        const uiReview = normalizeUiTestReview(testSummary.uiReview, uiSpecification);
+        return this.updateField(input.workspaceId, input.projectId, "testSummary",
+          Object.freeze({ ...testSummary, uiReview }));
+      }
+      return this.updateField(input.workspaceId, input.projectId, "testSummary", testSummary);
+    }
     if (input.name === "e2e.start") {
       const plan = await this.repository.readLatestTestPlan(input.workspaceId, input.projectId);
       if (!plan) throw new Error("The Test Agent must persist a complete plan before starting E2E");
       return Object.freeze({ accepted: true, plan, delegatedTo: "controlled-host-gateway" });
     }
-    if (input.name === "e2e.observe" || input.name === "evidence.read") {
+    if (input.name === "e2e.observe") {
       return Object.freeze({ runs: await this.repository.readTestEvidence(input.workspaceId, input.projectId) });
+    }
+    if (input.name === "evidence.read") {
+      const runs = await this.repository.readTestEvidence(input.workspaceId, input.projectId);
+      const visualEvidence = await this.readVisualEvidence(input.workspaceId, input.projectId, runs);
+      return Object.freeze({ runs, ...visualEvidence });
     }
     if (input.name === "diagnostics.run") {
       return Object.freeze({ accepted: true, delegatedTo: "controlled-host-gateway", bounded: true });
@@ -642,17 +698,102 @@ export class ProjectRuntimeService {
     throw new Error(`Project Runtime tool is not implemented: ${input.name}`);
   }
 
+  private async readVisualEvidence(
+    workspaceId: string,
+    projectId: string,
+    runs: readonly Readonly<Record<string, unknown>>[],
+  ): Promise<Readonly<Record<string, unknown>>> {
+    const selected = latestEvidenceReport(runs);
+    if (!selected) return Object.freeze({ visualEvidence: Object.freeze({ available: false, reason: "NO_E2E_REPORT" }) });
+    if (!this.artifactReader) {
+      return Object.freeze({ visualEvidence: Object.freeze({
+        available: false,
+        reason: "ARTIFACT_READER_UNAVAILABLE",
+        runId: selected.runId,
+      }) });
+    }
+    const archive = await this.artifactReader.readProjectArtifact({
+      workspaceId,
+      projectId,
+      ...selected.object,
+      maximumBytes: AGENT_EVIDENCE_ARCHIVE_MAX_BYTES,
+    });
+    const directory = await mkdtemp(join(tmpdir(), "deviludo-agent-evidence-"));
+    try {
+      const archivePath = join(directory, "evidence.zip");
+      const extractionRoot = join(directory, "extracted");
+      await writeFile(archivePath, archive, { mode: 0o600 });
+      const validated = await extractAndValidateEvidenceBundle(
+        archivePath,
+        extractionRoot,
+        AGENT_EVIDENCE_ARCHIVE_MAX_BYTES,
+      );
+      const reportCheckpoints = Array.isArray(validated.report.checkpoints)
+        ? validated.report.checkpoints
+        : [];
+      const evidenceImages: Readonly<Record<string, unknown>>[] = [];
+      for (const role of AGENT_EVIDENCE_ROLES) {
+        const checkpoint = reportCheckpoints.find(item => {
+          if (!item || typeof item !== "object" || Array.isArray(item)) return false;
+          const record = item as Record<string, unknown>;
+          return record.role === role && record.status === "PASSED" && typeof record.screenshot === "string";
+        }) as Record<string, unknown> | undefined;
+        if (!checkpoint) continue;
+        const relativeScreenshot = String(checkpoint.screenshot);
+        const screenshotPath = resolve(extractionRoot, relativeScreenshot);
+        const boundedPath = relative(extractionRoot, screenshotPath);
+        if (!boundedPath || boundedPath === ".." || boundedPath.startsWith(`..${sep}`)) {
+          throw new Error("E2E screenshot escaped the validated evidence root");
+        }
+        const original = await readFile(screenshotPath);
+        if (original.length < 1 || original.length > AGENT_EVIDENCE_IMAGE_MAX_BYTES) {
+          throw new Error("E2E screenshot size is invalid for Agent visual review");
+        }
+        const image = await sharp(original)
+          .resize({ width: 960, height: 540, fit: "inside", withoutEnlargement: true })
+          .jpeg({ quality: 84, chromaSubsampling: "4:4:4" })
+          .toBuffer();
+        evidenceImages.push(Object.freeze({
+          runId: selected.runId,
+          targetPlatform: selected.targetPlatform,
+          checkpointId: typeof checkpoint.checkpointId === "string" ? checkpoint.checkpointId : role.toLowerCase(),
+          checkpointRole: role,
+          mimeType: "image/jpeg",
+          sizeBytes: image.length,
+          data: image.toString("base64"),
+        }));
+      }
+      return Object.freeze({
+        visualEvidence: Object.freeze({
+          available: evidenceImages.length > 0,
+          runId: selected.runId,
+          targetPlatform: selected.targetPlatform,
+          reportOutcome: validated.report.outcome,
+          imageCount: evidenceImages.length,
+        }),
+        evidenceImages: Object.freeze(evidenceImages),
+      });
+    } finally {
+      await rm(directory, { recursive: true, force: true }).catch(() => undefined);
+    }
+  }
+
   private async checkpointSource(workspaceId: string, projectId: string): Promise<Readonly<Record<string, unknown>>> {
     const context = await this.readContext(workspaceId, projectId);
+    const uiSpecification = latestUiSpecification(context);
+    if (uiSpecification) assertRequiredUiAssets(uiSpecification, context.assetPlan);
     const revision = (context.source?.revision ?? 0) + 1;
     const directory = join(resolve(this.projectsRoot), "workspaces", workspaceId, "projects", projectId, "runtime", "worktree");
+    await this.requireProbePublisher(directory);
     // ProjectSourceStore validates every path and rejects links while publishing.
     const stored = await this.sources.publishDirectory({ workspaceId, projectId, revision, directory });
     await this.repository.recordSourceRevision({ workspaceId, projectId, revision,
       relativePath: stored.relativePath, digest: stored.digest, fileCount: stored.fileCount, totalBytes: stored.totalBytes });
-    await this.mutateContext(workspaceId, projectId, current => updateProjectContext(current, { source: Object.freeze({
-      revision, sha256: stored.digest, relativePath: stored.relativePath,
-    }) }));
+    await this.mutateContext(workspaceId, projectId, current => updateProjectContext(current, {
+      source: Object.freeze({ revision, sha256: stored.digest, relativePath: stored.relativePath }),
+      e2e: Object.freeze({ ...current.e2e, planRevision: null, plan: null }),
+      testSummary: null,
+    }));
     return Object.freeze({ revision, sha256: stored.digest, relativePath: stored.relativePath });
   }
 
@@ -713,25 +854,59 @@ export class ProjectRuntimeService {
     plan: Readonly<Record<string, unknown>>,
   ): Promise<void> {
     const root = await this.sourceRoot(workspaceId, projectId);
-    const publisherTexts: string[] = [];
-    for (const path of await this.listSource(workspaceId, projectId)) {
-      if (!/\.(?:gd|cs|js|mjs|cjs|ts|tsx|lua|py)$/i.test(path)) continue;
-      const target = resolve(root, normalizeProjectPath(path));
-      const info = await lstat(target);
-      if (!info.isFile() || info.isSymbolicLink() || info.size > 16 * 1024 * 1024) continue;
-      const bytes = await readFile(target);
-      if (bytes.includes(0)) continue;
-      const text = bytes.toString("utf8");
-      if (text.includes("deviludo.e2e-ui-probe")) publisherTexts.push(text);
-    }
-    if (publisherTexts.length === 0) {
-      throw new Error("The current source does not publish the deviludo.e2e-ui-probe contract required by an interactive test plan");
-    }
+    const publisherTexts = await this.requireProbePublisher(root);
     const missing = unpublishedTestPlanProbeReferences(plan, publisherTexts);
     if (missing.length > 0) {
       throw new Error(`The Test Agent plan references values not published by the current Probe source: ${missing
         .map(reference => `${reference.kind}:${reference.value}`).join(", ")}`);
     }
+  }
+
+  private async requireProbePublisher(root: string): Promise<readonly string[]> {
+    const publisherTexts: string[] = [];
+    const projectTexts: string[] = [];
+    const fontPaths: string[] = [];
+    const visit = async (directory: string): Promise<void> => {
+      for (const entry of await readdir(directory, { withFileTypes: true })) {
+        if (entry.isSymbolicLink()) continue;
+        const target = join(directory, entry.name);
+        if (entry.isDirectory()) {
+          await visit(target);
+          continue;
+        }
+        if (!entry.isFile()) continue;
+        const projectPath = relative(root, target).split(sep).join("/");
+        if (/\.(?:tt[cf]|ot[cf]|woff2?)$/i.test(entry.name)) {
+          fontPaths.push(projectPath);
+          continue;
+        }
+        if (!/\.(?:gd|cs|js|mjs|cjs|ts|tsx|lua|py|tscn|tres|theme|css|html|json|ya?ml)$/i.test(entry.name)) continue;
+        const info = await lstat(target);
+        if (info.size > 16 * 1024 * 1024) continue;
+        const bytes = await readFile(target);
+        if (bytes.includes(0)) continue;
+        const text = bytes.toString("utf8");
+        projectTexts.push(text);
+        if (text.includes("deviludo.e2e-ui-probe")) publisherTexts.push(text);
+      }
+    };
+    await visit(root);
+    const fontError = bundledCjkFontValidationError(projectTexts, fontPaths);
+    if (fontError) throw new Error(fontError);
+    if (publisherTexts.length === 0) {
+      throw new Error("The current source does not publish the deviludo.e2e-ui-probe contract required by cross-platform E2E");
+    }
+    const publication = publisherTexts.join("\n");
+    const missingFields = [
+      "DEVILUDO_E2E_UI_PROBE_FILE", "DEVILUDO_E2E_SESSION_NONCE",
+      "sessionNonce", "pid", "sequence", "sceneId", "state",
+      "screen_mode", "session_active", "gameplay_input_enabled", "blocking_layer_count",
+      "progress", "controls",
+    ].filter(field => !publication.includes(field));
+    if (missingFields.length > 0) {
+      throw new Error(`The current E2E Probe publisher is missing required fields: ${missingFields.join(", ")}`);
+    }
+    return Object.freeze(publisherTexts);
   }
 
   private async sourceRoot(workspaceId: string, projectId: string): Promise<string> {
@@ -776,6 +951,61 @@ export class ProjectRuntimeService {
     return Object.freeze({ accepted: true, contextRevision: current.revision });
   }
 
+  private async updateUiDesignDocument(
+    workspaceId: string,
+    projectId: string,
+    document: ProjectDocumentContent,
+  ): Promise<Readonly<Record<string, unknown>>> {
+    const current = await this.readContext(workspaceId, projectId);
+    const approved = parseProjectDocumentContent(current.projectDocument);
+    for (const field of ["introduction", "gameplay", "categories", "features"] as const) {
+      if (!sameJson(document[field], approved[field])) {
+        throw new Error(`UI Design Agent cannot change the approved ${field} snapshot`);
+      }
+    }
+    const persisted = await this.repository.updateUiDesignDocument({
+      workspaceId,
+      projectId,
+      expectedRevision: Number(current.workflow.documentRevision ?? 0),
+      document,
+      responseLanguage: current.language,
+    });
+    const updated = await this.mutateContext(workspaceId, projectId, context => updateProjectContext(context, {
+      projectDocument: document,
+      workflow: Object.freeze({ ...context.workflow, documentRevision: persisted.revision }),
+    }));
+    return Object.freeze({ accepted: true, contextRevision: updated.revision,
+      documentRevision: persisted.revision });
+  }
+
+  private async replaceUiDesignGoals(
+    workspaceId: string,
+    projectId: string,
+    goals: readonly E2eGoal[],
+  ): Promise<Readonly<Record<string, unknown>>> {
+    const current = await this.readContext(workspaceId, projectId);
+    const workflowId = String(current.workflow.id ?? "");
+    if (!/^[0-9a-f-]{36}$/i.test(workflowId)) throw new Error("UI Design workflow id is invalid");
+    const persisted = await this.repository.replaceUiDesignGoals({
+      workspaceId,
+      projectId,
+      workflowId,
+      expectedRevision: current.e2e.goalRevision,
+      goals,
+    });
+    const updated = await this.mutateContext(workspaceId, projectId, context => updateProjectContext(context, {
+      e2e: Object.freeze({ ...context.e2e, goalRevision: persisted.revision, goals }),
+      requirements: Object.freeze([
+        ...context.requirements.filter(requirement => requirement.source !== "CORE_LOOP"
+          && requirement.source !== "ACCEPTANCE"),
+        ...goals.map(goal => Object.freeze({ id: goal.id, text: goal.description, source: goal.source })),
+      ]),
+      workflow: Object.freeze({ ...context.workflow, goalRevision: persisted.revision }),
+    }));
+    return Object.freeze({ accepted: true, contextRevision: updated.revision,
+      goalRevision: persisted.revision });
+  }
+
   private async replaceAssetPlan(
     workspaceId: string,
     projectId: string,
@@ -783,6 +1013,8 @@ export class ProjectRuntimeService {
   ): Promise<Readonly<Record<string, unknown>>> {
     const next = normalizeAssetPlan(requested);
     const current = await this.readContext(workspaceId, projectId);
+    const uiSpecification = latestUiSpecification(current);
+    if (uiSpecification) assertRequiredUiAssets(uiSpecification, next);
     const nextKeys = new Set(next.map(asset => String(asset.key)));
     const nextPaths = new Set(next.map(asset => assetSourcePath(asset)).filter((path): path is string => path !== null));
     const retainedUploads = current.assetPlan.filter(asset => isUserUpload(asset) && !nextKeys.has(String(asset.key ?? "")));
@@ -799,6 +1031,11 @@ export class ProjectRuntimeService {
     });
     const contextAfter = await this.mutateContext(workspaceId, projectId,
       value => updateProjectContext(value, { assetPlan: retained }));
+    const workflowId = String(contextAfter.workflow.id ?? "");
+    if (!/^[0-9a-f-]{36}$/i.test(workflowId)) throw new Error("Asset plan workflow id is invalid");
+    const manifest = await this.repository.replaceAssetManifestPlan({
+      workspaceId, projectId, workflowId, assets: retained,
+    });
     const queuedObjects = await this.repository.queueGeneratedAssetCleanup({ workspaceId, objects });
     let removedFiles = 0;
     for (const asset of retired) {
@@ -811,6 +1048,8 @@ export class ProjectRuntimeService {
       contextRevision: contextAfter.revision,
       retainedUploads: retainedUploads.length,
       retiredAssets: retired.length,
+      manifestId: manifest.manifestId,
+      plannedAssets: manifest.planned,
       queuedObjects,
       removedFiles,
     });
@@ -1117,6 +1356,23 @@ function arrayOfObjects(value: unknown): readonly Readonly<Record<string, unknow
   return Object.freeze(value.map(boundedObject));
 }
 
+function normalizeRuntimeE2eGoals(value: unknown): readonly E2eGoal[] {
+  const goals = arrayOfObjects(value);
+  const ids = new Set<string>();
+  return Object.freeze(goals.map(goal => {
+    const id = typeof goal.id === "string" ? goal.id : "";
+    const description = typeof goal.description === "string" ? goal.description.trim() : "";
+    const source = String(goal.source ?? "");
+    if (!/^[a-z0-9][a-z0-9-]{0,119}$/.test(id) || ids.has(id)
+      || !description || description.length > 2_000
+      || !["CORE_LOOP", "ACCEPTANCE"].includes(source)) {
+      throw new Error("UI Design Agent returned an invalid or duplicate E2E goal");
+    }
+    ids.add(id);
+    return Object.freeze({ id, description, source: source as E2eGoal["source"] });
+  }));
+}
+
 function arrayOfStrings(value: unknown): readonly string[] {
   if (!Array.isArray(value) || value.length > 1_000 || value.some(item => typeof item !== "string" || item.length > 500)) {
     throw new Error("Tool argument must be a bounded string array");
@@ -1128,27 +1384,358 @@ function normalizeAssetPlan(value: readonly Readonly<Record<string, unknown>>[])
   const keys = new Set<string>();
   return Object.freeze(value.map(asset => {
     const key = String(asset.key ?? "");
+    const assetType = String(asset.assetType ?? "").toLowerCase();
     const origin = String(asset.origin ?? "GENERATED").toUpperCase();
     const resource = String(asset.expectedResourcePath ?? "");
+    const music = assetType === "music";
+    const description = String(asset.description ?? "").trim();
+    const generationPrompt = String(asset.generationPrompt ?? "").trim();
+    const targetId = String(asset.targetId ?? "");
+    const checkpointRole = String(asset.checkpointRole ?? "").toUpperCase();
+    const visualTypes = ["sprite", "animation", "background", "ui", "icon", "tileset"];
+    const generatedResource = `res://assets/generated/${key}.png`;
+    const musicResourcePrefix = `res://assets/generated/${key}.`;
+    const musicResource = musicResourcePrefix.length < resource.length
+      && ["mp3", "ogg", "wav"].includes(resource.slice(musicResourcePrefix.length).toLowerCase());
+    const musicGenerationFields = ["generationPrompt", "prompt", "frameCount", "dimensions", "sourcePath"]
+      .some(field => asset[field] !== undefined && asset[field] !== null);
     if (!/^[a-z0-9][a-z0-9/_.-]{0,199}$/.test(key) || keys.has(key)
       || !["GENERATED", "USER_UPLOAD"].includes(origin)
-      || !/^res:\/\/[A-Za-z0-9][A-Za-z0-9._/-]{0,499}\.(?:png|jpe?g|webp|svg)$/i.test(resource)) {
-      throw new Error("Development Agent returned an invalid or duplicate asset plan item");
+      || (music
+        ? origin !== "USER_UPLOAD"
+          || description.length < 1 || description.length > 2_000
+          || !musicResource
+          || musicGenerationFields
+        : !visualTypes.includes(assetType)
+          || description.length < 1 || description.length > 2_000
+          || !/^[a-z0-9][a-z0-9-]{0,119}$/.test(targetId)
+          || !["START", "READY", "ACTION", "PROGRESS", "COMPLETION"].includes(checkpointRole)
+          || resource !== generatedResource
+          || (origin === "GENERATED" && (generationPrompt.length < 20 || generationPrompt.length > 4_000))
+          || (origin === "USER_UPLOAD" && generationPrompt.length > 0)
+          || (asset.dimensions !== undefined && !/^\d{1,5}x\d{1,5}$/.test(String(asset.dimensions)))
+          || (asset.frameCount !== undefined
+            && (!Number.isSafeInteger(Number(asset.frameCount)) || Number(asset.frameCount) < 1 || Number(asset.frameCount) > 4_096)))) {
+      throw new Error("Agent returned an invalid or duplicate asset plan item");
     }
     keys.add(key);
     const normalized = {
       ...asset,
       key,
+      ...(music ? { assetType: "music", description } : {}),
+      ...(!music ? { assetType, description, targetId, checkpointRole,
+        ...(origin === "GENERATED" ? { generationPrompt } : {}) } : {}),
       origin,
       expectedResourcePath: resource,
-      sourcePath: assetSourcePath(asset) ?? resource.slice("res://".length),
+      ...(!music ? { sourcePath: assetSourcePath(asset) ?? resource.slice("res://".length) } : {}),
     };
     return Object.freeze(normalized);
   }));
 }
 
+const UI_SPECIFICATION_SCHEMA = "deviludo.ui-specification";
+const UI_SPECIFICATION_ROLES = Object.freeze(["START", "READY", "ACTION", "PROGRESS", "COMPLETION"]);
+const PRINCIPAL_UI_SPECIFICATION_ROLES = Object.freeze(["START", "READY", "PROGRESS", "COMPLETION"]);
+const UI_SPECIFICATION_ASSET_FIELDS = Object.freeze([
+  "key", "assetType", "origin", "description", "generationPrompt", "dimensions",
+  "frameCount", "expectedResourcePath", "targetId", "checkpointRole",
+]);
+
+export function normalizeUiSpecification(value: unknown): Readonly<Record<string, unknown>> {
+  const specification = boundedObject(value);
+  const canvas = boundedObject(specification.referenceCanvas);
+  if (specification.schema !== UI_SPECIFICATION_SCHEMA || canvas.width !== 1280 || canvas.height !== 720
+    || typeof specification.visualThesis !== "string" || !specification.visualThesis.trim()
+    || specification.visualThesis.length > 4_000) {
+    throw new Error("UI Design Agent returned an invalid UI specification header");
+  }
+  assertOnlyKeys(specification, ["schema", "visualThesis", "referenceCanvas", "checkpoints", "assets"], "UI specification");
+  assertOnlyKeys(canvas, ["width", "height"], "UI reference canvas");
+  if (!Array.isArray(specification.assets) || specification.assets.length > 500) {
+    throw new Error("UI Design Agent returned an invalid UI asset contract");
+  }
+  const assets = normalizeAssetPlan(arrayOfObjects(specification.assets));
+  if (assets.some(asset => asset.assetType === "music")) {
+    throw new Error("UI Design Agent cannot include upload-only music in its visual asset contract");
+  }
+  if (!Array.isArray(specification.checkpoints)
+    || specification.checkpoints.length < PRINCIPAL_UI_SPECIFICATION_ROLES.length
+    || specification.checkpoints.length > 32) {
+    throw new Error("UI Design Agent must specify every principal screenshot checkpoint");
+  }
+  const assetByKey = new Map(assets.map(asset => [String(asset.key), asset]));
+  const assetAnchors = new Set<string>();
+  const principalCounts = new Map(PRINCIPAL_UI_SPECIFICATION_ROLES.map(role => [role, 0]));
+  const checkpoints = specification.checkpoints.map(candidate => {
+    const checkpoint = boundedObject(candidate);
+    assertOnlyKeys(checkpoint, [
+      "role", "purpose", "silhouette", "focalPoint", "primaryActionId", "regions",
+      "visualAnchors", "negativeSpaceIntent", "contentStressCase", "thumbnailRead",
+      "acceptanceCriteria", "forbiddenFallbacks",
+    ], "UI checkpoint");
+    const role = String(checkpoint.role ?? "");
+    if (!UI_SPECIFICATION_ROLES.includes(role)) throw new Error("UI checkpoint role is invalid");
+    if (principalCounts.has(role)) principalCounts.set(role, Number(principalCounts.get(role)) + 1);
+    for (const field of ["purpose", "silhouette", "focalPoint", "negativeSpaceIntent", "contentStressCase", "thumbnailRead"]) {
+      requireUiSpecificationText(checkpoint[field], `UI checkpoint ${field}`, field === "contentStressCase" ? 4_000 : 2_000);
+    }
+    if (!isStableUiId(checkpoint.primaryActionId)) throw new Error("UI checkpoint primary action ID is invalid");
+    if (!Array.isArray(checkpoint.regions) || checkpoint.regions.length < 1 || checkpoint.regions.length > 32) {
+      throw new Error("UI checkpoint requires bounded spatial regions");
+    }
+    const regionIds = new Set<string>();
+    const regions = checkpoint.regions.map(candidateRegion => {
+      const region = boundedObject(candidateRegion);
+      assertOnlyKeys(region, ["id", "x", "y", "width", "height", "layer", "purpose", "content", "overflow"], "UI region");
+      const id = String(region.id ?? "");
+      const x = Number(region.x); const y = Number(region.y);
+      const width = Number(region.width); const height = Number(region.height); const layer = Number(region.layer);
+      if (!isStableUiId(id) || regionIds.has(id)
+        || ![x, y, width, height, layer].every(Number.isSafeInteger)
+        || x < 0 || y < 0 || width < 1 || height < 1 || layer < 0 || layer > 100
+        || x + width > 1280 || y + height > 720) {
+        throw new Error("UI checkpoint contains an invalid or out-of-canvas region");
+      }
+      regionIds.add(id);
+      requireUiSpecificationText(region.purpose, "UI region purpose");
+      requireUiSpecificationText(region.content, "UI region representative content", 4_000);
+      requireUiSpecificationText(region.overflow, "UI region overflow rule");
+      return Object.freeze({ ...region, id, x, y, width, height, layer });
+    });
+    if (!Array.isArray(checkpoint.visualAnchors)
+      || checkpoint.visualAnchors.length < 1 || checkpoint.visualAnchors.length > 32) {
+      throw new Error("Every UI checkpoint requires a visible identity anchor");
+    }
+    const visualAnchors = checkpoint.visualAnchors.map(candidateAnchor => {
+      const anchor = boundedObject(candidateAnchor);
+      assertOnlyKeys(anchor, ["kind", "key", "targetId", "description"], "UI visual anchor");
+      const kind = String(anchor.kind ?? "");
+      const targetId = String(anchor.targetId ?? "");
+      const key = typeof anchor.key === "string" ? anchor.key : null;
+      if (!["ASSET", "CODE_NATIVE"].includes(kind) || !isStableUiId(targetId)) {
+        throw new Error("UI checkpoint visual anchor is invalid");
+      }
+      requireUiSpecificationText(anchor.description, "UI visual anchor description");
+      if (kind === "ASSET") {
+        const asset = key ? assetByKey.get(key) : null;
+        if (!asset || asset.targetId !== targetId || asset.checkpointRole !== role) {
+          throw new Error("UI checkpoint asset anchor does not match its asset contract");
+        }
+        assetAnchors.add(key!);
+      } else if (key !== null) {
+        throw new Error("Code-native UI anchors cannot claim a generated asset key");
+      }
+      return Object.freeze({ ...anchor, kind, targetId, ...(key ? { key } : {}) });
+    });
+    const acceptanceCriteria = uiSpecificationTextList(checkpoint.acceptanceCriteria, "UI checkpoint acceptance criteria");
+    const forbiddenFallbacks = uiSpecificationTextList(checkpoint.forbiddenFallbacks, "UI checkpoint forbidden fallbacks");
+    return Object.freeze({ ...checkpoint, role, regions: Object.freeze(regions),
+      visualAnchors: Object.freeze(visualAnchors), acceptanceCriteria, forbiddenFallbacks });
+  });
+  if (PRINCIPAL_UI_SPECIFICATION_ROLES.some(role => principalCounts.get(role) !== 1)) {
+    throw new Error("UI specification must contain exactly one START, READY, PROGRESS, and COMPLETION checkpoint");
+  }
+  const unanchoredAssets = assets.filter(asset => !assetAnchors.has(String(asset.key))).map(asset => String(asset.key));
+  if (unanchoredAssets.length > 0) {
+    throw new Error(`UI asset contract is not visibly anchored at its checkpoint: ${unanchoredAssets.join(", ")}`);
+  }
+  return Object.freeze({
+    schema: UI_SPECIFICATION_SCHEMA,
+    visualThesis: specification.visualThesis.trim(),
+    referenceCanvas: Object.freeze({ width: 1280, height: 720 }),
+    checkpoints: Object.freeze(checkpoints),
+    assets,
+  });
+}
+
+export function latestUiSpecification(
+  context: Pick<ProjectContext, "handoffs">,
+): Readonly<Record<string, unknown>> | null {
+  for (let index = context.handoffs.length - 1; index >= 0; index -= 1) {
+    const handoff = context.handoffs[index];
+    if (handoff?.fromRole !== "UI_DESIGN" || handoff.toRole !== "DEVELOPMENT"
+      || handoff.uiSpecification === undefined) continue;
+    return normalizeUiSpecification(handoff.uiSpecification);
+  }
+  return null;
+}
+
+export function normalizeUiTestReview(
+  value: unknown,
+  specification: Readonly<Record<string, unknown>>,
+): Readonly<Record<string, unknown>> {
+  const review = boundedObject(value);
+  assertOnlyKeys(review, ["checkpoints"], "UI test review");
+  if (!Array.isArray(review.checkpoints) || review.checkpoints.length !== PRINCIPAL_UI_SPECIFICATION_ROLES.length) {
+    throw new Error("Test Agent cannot PASS without reviewing every principal UI screenshot checkpoint");
+  }
+  const specificationByRole = new Map(arrayOfObjects(specification.checkpoints)
+    .filter(checkpoint => PRINCIPAL_UI_SPECIFICATION_ROLES.includes(String(checkpoint.role ?? "")))
+    .map(checkpoint => [String(checkpoint.role), checkpoint]));
+  const seenRoles = new Set<string>();
+  const checkpoints = review.checkpoints.map(candidate => {
+    const checkpoint = boundedObject(candidate);
+    assertOnlyKeys(checkpoint, [
+      "role", "checkpointId", "screenshotDescription", "silhouetteMatches", "focalPointVisible",
+      "primaryActionVisible", "negativeSpaceCompliant", "thumbnailReadMatches", "stressCaseHandled",
+      "visualAnchorsVisible", "mostlyBlankUndecoratedPanelPresent", "acceptanceCriteria",
+      "forbiddenFallbacks",
+    ], "UI checkpoint review");
+    const role = String(checkpoint.role ?? "");
+    const expected = specificationByRole.get(role);
+    if (!expected || seenRoles.has(role)) {
+      throw new Error("Test Agent UI review has a missing, duplicate, or invalid principal checkpoint role");
+    }
+    seenRoles.add(role);
+    requireUiSpecificationText(checkpoint.checkpointId, "UI review screenshot checkpoint ID", 500);
+    requireUiSpecificationText(checkpoint.screenshotDescription, "UI review screenshot description", 4_000);
+    const passingBooleanFields = [
+      "silhouetteMatches", "focalPointVisible", "primaryActionVisible", "negativeSpaceCompliant",
+      "thumbnailReadMatches", "stressCaseHandled", "visualAnchorsVisible",
+    ];
+    const failedFields = passingBooleanFields.filter(field => checkpoint[field] !== true);
+    if (failedFields.length > 0 || checkpoint.mostlyBlankUndecoratedPanelPresent !== false) {
+      throw new Error(`Test Agent cannot PASS UI checkpoint ${role}: ${[
+        ...failedFields,
+        ...(checkpoint.mostlyBlankUndecoratedPanelPresent !== false
+          ? ["mostlyBlankUndecoratedPanelPresent"] : []),
+      ].join(", ")}`);
+    }
+    const expectedCriteria = uiSpecificationTextList(expected.acceptanceCriteria,
+      "UI checkpoint acceptance criteria");
+    const acceptanceCriteria = normalizeUiCriterionReview(
+      checkpoint.acceptanceCriteria,
+      expectedCriteria,
+      "criterion",
+      result => result.status === "PASS",
+      `UI checkpoint ${role} acceptance criterion`,
+    );
+    const expectedFallbacks = uiSpecificationTextList(expected.forbiddenFallbacks,
+      "UI checkpoint forbidden fallbacks");
+    const forbiddenFallbacks = normalizeUiCriterionReview(
+      checkpoint.forbiddenFallbacks,
+      expectedFallbacks,
+      "fallback",
+      result => result.present === false,
+      `UI checkpoint ${role} forbidden fallback`,
+    );
+    return Object.freeze({ ...checkpoint, role, acceptanceCriteria, forbiddenFallbacks });
+  });
+  if (PRINCIPAL_UI_SPECIFICATION_ROLES.some(role => !seenRoles.has(role))) {
+    throw new Error("Test Agent cannot PASS without reviewing every principal UI screenshot checkpoint");
+  }
+  return Object.freeze({ checkpoints: Object.freeze(checkpoints) });
+}
+
+function normalizeUiCriterionReview(
+  value: unknown,
+  expected: readonly string[],
+  textField: "criterion" | "fallback",
+  passes: (result: Readonly<Record<string, unknown>>) => boolean,
+  label: string,
+): readonly Readonly<Record<string, unknown>>[] {
+  if (!Array.isArray(value) || value.length !== expected.length) {
+    throw new Error(`${label} review must cover the approved contract exactly`);
+  }
+  return Object.freeze(value.map((candidate, index) => {
+    const result = boundedObject(candidate);
+    const keys = textField === "criterion"
+      ? ["criterion", "status", "evidence"]
+      : ["fallback", "present", "evidence"];
+    assertOnlyKeys(result, keys, label);
+    if (result[textField] !== expected[index]) {
+      throw new Error(`${label} review must preserve the approved contract text and order`);
+    }
+    requireUiSpecificationText(result.evidence, `${label} evidence`, 4_000);
+    if (!passes(result)) throw new Error(`Test Agent cannot PASS a failed ${label}`);
+    return Object.freeze({ ...result, [textField]: expected[index] });
+  }));
+}
+
+export function requiredUiAssetProblems(
+  specification: Readonly<Record<string, unknown>>,
+  candidatePlan: readonly Readonly<Record<string, unknown>>[],
+): readonly string[] {
+  const expected = arrayOfObjects(specification.assets);
+  const actualByKey = new Map(candidatePlan.map(asset => [String(asset.key ?? ""), asset]));
+  return Object.freeze(expected.flatMap(asset => {
+    const actual = actualByKey.get(String(asset.key));
+    if (!actual) return [`missing:${String(asset.key)}`];
+    const mismatch = UI_SPECIFICATION_ASSET_FIELDS.some(field => JSON.stringify(actual[field] ?? null) !== JSON.stringify(asset[field] ?? null));
+    return mismatch ? [`mismatch:${String(asset.key)}`] : [];
+  }));
+}
+
+function assertRequiredUiAssets(
+  specification: Readonly<Record<string, unknown>>,
+  candidatePlan: readonly Readonly<Record<string, unknown>>[],
+): void {
+  const problems = requiredUiAssetProblems(specification, candidatePlan);
+  if (problems.length > 0) {
+    throw new Error(`Development Agent asset plan does not implement the approved UI asset contract: ${problems.join(", ")}`);
+  }
+}
+
+function requireUiSpecificationText(value: unknown, label: string, maximum = 2_000): asserts value is string {
+  if (typeof value !== "string" || !value.trim() || value.length > maximum) throw new Error(`${label} is invalid`);
+}
+
+function uiSpecificationTextList(value: unknown, label: string): readonly string[] {
+  if (!Array.isArray(value) || value.length < 1 || value.length > 24) throw new Error(`${label} is invalid`);
+  const result = value.map(item => {
+    requireUiSpecificationText(item, label);
+    return item.trim();
+  });
+  return Object.freeze(result);
+}
+
+function isStableUiId(value: unknown): boolean {
+  return typeof value === "string" && /^[a-z0-9][a-z0-9-]{0,119}$/.test(value);
+}
+
+function assertOnlyKeys(value: Readonly<Record<string, unknown>>, keys: readonly string[], label: string): void {
+  const allowed = new Set(keys);
+  if (Object.keys(value).some(key => !allowed.has(key))) throw new Error(`${label} contains unsupported fields`);
+}
+
 function isUserUpload(asset: Readonly<Record<string, unknown>>): boolean {
   return String(asset.origin ?? "").toUpperCase() === "USER_UPLOAD";
+}
+
+export function latestEvidenceReport(
+  runs: readonly Readonly<Record<string, unknown>>[],
+): Readonly<{
+  runId: string;
+  targetPlatform: string;
+  object: Readonly<{
+    bucket: string;
+    key: string;
+    sha256: string;
+    sizeBytes: number;
+  }>;
+}> | null {
+  for (const run of runs) {
+    const summary = run.evidenceSummary;
+    if (!summary || typeof summary !== "object" || Array.isArray(summary)) continue;
+    const outputs = (summary as Record<string, unknown>).outputObjects;
+    if (!Array.isArray(outputs)) continue;
+    const report = outputs.find(candidate => candidate && typeof candidate === "object"
+      && !Array.isArray(candidate) && (candidate as Record<string, unknown>).kind === "E2E_REPORT") as Record<string, unknown> | undefined;
+    if (!report || typeof report.bucket !== "string" || typeof report.key !== "string"
+      || typeof report.sha256 !== "string" || !Number.isSafeInteger(report.sizeBytes)
+      || typeof run.id !== "string" || typeof run.targetPlatform !== "string") continue;
+    return Object.freeze({
+      runId: run.id,
+      targetPlatform: run.targetPlatform,
+      object: Object.freeze({
+        bucket: report.bucket,
+        key: report.key,
+        sha256: report.sha256,
+        sizeBytes: Number(report.sizeBytes),
+      }),
+    });
+  }
+  return null;
 }
 
 function assetSourcePath(asset: Readonly<Record<string, unknown>>): string | null {
@@ -1201,20 +1788,92 @@ export function unpublishedTestPlanProbeReferences(
   return Object.freeze(testPlanProbeReferences(plan).filter(reference => !published.matches(reference.value)));
 }
 
+export function bundledCjkFontValidationError(
+  texts: readonly string[],
+  fontPaths: readonly string[],
+): string | null {
+  const cjkLiteral = /"(?:\\.|[^"\\\r\n])*[\p{Script=Han}\p{Script=Hiragana}\p{Script=Katakana}\p{Script=Hangul}](?:\\.|[^"\\\r\n])*"|'(?:\\.|[^'\\\r\n])*[\p{Script=Han}\p{Script=Hiragana}\p{Script=Katakana}\p{Script=Hangul}](?:\\.|[^'\\\r\n])*'/u;
+  if (!texts.some(text => cjkLiteral.test(text))) return null;
+  if (fontPaths.length === 0) {
+    return "Project source displays CJK text but does not bundle a TTF, TTC, OTF, OTC, WOFF, or WOFF2 font; cross-platform builds must not depend on host fallback fonts";
+  }
+  const publication = texts.join("\n").toLowerCase();
+  const referenced = fontPaths.some(path => {
+    const normalized = path.toLowerCase();
+    const basename = normalized.split("/").at(-1) ?? normalized;
+    return publication.includes(normalized) || publication.includes(`res://${normalized}`)
+      || publication.includes(basename);
+  });
+  return referenced ? null
+    : "Project source bundles a CJK font but does not reference it from the runtime UI or theme";
+}
+
+export function unobservedTestPlanAssetPlacements(
+  plan: Readonly<Record<string, unknown>>,
+): readonly Readonly<{ targetId: string; checkpointRole: string }>[] {
+  const manifest = boundedObject(plan.testManifest);
+  const events: Readonly<Record<string, unknown>>[] = [];
+  if (Array.isArray(manifest.features)) {
+    for (const feature of manifest.features) {
+      const script = boundedObject(boundedObject(feature).interactionScript);
+      if (Array.isArray(script.events)) events.push(...script.events.map(boundedObject));
+    }
+  }
+  const referencesTarget = (value: unknown, targetId: string): boolean => {
+    if (!Array.isArray(value)) return false;
+    return value.some(candidate => boundedObject(candidate).source === "CONTROL"
+      && boundedObject(candidate).targetId === targetId);
+  };
+  const placementObserved = (targetId: string, checkpointRole: string): boolean => {
+    if (checkpointRole === "ACTION") {
+      return events.some(event => (event.type !== "checkpoint" && event.type !== "wait"
+        && [event.targetId, event.fromTargetId, event.toTargetId].includes(targetId))
+        || referencesTarget(event.postconditions, targetId));
+    }
+    return events.some(event => event.type === "checkpoint" && event.role === checkpointRole
+      && (checkpointRole === "START" || checkpointRole === "READY"
+        || event.changeTargetId === targetId
+        || referencesTarget(event.assertions, targetId)));
+  };
+  const placement = boundedObject(plan.assetPlacementPlan);
+  if (!Array.isArray(placement.placements)) return Object.freeze([]);
+  return Object.freeze(placement.placements.flatMap(candidate => {
+    const item = boundedObject(candidate);
+    const targetId = typeof item.targetId === "string" ? item.targetId : "";
+    const checkpointRole = typeof item.checkpointRole === "string" ? item.checkpointRole : "";
+    return targetId && checkpointRole && !placementObserved(targetId, checkpointRole)
+      ? [Object.freeze({ targetId, checkpointRole })]
+      : [];
+  }));
+}
+
 function probePublisherLiterals(texts: readonly string[]): Readonly<{ matches(value: string): boolean }> {
   const exact = new Set<string>();
   const patterns: RegExp[] = [];
-  const literal = /"((?:\\.|[^"\\]){1,240})"|'((?:\\.|[^'\\]){1,240})'/g;
+  const register = (value: string): void => {
+    if (value.length > 240) return;
+    exact.add(value);
+    if (/%[sdif]/i.test(value)) {
+      const expression = value
+        .replace(/[.*+?^${}()|[\]\\]/g, "\\$&")
+        .replace(/%[sdif]/gi, "[a-z0-9_.-]+");
+      patterns.push(new RegExp(`^${expression}$`));
+    }
+    if (value.endsWith("-") && /^[a-z0-9][a-z0-9_.-]*-$/.test(value)) {
+      patterns.push(new RegExp(`^${value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}[a-z0-9_.-]+$`));
+    }
+  };
+  const literal = /"((?:\\.|[^"\\\r\n]){0,240})"|'((?:\\.|[^'\\\r\n]){0,240})'/g;
+  const stableLiteral = /(["'])((?:[a-z0-9_.-]|%[sdif]){1,240})\1/gi;
   for (const text of texts) {
+    // Probe references are stable IDs/paths. Extract those bounded literals
+    // independently so an apostrophe in a comment (for example `engine's`)
+    // cannot make a language-agnostic quote matcher consume the rest of the
+    // source and hide otherwise explicit publisher keys.
+    for (const match of text.matchAll(stableLiteral)) register(String(match[2] ?? ""));
     for (const match of text.matchAll(literal)) {
       const value = String(match[1] ?? match[2] ?? "").replace(/\\(["'\\])/g, "$1");
-      exact.add(value);
-      if (/%[sdif]/i.test(value)) {
-        const expression = value
-          .replace(/[.*+?^${}()|[\]\\]/g, "\\$&")
-          .replace(/%[sdif]/gi, "[a-z0-9_.-]+");
-        patterns.push(new RegExp(`^${expression}$`));
-      }
+      register(value);
     }
   }
   return Object.freeze({ matches: (value: string) => exact.has(value) || patterns.some(pattern => pattern.test(value)) });
@@ -1231,7 +1890,8 @@ function freezeTestPlan(value: Readonly<Record<string, unknown>>, context: Proje
     throw new Error("The Test Agent plan does not cover every current E2E goal ID");
   }
   const placement = boundedObject(value.assetPlacementPlan);
-  const plannedAssetKeys = context.assetPlan.map(asset => String(asset.key ?? asset.assetKey ?? "")).filter(Boolean).sort();
+  const visualAssetPlan = context.assetPlan.filter(asset => String(asset.assetType ?? "").toLowerCase() !== "music");
+  const plannedAssetKeys = visualAssetPlan.map(asset => String(asset.key ?? asset.assetKey ?? "")).filter(Boolean).sort();
   if (placement.schema !== "deviludo.asset-placement-plan"
     || !Array.isArray(placement.plannedAssetKeys)
     || !Array.isArray(placement.placements)
@@ -1253,6 +1913,11 @@ function freezeTestPlan(value: Readonly<Record<string, unknown>>, context: Proje
     mapped.add(String(item.assetKey));
   }
   if (plannedAssetKeys.some(key => !mapped.has(key))) throw new Error("The Test Agent plan leaves a planned asset untested");
+  const unobservedPlacements = unobservedTestPlanAssetPlacements(value);
+  if (unobservedPlacements.length > 0) {
+    throw new Error(`The Test Agent plan does not explicitly observe conditional asset targets at their planned checkpoint roles: ${unobservedPlacements
+      .map(item => `${item.targetId}@${item.checkpointRole}`).join(", ")}`);
+  }
   const coverage = Object.freeze(Object.fromEntries(manifest.requirements.map(requirement => [
     requirement.requirementId,
     Object.freeze(manifest.features.filter(feature => feature.requirementIds.includes(requirement.requirementId)).map(feature => feature.id)),

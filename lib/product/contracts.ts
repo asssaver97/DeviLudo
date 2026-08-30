@@ -86,7 +86,7 @@ export type AgentRuntimeAvailability = Readonly<{
   authentication: "CHATGPT" | "API_KEY" | "SIGNED_OUT" | null;
 }>;
 
-export const PROJECT_AGENT_ROLES = ["DESIGN", "DEVELOPMENT", "TEST"] as const;
+export const PROJECT_AGENT_ROLES = ["DESIGN", "UI_DESIGN", "DEVELOPMENT", "TEST"] as const;
 export type ProjectAgentRole = typeof PROJECT_AGENT_ROLES[number];
 
 const LEGACY_MANUAL_CONVERSATION_REPLY_LABELS = new Set([
@@ -133,7 +133,7 @@ function conversationReplyOption(value: unknown): ConversationReplyOption | null
 }
 
 /**
- * Runtime roles are deliberately separate from the three members rendered in
+ * Runtime roles are deliberately separate from the permanent members rendered in
  * the project group chat. Intent is a transient router and Analysis owns the
  * import report; neither is presented as a permanent chat participant.
  */
@@ -195,7 +195,7 @@ export type ImplementationChangeRequest = Readonly<{
 export type ConversationWorkflowAction = "NONE" | "AWAITING_CONFIRMATION" | "AGENT_STARTED"
   | "AGENT_RERUN_STARTED" | "NEW_ITERATION_STARTED" | "WAITING_FOR_ANALYSIS";
 
-export const AGENT_MODEL_OVERRIDE_ROLES = ["intent", "analysis", "design", "development", "test"] as const;
+export const AGENT_MODEL_OVERRIDE_ROLES = ["intent", "analysis", "design", "uiDesign", "development", "test"] as const;
 export type AgentModelOverrideRole = typeof AGENT_MODEL_OVERRIDE_ROLES[number];
 
 /** A null text-Agent override inherits the instance's primary model. */
@@ -203,6 +203,7 @@ export type AgentModelOverrides = Readonly<{
   intent: string | null;
   analysis: string | null;
   design: string | null;
+  uiDesign: string | null;
   development: string | null;
   test: string | null;
 }>;
@@ -341,6 +342,7 @@ export type ProductProjectDetail = ProductProjectSummary & Readonly<{
 export type ProjectDocumentContent = Readonly<{
   introduction: string;
   gameplay: string;
+  uiDesign: string;
   categories: readonly string[];
   features: readonly string[];
 }>;
@@ -461,6 +463,7 @@ export const WORKFLOW_LABELS: Readonly<Record<string, string>> = Object.freeze({
   DRAFT: "需求讨论中",
   ANALYZING: "项目分析中",
   DESIGNING: "游戏设计中",
+  UI_DESIGNING: "UI 设计中",
   DEVELOPING: "游戏生成中",
   BUILDING: "制品构建中",
   TEST_PLANNING: "测试规划中",

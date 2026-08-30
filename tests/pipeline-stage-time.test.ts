@@ -66,14 +66,17 @@ test("stages after the active delivery stage wait for their predecessor", () => 
   assert.equal(pipelineStageWaitsForPredecessor("E2E_PLATFORM_RUN", "FAILED"), false);
 });
 
-test("Test Agent work is projected onto E2E instead of Game Generation", () => {
+test("Design roles have dedicated nodes while Development and Test project onto their execution stages", () => {
   const design = { ...job("SUCCEEDED", "2026-08-16T01:00:00.000Z"), id: "design", kind: "AGENT_TURN", agentRole: "DESIGN" as const };
+  const uiDesign = { ...job("SUCCEEDED", "2026-08-16T01:00:30.000Z"), id: "ui-design", kind: "AGENT_TURN", agentRole: "UI_DESIGN" as const };
   const development = { ...job("SUCCEEDED", "2026-08-16T01:01:00.000Z"), id: "development", kind: "AGENT_TURN", agentRole: "DEVELOPMENT" as const };
   const testPlan = { ...job("RUNNING", "2026-08-16T01:02:00.000Z"), id: "test-plan", kind: "AGENT_TURN", agentRole: "TEST" as const };
   const e2e = { ...job("QUEUED", "2026-08-16T01:03:00.000Z", "macos"), id: "e2e" };
-  const jobs = [design, development, testPlan, e2e];
+  const jobs = [design, uiDesign, development, testPlan, e2e];
 
-  assert.deepEqual(pipelineJobsForStage("AGENT_TURN", jobs).map(item => item.id), ["design", "development"]);
+  assert.deepEqual(pipelineJobsForStage("GAME_DESIGN", jobs).map(item => item.id), ["design"]);
+  assert.deepEqual(pipelineJobsForStage("UI_DESIGN", jobs).map(item => item.id), ["ui-design"]);
+  assert.deepEqual(pipelineJobsForStage("AGENT_TURN", jobs).map(item => item.id), ["development"]);
   assert.deepEqual(pipelineJobsForStage("E2E_PLATFORM_RUN", jobs).map(item => item.id), ["test-plan", "e2e"]);
 });
 

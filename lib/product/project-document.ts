@@ -1,6 +1,7 @@
 export type ProjectDocumentContent = Readonly<{
   introduction: string;
   gameplay: string;
+  uiDesign: string;
   categories: readonly string[];
   features: readonly string[];
 }>;
@@ -22,6 +23,9 @@ export function createInitialProjectDocument(
     gameplay: coreLoop.length > 0
       ? coreLoop.join("\n")
       : responseLanguage === "zh" ? "待 Agent 根据项目实现补充玩法说明。" : "The Agent will complete the gameplay description from the implementation.",
+    uiDesign: responseLanguage === "zh"
+      ? "待 UI 设计 Agent 根据已确认的玩法完成界面与交互规格。"
+      : "The UI Design Agent will complete the interface and interaction specification from the approved gameplay.",
     categories: Object.freeze([responseLanguage === "zh" ? "待 Agent 分类" : "Pending Agent classification"]),
     features: Object.freeze(acceptance.length > 0
       ? acceptance
@@ -36,11 +40,13 @@ export function parseProjectDocumentContent(value: unknown): ProjectDocumentCont
   const input = value as Record<string, unknown>;
   const introduction = requiredText(input.introduction, "游戏介绍");
   const gameplay = requiredText(input.gameplay, "玩法");
+  const uiDesign = requiredText(input.uiDesign, "UI 设计");
   const categories = requiredList(input.categories, "游戏分类");
   const features = requiredList(input.features, "主要特性");
   return Object.freeze({
     introduction,
     gameplay,
+    uiDesign,
     categories: Object.freeze(categories),
     features: Object.freeze(features),
   });
@@ -60,6 +66,7 @@ export function normalizeAgentProjectDocumentContent(value: unknown): ProjectDoc
   return Object.freeze({
     introduction: agentText(input.introduction, "游戏介绍"),
     gameplay: agentText(input.gameplay, "玩法"),
+    uiDesign: agentText(input.uiDesign, "UI 设计"),
     categories: Object.freeze(agentList(input.categories, "游戏分类")),
     features: Object.freeze(agentList(input.features, "主要特性")),
   });
@@ -71,8 +78,8 @@ export function projectDocumentMarkdown(
   responseLanguage: "en" | "zh" = "en",
 ): string {
   const headings = responseLanguage === "zh"
-    ? ["游戏介绍", "玩法", "游戏分类", "主要特性"]
-    : ["Game overview", "Gameplay", "Categories", "Key features"];
+    ? ["游戏介绍", "玩法", "UI 设计", "游戏分类", "主要特性"]
+    : ["Game overview", "Gameplay", "UI design", "Categories", "Key features"];
   return [
     `# ${projectName}`,
     "",
@@ -86,9 +93,13 @@ export function projectDocumentMarkdown(
     "",
     `## ${headings[2]}`,
     "",
-    ...content.categories.map(category => `- ${category}`),
+    content.uiDesign,
     "",
     `## ${headings[3]}`,
+    "",
+    ...content.categories.map(category => `- ${category}`),
+    "",
+    `## ${headings[4]}`,
     "",
     ...content.features.map(feature => `- ${feature}`),
     "",

@@ -266,6 +266,7 @@ test("the production Guest, relay, executor and node all wire the lifecycle guar
   assert.match(guest, /driver\("find-pid", \["--executable", executable\]/);
   assert.doesNotMatch(guest, /execute\("ps", \["-ax", "-o", "pid=,command="\]/);
   assert.match(guest, /POSTCONDITION_TRANSITION_MISSING/);
+  assert.match(guest, /checkpointAssertions = evaluateProbeAssertions[\s\S]*await delay\(CHECKPOINT_VISUAL_SETTLE_MS\);[\s\S]*testEnvironment\.capture\(screenshotPath\)/);
   assert.match(guest, /!transitionProven\) throw configurationFailure\([\s\S]*POSTCONDITION_TRANSITION_MISSING/);
   assert.match(guest, /missingChangedAssertionReferences\(event\.postconditions, before\)[\s\S]*TEST_PLAN_REFERENCE_MISSING/);
   assert.match(guest, /Project Runtime is completing a lifecycle transition/);
@@ -304,6 +305,7 @@ test("the production Guest, relay, executor and node all wire the lifecycle guar
   assert.match(guest, /const detail = stderr \|\| message \|\| String\(error \?\? ""\)\.trim\(\) \|\| `GUI driver \$\{command\} failed without diagnostics`/);
   assert.match(guest, /throw new Error\(`INFRASTRUCTURE: GUI driver \$\{command\} failed:/);
   assert.match(guest, /captureFailedActionEvidence\(\{[\s\S]*testEnvironment, journey,[\s\S]*await testEnvironment\.capture\(screenshotPath\)/);
+  assert.match(guest, /Preserve the[\s\S]*original Probe\/target\/postcondition error[\s\S]*FAILURE_EVIDENCE_CAPTURE_SKIPPED:/);
   assert.match(guest, /failureCode: "ACTION_TARGET_UNAVAILABLE"[\s\S]*`\$\{journey\.id\}\/\$\{event\.stepId\}: \$\{detail\}`/);
   assert.match(guest, /failureCode: "PROBE_NOT_UPDATED"[\s\S]*await captureFailedActionEvidence\(\{/);
   assert.match(guest, /failureDetail: detail/);
