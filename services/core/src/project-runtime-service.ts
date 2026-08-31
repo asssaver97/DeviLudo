@@ -1200,8 +1200,19 @@ function contextFromSeed(current: ProjectContext, seed: ProjectContextSeed, init
   });
 }
 
-function sameJson(left: unknown, right: unknown): boolean {
-  return JSON.stringify(left) === JSON.stringify(right);
+/**
+ * PostgreSQL jsonb does not preserve object-key insertion order. Runtime tools
+ * parse typed payloads back into their schema order, so bytewise stringify
+ * comparison can reject an otherwise identical approved snapshot. Sort object
+ * keys recursively while preserving array order before comparing JSON values.
+ */
+export function sameJson(left: unknown, right: unknown): boolean {
+  const canonicalize = (_key: string, value: unknown): unknown => {
+    if (!value || typeof value !== "object" || Array.isArray(value)) return value;
+    const record = value as Readonly<Record<string, unknown>>;
+    return Object.fromEntries(Object.keys(record).sort().map(key => [key, record[key]]));
+  };
+  return JSON.stringify(left, canonicalize) === JSON.stringify(right, canonicalize);
 }
 
 export function runtimeTurnHandoff(

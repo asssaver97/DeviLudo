@@ -7,6 +7,7 @@ import {
   pipelineStageFinishedAt,
   pipelineStageWaitsForPredecessor,
   runningAgentJobForConversation,
+  visualAssetNodeStatus,
 } from "../components/ProjectStudio";
 import type { ProductEvent, ProductJob } from "../lib/product/contracts";
 
@@ -102,4 +103,43 @@ test("the requirements or analysis node uses the latest approval event as its fi
   ];
   assert.equal(pipelineEventFinishedAt(events, "SPEC_APPROVED"), "2026-08-16T01:03:04.000Z");
   assert.equal(pipelineEventFinishedAt(events, "JOB_SUCCEEDED"), null);
+});
+
+test("planned art is idle while automatic generation is disabled", () => {
+  assert.equal(visualAssetNodeStatus({
+    hasManifest: true,
+    autoGenerateEnabled: false,
+    completionComplete: false,
+    itemStatuses: ["generated", "planned"],
+  }), "pending");
+});
+
+test("planned or leased art is active only when generation can actually run", () => {
+  assert.equal(visualAssetNodeStatus({
+    hasManifest: true,
+    autoGenerateEnabled: true,
+    completionComplete: false,
+    itemStatuses: ["planned"],
+  }), "active");
+  assert.equal(visualAssetNodeStatus({
+    hasManifest: true,
+    autoGenerateEnabled: false,
+    completionComplete: false,
+    itemStatuses: ["generating"],
+  }), "active");
+});
+
+test("completed and failed art states take precedence over generation settings", () => {
+  assert.equal(visualAssetNodeStatus({
+    hasManifest: true,
+    autoGenerateEnabled: false,
+    completionComplete: true,
+    itemStatuses: ["generated"],
+  }), "completed");
+  assert.equal(visualAssetNodeStatus({
+    hasManifest: true,
+    autoGenerateEnabled: false,
+    completionComplete: false,
+    itemStatuses: ["failed"],
+  }), "failed");
 });

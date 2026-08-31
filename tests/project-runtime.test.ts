@@ -39,6 +39,7 @@ import {
   requiredUiAssetProblems,
   retryProjectRuntimeLifecycle,
   runtimeTurnHandoff,
+  sameJson,
   summarizeRuntimeToolCalls,
   summarizeToolAuditValue,
   unobservedTestPlanAssetPlacements,
@@ -103,6 +104,26 @@ test("Design and UI Design completion accept only the current turn's durable nex
   assert.equal(runtimeTurnHandoff(context, "ui-current", "UI_DESIGN", "DEVELOPMENT")?.summary, "Implement it");
   assert.equal(runtimeTurnHandoff(context, "old", "DESIGN", "TEST"), null);
   assert.equal(runtimeTurnHandoff(context, "missing", "DESIGN", "UI_DESIGN"), null);
+});
+
+test("approved Runtime snapshots ignore PostgreSQL jsonb object-key ordering", () => {
+  const stored = {
+    categories: ["narrative", "strategy"],
+    features: ["complete loop"],
+    gameplay: "Choose a response and observe its consequence.",
+    introduction: "A relationship strategy game.",
+    uiDesign: "A paper dossier interface.",
+  };
+  const parsed = {
+    introduction: "A relationship strategy game.",
+    gameplay: "Choose a response and observe its consequence.",
+    uiDesign: "A paper dossier interface.",
+    categories: ["narrative", "strategy"],
+    features: ["complete loop"],
+  };
+  assert.equal(sameJson(stored, parsed), true);
+  assert.equal(sameJson(stored, { ...parsed, gameplay: "Different gameplay." }), false);
+  assert.equal(sameJson(stored, { ...parsed, categories: [...parsed.categories].reverse() }), false);
 });
 
 test("persistent Runtime intent selects exactly one role and rejects contradictory mutation flags", () => {

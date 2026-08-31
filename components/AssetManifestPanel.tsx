@@ -296,6 +296,8 @@ export function AssetManifestPanel({
                     : text("排队自动生成中，也可以直接上传自备素材", "Queued for automatic generation; you can also upload your own asset")}</small>
                 ) : item.status === "planned" && music ? (
                   <small className="asset-upload-hint">{text("仅支持用户上传，不会进入 AI 生成队列", "Upload only; this item never enters the AI generation queue")}</small>
+                ) : item.status === "planned" ? (
+                  <small className="asset-upload-hint">{text("自动生成已关闭，请上传素材或从美术节点手动补齐", "Automatic generation is off. Upload an asset or manually fill it from the Art stage.")}</small>
                 ) : null}
                 {item.status === "generated" || item.status === "uploaded" ? (
                   <small className="asset-upload-hint">{text("已有素材，上传新文件会替换它", "An asset already exists; uploading a new file will replace it")}</small>

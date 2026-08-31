@@ -75,6 +75,27 @@ const ASSET_RERUN_WORKFLOW_STATES = new Set([
   "DEVELOPING", "RELEASE_APPROVAL_PENDING", "BLOCKED", "FAILED", "SUCCEEDED", "CANCELLED",
 ]);
 
+export type VisualAssetNodeStatus = "pending" | "active" | "completed" | "failed";
+
+/**
+ * A planned image is only active work when automatic generation is enabled.
+ * Otherwise it is waiting for an explicit upload or rerun, and presenting it as
+ * active makes an idle, completed delivery look permanently stuck.
+ */
+export function visualAssetNodeStatus(input: Readonly<{
+  hasManifest: boolean;
+  autoGenerateEnabled: boolean;
+  completionComplete: boolean;
+  itemStatuses: readonly string[];
+}>): VisualAssetNodeStatus {
+  if (!input.hasManifest) return "pending";
+  if (input.completionComplete) return "completed";
+  if (input.itemStatuses.includes("failed")) return "failed";
+  if (input.itemStatuses.includes("generating")) return "active";
+  if (input.autoGenerateEnabled && input.itemStatuses.includes("planned")) return "active";
+  return "pending";
+}
+
 type LocalGitState = Readonly<{
   repository: boolean;
   branch: string | null;
@@ -900,15 +921,14 @@ export function ProjectStudio({ projectId }: { projectId: string }) {
   const assetOutstanding = visualAssetItems.filter(item => ["planned", "generating", "failed"].includes(item.status)).length;
   const assetRerunAvailable = !viewingHistoricalIteration
     && ASSET_RERUN_WORKFLOW_STATES.has(project.workflowState);
-  const assetNodeStatus = !assetManifestView?.manifest
-    ? "pending"
-    : assetCompletion?.complete
-      ? "completed"
-      : visualAssetItems.some(item => item.status === "failed")
-        ? "failed"
-        : visualAssetItems.some(item => item.status === "planned" || item.status === "generating")
-          ? "active"
-          : "pending";
+  const assetNodeStatus = visualAssetNodeStatus({
+    hasManifest: Boolean(assetManifestView?.manifest),
+    autoGenerateEnabled: assetManifestView?.manifest?.autoGenerateEnabled ?? false,
+    completionComplete: assetCompletion?.complete ?? false,
+    itemStatuses: visualAssetItems.map(item => item.status),
+  });
+  const visualAssetsAwaitingUpload = assetManifestView?.manifest?.autoGenerateEnabled === false
+    && visualAssetItems.some(item => item.status === "planned");
   const assetNodeSymbol = assetNodeStatus === "completed" ? "✓" : assetNodeStatus === "failed" ? "!" : assetNodeStatus === "active" ? "●" : "○";
   const assetNodeLabel = !assetManifestView?.manifest || visualAssetItems.length === 0
     ? text("等待 Agent 规划", "WAITING FOR AGENT")
@@ -916,7 +936,9 @@ export function ProjectStudio({ projectId }: { projectId: string }) {
       ? text("素材已就绪", "ASSETS READY")
       : assetNodeStatus === "failed"
         ? text("需要补齐", "NEEDS RETRY")
-        : text("正在准备", "PREPARING");
+        : visualAssetsAwaitingUpload
+          ? text("等待上传", "AWAITING UPLOADS")
+          : text("正在准备", "PREPARING");
   const musicUploaded = musicItems.filter(item => item.status === "uploaded").length;
   const musicNodeStatus = musicItems.length === 0
     ? "pending"
