@@ -3,7 +3,7 @@ import { request } from "node:http";
 import { StringDecoder } from "node:string_decoder";
 
 const action = process.argv[2];
-const actions = ["execute", "health", "live", "runtime-ensure", "runtime-turn", "runtime-pause", "runtime-resume", "runtime-destroy", "runtime-status", "runtime-list"];
+const actions = ["execute", "health", "live", "runtime-ensure", "runtime-turn", "runtime-pause", "runtime-resume", "runtime-cancel", "runtime-destroy", "runtime-status", "runtime-list"];
 if (!actions.includes(action)) throw new Error("Unsupported executor command");
 const socketPath = process.env.DEVILUDO_EXECUTOR_SOCKET ?? "/run/deviludo-executor/executor.sock";
 const chunks = [];

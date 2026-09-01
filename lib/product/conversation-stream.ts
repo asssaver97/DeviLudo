@@ -1,5 +1,6 @@
 import type {
   ConversationIntentDecision,
+  ConversationAttachmentContentType,
   ConversationWorkflowAction,
   ImplementationChangeRequest,
   ProductConversation,
@@ -19,13 +20,13 @@ export type ConversationStreamResult = Readonly<{
   workflowAction: ConversationWorkflowAction;
 }>;
 
-export type ConversationImageDraft = Readonly<{
+export type ConversationAttachmentDraft = Readonly<{
   id: string;
   filename: string;
-  contentType: "image/png" | "image/jpeg" | "image/webp";
+  contentType: ConversationAttachmentContentType;
   sizeBytes: number;
   dataBase64: string;
-  previewUrl: string;
+  previewUrl: string | null;
 }>;
 
 export type StreamingConversationReply = Readonly<{
@@ -38,7 +39,10 @@ export type StreamingConversationReply = Readonly<{
 
 export type StreamingConversationReplies = Readonly<Partial<Record<ProjectRuntimeRole, StreamingConversationReply>>>;
 
+export type ConversationStreamPhase = "PREPARING" | "NAMING" | "RESPONDING" | "SAVING";
+
 export type ConversationStreamCallbacks = Readonly<{
+  onStatus?: (phase: ConversationStreamPhase) => void;
   onAgentStart: (agentRole: ProjectRuntimeRole) => void;
   onAgentProcess: (agentRole: ProjectRuntimeRole, event: string) => void;
   onAgentDelta: (agentRole: ProjectRuntimeRole, delta: string) => void;
@@ -65,7 +69,7 @@ export async function sendConversationMessageStream(
     conversationId?: string;
     projectId?: string | null;
     responseLanguage?: "en" | "zh";
-    attachments?: readonly Pick<ConversationImageDraft, "filename" | "contentType" | "dataBase64">[];
+    attachments?: readonly Pick<ConversationAttachmentDraft, "filename" | "contentType" | "dataBase64">[];
   }>,
   idempotencyKey: string,
   callbacks: ConversationStreamCallbacks,
@@ -97,6 +101,10 @@ export async function sendConversationMessageStream(
       event = value as Record<string, unknown>;
     } catch {
       throw new ConversationStreamError("INVALID_STREAM", "对话服务返回了无效数据");
+    }
+    if (event.type === "status" && isConversationStreamPhase(event.phase)) {
+      callbacks.onStatus?.(event.phase);
+      return;
     }
     if (event.type === "agent_start" && isProjectRuntimeRole(event.agentRole)) {
       callbacks.onAgentStart(event.agentRole);
@@ -164,6 +172,41 @@ export async function sendConversationMessageStream(
   if (buffer.trim()) consume(buffer);
   if (!result) throw new ConversationStreamError("INCOMPLETE_STREAM", "对话尚未完成，请重试");
   return result;
+}
+
+export async function recoverConversationAfterDisconnect(input: Readonly<{
+  conversationId: string;
+  baselineMessageId: string | null;
+  submittedContent: string;
+  timeoutMs?: number;
+  pollIntervalMs?: number;
+  fetcher?: typeof fetch;
+  wait?: (milliseconds: number) => Promise<void>;
+}>): Promise<ProductConversation | null> {
+  const deadline = Date.now() + (input.timeoutMs ?? 2 * 60_000);
+  const fetcher = input.fetcher ?? fetch;
+  const wait = input.wait ?? (milliseconds => new Promise<void>(resolve => setTimeout(resolve, milliseconds)));
+  while (Date.now() <= deadline) {
+    try {
+      const response = await fetcher(`/api/conversations/${encodeURIComponent(input.conversationId)}`, { cache: "no-store" });
+      if (response.ok) {
+        const payload = await response.json() as { conversation?: ProductConversation };
+        const conversation = payload.conversation;
+        if (conversation && conversationContainsCompletedTurn(
+          conversation,
+          input.baselineMessageId,
+          input.submittedContent,
+        )) return conversation;
+      }
+    } catch {
+      // A restarted Web process can be briefly unavailable. Keep reconciling
+      // the durable Core result instead of turning a completed turn into a
+      // misleading local send failure.
+    }
+    if (Date.now() >= deadline) break;
+    await wait(input.pollIntervalMs ?? 1_000);
+  }
+  return null;
 }
 
 export function initialStreamingConversationReplies(): StreamingConversationReplies {
@@ -309,12 +352,30 @@ function isProjectRuntimeRole(value: unknown): value is ProjectRuntimeRole {
     || value === "UI_DESIGN" || value === "DEVELOPMENT" || value === "TEST";
 }
 
+function isConversationStreamPhase(value: unknown): value is ConversationStreamPhase {
+  return value === "PREPARING" || value === "NAMING" || value === "RESPONDING" || value === "SAVING";
+}
+
+function conversationContainsCompletedTurn(
+  conversation: ProductConversation,
+  baselineMessageId: string | null,
+  submittedContent: string,
+): boolean {
+  const baselineIndex = baselineMessageId
+    ? conversation.messages.findIndex(message => message.id === baselineMessageId)
+    : -1;
+  if (baselineMessageId && baselineIndex < 0) return false;
+  const appended = conversation.messages.slice(baselineIndex + 1);
+  const userIndex = appended.findIndex(message => message.role === "USER" && message.content === submittedContent);
+  return userIndex >= 0 && appended.slice(userIndex + 1).some(message => message.role === "ASSISTANT");
+}
+
 export function optimisticConversation(
   current: ProductConversation | null,
   projectId: string,
   content: string,
   title = "新游戏构想",
-  attachments: readonly ConversationImageDraft[] = Object.freeze([]),
+  attachments: readonly ConversationAttachmentDraft[] = Object.freeze([]),
 ): ProductConversation {
   const now = new Date().toISOString();
   const currentMessages = current?.messages ?? Object.freeze([]);
@@ -333,7 +394,7 @@ export function optimisticConversation(
       filename: attachment.filename,
       contentType: attachment.contentType,
       sizeBytes: attachment.sizeBytes,
-      previewUrl: attachment.previewUrl,
+      ...(attachment.previewUrl ? { previewUrl: attachment.previewUrl } : {}),
     }))),
     metadata: Object.freeze({ pending: true }),
     createdAt: now,

@@ -62,6 +62,7 @@ test("executor startup preserves current project containers and removes only dis
   assert.match(daemon, /\/v2\/runtime\/ensure/);
   assert.match(daemon, /\/v2\/runtime\/pause/);
   assert.match(daemon, /\/v2\/runtime\/resume/);
+  assert.match(daemon, /\/v2\/runtime\/cancel/);
   assert.match(daemon, /\/v2\/runtime\/destroy/);
   assert.match(daemon, /label=deviludo\.kind=task/);
   assert.doesNotMatch(daemon, /label=deviludo\.kind=project-runtime[^\n]*rm/);
@@ -104,6 +105,11 @@ test("disposable Core task image handles only Builder and Steam publisher", asyn
   assert.doesNotMatch(runner, /AGENT_TURN/);
   assert.doesNotMatch(fixture, /AGENT_TURN/);
   assert.match(sandbox, /AGENT_TURN jobs must use the persistent Project Runtime/);
+});
+
+test("Core includes deterministic PDF text and page rendering tools", async () => {
+  const dockerfile = await readFile(new URL("../Dockerfile.core", import.meta.url), "utf8");
+  assert.match(dockerfile, /apk add --no-cache[^\n]*poppler-utils/);
 });
 
 test("executor persists the canonical output MIME type in object storage", async () => {

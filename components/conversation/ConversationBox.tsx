@@ -13,20 +13,23 @@ import {
   type ReactNode,
 } from "react";
 import {
-  MAX_CONVERSATION_IMAGES,
-  MAX_CONVERSATION_IMAGE_BYTES,
-  MAX_CONVERSATION_IMAGE_TOTAL_BYTES,
+  CONVERSATION_ATTACHMENT_CONTENT_TYPES,
+  MAX_CONVERSATION_ATTACHMENTS,
+  MAX_CONVERSATION_ATTACHMENT_BYTES,
+  MAX_CONVERSATION_ATTACHMENT_TOTAL_BYTES,
   normalizeConversationReplyOptions,
   PROJECT_AGENT_ROLES,
   PROJECT_RUNTIME_ROLES,
   type AgentProgressEvent,
+  type ConversationAttachmentContentType,
   type ConversationReplyOption,
   type ProductConversationMessage,
   type ProjectRuntimeRole,
 } from "@/lib/product/contracts";
 import {
   streamingConversationReplyIsActive,
-  type ConversationImageDraft,
+  type ConversationStreamPhase,
+  type ConversationAttachmentDraft,
   type StreamingConversationReplies,
 } from "@/lib/product/conversation-stream";
 import { agentProgressDisplayRows, localizedAgentProgressContent } from "@/lib/product/agent-progress";
@@ -38,6 +41,7 @@ type ConversationBoxProps = Readonly<{
   conversationKey: string | null;
   messages: readonly ProductConversationMessage[];
   sending: boolean;
+  streamPhase?: ConversationStreamPhase | null;
   streamingReplies: StreamingConversationReplies;
   agentProgress?: Readonly<{
     running: boolean;
@@ -48,8 +52,8 @@ type ConversationBoxProps = Readonly<{
   }>;
   showSendingReply?: boolean;
   value: string;
-  attachments: readonly ConversationImageDraft[];
-  onAttachmentsChange: (attachments: readonly ConversationImageDraft[]) => void;
+  attachments: readonly ConversationAttachmentDraft[];
+  onAttachmentsChange: (attachments: readonly ConversationAttachmentDraft[]) => void;
   onValueChange: (value: string) => void;
   onSubmit: (event: FormEvent<HTMLFormElement>) => void;
   onOptionSelect?: (option: string) => void;
@@ -72,6 +76,7 @@ export function ConversationBox({
   conversationKey,
   messages,
   sending,
+  streamPhase = null,
   streamingReplies,
   agentProgress,
   showSendingReply = true,
@@ -99,10 +104,17 @@ export function ConversationBox({
   const messageViewport = useRef<HTMLDivElement | null>(null);
   const composer = useRef<HTMLFormElement | null>(null);
   const textarea = useRef<HTMLTextAreaElement | null>(null);
-  const imageInput = useRef<HTMLInputElement | null>(null);
-  const imageDragDepth = useRef(0);
-  const [imageError, setImageError] = useState<string | null>(null);
-  const [imageDropActive, setImageDropActive] = useState(false);
+  const attachmentInput = useRef<HTMLInputElement | null>(null);
+  const attachmentDragDepth = useRef(0);
+  const [attachmentError, setAttachmentError] = useState<string | null>(null);
+  const [attachmentDropActive, setAttachmentDropActive] = useState(false);
+  const sendingStatus = streamPhase === "NAMING"
+    ? text("正在创建项目", "Creating project")
+    : streamPhase === "RESPONDING"
+      ? text("正在启动 Agent", "Starting Agent")
+      : streamPhase === "SAVING"
+        ? text("正在保存回复", "Saving reply")
+        : text("正在准备会话", "Preparing conversation");
   const followLatestMessage = useRef(true);
   const hasPrimaryAction = primaryAction !== null && primaryAction !== undefined;
   const latestProgressSequence = agentProgress?.events.at(-1)?.sequence ?? null;
@@ -142,45 +154,45 @@ export function ConversationBox({
     }
   }
 
-  async function addImages(files: readonly File[]) {
+  async function addAttachments(files: readonly File[]) {
     if (!files.length) return;
-    if (attachments.length + files.length > MAX_CONVERSATION_IMAGES) {
-      setImageError(text(`最多发送 ${MAX_CONVERSATION_IMAGES} 张图片`, `Attach up to ${MAX_CONVERSATION_IMAGES} images`));
+    if (attachments.length + files.length > MAX_CONVERSATION_ATTACHMENTS) {
+      setAttachmentError(text(`最多发送 ${MAX_CONVERSATION_ATTACHMENTS} 个附件`, `Attach up to ${MAX_CONVERSATION_ATTACHMENTS} files`));
       return;
     }
-    if (files.some(file => !isConversationImageType(file.type) || file.size < 1 || file.size > MAX_CONVERSATION_IMAGE_BYTES)) {
-      const limitMiB = MAX_CONVERSATION_IMAGE_BYTES / 1024 / 1024;
-      setImageError(text(
-        `仅支持 ${limitMiB} MB 以内的 PNG、JPEG 或 WebP 图片`,
-        `Use PNG, JPEG, or WebP images up to ${limitMiB} MB each`,
+    if (files.some(file => !conversationFileContentType(file) || file.size < 1 || file.size > MAX_CONVERSATION_ATTACHMENT_BYTES)) {
+      const limitMiB = MAX_CONVERSATION_ATTACHMENT_BYTES / 1024 / 1024;
+      setAttachmentError(text(
+        `支持 ${limitMiB} MB 以内的 PDF、PNG、JPEG、WebP、GIF、TIFF、AVIF、HEIC/HEIF`,
+        `Use PDF, PNG, JPEG, WebP, GIF, TIFF, AVIF, HEIC, or HEIF files up to ${limitMiB} MB each`,
       ));
       return;
     }
     if (attachments.reduce((total, item) => total + item.sizeBytes, 0)
-      + files.reduce((total, item) => total + item.size, 0) > MAX_CONVERSATION_IMAGE_TOTAL_BYTES) {
-      setImageError(text("图片总大小不能超过 12 MB", "Images may total up to 12 MB"));
+      + files.reduce((total, item) => total + item.size, 0) > MAX_CONVERSATION_ATTACHMENT_TOTAL_BYTES) {
+      setAttachmentError(text("附件总大小不能超过 32 MB", "Attachments may total up to 32 MB"));
       return;
     }
     try {
-      const drafts = await Promise.all(files.map(readConversationImage));
+      const drafts = await Promise.all(files.map(readConversationAttachment));
       onAttachmentsChange(Object.freeze([...attachments, ...drafts]));
-      setImageError(null);
+      setAttachmentError(null);
     } catch {
-      setImageError(text("图片读取失败，请重新选择", "Unable to read the image. Select it again."));
+      setAttachmentError(text("附件读取失败，请重新选择", "Unable to read the attachment. Select it again."));
     }
   }
 
-  function handleImages(event: ChangeEvent<HTMLInputElement>) {
+  function handleAttachments(event: ChangeEvent<HTMLInputElement>) {
     const files = [...(event.target.files ?? [])];
     event.target.value = "";
-    void addImages(files);
+    void addAttachments(files);
   }
 
   function handleImageDragEnter(event: DragEvent<HTMLFormElement>) {
     if (!hasDraggedFiles(event) || sending || disabled) return;
     event.preventDefault();
-    imageDragDepth.current += 1;
-    setImageDropActive(true);
+    attachmentDragDepth.current += 1;
+    setAttachmentDropActive(true);
   }
 
   function handleImageDragOver(event: DragEvent<HTMLFormElement>) {
@@ -192,17 +204,17 @@ export function ConversationBox({
   function handleImageDragLeave(event: DragEvent<HTMLFormElement>) {
     if (!hasDraggedFiles(event)) return;
     event.preventDefault();
-    imageDragDepth.current = Math.max(0, imageDragDepth.current - 1);
-    if (imageDragDepth.current === 0) setImageDropActive(false);
+    attachmentDragDepth.current = Math.max(0, attachmentDragDepth.current - 1);
+    if (attachmentDragDepth.current === 0) setAttachmentDropActive(false);
   }
 
   function handleImageDrop(event: DragEvent<HTMLFormElement>) {
     if (!hasDraggedFiles(event)) return;
     event.preventDefault();
-    imageDragDepth.current = 0;
-    setImageDropActive(false);
+    attachmentDragDepth.current = 0;
+    setAttachmentDropActive(false);
     if (sending || disabled) return;
-    void addImages([...event.dataTransfer.files]);
+    void addAttachments([...event.dataTransfer.files]);
   }
 
   return (
@@ -257,18 +269,21 @@ export function ConversationBox({
                   ) : null}
                 </header>
                 {(message.attachments ?? []).length ? (
-                  <div className="conversation-message-images">
-                    {(message.attachments ?? []).map(image => (
-                      <a href={conversationImageUrl(conversationKey, message.id, image.id, image.previewUrl)} key={image.id} rel="noreferrer" target="_blank">
-                        <Image
-                          alt={image.filename}
-                          height={360}
-                          src={conversationImageUrl(conversationKey, message.id, image.id, image.previewUrl)}
-                          unoptimized
-                          width={480}
-                        />
-                      </a>
-                    ))}
+                  <div className="conversation-message-images conversation-message-attachments">
+                    {(message.attachments ?? []).map(attachment => {
+                      const url = conversationAttachmentUrl(conversationKey, message.id, attachment.id, attachment.previewUrl);
+                      return isBrowserPreviewableImage(attachment.contentType) ? (
+                        <a href={url} key={attachment.id} rel="noreferrer" target="_blank">
+                          <Image alt={attachment.filename} height={360} src={url} unoptimized width={480} />
+                        </a>
+                      ) : (
+                        <a className="conversation-file-attachment" href={url} key={attachment.id} rel="noreferrer" target="_blank">
+                          <span>{attachment.contentType === "application/pdf" ? "PDF" : imageFormatLabel(attachment.contentType)}</span>
+                          <b>{attachment.filename}</b>
+                          <small>{formatAttachmentBytes(attachment.sizeBytes)}</small>
+                        </a>
+                      );
+                    })}
                   </div>
                 ) : null}
                 <p>{message.content}</p>
@@ -314,12 +329,12 @@ export function ConversationBox({
           ) : null}
           {agentProgress ? <AgentProgressPanel progress={agentProgress} /> : null}
           {sending && showSendingReply && !PROJECT_RUNTIME_ROLES.some(role => Boolean(streamingReplies[role])) ? (
-            <article className="conversation-box-message assistant is-thinking role-intent">
-              <span className="message-avatar">IN</span>
+            <article className="conversation-box-message assistant is-thinking role-system">
+              <span className="message-avatar">DL</span>
               <div>
                 <header>
-                  <b>{text("Intent Agent", "Intent Agent")}</b>
-                  <span className="conversation-agent-working">{text("正在识别意图", "Identifying intent")}</span>
+                  <b>DeviLudo</b>
+                  <span className="conversation-agent-working">{sendingStatus}</span>
                 </header>
                 <p><TypingDots /></p>
               </div>
@@ -367,7 +382,7 @@ export function ConversationBox({
       ) : null}
 
       <form
-        className={`conversation-box-composer${imageDropActive ? " is-image-dragover" : ""}`}
+        className={`conversation-box-composer${attachmentDropActive ? " is-image-dragover" : ""}`}
         onDragEnter={handleImageDragEnter}
         onDragLeave={handleImageDragLeave}
         onDragOver={handleImageDragOver}
@@ -378,8 +393,8 @@ export function ConversationBox({
         }}
         ref={composer}
       >
-        <span aria-hidden={!imageDropActive} className="conversation-image-drop-hint">
-          {text("松开以添加图片", "Drop to attach images")}
+        <span aria-hidden={!attachmentDropActive} className="conversation-image-drop-hint">
+          {text("松开以添加 PDF 或图片", "Drop to attach a PDF or image")}
         </span>
         {composerPrefix}
         <textarea
@@ -395,38 +410,40 @@ export function ConversationBox({
           value={value}
         />
         {attachments.length ? (
-          <div className="conversation-composer-images" aria-label={text("待发送图片", "Images to send")}>
-            {attachments.map(image => (
-              <figure key={image.id}>
-                <Image alt={image.filename} height={144} src={image.previewUrl} unoptimized width={192} />
-                <figcaption>{image.filename}</figcaption>
+          <div className="conversation-composer-images conversation-composer-attachments" aria-label={text("待发送附件", "Attachments to send")}>
+            {attachments.map(attachment => (
+              <figure className={attachment.previewUrl ? "" : "is-file"} key={attachment.id}>
+                {attachment.previewUrl
+                  ? <Image alt={attachment.filename} height={144} src={attachment.previewUrl} unoptimized width={192} />
+                  : <span className="conversation-file-badge">{attachment.contentType === "application/pdf" ? "PDF" : imageFormatLabel(attachment.contentType)}</span>}
+                <figcaption>{attachment.filename}</figcaption>
                 <button
-                  aria-label={text(`移除 ${image.filename}`, `Remove ${image.filename}`)}
+                  aria-label={text(`移除 ${attachment.filename}`, `Remove ${attachment.filename}`)}
                   disabled={sending || disabled}
-                  onClick={() => onAttachmentsChange(Object.freeze(attachments.filter(candidate => candidate.id !== image.id)))}
+                  onClick={() => onAttachmentsChange(Object.freeze(attachments.filter(candidate => candidate.id !== attachment.id)))}
                   type="button"
                 ><CloseIcon /></button>
               </figure>
             ))}
           </div>
         ) : null}
-        {imageError ? <p className="conversation-image-error" role="alert">{imageError}</p> : null}
+        {attachmentError ? <p className="conversation-image-error" role="alert">{attachmentError}</p> : null}
         <footer>
           <input
-            accept="image/png,image/jpeg,image/webp"
-            aria-label={text("选择会话图片", "Choose conversation images")}
+            accept=".pdf,.png,.jpg,.jpeg,.webp,.gif,.tif,.tiff,.avif,.heic,.heif,application/pdf,image/png,image/jpeg,image/webp,image/gif,image/tiff,image/avif,image/heic,image/heif"
+            aria-label={text("选择会话附件", "Choose conversation attachments")}
             disabled={sending || disabled}
             hidden
             multiple
-            onChange={handleImages}
-            ref={imageInput}
+            onChange={handleAttachments}
+            ref={attachmentInput}
             type="file"
           />
           <button
-            aria-label={text("添加图片", "Attach images")}
+            aria-label={text("添加 PDF 或图片", "Attach a PDF or image")}
             className="conversation-image-button"
-            disabled={sending || disabled || attachments.length >= MAX_CONVERSATION_IMAGES}
-            onClick={() => imageInput.current?.click()}
+            disabled={sending || disabled || attachments.length >= MAX_CONVERSATION_ATTACHMENTS}
+            onClick={() => attachmentInput.current?.click()}
             type="button"
           ><PlusIcon /></button>
           <span className="conversation-box-shortcut"><kbd>⌘</kbd><kbd>↵</kbd> {text("发送 · Enter 换行", "SEND · ENTER FOR NEW LINE")}</span>
@@ -506,39 +523,67 @@ function AgentProgressPanel({
   );
 }
 
-function isConversationImageType(value: string): value is ConversationImageDraft["contentType"] {
-  return value === "image/png" || value === "image/jpeg" || value === "image/webp";
+function isConversationAttachmentType(value: string): value is ConversationAttachmentContentType {
+  return CONVERSATION_ATTACHMENT_CONTENT_TYPES.includes(value as ConversationAttachmentContentType);
 }
 
 function hasDraggedFiles(event: DragEvent<HTMLElement>): boolean {
   return [...event.dataTransfer.types].includes("Files");
 }
 
-function readConversationImage(file: File): Promise<ConversationImageDraft> {
+function conversationFileContentType(file: File): ConversationAttachmentContentType | null {
+  const browserType = file.type === "image/x-tiff" ? "image/tiff" : file.type;
+  if (isConversationAttachmentType(browserType)) return browserType;
+  const extension = file.name.split(".").at(-1)?.toLowerCase();
+  const inferred: Record<string, ConversationAttachmentContentType> = {
+    pdf: "application/pdf", png: "image/png", jpg: "image/jpeg", jpeg: "image/jpeg",
+    webp: "image/webp", gif: "image/gif", tif: "image/tiff", tiff: "image/tiff",
+    avif: "image/avif", heic: "image/heic", heif: "image/heif",
+  };
+  return extension ? inferred[extension] ?? null : null;
+}
+
+function readConversationAttachment(file: File): Promise<ConversationAttachmentDraft> {
   return new Promise((resolve, reject) => {
+    const contentType = conversationFileContentType(file);
+    if (!contentType) return reject(new Error("Attachment read failed"));
     const reader = new FileReader();
-    reader.onerror = () => reject(reader.error ?? new Error("Image read failed"));
+    reader.onerror = () => reject(reader.error ?? new Error("Attachment read failed"));
     reader.onload = () => {
-      if (typeof reader.result !== "string" || !isConversationImageType(file.type)) return reject(new Error("Image read failed"));
+      if (typeof reader.result !== "string") return reject(new Error("Attachment read failed"));
       const marker = reader.result.indexOf(",");
-      if (marker < 0) return reject(new Error("Image read failed"));
+      if (marker < 0) return reject(new Error("Attachment read failed"));
       resolve(Object.freeze({
         id: crypto.randomUUID(),
         filename: file.name,
-        contentType: file.type,
+        contentType,
         sizeBytes: file.size,
         dataBase64: reader.result.slice(marker + 1),
-        previewUrl: reader.result,
+        previewUrl: isBrowserPreviewableImage(contentType) ? reader.result : null,
       }));
     };
     reader.readAsDataURL(file);
   });
 }
 
-function conversationImageUrl(conversationId: string | null, messageId: string, imageId: string, previewUrl?: string): string {
+function conversationAttachmentUrl(conversationId: string | null, messageId: string, attachmentId: string, previewUrl?: string | null): string {
   if (previewUrl) return previewUrl;
   if (!conversationId) return "";
-  return `/api/conversations/${encodeURIComponent(conversationId)}/messages/${encodeURIComponent(messageId)}/images/${encodeURIComponent(imageId)}`;
+  return `/api/conversations/${encodeURIComponent(conversationId)}/messages/${encodeURIComponent(messageId)}/attachments/${encodeURIComponent(attachmentId)}`;
+}
+
+function isBrowserPreviewableImage(contentType: ConversationAttachmentContentType): boolean {
+  return ["image/png", "image/jpeg", "image/webp", "image/gif", "image/avif"].includes(contentType);
+}
+
+function imageFormatLabel(contentType: ConversationAttachmentContentType): string {
+  return contentType.split("/").at(-1)?.toUpperCase() ?? "FILE";
+}
+
+function formatAttachmentBytes(sizeBytes: number): string {
+  return sizeBytes >= 1024 * 1024
+    ? `${(sizeBytes / 1024 / 1024).toFixed(1)} MB`
+    : `${Math.max(1, Math.ceil(sizeBytes / 1024))} KB`;
 }
 
 function conversationIntent(metadata: Readonly<Record<string, unknown>>): string | null {

@@ -641,6 +641,54 @@ export class ProjectRuntimeRepository {
     });
   }
 
+  async interruptIdleCompaction(
+    workspaceId: string,
+    projectId: string,
+    runtime: AgentRuntimeKind,
+  ): Promise<RuntimeRecord | null> {
+    return this.database.withWorkspace(workspaceId, async client => {
+      const container = await lockedContainer(client, workspaceId, projectId);
+      // A different Runtime means this is a deliberate Runtime switch, not an
+      // idle pause. Only foreground work for the current Runtime may preempt it.
+      if (container.runtime !== runtime || container.state !== "COMPACTING" || !container.lease_token) return null;
+      const foreground = await client.query(
+        `SELECT 1 FROM deviludo.agent_turns
+          WHERE workspace_id = $1::uuid AND project_id = $2::uuid
+            AND state = 'RUNNING' AND mode <> 'COMPACT'
+          LIMIT 1`,
+        [workspaceId, projectId],
+      );
+      if (foreground.rowCount) return null;
+      await client.query(
+        `WITH cancelled AS (
+           UPDATE deviludo.agent_turns
+              SET state = 'CANCELLED', lease_token = NULL, mcp_token_hash = NULL,
+                  mcp_token_expires_at = NULL, completed_at = clock_timestamp(),
+                  output_summary = 'idle compaction interrupted by foreground work'
+            WHERE workspace_id = $1::uuid AND project_id = $2::uuid
+              AND state = 'RUNNING' AND mode = 'COMPACT'
+          RETURNING id
+         )
+         UPDATE deviludo.agent_sessions
+            SET active_turn_id = NULL, updated_at = clock_timestamp()
+          WHERE workspace_id = $1::uuid AND project_id = $2::uuid
+            AND active_turn_id IN (SELECT id FROM cancelled)`,
+        [workspaceId, projectId],
+      );
+      const updated = await client.query(
+        `UPDATE deviludo.agent_containers
+            SET state = 'RUNNING', lease_token = NULL, lease_expires_at = NULL,
+                paused_at = NULL, last_activity_at = clock_timestamp(), updated_at = clock_timestamp()
+          WHERE workspace_id = $1::uuid AND project_id = $2::uuid
+            AND runtime = $3::deviludo.agent_runtime
+            AND state = 'COMPACTING' AND lease_token = $4::uuid
+        RETURNING *`,
+        [workspaceId, projectId, runtime, container.lease_token],
+      );
+      return updated.rows[0] ? runtimeRecord(updated.rows[0]) : null;
+    });
+  }
+
   async claimRuntimeSwitch(
     workspaceId: string,
     projectId: string,
@@ -838,6 +886,7 @@ export class ProjectRuntimeRepository {
     fencingToken: number;
     state: ProjectRuntimeState;
     containerId: string | null;
+    lifecycleLeaseToken?: string;
   }>): Promise<boolean> {
     const result = await this.database.withWorkspace(workspaceId, client => client.query(
       `UPDATE deviludo.agent_containers
@@ -846,8 +895,10 @@ export class ProjectRuntimeRepository {
               destroyed_at = CASE WHEN $5 = 'DESTROYED' THEN clock_timestamp() ELSE NULL END,
               last_activity_at = clock_timestamp(), updated_at = clock_timestamp()
         WHERE workspace_id = $1::uuid AND project_id = $2::uuid
-          AND generation = $3 AND fencing_token = $4`,
-      [workspaceId, projectId, input.generation, input.fencingToken, input.state, input.containerId],
+          AND generation = $3 AND fencing_token = $4
+          AND (($7::uuid IS NULL AND lease_token IS NULL) OR lease_token = $7::uuid)`,
+      [workspaceId, projectId, input.generation, input.fencingToken, input.state,
+        input.containerId, input.lifecycleLeaseToken ?? null],
     ));
     return result.rowCount === 1;
   }
@@ -867,7 +918,10 @@ export class ProjectRuntimeRepository {
     return this.database.withWorkspace(input.workspaceId, async client => {
       const container = await lockedContainer(client, input.workspaceId, input.projectId);
       if (container.runtime !== input.runtime) throw new Error("Project Runtime selection changed before the turn started");
-      if (container.lease_token && container.lease_token !== input.lifecycleLeaseToken) {
+      if (input.lifecycleLeaseToken && container.lease_token !== input.lifecycleLeaseToken) {
+        throw new Error("Project Runtime lifecycle transition was interrupted");
+      }
+      if (!input.lifecycleLeaseToken && container.lease_token) {
         throw new Error("Project Runtime is completing a lifecycle transition");
       }
       if (container.state === "FAILED"
@@ -956,10 +1010,12 @@ export class ProjectRuntimeRepository {
       }
       await client.query(
         `UPDATE deviludo.agent_containers
-            SET state = 'RUNNING', paused_at = NULL, destroyed_at = NULL,
+            SET state = $3::deviludo.agent_container_state,
+                paused_at = NULL, destroyed_at = NULL,
                 last_activity_at = clock_timestamp(), updated_at = clock_timestamp()
           WHERE workspace_id = $1::uuid AND project_id = $2::uuid`,
-        [input.workspaceId, input.projectId],
+        [input.workspaceId, input.projectId,
+          runtimeContainerStateForTurn(input.mode, input.lifecycleLeaseToken)],
       );
       return Object.freeze({
         id: turnId, sessionId: session.rows[0].id, leaseToken, mcpToken,
@@ -1105,6 +1161,7 @@ export class ProjectRuntimeRepository {
       `SELECT role::text
          FROM deviludo.agent_sessions
         WHERE workspace_id = $1::uuid AND project_id = $2::uuid AND container_generation = $3
+          AND role <> 'INTENT'
         ORDER BY created_at, role`,
       [workspaceId, projectId, generation],
     ));
@@ -1119,6 +1176,19 @@ export class ProjectRuntimeRepository {
       [300, 1800, 900],
     );
     return lifecycleClaim(result.rows[0]);
+  }
+
+  async lifecycleClaimActive(claim: RuntimeLifecycleClaim): Promise<boolean> {
+    return this.database.withWorkspace(claim.workspaceId, async client => {
+      const result = await client.query(
+        `SELECT 1 FROM deviludo.agent_containers
+          WHERE workspace_id = $1::uuid AND project_id = $2::uuid
+            AND generation = $3 AND fencing_token = $4
+            AND state = 'COMPACTING' AND lease_token = $5::uuid`,
+        [claim.workspaceId, claim.projectId, claim.generation, claim.fencingToken, claim.leaseToken],
+      );
+      return result.rowCount === 1;
+    });
   }
 
   async claimPressureLifecycle(): Promise<RuntimeLifecycleClaim | null> {
@@ -1145,6 +1215,13 @@ export class ProjectRuntimeRepository {
     );
     return result.rows[0]?.failed === true;
   }
+}
+
+export function runtimeContainerStateForTurn(
+  mode: ProjectRuntimeTurnMode,
+  lifecycleLeaseToken?: string,
+): "RUNNING" | "COMPACTING" {
+  return mode === "COMPACT" && lifecycleLeaseToken ? "COMPACTING" : "RUNNING";
 }
 
 function sameProjectDocument(left: ProjectDocumentContent, right: ProjectDocumentContent): boolean {

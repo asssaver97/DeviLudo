@@ -18,6 +18,7 @@ export interface ProjectRuntimeBackend {
   ): Promise<ProjectRuntimeTurnResult>;
   pause(request: ProjectRuntimeControlRequest, signal?: AbortSignal): Promise<ProjectRuntimeStatus>;
   resume(request: ProjectRuntimeControlRequest, signal?: AbortSignal): Promise<ProjectRuntimeStatus>;
+  cancel(request: ProjectRuntimeControlRequest, signal?: AbortSignal): Promise<ProjectRuntimeStatus>;
   destroy(request: ProjectRuntimeControlRequest, signal?: AbortSignal): Promise<ProjectRuntimeStatus>;
   status(request: ProjectRuntimeControlRequest, signal?: AbortSignal): Promise<ProjectRuntimeStatus>;
   list(signal?: AbortSignal): Promise<readonly Readonly<Record<string, unknown>>[]>;
@@ -32,6 +33,7 @@ export class ProcessProjectRuntimeBackend implements ProjectRuntimeBackend {
   }
   pause(request: ProjectRuntimeControlRequest, signal?: AbortSignal) { return this.call<ProjectRuntimeStatus>("runtime-pause", request, signal); }
   resume(request: ProjectRuntimeControlRequest, signal?: AbortSignal) { return this.call<ProjectRuntimeStatus>("runtime-resume", request, signal); }
+  cancel(request: ProjectRuntimeControlRequest, signal?: AbortSignal) { return this.call<ProjectRuntimeStatus>("runtime-cancel", request, signal); }
   destroy(request: ProjectRuntimeControlRequest, signal?: AbortSignal) { return this.call<ProjectRuntimeStatus>("runtime-destroy", request, signal); }
   status(request: ProjectRuntimeControlRequest, signal?: AbortSignal) { return this.call<ProjectRuntimeStatus>("runtime-status", request, signal); }
   list(signal?: AbortSignal) { return this.call<readonly Readonly<Record<string, unknown>>[]>("runtime-list", undefined, signal); }

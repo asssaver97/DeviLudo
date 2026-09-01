@@ -89,6 +89,7 @@ const server = createServer(async (request, response) => {
       "/directory/git/branch",
       "/directory/file/open",
       "/artifact/open",
+      "/artifact/reveal",
     ].includes(request.url ?? "")) {
       sendJson(response, 404, { code: "NOT_FOUND", message: "本地项目接口不存在" }, cors);
       return;
@@ -114,8 +115,8 @@ const server = createServer(async (request, response) => {
         sendJson(response, 200, await openBoundProjectFile(body), cors);
         return;
       }
-      if (request.url === "/artifact/open") {
-        sendJson(response, 200, await openLocalArtifact(body), cors);
+      if (request.url === "/artifact/open" || request.url === "/artifact/reveal") {
+        sendJson(response, 200, await accessLocalArtifact(body, request.url === "/artifact/reveal" ? "REVEAL" : "OPEN"), cors);
         return;
       }
       const result = request.url === "/directory/select"
@@ -286,7 +287,7 @@ async function cloneGitHubDirectory(repositoryUrl) {
   }
 }
 
-async function openLocalArtifact(body) {
+async function accessLocalArtifact(body, action) {
   if (process.platform !== "darwin") {
     throw failure("ARTIFACT_OPEN_UNAVAILABLE", "本地制品直接打开目前仅支持 macOS");
   }
@@ -318,7 +319,7 @@ async function openLocalArtifact(body) {
   const cached = await readFile(metadataPath, "utf8").then(JSON.parse).catch(() => null);
   if (cached?.sha256 === expectedSha256 && cached?.kind === kind
     && cached?.targetPlatform === targetPlatform && cached?.filename === filename) {
-    try { return await launchLocalArtifact(destination, kind, targetPlatform, filename, locale, theme); }
+    try { return await presentLocalArtifact(destination, kind, targetPlatform, filename, locale, theme, action); }
     catch { await rm(destination, { recursive: true, force: true }); }
   }
 
@@ -369,7 +370,7 @@ async function openLocalArtifact(body) {
     await writeFile(join(staging, "artifact.json"), `${JSON.stringify({ sha256: expectedSha256, kind, targetPlatform, filename })}\n`, { mode: 0o600 });
     await rm(destination, { recursive: true, force: true });
     await rename(staging, destination);
-    return launchLocalArtifact(destination, kind, targetPlatform, filename, locale, theme);
+    return presentLocalArtifact(destination, kind, targetPlatform, filename, locale, theme, action);
   } catch (error) {
     await rm(staging, { recursive: true, force: true });
     if ([
@@ -378,11 +379,14 @@ async function openLocalArtifact(body) {
       "UNSAFE_ARTIFACT_ARCHIVE",
     ].includes(String(error?.code ?? ""))) throw error;
     console.error(JSON.stringify({
-      event: "local_artifact_open_failed",
+      event: action === "REVEAL" ? "local_artifact_reveal_failed" : "local_artifact_open_failed",
       artifactId,
       message: error instanceof Error ? error.message : String(error),
     }));
-    throw failure("ARTIFACT_OPEN_FAILED", "制品已获取，但无法在本机打开");
+    throw failure(
+      action === "REVEAL" ? "ARTIFACT_REVEAL_FAILED" : "ARTIFACT_OPEN_FAILED",
+      action === "REVEAL" ? "制品已获取，但无法在 Finder 中打开" : "制品已获取，但无法在本机打开",
+    );
   }
 }
 
@@ -442,6 +446,24 @@ async function launchLocalArtifact(destination, kind, targetPlatform, filename, 
   }
   await execute("/usr/bin/open", [content], { timeout: 30_000, maxBuffer: 64 * 1024 });
   return Object.freeze({ opened: true, action: "REVEALED" });
+}
+
+async function presentLocalArtifact(destination, kind, targetPlatform, filename, locale, theme, action) {
+  if (action !== "REVEAL") return launchLocalArtifact(destination, kind, targetPlatform, filename, locale, theme);
+  const target = await localArtifactTarget(destination, kind, targetPlatform, filename);
+  await execute("/usr/bin/open", ["-R", target], { timeout: 30_000, maxBuffer: 64 * 1024 });
+  return Object.freeze({ opened: true, action: "REVEALED" });
+}
+
+async function localArtifactTarget(destination, kind, targetPlatform, filename) {
+  if (!BUILD_ARTIFACT_KINDS.has(kind)) {
+    return kind === "E2E_REPORT" && filename.toLowerCase().endsWith(".zip")
+      ? join(destination, "e2e-report/index.html")
+      : join(destination, filename);
+  }
+  const content = join(destination, "content");
+  if (targetPlatform === "macos") return await findAppBundle(content) ?? content;
+  return content;
 }
 
 async function findAppBundle(root) {
@@ -789,6 +811,7 @@ function importFailure(error) {
     ARTIFACT_DOWNLOAD_FAILED: 502,
     ARTIFACT_DIGEST_MISMATCH: 502,
     ARTIFACT_OPEN_FAILED: 502,
+    ARTIFACT_REVEAL_FAILED: 502,
     NOT_A_GODOT_PROJECT: 422,
     NOT_A_GIT_REPOSITORY: 422,
     DIRECTORY_BINDING_NOT_FOUND: 422,

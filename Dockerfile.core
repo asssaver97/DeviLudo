@@ -6,7 +6,7 @@ ENV NODE_ENV=production
 ARG CODEX_CLI_VERSION=0.149.0
 ARG NPM_CONFIG_REGISTRY=https://registry.npmjs.org/
 ENV DEVILUDO_BUNDLED_CODEX_CLI_VERSION=${CODEX_CLI_VERSION}
-RUN apk add --no-cache postgresql17-client unzip \
+RUN apk add --no-cache postgresql17-client unzip poppler-utils \
  && npm install --global --no-audit --no-fund "@openai/codex@${CODEX_CLI_VERSION}"
 RUN addgroup --system --gid 1001 core && adduser --system --uid 1001 --ingroup core core
 COPY package.json package-lock.json ./

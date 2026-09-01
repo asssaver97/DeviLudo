@@ -9,6 +9,10 @@ import type {
   ProjectRuntimeTurnRequest,
   ProjectRuntimeTurnResult,
 } from "@/lib/product/project-runtime";
+import {
+  MAX_PROJECT_RUNTIME_ATTACHMENT_PATHS,
+  MAX_PROJECT_RUNTIME_PROMPT_CHARS,
+} from "@/lib/product/project-runtime";
 
 type DockerOptions = Readonly<{
   signal?: AbortSignal;
@@ -23,7 +27,10 @@ type Docker = (
 type SecretResolver = (reference: string) => Promise<string>;
 
 export class ProjectRuntimeSupervisor {
-  private readonly activeTurns = new Map<string, AbortController>();
+  private readonly activeTurns = new Map<string, Readonly<{
+    controller: AbortController;
+    settled: Promise<void>;
+  }>>();
 
   constructor(private readonly options: Readonly<{
     docker: Docker;
@@ -140,10 +147,12 @@ export class ProjectRuntimeSupervisor {
       : `${request.workspaceId}:${request.projectId}:${request.role}:PRIMARY`;
     if (this.activeTurns.has(key)) throw new Error(`${request.role} Runtime session already has an active primary turn`);
     const controller = new AbortController();
+    let settle = () => {};
+    const settled = new Promise<void>(resolve => { settle = resolve; });
     const abort = () => controller.abort();
     signal?.addEventListener("abort", abort, { once: true });
     if (signal?.aborted) controller.abort();
-    this.activeTurns.set(key, controller);
+    this.activeTurns.set(key, Object.freeze({ controller, settled }));
     const name = runtimeName(this.options.projectsVolume, request.workspaceId, request.projectId);
     try {
       const provider = Buffer.from(await this.options.resolveSecret(request.credentialRef));
@@ -165,6 +174,7 @@ export class ProjectRuntimeSupervisor {
     } finally {
       signal?.removeEventListener("abort", abort);
       this.activeTurns.delete(key);
+      settle();
       await this.options.docker(["exec", name, "rm", "-rf", `/run/deviludo/${request.turnId}`], 10_000).catch(() => undefined);
     }
   }
@@ -183,6 +193,16 @@ export class ProjectRuntimeSupervisor {
     await this.assertCurrent(request);
     const status = await this.status(request);
     if (status.state === "PAUSED") await this.options.docker(["unpause", runtimeName(this.options.projectsVolume, request.workspaceId, request.projectId)], 30_000);
+    return this.status(request);
+  }
+
+  async cancel(request: ProjectRuntimeControlRequest): Promise<ProjectRuntimeStatus> {
+    validateControl(request);
+    await this.assertCurrent(request);
+    const prefix = `${request.workspaceId}:${request.projectId}:`;
+    const active = [...this.activeTurns.entries()].filter(([key]) => key.startsWith(prefix));
+    for (const [, turn] of active) turn.controller.abort();
+    await Promise.allSettled(active.map(([, turn]) => turn.settled));
     return this.status(request);
   }
 
@@ -355,7 +375,7 @@ export class ProjectRuntimeSupervisor {
 
   private abortProjectTurns(workspaceId: string, projectId: string): void {
     const prefix = `${workspaceId}:${projectId}:`;
-    for (const [key, controller] of this.activeTurns) if (key.startsWith(prefix)) controller.abort();
+    for (const [key, turn] of this.activeTurns) if (key.startsWith(prefix)) turn.controller.abort();
   }
 
   private async destroyExisting(name: string, projectId: string): Promise<void> {
@@ -409,11 +429,13 @@ function validateTurn(value: ProjectRuntimeTurnRequest, images: ReadonlySet<stri
     || Date.parse(value.leaseExpiresAt) <= Date.now()
     || !/^[A-Za-z0-9_-]{32,512}$/.test(value.mcpToken)
     || !value.credentialRef.startsWith("vault://instance/agent-runtime/api-key/versions/")
-    || !Array.isArray(value.attachmentPaths) || value.attachmentPaths.length > 4
+    || !Array.isArray(value.attachmentPaths)
+    || value.attachmentPaths.length > MAX_PROJECT_RUNTIME_ATTACHMENT_PATHS
     || value.attachmentPaths.some(path => typeof path !== "string"
       || !path.startsWith(`/workspace/project/runtime/attachments/${value.turnId}/`)
       || !/\.(?:png|jpg|webp)$/.test(path))
-    || typeof value.prompt !== "string" || value.prompt.length < 1 || value.prompt.length > 100_000) {
+    || typeof value.prompt !== "string" || value.prompt.length < 1
+    || value.prompt.length > MAX_PROJECT_RUNTIME_PROMPT_CHARS) {
     throw new Error("Project Runtime turn request is invalid");
   }
 }

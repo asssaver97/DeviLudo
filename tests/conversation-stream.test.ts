@@ -9,16 +9,17 @@ import {
   failedOptimisticConversation,
   initialStreamingConversationReplies,
   optimisticConversation,
+  recoverConversationAfterDisconnect,
   replaceStreamingConversationReply,
   sendConversationMessageStream,
   startStreamingConversationReply,
   streamingConversationReplyIsActive,
   updateStreamingConversationActivity,
 } from "../lib/product/conversation-stream";
-import { MAX_CONVERSATION_IMAGE_BYTES } from "../lib/product/contracts";
+import { MAX_CONVERSATION_ATTACHMENT_BYTES } from "../lib/product/contracts";
 
-test("conversation images allow up to eight MiB per file", () => {
-  assert.equal(MAX_CONVERSATION_IMAGE_BYTES, 8 * 1024 * 1024);
+test("conversation attachments allow up to twenty MiB per file", () => {
+  assert.equal(MAX_CONVERSATION_ATTACHMENT_BYTES, 20 * 1024 * 1024);
 });
 
 test("streaming reply activity moves from thinking to typing and then clears its status", () => {
@@ -77,6 +78,7 @@ test("conversation SSE accepts UI Design Agent lifecycle events", async () => {
   const originalFetch = globalThis.fetch;
   const observed: string[] = [];
   globalThis.fetch = async () => new Response([
+    JSON.stringify({ type: "status", phase: "PREPARING" }),
     JSON.stringify({ type: "agent_start", agentRole: "UI_DESIGN" }),
     JSON.stringify({ type: "agent_process", agentRole: "UI_DESIGN", event: "正在规划界面" }),
     JSON.stringify({ type: "agent_complete", agentRole: "UI_DESIGN" }),
@@ -92,6 +94,7 @@ test("conversation SSE accepts UI Design Agent lifecycle events", async () => {
   ].join("\n"), { status: 200 });
   try {
     await sendConversationMessageStream({ content: "重新设计 UI" }, "request", {
+      onStatus: phase => observed.push(`status:${phase}`),
       onAgentStart: role => observed.push(`start:${role}`),
       onAgentProcess: role => observed.push(`process:${role}`),
       onAgentDelta: role => observed.push(`delta:${role}`),
@@ -103,7 +106,31 @@ test("conversation SSE accepts UI Design Agent lifecycle events", async () => {
   } finally {
     globalThis.fetch = originalFetch;
   }
-  assert.deepEqual(observed, ["start:UI_DESIGN", "process:UI_DESIGN", "complete:UI_DESIGN"]);
+  assert.deepEqual(observed, ["status:PREPARING", "start:UI_DESIGN", "process:UI_DESIGN", "complete:UI_DESIGN"]);
+});
+
+test("a disconnected stream recovers the durable completed conversation turn", async () => {
+  const conversation = {
+    id: "conversation-1",
+    projectId: "project-1",
+    mode: "PROJECT_FEEDBACK" as const,
+    title: "项目会话",
+    createdAt: "2026-09-01T00:00:00.000Z",
+    updatedAt: "2026-09-01T00:01:00.000Z",
+    messages: Object.freeze([
+      { id: "before", role: "ASSISTANT" as const, content: "请选择", attachments: [], metadata: {}, createdAt: "2026-09-01T00:00:00.000Z", completedAt: "2026-09-01T00:00:01.000Z" },
+      { id: "user", role: "USER" as const, content: "采用第一项", attachments: [], metadata: {}, createdAt: "2026-09-01T00:00:02.000Z", completedAt: "2026-09-01T00:00:03.000Z" },
+      { id: "reply", role: "ASSISTANT" as const, content: "已继续设计", attachments: [], metadata: { agentRole: "DESIGN" }, createdAt: "2026-09-01T00:00:04.000Z", completedAt: "2026-09-01T00:00:05.000Z" },
+    ]),
+  };
+  const recovered = await recoverConversationAfterDisconnect({
+    conversationId: conversation.id,
+    baselineMessageId: "before",
+    submittedContent: "采用第一项",
+    timeoutMs: 0,
+    fetcher: async () => Response.json({ conversation }),
+  });
+  assert.equal(recovered?.messages.at(-1)?.id, "reply");
 });
 
 test("completed tool activity clears immediately and final normalization can replace streamed text", () => {

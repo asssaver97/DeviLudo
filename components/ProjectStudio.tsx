@@ -35,11 +35,13 @@ import {
   failedOptimisticConversation,
   initialStreamingConversationReplies,
   optimisticConversation,
+  recoverConversationAfterDisconnect,
   replaceStreamingConversationReply,
   sendConversationMessageStream,
   startStreamingConversationReply,
   updateStreamingConversationActivity,
-  type ConversationImageDraft,
+  type ConversationAttachmentDraft,
+  type ConversationStreamPhase,
   type StreamingConversationReplies,
 } from "@/lib/product/conversation-stream";
 import { ConversationBox } from "./conversation/ConversationBox";
@@ -101,6 +103,11 @@ type LocalGitState = Readonly<{
   branch: string | null;
 }>;
 
+type ArtifactAccess = Readonly<{
+  artifactId: string;
+  action: "OPEN" | "REVEAL";
+}>;
+
 type ProjectRuntimeView = Readonly<{
   runtime: Readonly<{
     state: string;
@@ -125,11 +132,12 @@ export function ProjectStudio({ projectId }: { projectId: string }) {
   const [selectedConversationId, setSelectedConversationId] = useState<string | null>(initialConversationId);
   const [conversation, setConversation] = useState<ProductConversation | null>(initialConversation ?? null);
   const [conversationInput, setConversationInput] = useState("");
-  const [conversationImages, setConversationImages] = useState<readonly ConversationImageDraft[]>(Object.freeze([]));
+  const [conversationAttachments, setConversationAttachments] = useState<readonly ConversationAttachmentDraft[]>(Object.freeze([]));
   const [busy, setBusy] = useState(false);
   const [sendingMessage, setSendingMessage] = useState(false);
   const [decidingChange, setDecidingChange] = useState(false);
   const [streamingReplies, setStreamingReplies] = useState<StreamingConversationReplies>({});
+  const [streamPhase, setStreamPhase] = useState<ConversationStreamPhase | null>(null);
   const [agentProgressBuffer, setAgentProgressBuffer] = useState<Readonly<{
     jobId: string | null;
     events: readonly AgentProgressEvent[];
@@ -140,7 +148,7 @@ export function ProjectStudio({ projectId }: { projectId: string }) {
   const [historicalIteration, setHistoricalIteration] = useState<ProductWorkflowIterationDetail | null>(null);
   const [conversationFocusKey, setConversationFocusKey] = useState(0);
   const conversationSelectionRevision = useRef(0);
-  const [openingArtifactId, setOpeningArtifactId] = useState<string | null>(null);
+  const [artifactAccess, setArtifactAccess] = useState<ArtifactAccess | null>(null);
   const agentProgressCursor = useRef(0);
   const [deleting, setDeleting] = useState(false);
   const [confirmingDelete, setConfirmingDelete] = useState(false);
@@ -497,7 +505,7 @@ export function ProjectStudio({ projectId }: { projectId: string }) {
     setSelectedConversationId(null);
     setConversation(null);
     setConversationInput("");
-    setConversationImages(Object.freeze([]));
+    setConversationAttachments(Object.freeze([]));
     setError(null);
   }
 
@@ -578,27 +586,33 @@ export function ProjectStudio({ projectId }: { projectId: string }) {
   async function sendConversationMessage(event?: FormEvent<HTMLFormElement>, selectedOption?: string) {
     event?.preventDefault();
     const content = (selectedOption ?? conversationInput).trim();
-    const images = conversationImages;
-    if ((content.length < 2 && images.length === 0) || sendingMessage || selectedWorkflowId !== null) return;
-    const displayedContent = content || text("请查看随附图片。", "Please review the attached image.");
+    const attachments = conversationAttachments;
+    if ((content.length < 2 && attachments.length === 0) || sendingMessage || selectedWorkflowId !== null) return;
+    const displayedContent = content || text("请查看随附附件。", "Please review the attached file.");
     const previousConversation = conversation;
-    const pendingConversation = optimisticConversation(previousConversation, projectId, displayedContent, project?.name ?? text("项目会话", "Project conversation"), images);
+    const pendingConversation = optimisticConversation(previousConversation, projectId, displayedContent, project?.name ?? text("项目会话", "Project conversation"), attachments);
     conversationSelectionRevision.current += 1;
     setSendingMessage(true);
     setError(null);
     setStreamingReplies(initialStreamingConversationReplies());
+    setStreamPhase("PREPARING");
     setConversation(pendingConversation);
     setSelectedConversationId(pendingConversation.id);
     setConversationInput("");
-    setConversationImages(Object.freeze([]));
+    setConversationAttachments(Object.freeze([]));
+    let agentStarted = false;
     try {
       const payload = await sendConversationMessageStream(
         previousConversation && !previousConversation.id.startsWith("pending-")
-          ? { conversationId: previousConversation.id, content, responseLanguage: locale, attachments: conversationImagePayload(images) }
-          : { projectId, content, responseLanguage: locale, attachments: conversationImagePayload(images) },
+          ? { conversationId: previousConversation.id, content, responseLanguage: locale, attachments: conversationAttachmentPayload(attachments) }
+          : { projectId, content, responseLanguage: locale, attachments: conversationAttachmentPayload(attachments) },
         `conversation:${crypto.randomUUID()}`,
         {
-          onAgentStart: agentRole => setStreamingReplies(current => startStreamingConversationReply(current, agentRole)),
+          onStatus: setStreamPhase,
+          onAgentStart: agentRole => {
+            agentStarted = true;
+            setStreamingReplies(current => startStreamingConversationReply(current, agentRole));
+          },
           onAgentProcess: (agentRole, processEvent) => setStreamingReplies(current => appendStreamingConversationProcess(current, agentRole, processEvent)),
           onAgentDelta: (agentRole, delta) => setStreamingReplies(current => appendStreamingConversationReply(current, agentRole, delta)),
           onAgentReplace: (agentRole, replyContent) => setStreamingReplies(current => replaceStreamingConversationReply(current, agentRole, replyContent)),
@@ -628,6 +642,27 @@ export function ProjectStudio({ projectId }: { projectId: string }) {
         return next;
       });
     } catch (reason) {
+      const disconnected = !(reason instanceof ConversationStreamError)
+        || reason.code === "EMPTY_STREAM"
+        || reason.code === "INCOMPLETE_STREAM";
+      if (agentStarted && disconnected && previousConversation && !previousConversation.id.startsWith("pending-")) {
+        const recovered = await recoverConversationAfterDisconnect({
+          conversationId: previousConversation.id,
+          baselineMessageId: previousConversation.messages.at(-1)?.id ?? null,
+          submittedContent: content,
+        });
+        if (recovered) {
+          setConversation(recovered);
+          setSelectedConversationId(recovered.id);
+          storeCached(clientCacheKeys.conversation(recovered.id), recovered, 30_000);
+          setConversations(current => {
+            const summary = conversationSummary(recovered);
+            return Object.freeze([summary, ...current.filter(item => item.id !== summary.id)]);
+          });
+          await loadProject(true).catch(() => undefined);
+          return;
+        }
+      }
       const failureMessage = reason instanceof ConversationStreamError
         ? errorText(reason.message, "消息发送失败，请稍后重试", "Message failed. Please try again.")
         : text("消息发送失败，请稍后重试", "Message failed. Please try again.");
@@ -642,6 +677,7 @@ export function ProjectStudio({ projectId }: { projectId: string }) {
       }
     } finally {
       setStreamingReplies({});
+      setStreamPhase(null);
       setSendingMessage(false);
     }
   }
@@ -793,13 +829,13 @@ export function ProjectStudio({ projectId }: { projectId: string }) {
     }
   }
 
-  async function accessArtifact(artifact: ArtifactRecord) {
-    if (openingArtifactId) return;
+  async function accessArtifact(artifact: ArtifactRecord, action: ArtifactAccess["action"] = "OPEN") {
+    if (artifactAccess || (action === "REVEAL" && managed)) return;
     // Self-hosted artifacts already live in the local object store. Hand all
     // of them to the host bridge so reports and snapshots open in their default
-    // macOS application instead of taking an unnecessary browser download path.
+    // macOS application or can be revealed in Finder without a second download.
     const opensOnHost = !managed;
-    setOpeningArtifactId(artifact.id);
+    setArtifactAccess(Object.freeze({ artifactId: artifact.id, action }));
     setError(null);
     try {
       const [response, bridgeUrl] = await Promise.all([
@@ -814,7 +850,7 @@ export function ProjectStudio({ projectId }: { projectId: string }) {
         throw new Error(errorText(payload.message, `制品下载授权失败 (${response.status})`, `Unable to authorize download (${response.status})`));
       }
       if (opensOnHost && bridgeUrl) {
-        const openResponse = await fetch(`${bridgeUrl}/artifact/open`, {
+        const openResponse = await fetch(`${bridgeUrl}/artifact/${action === "REVEAL" ? "reveal" : "open"}`, {
           method: "POST",
           headers: { "content-type": "application/json" },
           body: JSON.stringify({
@@ -831,7 +867,11 @@ export function ProjectStudio({ projectId }: { projectId: string }) {
         });
         const openResult = await openResponse.json().catch(() => ({})) as { opened?: boolean; message?: string };
         if (!openResponse.ok || openResult.opened !== true) {
-          throw new Error(errorText(openResult.message, "本地制品打开失败", "Unable to open the local artifact"));
+          throw new Error(errorText(
+            openResult.message,
+            action === "REVEAL" ? "无法在 Finder 中打开制品" : "本地制品打开失败",
+            action === "REVEAL" ? "Unable to show the artifact in Finder" : "Unable to open the local artifact",
+          ));
         }
         return;
       }
@@ -843,9 +883,11 @@ export function ProjectStudio({ projectId }: { projectId: string }) {
       link.click();
       link.remove();
     } catch (reason) {
-      setError(reason instanceof Error ? reason.message : text("制品打开失败", "Unable to access artifact"));
+      setError(reason instanceof Error ? reason.message : action === "REVEAL"
+        ? text("无法在 Finder 中打开制品", "Unable to show the artifact in Finder")
+        : text("制品打开失败", "Unable to access artifact"));
     } finally {
-      setOpeningArtifactId(null);
+      setArtifactAccess(null);
     }
   }
 
@@ -1151,22 +1193,46 @@ export function ProjectStudio({ projectId }: { projectId: string }) {
                   <small>{text("需求、构建与验证报告", "REQUIREMENTS, BUILDS & REPORTS")}</small>
                 </legend>
                 <div className="product-delivery-artifact-grid">
-                  {viewedArtifacts.map(artifact => (
-                    <button
-                      aria-label={text(`打开${artifactLabel(artifact, text)}`, `Open ${artifactLabel(artifact, text)}`)}
-                      disabled={openingArtifactId !== null}
-                      key={artifact.id}
-                      onClick={() => void accessArtifact(artifact)}
-                      title={`${artifactLabel(artifact, text)} · ${artifact.targetPlatform ?? text("通用", "COMMON")} · ${formatArtifactSize(artifact.object.sizeBytes)}`}
-                      type="button"
-                    >
-                      <span>{artifact.targetPlatform ?? text("通用", "ALL")}</span>
-                      <b>{artifactLabel(artifact, text)}</b>
-                      <strong>{openingArtifactId === artifact.id
-                        ? text("打开中…", "OPENING…")
-                        : text("打开", "OPEN")}</strong>
-                    </button>
-                  ))}
+                  {viewedArtifacts.map(artifact => {
+                    const label = artifactLabel(artifact, text);
+                    const opening = artifactAccess?.artifactId === artifact.id && artifactAccess.action === "OPEN";
+                    const revealing = artifactAccess?.artifactId === artifact.id && artifactAccess.action === "REVEAL";
+                    return (
+                      <article
+                        className="product-delivery-artifact-card"
+                        key={artifact.id}
+                        title={`${label} · ${artifact.targetPlatform ?? text("通用", "COMMON")} · ${formatArtifactSize(artifact.object.sizeBytes)}`}
+                      >
+                        <div className="product-delivery-artifact-summary">
+                          <span>{artifact.targetPlatform ?? text("通用", "ALL")}</span>
+                          <b>{label}</b>
+                          <small>{formatArtifactSize(artifact.object.sizeBytes)}</small>
+                        </div>
+                        <div className="product-delivery-artifact-actions">
+                          <button
+                            aria-label={text(`打开${label}`, `Open ${label}`)}
+                            className="product-delivery-artifact-open"
+                            disabled={artifactAccess !== null}
+                            onClick={() => void accessArtifact(artifact)}
+                            type="button"
+                          >
+                            {opening ? text("打开中…", "OPENING…") : text("打开", "OPEN")}
+                          </button>
+                          {!managed ? (
+                            <button
+                              aria-label={text(`在 Finder 中显示：${label}`, `Show in Finder: ${label}`)}
+                              className="product-delivery-artifact-reveal"
+                              disabled={artifactAccess !== null}
+                              onClick={() => void accessArtifact(artifact, "REVEAL")}
+                              type="button"
+                            >
+                              {revealing ? text("定位中…", "LOCATING…") : text("在 Finder 中打开", "OPEN IN FINDER")}
+                            </button>
+                          ) : null}
+                        </div>
+                      </article>
+                    );
+                  })}
                 </div>
               </fieldset>
             ) : null}
@@ -1333,9 +1399,9 @@ export function ProjectStudio({ projectId }: { projectId: string }) {
                 disabled={viewingHistoricalIteration}
                 focusKey={conversationFocusKey}
                 messages={orderedMessages}
-                attachments={conversationImages}
+                attachments={conversationAttachments}
                 onOptionSelect={selectConversationOption}
-                onAttachmentsChange={setConversationImages}
+                onAttachmentsChange={setConversationAttachments}
                 onSubmit={sendConversationMessage}
                 onValueChange={setConversationInput}
                 placeholder={text("提问，或提出实现调整…", "Ask a question or request an implementation change…")}
@@ -1362,6 +1428,7 @@ export function ProjectStudio({ projectId }: { projectId: string }) {
                 ) : null}
                 sendButtonLabel={text("发送项目消息", "Send project message")}
                 sending={sendingMessage}
+                streamPhase={streamPhase}
                 showSendingReply
                 streamingReplies={streamingReplies}
                 textareaLabel={text("继续项目会话", "Continue project conversation")}
@@ -1906,11 +1973,11 @@ function conversationSummary(conversation: ProductConversation): ProductConversa
   });
 }
 
-function conversationImagePayload(images: readonly ConversationImageDraft[]) {
-  return images.map(image => Object.freeze({
-    filename: image.filename,
-    contentType: image.contentType,
-    dataBase64: image.dataBase64,
+function conversationAttachmentPayload(attachments: readonly ConversationAttachmentDraft[]) {
+  return attachments.map(attachment => Object.freeze({
+    filename: attachment.filename,
+    contentType: attachment.contentType,
+    dataBase64: attachment.dataBase64,
   }));
 }
 

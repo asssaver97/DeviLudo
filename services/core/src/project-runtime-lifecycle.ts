@@ -24,8 +24,17 @@ export class ProjectRuntimeLifecycle {
     const claim = pressureClaim ?? await this.runtimes.claimLifecycle();
     if (!claim) return null;
     try {
-      if (claim.action === "PAUSE") await this.compactAndPause(claim);
-      else await this.destroy(claim);
+      if (claim.action === "PAUSE") {
+        if (!await this.compactAndPause(claim)) {
+          await this.runtimes.failLifecycle(claim).catch(() => undefined);
+          return Object.freeze({
+            workspaceId: claim.workspaceId,
+            projectId: claim.projectId,
+            action: "INTERRUPTED",
+            generation: claim.generation,
+          });
+        }
+      } else await this.destroy(claim);
       if (!await this.runtimes.completeLifecycle(claim)) {
         throw new Error("Project Runtime lifecycle completion lease was rejected");
       }
@@ -41,12 +50,13 @@ export class ProjectRuntimeLifecycle {
     }
   }
 
-  private async compactAndPause(claim: RuntimeLifecycleClaim): Promise<void> {
+  private async compactAndPause(claim: RuntimeLifecycleClaim): Promise<boolean> {
     const settings = await this.repository.readAgentSettings();
     if (settings) {
       const context = await this.service.readContext(claim.workspaceId, claim.projectId);
       const roles = await this.runtimes.sessionRoles(claim.workspaceId, claim.projectId, claim.generation);
       for (const role of roles) {
+        if (!await this.runtimes.lifecycleClaimActive(claim)) return false;
         try {
           await this.service.turn({
             workspaceId: claim.workspaceId,
@@ -66,7 +76,9 @@ export class ProjectRuntimeLifecycle {
         }
       }
     }
+    if (!await this.runtimes.lifecycleClaimActive(claim)) return false;
     await this.service.pauseRuntime(control(claim));
+    return true;
   }
 
   private async destroy(claim: RuntimeLifecycleClaim): Promise<void> {

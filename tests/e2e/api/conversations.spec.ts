@@ -86,7 +86,7 @@ test("conversation stream emits the authoritative reply before the persisted res
   `)).toEqual([{ intent_turns: 0 }]);
 });
 
-test("conversation images are validated, persisted, displayed through an authenticated boundary, and exposed to the reply Agent", async ({ stack }) => {
+test("conversation attachments are validated, persisted, displayed through an authenticated boundary, and exposed to the reply Agent", async ({ stack }) => {
   await stack.configureAgent();
   const project = await stack.createProject({
     name: "会话图片验证",
@@ -116,7 +116,7 @@ test("conversation images are validated, persisted, displayed through an authent
   expect(JSON.stringify(userMessage.metadata)).not.toContain("workspaces/");
 
   const image = await stack.web(
-    `/api/conversations/${conversation.id}/messages/${userMessage.id}/images/${userMessage.attachments[0].id}`,
+    `/api/conversations/${conversation.id}/messages/${userMessage.id}/attachments/${userMessage.attachments[0].id}`,
   );
   expect(image.status()).toBe(200);
   expect(image.headers()["content-type"]).toContain("image/png");
@@ -137,30 +137,85 @@ test("conversation images are validated, persisted, displayed through an authent
   });
   expect(disguised.status()).toBe(400);
 
-  const maximumImage = Buffer.alloc(8 * 1024 * 1024);
+  const maximumImage = Buffer.alloc(20 * 1024 * 1024);
   Buffer.from(ONE_PIXEL_PNG, "base64").copy(maximumImage);
   const acceptedBoundary = await stack.web("/api/conversations/messages", {
     method: "POST",
     data: {
       projectId: project.id,
-      content: "验证八兆图片边界。",
-      attachments: [{ filename: "eight-mib.png", contentType: "image/png", dataBase64: maximumImage.toString("base64") }],
+      content: "验证二十兆附件边界。",
+      attachments: [{ filename: "twenty-mib.png", contentType: "image/png", dataBase64: maximumImage.toString("base64") }],
     },
   });
   expect(acceptedBoundary.status()).toBe(201);
 
-  const oversizedImage = Buffer.alloc(8 * 1024 * 1024 + 1);
+  const oversizedImage = Buffer.alloc(20 * 1024 * 1024 + 1);
   Buffer.from(ONE_PIXEL_PNG, "base64").copy(oversizedImage);
   const rejectedBoundary = await stack.web("/api/conversations/messages", {
     method: "POST",
     data: {
       projectId: project.id,
-      content: "拒绝超过八兆的图片。",
-      attachments: [{ filename: "over-eight-mib.png", contentType: "image/png", dataBase64: oversizedImage.toString("base64") }],
+      content: "拒绝超过二十兆的附件。",
+      attachments: [{ filename: "over-twenty-mib.png", contentType: "image/png", dataBase64: oversizedImage.toString("base64") }],
     },
   });
   expect(rejectedBoundary.status()).toBe(400);
 });
+
+test("PDF attachments are parsed for the Agent and remain downloadable as the original document", async ({ stack }) => {
+  await stack.configureAgent();
+  const project = await stack.createProject({
+    name: "PDF 需求验证",
+    concept: "验证 PDF 需求文档可供设计 Agent 阅读。",
+  });
+  const pdf = minimalPdf("PDF gameplay requirements: the player crosses three connected rooms.");
+  const sent = await stack.web("/api/conversations/messages", {
+    method: "POST",
+    data: {
+      projectId: project.id,
+      content: "请阅读 PDF 并总结其中的玩法要求。",
+      attachments: [{ filename: "requirements.pdf", contentType: "application/pdf", dataBase64: pdf.toString("base64") }],
+    },
+  });
+  expect(sent.status()).toBe(201);
+  const conversation = (await sent.json() as { conversation: Conversation }).conversation;
+  const userMessage = conversation.messages[0];
+  expect(userMessage.attachments[0]).toMatchObject({
+    filename: "requirements.pdf",
+    contentType: "application/pdf",
+    sizeBytes: pdf.length,
+  });
+  const downloaded = await stack.web(
+    `/api/conversations/${conversation.id}/messages/${userMessage.id}/attachments/${userMessage.attachments[0].id}`,
+  );
+  expect(downloaded.status()).toBe(200);
+  expect(downloaded.headers()["content-type"]).toContain("application/pdf");
+  expect(downloaded.headers()["content-disposition"]).toContain("attachment;");
+  expect(Buffer.from(await downloaded.body())).toEqual(pdf);
+});
+
+function minimalPdf(text: string): Buffer {
+  const escaped = text.replaceAll("\\", "\\\\").replaceAll("(", "\\(").replaceAll(")", "\\)");
+  const stream = `BT /F1 12 Tf 72 720 Td (${escaped}) Tj ET`;
+  const objects = [
+    "<< /Type /Catalog /Pages 2 0 R >>",
+    "<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
+    "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 4 0 R >> >> /Contents 5 0 R >>",
+    "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>",
+    `<< /Length ${Buffer.byteLength(stream)} >>\nstream\n${stream}\nendstream`,
+  ];
+  let document = "%PDF-1.4\n";
+  const offsets = [0];
+  objects.forEach((object, index) => {
+    offsets.push(Buffer.byteLength(document));
+    document += `${index + 1} 0 obj\n${object}\nendobj\n`;
+  });
+  const xrefOffset = Buffer.byteLength(document);
+  document += `xref\n0 ${objects.length + 1}\n0000000000 65535 f \n`;
+  document += offsets.slice(1).map(offset => `${String(offset).padStart(10, "0")} 00000 n \n`).join("");
+  document += `trailer\n<< /Size ${objects.length + 1} /Root 1 0 R >>\nstartxref\n${xrefOffset}\n%%EOF\n`;
+  return Buffer.from(document, "ascii");
+}
 
 test("new-game conversations validate, persist and keep their context locked", async ({ stack }) => {
   for (const data of [

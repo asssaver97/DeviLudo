@@ -2378,45 +2378,76 @@ textarea {
   grid-template-columns: repeat(auto-fit, minmax(min(220px, 100%), 1fr));
 }
 
-.product-delivery-artifact-grid button {
-  align-items: center;
+.product-delivery-artifact-card {
   background: #09111b;
   border: 1px solid #34445b;
   color: var(--ink);
-  cursor: pointer;
+  display: grid;
+  gap: 11px;
+  min-height: 96px;
+  padding: 13px;
+}
+
+.product-delivery-artifact-summary {
+  align-items: center;
   display: grid;
   gap: 8px;
   grid-template-columns: auto minmax(0, 1fr) auto;
-  min-height: 58px;
-  padding: 11px 13px;
-  text-align: left;
+  min-width: 0;
 }
 
-.product-delivery-artifact-grid button:hover,
-.product-delivery-artifact-grid button:focus-visible {
-  border-color: var(--blue);
-  outline: none;
-}
-
-.product-delivery-artifact-grid button:disabled {
-  cursor: progress;
-  opacity: .65;
-}
-
-.product-delivery-artifact-grid button span,
-.product-delivery-artifact-grid button strong {
+.product-delivery-artifact-summary span,
+.product-delivery-artifact-summary small {
   color: #7d8da4;
   font: 700 9px var(--font-geist-mono), monospace;
   margin: 0;
   text-transform: uppercase;
 }
 
-.product-delivery-artifact-grid button b {
+.product-delivery-artifact-summary b {
   font: 800 12px/1.35 var(--font-geist-mono), monospace;
   margin: 0;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.product-delivery-artifact-actions {
+  display: grid;
+  gap: 8px;
+  grid-template-columns: minmax(72px, .7fr) minmax(128px, 1.3fr);
+}
+
+.product-delivery-artifact-actions:has(> :only-child) {
+  grid-template-columns: 1fr;
+}
+
+.product-delivery-artifact-actions button {
+  background: #101c2a;
+  border: 1px solid #34445b;
+  color: #aebed2;
+  cursor: pointer;
+  font: 800 9px/1.2 var(--font-geist-mono), monospace;
+  min-height: 34px;
+  padding: 7px 10px;
+}
+
+.product-delivery-artifact-actions .product-delivery-artifact-open {
+  background: #102c3d;
+  border-color: #25799a;
+  color: #6bdcff;
+}
+
+.product-delivery-artifact-actions button:hover,
+.product-delivery-artifact-actions button:focus-visible {
+  border-color: var(--blue);
+  box-shadow: inset 0 0 0 1px rgba(61, 214, 255, .16);
+  outline: none;
+}
+
+.product-delivery-artifact-actions button:disabled {
+  cursor: progress;
+  opacity: .65;
 }
 
 .product-delivery-configuration {
@@ -3675,6 +3706,51 @@ textarea {
   width: 100%;
 }
 
+.conversation-file-attachment {
+  align-items: center;
+  color: var(--ink);
+  display: grid !important;
+  gap: 4px;
+  grid-template-columns: auto minmax(0, 1fr);
+  min-height: 76px;
+  padding: 12px;
+  text-decoration: none;
+}
+
+.conversation-file-attachment > span,
+.conversation-file-badge {
+  align-items: center;
+  background: #152538;
+  border: 1px solid #42617b;
+  color: var(--blue);
+  display: flex;
+  font: 800 10px/1 var(--font-geist-mono), monospace;
+  justify-content: center;
+  min-height: 38px;
+  min-width: 42px;
+  padding: 8px;
+}
+
+.conversation-file-attachment > span {
+  grid-row: 1 / span 2;
+}
+
+.conversation-file-attachment > b,
+.conversation-file-attachment > small {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.conversation-file-attachment > b {
+  font: 700 10px/1.35 var(--font-geist-mono), monospace;
+}
+
+.conversation-file-attachment > small {
+  color: var(--muted);
+  font: 8px/1.3 var(--font-geist-mono), monospace;
+}
+
 .conversation-box-message.role-design .message-avatar { background: #172437; color: var(--blue); }
 .conversation-box-message.role-analysis .message-avatar { background: #2a2417; color: #e8bd65; }
 .conversation-box-message.role-ui_design .message-avatar { background: #2b2418; color: #f1b85b; }
@@ -4004,6 +4080,16 @@ textarea {
   height: 82px;
   object-fit: cover;
   width: 100%;
+}
+
+.conversation-composer-images figure.is-file {
+  display: grid;
+  grid-template-rows: 82px auto;
+}
+
+.conversation-composer-images figure.is-file .conversation-file-badge {
+  align-self: stretch;
+  min-height: 82px;
 }
 
 .conversation-composer-images figcaption {

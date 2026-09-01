@@ -2,6 +2,8 @@ import type { AgentRuntimeKind, ProjectRuntimeRole, ProjectRuntimeState } from "
 
 export const PROJECT_RUNTIME_SCHEMA = "deviludo.project-runtime.v2" as const;
 export const PROJECT_CONTEXT_SCHEMA = "deviludo.project-context.v2" as const;
+export const MAX_PROJECT_RUNTIME_ATTACHMENT_PATHS = 20;
+export const MAX_PROJECT_RUNTIME_PROMPT_CHARS = 1_000_000;
 
 export type ProjectRuntimeIdentity = Readonly<{
   workspaceId: string;

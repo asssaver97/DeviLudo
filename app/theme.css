@@ -318,6 +318,18 @@ html[data-theme="light"] .product-delivery-config-toggle-icon {
   background: rgba(8, 127, 167, .1);
 }
 
+html[data-theme="light"] .product-delivery-artifact-actions .product-delivery-artifact-open {
+  background: #dff2f8;
+  border-color: #087fa7;
+  color: #075f7c;
+}
+
+html[data-theme="light"] .product-delivery-artifact-actions .product-delivery-artifact-reveal {
+  background: #ffffff;
+  border-color: #aebdcc;
+  color: #43566b;
+}
+
 html[data-theme="light"] .product-delivery-material-group > legend,
 html[data-theme="light"] .product-delivery-artifacts-dock > legend {
   background: #ffffff;
@@ -344,6 +356,7 @@ html[data-theme="light"] :is(
   .product-delivery-material-disclosure,
   .product-delivery-stage-marker,
   .product-delivery-stage-rerun-icon,
+  .product-delivery-artifact-card,
   .product-delivery-artifact-grid button,
   .product-delivery-configuration-grid,
   .project-delivery-asset-settings,
@@ -506,6 +519,17 @@ html[data-theme="light"] .conversation-image-button:focus-visible {
 html[data-theme="light"] .conversation-image-drop-hint {
   background: rgba(248, 251, 253, .96);
   border-color: #6ca8bc;
+  color: #087fa7;
+}
+
+html[data-theme="light"] :is(.conversation-file-attachment, .conversation-composer-images figure) {
+  background: #f5f8fb;
+  border-color: #b8c7d6;
+}
+
+html[data-theme="light"] :is(.conversation-file-attachment > span, .conversation-file-badge) {
+  background: #e4f2f7;
+  border-color: #8db8c8;
   color: #087fa7;
 }
 

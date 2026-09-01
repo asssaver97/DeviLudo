@@ -3,23 +3,23 @@ import { test, expect } from "../fixtures/stack";
 
 const ONE_PIXEL_PNG = Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAACXBIWXMAAAPoAAAD6AG1e1JrAAAADUlEQVR4nGNg2PL/PwAFHgKz57crZQAAAABJRU5ErkJggg==", "base64");
 
-test("the conversation composer accepts images above five MiB up to the new eight MiB limit", async ({ page, stack }) => {
+test("the conversation composer accepts PDF and images up to the twenty MiB attachment limit", async ({ page, stack }) => {
   const project = await stack.createProject({
     name: "会话图片边界",
     concept: "验证聊天框放宽后的图片大小边界。",
   });
   await page.goto(`/projects/${project.id}`);
-  const imageInput = page.getByLabel("选择会话图片");
-  const accepted = Buffer.alloc(6 * 1024 * 1024);
+  const imageInput = page.getByLabel("选择会话附件");
+  const accepted = Buffer.alloc(12 * 1024 * 1024);
   ONE_PIXEL_PNG.copy(accepted);
-  await imageInput.setInputFiles({ name: "six-mib.png", mimeType: "image/png", buffer: accepted });
-  await expect(page.locator('.conversation-composer-images img[alt="six-mib.png"]')).toBeVisible();
+  await imageInput.setInputFiles({ name: "twelve-mib.png", mimeType: "image/png", buffer: accepted });
+  await expect(page.locator('.conversation-composer-images img[alt="twelve-mib.png"]')).toBeVisible();
   await expect(page.locator(".conversation-image-error")).toHaveCount(0);
 
-  const rejected = Buffer.alloc(8 * 1024 * 1024 + 1);
+  const rejected = Buffer.alloc(20 * 1024 * 1024 + 1);
   ONE_PIXEL_PNG.copy(rejected);
-  await imageInput.setInputFiles({ name: "over-eight-mib.png", mimeType: "image/png", buffer: rejected });
-  await expect(page.locator(".conversation-image-error")).toHaveText("仅支持 8 MB 以内的 PNG、JPEG 或 WebP 图片");
+  await imageInput.setInputFiles({ name: "over-twenty-mib.png", mimeType: "image/png", buffer: rejected });
+  await expect(page.locator(".conversation-image-error")).toHaveText("支持 20 MB 以内的 PDF、PNG、JPEG、WebP、GIF、TIFF、AVIF、HEIC/HEIF");
 });
 
 test("product navigation preserves the shell and reuses project data without reconnecting",async({page,stack})=>{
@@ -519,7 +519,7 @@ test("game generation progress is a chronological chat message and resets betwee
   await expect(liveProgress).not.toContainText("刷新进度不得移动会话历史");
 });
 
-test("intent routing does not invent a Design Agent while the request is still unclassified", async ({ page, stack }) => {
+test("conversation preparation does not invent an Agent role before Core starts one", async ({ page, stack }) => {
   const project = await stack.createProject({
     name: "稳定视窗",
     concept: "用于验证流式回复不会把整个项目页面拖到最底部。",
@@ -535,7 +535,7 @@ test("intent routing does not invent a Design Agent while the request is still u
     const input = page.getByLabel("继续项目会话");
     await input.scrollIntoViewIfNeeded();
     await input.fill("请给这个玩法增加一个新的循环机制。");
-    await page.getByLabel("选择会话图片").setInputFiles({
+    await page.getByLabel("选择会话附件").setInputFiles({
       name: "project-feedback.png",
       mimeType: "image/png",
       buffer: ONE_PIXEL_PNG,
@@ -551,14 +551,14 @@ test("intent routing does not invent a Design Agent while the request is still u
     await expect(page.locator('.project-conversation-box .conversation-message-images img[alt="project-feedback.png"]')).toBeVisible();
     await expect(page.locator(".project-conversation-box .conversation-box-message.user .conversation-message-completed-at")).toHaveCount(0);
     await expect(page.locator(".project-conversation-box .conversation-box-message.role-design.is-thinking")).toHaveCount(0);
-    await expect(page.locator(".project-conversation-box .conversation-box-message.role-intent.is-thinking")).toBeVisible();
-    await expect(page.getByText("正在识别意图", { exact: true })).toBeVisible();
+    await expect(page.locator(".project-conversation-box .conversation-box-message.role-system.is-thinking")).toBeVisible();
+    await expect(page.getByText("正在准备会话", { exact: true })).toBeVisible();
     await expect(page.getByText("正在思考", { exact: true })).toHaveCount(0);
     await page.waitForTimeout(250);
     const pageScrollAfter = await page.evaluate(() => window.scrollY);
     expect(Math.abs(pageScrollAfter - pageScrollBefore)).toBeLessThanOrEqual(1);
     await page.getByRole("button", { name: "English" }).click();
-    await expect(page.getByText("Identifying intent", { exact: true })).toBeVisible();
+    await expect(page.getByText("Preparing conversation", { exact: true })).toBeVisible();
     await expect(page.getByText("Thinking", { exact: true })).toHaveCount(0);
   } finally {
     releaseRequest();
@@ -808,7 +808,7 @@ test("the home chat supports both project feedback and a fresh game conversation
   await expect(page.getByRole("heading", { name: "今天想做什么游戏？" })).toBeVisible();
   await page.getByRole("button", { name: "浅色" }).click();
   await expect(page.locator("html")).toHaveAttribute("data-theme", "light");
-  const attachButton = page.getByRole("button", { name: "添加图片" });
+  const attachButton = page.getByRole("button", { name: "添加 PDF 或图片" });
   await expect(attachButton).toBeVisible();
   await expect(attachButton).toHaveText("");
   await expect(attachButton).not.toHaveAttribute("title", /.+/);
@@ -854,7 +854,7 @@ test("the home chat supports both project feedback and a fresh game conversation
   const composer = page.locator(".home-conversation-box .conversation-box-composer");
   await composer.dispatchEvent("dragenter", { dataTransfer: imageTransfer });
   await expect(composer).toHaveClass(/is-image-dragover/);
-  await expect(page.getByText("松开以添加图片", { exact: true })).toBeVisible();
+  await expect(page.getByText("松开以添加 PDF 或图片", { exact: true })).toBeVisible();
   await composer.dispatchEvent("drop", { dataTransfer: imageTransfer });
   await expect(composer).not.toHaveClass(/is-image-dragover/);
   await expect(page.locator(".conversation-composer-images figcaption")).toHaveText(["fog-mode.png", "unused-ui.png"]);
@@ -968,7 +968,7 @@ test("home chat enters the thread immediately and shows animated waiting dots", 
     await page.goto("/");
     const concept = "先进入会话，再等待设计搭档的流式回复。";
     await page.getByLabel("游戏想法或修改意见").fill(concept);
-    await page.getByLabel("选择会话图片").setInputFiles({
+    await page.getByLabel("选择会话附件").setInputFiles({
       name: "new-game-reference.png",
       mimeType: "image/png",
       buffer: ONE_PIXEL_PNG,
@@ -979,7 +979,7 @@ test("home chat enters the thread immediately and shows animated waiting dots", 
     await expect(page.getByText(concept, { exact: true })).toBeVisible();
     const waiting = page.locator(".home-conversation-box .conversation-box-message.is-thinking [aria-label='等待回复']");
     await expect(waiting).toBeVisible();
-    await expect(page.getByText("正在识别意图", { exact: true })).toBeVisible();
+    await expect(page.getByText("正在准备会话", { exact: true })).toBeVisible();
     await expect(waiting.locator("i")).toHaveCount(3);
   } finally {
     releaseRequest();

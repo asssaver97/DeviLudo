@@ -9,6 +9,7 @@ import {
   type AgentModelOverrides,
   type AgentRuntimeKind,
   type ArtifactRecord,
+  type ConversationAttachmentContentType,
   type E2eGoal,
   type E2eGoalDelta,
   type ImplementationChangeRequest,
@@ -52,7 +53,7 @@ import {
 } from "@/lib/product/project-document";
 import { parseResponseLanguage, type ResponseLanguage } from "@/lib/product/response-language";
 import { e2eGoalsDigest, initialE2eGoals, mergeE2eGoals } from "./e2e-goals";
-import type { StoredConversationImage } from "./object-store";
+import type { StoredConversationAttachment } from "./object-store";
 import { agentProgressContentChunks } from "@/lib/product/agent-progress";
 
 export class CoreRepository {
@@ -1322,7 +1323,7 @@ export class CoreRepository {
     document: ProjectDocumentContent;
     responseLanguage?: ResponseLanguage;
     userContent: string;
-    userAttachments?: readonly StoredConversationImage[];
+    userAttachments?: readonly StoredConversationAttachment[];
     assistantMessages: readonly Readonly<{
       content: string;
       metadata: Readonly<Record<string, unknown>>;
@@ -1377,7 +1378,7 @@ export class CoreRepository {
         `INSERT INTO deviludo.conversation_messages(workspace_id, conversation_id, role, content, metadata)
          VALUES ($1::uuid, $2::uuid, 'USER', $3, $4::jsonb)
          RETURNING message_id::text`,
-        [input.workspaceId, input.conversationId, input.userContent, conversationImageMetadata(input.userAttachments)],
+        [input.workspaceId, input.conversationId, input.userContent, conversationAttachmentMetadata(input.userAttachments)],
       );
       const intentDecision = input.assistantMessages
         .map(message => message.metadata.intentDecision)
@@ -2259,7 +2260,7 @@ export class CoreRepository {
     conversationId: string;
     projectId: string;
     userContent: string;
-    userAttachments?: readonly StoredConversationImage[];
+    userAttachments?: readonly StoredConversationAttachment[];
     assistantMessages: readonly Readonly<{
       content: string;
       metadata: Readonly<Record<string, unknown>>;
@@ -2341,7 +2342,7 @@ export class CoreRepository {
         `INSERT INTO deviludo.conversation_messages(workspace_id, conversation_id, role, content, metadata)
          VALUES ($1::uuid, $2::uuid, 'USER', $3, $4::jsonb)
          RETURNING message_id::text`,
-        [input.workspaceId, input.conversationId, input.userContent, conversationImageMetadata(input.userAttachments)],
+        [input.workspaceId, input.conversationId, input.userContent, conversationAttachmentMetadata(input.userAttachments)],
       );
       await touchProjectActivity(client, input.workspaceId, input.projectId);
       const appliedToDraft = input.assistantApplyToDraft && project.workflowState === "DRAFT";
@@ -2950,7 +2951,7 @@ export class CoreRepository {
         id: message.message_id,
         role: message.role,
         content: message.content,
-        attachments: publicConversationImages(message.metadata),
+        attachments: publicConversationAttachments(message.metadata),
         metadata: publicConversationMetadata(message.metadata),
         createdAt: message.created_at,
         completedAt: new Date(message.completed_at).toISOString(),
@@ -2958,12 +2959,12 @@ export class CoreRepository {
     });
   }
 
-  async readConversationImage(
+  async readConversationAttachment(
     workspaceId: string,
     conversationId: string,
     messageId: string,
-    imageId: string,
-  ): Promise<Readonly<{ projectId: string; image: StoredConversationImage }> | null> {
+    attachmentId: string,
+  ): Promise<Readonly<{ projectId: string; attachment: StoredConversationAttachment }> | null> {
     return this.database.withWorkspace(workspaceId, async client => {
       const result = await client.query<{ project_id: string; metadata: Record<string, unknown> }>(
         `SELECT conversation.project_id::text, message.metadata
@@ -2978,8 +2979,8 @@ export class CoreRepository {
       );
       const row = result.rows[0];
       if (!row) return null;
-      const image = storedConversationImages(row.metadata).find(candidate => candidate.id === imageId);
-      return image ? Object.freeze({ projectId: row.project_id, image }) : null;
+      const attachment = storedConversationAttachments(row.metadata).find(candidate => candidate.id === attachmentId);
+      return attachment ? Object.freeze({ projectId: row.project_id, attachment }) : null;
     });
   }
 
@@ -4182,7 +4183,7 @@ export type ProductConversation = Readonly<{
     attachments: readonly Readonly<{
       id: string;
       filename: string;
-      contentType: "image/png" | "image/jpeg" | "image/webp";
+      contentType: ConversationAttachmentContentType;
       sizeBytes: number;
     }>[];
     metadata: Readonly<Record<string, unknown>>;
@@ -4229,50 +4230,52 @@ type ProductConversationMessageRow = {
   completed_at: string;
 };
 
-const CONVERSATION_IMAGES_METADATA_KEY = "conversationImages";
+// Keep the persisted JSON slot stable; its historic name does not constrain
+// the attachment formats accepted by the current API.
+const CONVERSATION_ATTACHMENTS_METADATA_KEY = "conversationImages";
 
-function conversationImageMetadata(images: readonly StoredConversationImage[] | undefined): string {
-  return JSON.stringify(images?.length ? { [CONVERSATION_IMAGES_METADATA_KEY]: images } : {});
+function conversationAttachmentMetadata(attachments: readonly StoredConversationAttachment[] | undefined): string {
+  return JSON.stringify(attachments?.length ? { [CONVERSATION_ATTACHMENTS_METADATA_KEY]: attachments } : {});
 }
 
-function storedConversationImages(metadata: Readonly<Record<string, unknown>>): readonly StoredConversationImage[] {
-  const value = metadata[CONVERSATION_IMAGES_METADATA_KEY];
+function storedConversationAttachments(metadata: Readonly<Record<string, unknown>>): readonly StoredConversationAttachment[] {
+  const value = metadata[CONVERSATION_ATTACHMENTS_METADATA_KEY];
   if (!Array.isArray(value)) return Object.freeze([]);
-  const images = value.flatMap(candidate => {
+  const attachments = value.flatMap(candidate => {
     if (!candidate || typeof candidate !== "object" || Array.isArray(candidate)) return [];
-    const image = candidate as Record<string, unknown>;
-    if (typeof image.id !== "string" || !UUID.test(image.id)
-      || typeof image.filename !== "string" || image.filename.length < 1 || image.filename.length > 180
-      || !["image/png", "image/jpeg", "image/webp"].includes(String(image.contentType))
-      || !Number.isSafeInteger(image.sizeBytes) || Number(image.sizeBytes) < 1
-      || typeof image.bucket !== "string" || !image.bucket
-      || typeof image.key !== "string" || !image.key
-      || typeof image.sha256 !== "string" || !/^sha256:[0-9a-f]{64}$/.test(image.sha256)) return [];
+    const attachment = candidate as Record<string, unknown>;
+    if (typeof attachment.id !== "string" || !UUID.test(attachment.id)
+      || typeof attachment.filename !== "string" || attachment.filename.length < 1 || attachment.filename.length > 180
+      || !["image/png", "image/jpeg", "image/webp", "image/gif", "image/tiff", "image/avif", "image/heic", "image/heif", "application/pdf"].includes(String(attachment.contentType))
+      || !Number.isSafeInteger(attachment.sizeBytes) || Number(attachment.sizeBytes) < 1
+      || typeof attachment.bucket !== "string" || !attachment.bucket
+      || typeof attachment.key !== "string" || !attachment.key
+      || typeof attachment.sha256 !== "string" || !/^sha256:[0-9a-f]{64}$/.test(attachment.sha256)) return [];
     return [Object.freeze({
-      id: image.id,
-      filename: image.filename,
-      contentType: image.contentType as StoredConversationImage["contentType"],
-      sizeBytes: Number(image.sizeBytes),
-      bucket: image.bucket,
-      key: image.key,
-      sha256: image.sha256,
+      id: attachment.id,
+      filename: attachment.filename,
+      contentType: attachment.contentType as StoredConversationAttachment["contentType"],
+      sizeBytes: Number(attachment.sizeBytes),
+      bucket: attachment.bucket,
+      key: attachment.key,
+      sha256: attachment.sha256,
     })];
   });
-  return Object.freeze(images);
+  return Object.freeze(attachments);
 }
 
-function publicConversationImages(metadata: Readonly<Record<string, unknown>>) {
-  return Object.freeze(storedConversationImages(metadata).map(image => Object.freeze({
-    id: image.id,
-    filename: image.filename,
-    contentType: image.contentType,
-    sizeBytes: image.sizeBytes,
+function publicConversationAttachments(metadata: Readonly<Record<string, unknown>>) {
+  return Object.freeze(storedConversationAttachments(metadata).map(attachment => Object.freeze({
+    id: attachment.id,
+    filename: attachment.filename,
+    contentType: attachment.contentType,
+    sizeBytes: attachment.sizeBytes,
   })));
 }
 
 function publicConversationMetadata(metadata: Readonly<Record<string, unknown>>): Readonly<Record<string, unknown>> {
   const result = { ...metadata };
-  delete result[CONVERSATION_IMAGES_METADATA_KEY];
+  delete result[CONVERSATION_ATTACHMENTS_METADATA_KEY];
   if ("options" in result) {
     result.options = normalizeConversationReplyOptions(result.options);
   }

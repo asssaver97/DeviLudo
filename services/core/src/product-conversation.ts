@@ -2,6 +2,7 @@ import type {
   AgentModelOverrides,
   AgentRuntimeKind,
   ConversationReplyOption,
+  ConversationAttachmentContentType,
   E2eGoal,
   E2eGoalDelta,
   ProjectAgentRole,
@@ -95,7 +96,7 @@ export async function deliverValidatedConversationReply(input: Readonly<{
   }
 }
 
-export type ConversationImageInput = Readonly<{
-  contentType: "image/png" | "image/jpeg" | "image/webp";
+export type ConversationAttachmentInput = Readonly<{
+  contentType: ConversationAttachmentContentType;
   dataBase64: string;
 }>;

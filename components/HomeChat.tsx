@@ -4,7 +4,7 @@ import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { useEffect, useMemo, useState, type FormEvent } from "react";
 import { cachedValue, clientCacheKeys, loadCached, storeCached } from "@/lib/product/client-cache";
-import { isDevelopmentAuthorization, type ImplementationChangeRequest, type ProductConversation, type ProductProjectSummary } from "@/lib/product/contracts";
+import { isDevelopmentAuthorization, type ImplementationChangeRequest, type ProductConversation, type ProductProjectDetail, type ProductProjectSummary } from "@/lib/product/contracts";
 import {
   appendStreamingConversationProcess,
   appendStreamingConversationReply,
@@ -15,11 +15,13 @@ import {
   failedOptimisticConversation,
   initialStreamingConversationReplies,
   optimisticConversation,
+  recoverConversationAfterDisconnect,
   replaceStreamingConversationReply,
   sendConversationMessageStream,
   startStreamingConversationReply,
   updateStreamingConversationActivity,
-  type ConversationImageDraft,
+  type ConversationAttachmentDraft,
+  type ConversationStreamPhase,
   type StreamingConversationReplies,
 } from "@/lib/product/conversation-stream";
 import { ConversationBox } from "./conversation/ConversationBox";
@@ -48,12 +50,13 @@ export function HomeChat() {
   const [selectedProjectId, setSelectedProjectId] = useState("");
   const [conversation, setConversation] = useState<ProductConversation | null>(null);
   const [content, setContent] = useState("");
-  const [attachments, setAttachments] = useState<readonly ConversationImageDraft[]>(Object.freeze([]));
+  const [attachments, setAttachments] = useState<readonly ConversationAttachmentDraft[]>(Object.freeze([]));
   const [loadingProjects, setLoadingProjects] = useState(!initialProjects);
   const [sending, setSending] = useState(false);
   const [startingDevelopment, setStartingDevelopment] = useState(false);
   const [pendingChange, setPendingChange] = useState<ImplementationChangeRequest | null>(null);
   const [streamingReplies, setStreamingReplies] = useState<StreamingConversationReplies>({});
+  const [streamPhase, setStreamPhase] = useState<ConversationStreamPhase | null>(null);
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
@@ -93,7 +96,7 @@ export function HomeChat() {
     const message = (selectedOption ?? content).trim();
     const messageAttachments = attachments;
     if ((message.length < 2 && messageAttachments.length === 0) || sending) return;
-    const displayedMessage = message || text("请查看随附图片。", "Please review the attached image.");
+    const displayedMessage = message || text("请查看随附附件。", "Please review the attached file.");
     const previousConversation = conversation;
     const projectId = previousConversation?.projectId || selectedProjectId;
     const pendingConversation = optimisticConversation(
@@ -106,18 +109,24 @@ export function HomeChat() {
     setSending(true);
     setError(null);
     setStreamingReplies(initialStreamingConversationReplies());
+    setStreamPhase("PREPARING");
     setConversation(pendingConversation);
     setContent("");
     setAttachments(Object.freeze([]));
+    let agentStarted = false;
     try {
       const body = previousConversation && !previousConversation.id.startsWith("pending-")
-        ? { conversationId: previousConversation.id, content: message, responseLanguage: locale, attachments: conversationImagePayload(messageAttachments) }
-        : { projectId: selectedProjectId || null, content: message, responseLanguage: locale, attachments: conversationImagePayload(messageAttachments) };
+        ? { conversationId: previousConversation.id, content: message, responseLanguage: locale, attachments: conversationAttachmentPayload(messageAttachments) }
+        : { projectId: selectedProjectId || null, content: message, responseLanguage: locale, attachments: conversationAttachmentPayload(messageAttachments) };
       const result = await sendConversationMessageStream(
         body,
         `conversation:${crypto.randomUUID()}`,
         {
-          onAgentStart: agentRole => setStreamingReplies(current => startStreamingConversationReply(current, agentRole)),
+          onStatus: setStreamPhase,
+          onAgentStart: agentRole => {
+            agentStarted = true;
+            setStreamingReplies(current => startStreamingConversationReply(current, agentRole));
+          },
           onAgentProcess: (agentRole, processEvent) => setStreamingReplies(current => appendStreamingConversationProcess(current, agentRole, processEvent)),
           onAgentDelta: (agentRole, delta) => setStreamingReplies(current => appendStreamingConversationReply(current, agentRole, delta)),
           onAgentReplace: (agentRole, replyContent) => setStreamingReplies(current => replaceStreamingConversationReply(current, agentRole, replyContent)),
@@ -140,6 +149,34 @@ export function HomeChat() {
         router.push(`/projects/${result.project.id}`);
       }
     } catch (cause) {
+      const disconnected = !(cause instanceof ConversationStreamError)
+        || cause.code === "EMPTY_STREAM"
+        || cause.code === "INCOMPLETE_STREAM";
+      if (agentStarted && disconnected && previousConversation && !previousConversation.id.startsWith("pending-")) {
+        const recovered = await recoverConversationAfterDisconnect({
+          conversationId: previousConversation.id,
+          baselineMessageId: previousConversation.messages.at(-1)?.id ?? null,
+          submittedContent: message,
+        });
+        if (recovered) {
+          setConversation(recovered);
+          const projectResponse = await fetch(`/api/projects/${encodeURIComponent(recovered.projectId)}`, { cache: "no-store" }).catch(() => null);
+          const projectPayload = projectResponse?.ok
+            ? await projectResponse.json() as { project?: ProductProjectDetail }
+            : null;
+          if (projectPayload?.project) {
+            setProjects(current => {
+              const next = current.some(project => project.id === projectPayload.project!.id)
+                ? current.map(project => project.id === projectPayload.project!.id ? projectPayload.project! : project)
+                : Object.freeze([projectPayload.project!, ...current]);
+              storeCached(clientCacheKeys.projects, next, 10_000);
+              return next;
+            });
+            setPendingChange(projectPayload.project.pendingImplementationChange);
+          }
+          return;
+        }
+      }
       const failureMessage = cause instanceof ConversationStreamError
         ? errorText(cause.message, "消息发送失败，请稍后重试", "Message failed. Please try again.")
         : text("消息发送失败，请稍后重试", "Message failed. Please try again.");
@@ -152,6 +189,7 @@ export function HomeChat() {
       }
     } finally {
       setStreamingReplies({});
+      setStreamPhase(null);
       setSending(false);
     }
   }
@@ -290,6 +328,7 @@ export function HomeChat() {
       primaryAction={developmentAction}
       sendButtonLabel={text("发送消息", "Send message")}
       sending={sending}
+      streamPhase={streamPhase}
       showMessages={Boolean(conversation)}
       streamingReplies={streamingReplies}
       textareaLabel={text("游戏想法或修改意见", "Game idea or feedback")}
@@ -335,11 +374,11 @@ export function HomeChat() {
   );
 }
 
-function conversationImagePayload(images: readonly ConversationImageDraft[]) {
-  return images.map(image => Object.freeze({
-    filename: image.filename,
-    contentType: image.contentType,
-    dataBase64: image.dataBase64,
+function conversationAttachmentPayload(attachments: readonly ConversationAttachmentDraft[]) {
+  return attachments.map(attachment => Object.freeze({
+    filename: attachment.filename,
+    contentType: attachment.contentType,
+    dataBase64: attachment.dataBase64,
   }));
 }
 

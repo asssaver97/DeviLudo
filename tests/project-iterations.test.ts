@@ -91,6 +91,10 @@ test("the delivery artifact dock keeps only the newest item for each kind and pl
   assert.match(studio, /artifact\.createdAt > current\.createdAt/);
   assert.match(studio, /className="product-delivery-artifacts-dock"/);
   assert.match(studio, /className="product-delivery-artifact-grid"/);
+  assert.match(studio, /className="product-delivery-artifact-card"/);
+  assert.match(studio, /text\(`在 Finder 中显示：\$\{label\}`/);
+  assert.match(studio, /accessArtifact\(artifact, "REVEAL"\)/);
+  assert.match(studio, /!managed \? \(/);
   assert.doesNotMatch(studio, /product-delivery-stage-artifacts/);
   assert.doesNotMatch(studio, /className="product-artifacts-panel"/);
 });

@@ -104,10 +104,11 @@ const server = createServer(async (request, response) => {
       const result = request.url === "/v2/runtime/ensure" ? await projectRuntimes.ensure(body)
         : request.url === "/v2/runtime/pause" ? await projectRuntimes.pause(body)
             : request.url === "/v2/runtime/resume" ? await projectRuntimes.resume(body)
-              : request.url === "/v2/runtime/destroy" ? await projectRuntimes.destroy(body)
-                : request.url === "/v2/runtime/status" ? await projectRuntimes.status(body)
-                  : request.url === "/v2/runtime/list" ? await projectRuntimes.list()
-                    : null;
+              : request.url === "/v2/runtime/cancel" ? await projectRuntimes.cancel(body)
+                : request.url === "/v2/runtime/destroy" ? await projectRuntimes.destroy(body)
+                  : request.url === "/v2/runtime/status" ? await projectRuntimes.status(body)
+                    : request.url === "/v2/runtime/list" ? await projectRuntimes.list()
+                      : null;
       if (result === null) {
         response.writeHead(404).end();
         return;

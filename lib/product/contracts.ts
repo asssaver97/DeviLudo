@@ -366,21 +366,35 @@ export type ProductConversationMessage = Readonly<{
   id: string;
   role: "USER" | "ASSISTANT";
   content: string;
-  attachments: readonly ConversationImageAttachment[];
+  attachments: readonly ConversationAttachment[];
   metadata: Readonly<Record<string, unknown>>;
   createdAt: string;
   /** Set only after the complete message has been accepted or has failed. */
   completedAt: string | null;
 }>;
 
-export const MAX_CONVERSATION_IMAGES = 4;
-export const MAX_CONVERSATION_IMAGE_BYTES = 8 * 1024 * 1024;
-export const MAX_CONVERSATION_IMAGE_TOTAL_BYTES = 12 * 1024 * 1024;
+export const CONVERSATION_ATTACHMENT_CONTENT_TYPES = Object.freeze([
+  "image/png",
+  "image/jpeg",
+  "image/webp",
+  "image/gif",
+  "image/tiff",
+  "image/avif",
+  "image/heic",
+  "image/heif",
+  "application/pdf",
+] as const);
 
-export type ConversationImageAttachment = Readonly<{
+export type ConversationAttachmentContentType = typeof CONVERSATION_ATTACHMENT_CONTENT_TYPES[number];
+
+export const MAX_CONVERSATION_ATTACHMENTS = 6;
+export const MAX_CONVERSATION_ATTACHMENT_BYTES = 20 * 1024 * 1024;
+export const MAX_CONVERSATION_ATTACHMENT_TOTAL_BYTES = 32 * 1024 * 1024;
+
+export type ConversationAttachment = Readonly<{
   id: string;
   filename: string;
-  contentType: "image/png" | "image/jpeg" | "image/webp";
+  contentType: ConversationAttachmentContentType;
   sizeBytes: number;
   /** Present only while an unsaved message is rendered optimistically. */
   previewUrl?: string;

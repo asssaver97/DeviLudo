@@ -3,9 +3,9 @@ import type { Socket } from "node:net";
 import { readFileSync } from "node:fs";
 import Fastify, { type FastifyRequest } from "fastify";
 import {
-  MAX_CONVERSATION_IMAGES,
-  MAX_CONVERSATION_IMAGE_BYTES,
-  MAX_CONVERSATION_IMAGE_TOTAL_BYTES,
+  MAX_CONVERSATION_ATTACHMENTS,
+  MAX_CONVERSATION_ATTACHMENT_BYTES,
+  MAX_CONVERSATION_ATTACHMENT_TOTAL_BYTES,
   type ConversationIntentDecision,
   type ConversationWorkflowAction,
   type ImplementationChangeRequest,
@@ -15,7 +15,10 @@ import {
   type ProjectRuntimeRole,
   type WorkspaceSummary,
 } from "@/lib/product/contracts";
-import type { ProjectRuntimeProgressEvent } from "@/lib/product/project-runtime";
+import {
+  MAX_PROJECT_RUNTIME_PROMPT_CHARS,
+  type ProjectRuntimeProgressEvent,
+} from "@/lib/product/project-runtime";
 import {
   assertPoolOperatingSystem,
   isServerPoolKind,
@@ -71,11 +74,17 @@ import {
 } from "./project-import";
 import {
   deliverValidatedConversationReply,
-  type ConversationImageInput,
+  type ConversationAttachmentInput,
   type ProductConversationGroupReply,
   type ProductConversationStreamCallbacks,
 } from "./product-conversation";
-import { generatedImageExtension, sniffContentType } from "./image-generation";
+import {
+  conversationAttachmentExtension,
+  MAX_RUNTIME_CONVERSATION_IMAGES,
+  prepareConversationAttachment,
+  sniffConversationAttachmentContentType,
+  type RuntimeConversationImage,
+} from "./conversation-attachments";
 import {
   MAX_PLAYER_POLICY_REQUEST_BYTES,
   parsePlayerPolicyDecision,
@@ -1170,46 +1179,49 @@ export async function runApi(
     },
   );
 
-  app.get<{ Params: { conversationId: string; messageId: string; imageId: string } }>(
-    "/v1/conversations/:conversationId/messages/:messageId/images/:imageId",
+  app.get<{ Params: { conversationId: string; messageId: string; attachmentId: string } }>(
+    "/v1/conversations/:conversationId/messages/:messageId/attachments/:attachmentId",
     async (request, reply) => {
       const principal = productAccess(request, config);
       const workspace = await requireSelectedWorkspace(request, repository, principal);
       if (!UUID.test(request.params.conversationId) || !isConversationMessageId(request.params.messageId)
-        || !UUID.test(request.params.imageId)) {
-        return reply.code(404).send({ code: "CONVERSATION_IMAGE_NOT_FOUND" });
+        || !UUID.test(request.params.attachmentId)) {
+        return reply.code(404).send({ code: "CONVERSATION_ATTACHMENT_NOT_FOUND" });
       }
-      const found = await repository.readConversationImage(
+      const found = await repository.readConversationAttachment(
         workspace.id,
         request.params.conversationId,
         request.params.messageId,
-        request.params.imageId,
+        request.params.attachmentId,
       );
-      if (!found) return reply.code(404).send({ code: "CONVERSATION_IMAGE_NOT_FOUND" });
-      const image = await objectStore.readConversationImage({
+      if (!found) return reply.code(404).send({ code: "CONVERSATION_ATTACHMENT_NOT_FOUND" });
+      const attachment = await objectStore.readConversationAttachment({
         workspaceId: workspace.id,
         projectId: found.projectId,
         conversationId: request.params.conversationId,
-        image: found.image,
+        attachment: found.attachment,
       });
       return reply
         .header("cache-control", "private, max-age=3600, immutable")
-        .header("content-type", image.contentType)
+        .header("content-type", attachment.contentType)
+        .header("content-disposition", attachment.contentType === "application/pdf"
+          ? `attachment; filename*=UTF-8''${encodeURIComponent(found.attachment.filename)}`
+          : "inline")
         .header("x-content-type-options", "nosniff")
-        .send(image.content);
+        .send(attachment.content);
     },
   );
 
-  app.post("/v1/conversations/messages", { bodyLimit: 18 * 1024 * 1024 }, async (request, reply) => {
+  app.post("/v1/conversations/messages", { bodyLimit: 46 * 1024 * 1024 }, async (request, reply) => {
     const principal = productAccess(request, config);
-    const command = conversationMessageCommand(request.body);
+    const command = await conversationMessageCommand(request.body);
     const result = await processConversationMessage({ request, principal, repository, objectStore, agentSecrets, host, projectRuntime, command });
     return reply.code(result.statusCode).send(result.payload);
   });
 
-  app.post("/v1/conversations/messages/stream", { bodyLimit: 18 * 1024 * 1024 }, async (request, reply) => {
+  app.post("/v1/conversations/messages/stream", { bodyLimit: 46 * 1024 * 1024 }, async (request, reply) => {
     const principal = productAccess(request, config);
-    const command = conversationMessageCommand(request.body);
+    const command = await conversationMessageCommand(request.body);
     const abortController = new AbortController();
     request.raw.once("aborted", () => abortController.abort());
     reply.hijack();
@@ -2140,17 +2152,19 @@ export async function runApi(
 
 type ConversationMessageCommand = Readonly<{
   content: string;
-  images: readonly ConversationImageCommand[];
+  attachments: readonly ConversationAttachmentCommand[];
+  runtimeImages: readonly RuntimeConversationImage[];
+  attachmentContext: string;
   conversationId: string | null;
   projectId: string | null;
   projectIdSupplied: boolean;
   responseLanguage: ResponseLanguage;
 }>;
 
-type ConversationImageCommand = ConversationImageInput & Readonly<{
+type ConversationAttachmentCommand = ConversationAttachmentInput & Readonly<{
   id: string;
   filename: string;
-  extension: "png" | "jpg" | "webp";
+  extension: string;
   content: Buffer;
 }>;
 
@@ -2167,22 +2181,26 @@ type ConversationMessageResult = Readonly<{
   }>;
 }>;
 
-function conversationMessageCommand(value: unknown): ConversationMessageCommand {
+async function conversationMessageCommand(value: unknown): Promise<ConversationMessageCommand> {
   const body = objectBody(value);
   const rawContent = typeof body.content === "string" ? body.content.trim() : "";
   const responseLanguage = parseResponseLanguage(body.responseLanguage);
-  const images = conversationImageCommands(body.attachments);
-  const content = rawContent || (images.length ? (responseLanguage === "zh" ? "请查看随附图片。" : "Please review the attached image.") : "");
+  const prepared = await conversationAttachmentCommands(body.attachments);
+  const content = rawContent || (prepared.attachments.length
+    ? (responseLanguage === "zh" ? "请查看随附附件。" : "Please review the attached file.")
+    : "");
   const conversationId = body.conversationId === undefined ? null : body.conversationId;
   const projectId = body.projectId === undefined ? null : body.projectId;
-  if ((!images.length && content.length < 2) || content.length > 4_000
+  if ((!prepared.attachments.length && content.length < 2) || content.length > 4_000
     || (conversationId !== null && (typeof conversationId !== "string" || !UUID.test(conversationId)))
     || (projectId !== null && (typeof projectId !== "string" || !UUID.test(projectId)))) {
     throw httpError(400, "INVALID_CONVERSATION_MESSAGE", "对话消息格式无效");
   }
   return Object.freeze({
     content,
-    images,
+    attachments: prepared.attachments,
+    runtimeImages: prepared.runtimeImages,
+    attachmentContext: prepared.attachmentContext,
     conversationId: conversationId as string | null,
     projectId: projectId as string | null,
     projectIdSupplied: body.projectId !== undefined,
@@ -2190,62 +2208,103 @@ function conversationMessageCommand(value: unknown): ConversationMessageCommand 
   });
 }
 
-function conversationImageCommands(value: unknown): readonly ConversationImageCommand[] {
-  if (value === undefined) return Object.freeze([]);
-  if (!Array.isArray(value) || value.length > MAX_CONVERSATION_IMAGES) {
-    throw httpError(400, "INVALID_CONVERSATION_IMAGE", "会话图片格式无效");
+async function conversationAttachmentCommands(value: unknown): Promise<Readonly<{
+  attachments: readonly ConversationAttachmentCommand[];
+  runtimeImages: readonly RuntimeConversationImage[];
+  attachmentContext: string;
+}>> {
+  if (value === undefined) return Object.freeze({
+    attachments: Object.freeze([]), runtimeImages: Object.freeze([]), attachmentContext: "",
+  });
+  if (!Array.isArray(value) || value.length > MAX_CONVERSATION_ATTACHMENTS) {
+    throw httpError(400, "INVALID_CONVERSATION_ATTACHMENT", "会话附件格式无效");
   }
-  if (value.length === 0) return Object.freeze([]);
+  if (value.length === 0) return Object.freeze({
+    attachments: Object.freeze([]), runtimeImages: Object.freeze([]), attachmentContext: "",
+  });
   let totalBytes = 0;
-  return Object.freeze(value.map(candidate => {
-    const image = objectBody(candidate);
-    const filename = typeof image.filename === "string" ? image.filename.trim() : "";
-    const declaredContentType = image.contentType;
-    const dataBase64 = image.dataBase64;
+  const attachments: ConversationAttachmentCommand[] = [];
+  const runtimeImages: RuntimeConversationImage[] = [];
+  const contexts: string[] = [];
+  for (const candidate of value) {
+    const attachment = objectBody(candidate);
+    const filename = typeof attachment.filename === "string" ? attachment.filename.trim() : "";
+    const declaredContentType = attachment.contentType;
+    const dataBase64 = attachment.dataBase64;
     if (!filename || filename.length > 180 || /[\/\\\u0000-\u001f\u007f]/u.test(filename)
       || typeof dataBase64 !== "string" || dataBase64.length < 4
-      || dataBase64.length > Math.ceil(MAX_CONVERSATION_IMAGE_BYTES / 3) * 4 + 4
+      || dataBase64.length > Math.ceil(MAX_CONVERSATION_ATTACHMENT_BYTES / 3) * 4 + 4
       || dataBase64.length % 4 !== 0 || !/^[A-Za-z0-9+/]+={0,2}$/.test(dataBase64)) {
-      throw httpError(400, "INVALID_CONVERSATION_IMAGE", "会话图片格式无效");
+      throw httpError(400, "INVALID_CONVERSATION_ATTACHMENT", "会话附件格式无效");
     }
     const content = Buffer.from(dataBase64, "base64");
-    if (content.length < 1 || content.length > MAX_CONVERSATION_IMAGE_BYTES
+    if (content.length < 1 || content.length > MAX_CONVERSATION_ATTACHMENT_BYTES
       || content.toString("base64") !== dataBase64) {
-      throw httpError(400, "INVALID_CONVERSATION_IMAGE", "会话图片格式无效");
+      throw httpError(400, "INVALID_CONVERSATION_ATTACHMENT", "会话附件格式无效");
     }
     totalBytes += content.length;
-    if (totalBytes > MAX_CONVERSATION_IMAGE_TOTAL_BYTES) {
-      throw httpError(413, "CONVERSATION_IMAGES_TOO_LARGE", "会话图片总大小超过限制");
+    if (totalBytes > MAX_CONVERSATION_ATTACHMENT_TOTAL_BYTES) {
+      throw httpError(413, "CONVERSATION_ATTACHMENTS_TOO_LARGE", "会话附件总大小超过限制");
     }
-    const contentType = sniffContentType(content);
-    const extension = contentType ? generatedImageExtension(contentType) : null;
-    if (!contentType || !extension || contentType !== declaredContentType) {
-      throw httpError(400, "INVALID_CONVERSATION_IMAGE", "会话图片格式无效");
+    const contentType = sniffConversationAttachmentContentType(content);
+    if (!contentType || !conversationAttachmentTypesMatch(contentType, declaredContentType)) {
+      throw httpError(400, "INVALID_CONVERSATION_ATTACHMENT", "附件内容与文件格式不匹配");
     }
-    return Object.freeze({
+    let prepared;
+    try {
+      prepared = await prepareConversationAttachment({ filename, contentType, content });
+    } catch (error) {
+      throw httpError(400, "INVALID_CONVERSATION_ATTACHMENT", error instanceof Error ? error.message : "会话附件无法解析");
+    }
+    attachments.push(Object.freeze({
       id: randomUUID(),
       filename,
-      contentType: contentType as ConversationImageInput["contentType"],
-      extension: extension as "png" | "jpg" | "webp",
+      contentType,
+      extension: conversationAttachmentExtension(contentType),
       content,
       dataBase64,
-    });
-  }));
+    }));
+    if (runtimeImages.length + prepared.runtimeImages.length > MAX_RUNTIME_CONVERSATION_IMAGES) {
+      throw httpError(400, "INVALID_CONVERSATION_ATTACHMENT", `供 Agent 阅读的附件页面总数不能超过 ${MAX_RUNTIME_CONVERSATION_IMAGES} 页`);
+    }
+    runtimeImages.push(...prepared.runtimeImages);
+    if (prepared.extractedText) contexts.push(prepared.extractedText);
+  }
+  const attachmentContext = contexts.join("\n\n===== NEXT ATTACHMENT =====\n\n");
+  if (attachmentContext.length > MAX_PROJECT_RUNTIME_PROMPT_CHARS - 200_000) {
+    throw httpError(413, "CONVERSATION_ATTACHMENTS_TOO_LARGE", "附件提取出的文本过长，请拆分后分批发送");
+  }
+  return Object.freeze({
+    attachments: Object.freeze(attachments),
+    runtimeImages: Object.freeze(runtimeImages),
+    attachmentContext,
+  });
 }
 
-function storeConversationImages(
+function conversationAttachmentTypesMatch(actual: string, declared: unknown): boolean {
+  if (actual === declared) return true;
+  return (actual === "image/heic" || actual === "image/heif")
+    && (declared === "image/heic" || declared === "image/heif");
+}
+
+function storeConversationAttachments(
   objectStore: CoreObjectStore,
   boundary: Readonly<{ workspaceId: string; projectId: string; conversationId: string }>,
-  images: readonly ConversationImageCommand[],
+  attachments: readonly ConversationAttachmentCommand[],
 ) {
-  return Promise.all(images.map(image => objectStore.putConversationImage({
+  return Promise.all(attachments.map(attachment => objectStore.putConversationAttachment({
     ...boundary,
-    id: image.id,
-    filename: image.filename,
-    extension: image.extension,
-    contentType: image.contentType,
-    content: image.content,
+    id: attachment.id,
+    filename: attachment.filename,
+    extension: attachment.extension,
+    contentType: attachment.contentType,
+    content: attachment.content,
   })));
+}
+
+function conversationAgentContent(command: ConversationMessageCommand): string {
+  if (!command.attachmentContext) return command.content;
+  return `${command.content}\n\n<player-attachment-content>\n${command.attachmentContext}\n</player-attachment-content>`;
 }
 
 function forwardConversationRuntimeProgress(
@@ -2368,14 +2427,14 @@ async function processConversationMessage(input: Readonly<{
       mode: "READ_ONLY_BRANCH",
       prompt: projectRuntimeSpecialistPrompt({
         intent: intentDecision,
-        content: command.content,
+        content: conversationAgentContent(command),
         confirmed: intentDecision.intent === "CHANGE_REQUEST" && intentDecision.explicitExecution,
       }),
       responseLanguage: command.responseLanguage,
       settings,
       sourceRevision: null,
       sourceRelativePath: null,
-      attachments: command.images,
+      attachments: command.runtimeImages,
       onEvent: event => {
         const forwarded = forwardConversationRuntimeProgress(input.stream, specialistRole, event);
         streamedSpecialistContent += forwarded.content;
@@ -2415,7 +2474,7 @@ async function processConversationMessage(input: Readonly<{
         mode: "READ_ONLY_BRANCH",
         prompt: projectRuntimeSpecialistPrompt({
           intent: uiIntent,
-          content: command.content,
+          content: conversationAgentContent(command),
           confirmed: intentDecision.intent === "CHANGE_REQUEST" && intentDecision.explicitExecution,
           upstreamDesign: conversationDesignHandoff(specialistReply),
         }),
@@ -2423,7 +2482,7 @@ async function processConversationMessage(input: Readonly<{
         settings,
         sourceRevision: null,
         sourceRelativePath: null,
-        attachments: command.images,
+        attachments: command.runtimeImages,
         onEvent: event => {
           const forwarded = forwardConversationRuntimeProgress(input.stream, "UI_DESIGN", event);
           streamedUiContent += forwarded.content;
@@ -2451,11 +2510,11 @@ async function processConversationMessage(input: Readonly<{
       input.stream?.onComplete(specialistRole);
     }
     input.onStage?.("SAVING");
-    const userAttachments = await storeConversationImages(objectStore, {
+    const userAttachments = await storeConversationAttachments(objectStore, {
       workspaceId: targetWorkspace.id,
       projectId,
       conversationId,
-    }, command.images);
+    }, command.attachments);
     const conversation = await repository.appendConversationTurn({
       workspaceId: targetWorkspace.id,
       projectId,
@@ -2533,9 +2592,10 @@ async function processConversationMessage(input: Readonly<{
   });
   input.onStage?.("RESPONDING");
   const pending = project.pendingImplementationChange;
-  const continuedIntent = project.workflowState === "DRAFT" && !pending
-    ? projectRuntimeContinuationIntent(existingConversation?.messages ?? Object.freeze([]), command.content)
-    : null;
+  const continuedIntent = projectRuntimeContinuationIntent(
+    existingConversation?.messages ?? Object.freeze([]),
+    command.content,
+  );
   let intentDecision: ConversationIntentDecision;
   if (continuedIntent) {
     intentDecision = continuedIntent;
@@ -2548,7 +2608,7 @@ async function processConversationMessage(input: Readonly<{
       mode: "PRIMARY",
       prompt: projectRuntimeIntentPrompt({
         content: command.content,
-        hasAttachments: command.images.length > 0,
+        hasAttachments: command.attachments.length > 0,
         hasPendingChange: pending !== null,
         workflowState: project.workflowState,
         recentMessages: existingConversation?.messages ?? Object.freeze([]),
@@ -2558,20 +2618,19 @@ async function processConversationMessage(input: Readonly<{
       settings,
       sourceRevision: project.source?.revision ?? null,
       sourceRelativePath: project.source?.relativePath ?? null,
-      attachments: command.images,
       onEvent: event => { forwardConversationRuntimeProgress(input.stream, "INTENT", event); },
     }).catch(error => { throw httpError(424, "INTENT_AGENT_FAILED", error instanceof Error ? error.message : "Intent Agent failed"); });
     input.stream?.onComplete("INTENT");
     intentDecision = parseProjectRuntimeIntent(intentResult);
   }
   const conversationId = command.conversationId ?? randomUUID();
-  let userAttachments: ReturnType<typeof storeConversationImages> | null = null;
+  let userAttachments: ReturnType<typeof storeConversationAttachments> | null = null;
   const storedUserAttachments = () => {
-    userAttachments ??= storeConversationImages(objectStore, {
+    userAttachments ??= storeConversationAttachments(objectStore, {
       workspaceId: workspace.id,
       projectId,
       conversationId,
-    }, command.images);
+    }, command.attachments);
     return userAttachments;
   };
   if (intentDecision.intent === "CONFIRM_CHANGE" || intentDecision.intent === "REJECT_CHANGE") {
@@ -2731,7 +2790,7 @@ async function processConversationMessage(input: Readonly<{
     mode: "READ_ONLY_BRANCH",
     prompt: projectRuntimeSpecialistPrompt({
       intent: intentDecision,
-      content: command.content,
+      content: conversationAgentContent(command),
       confirmed: intentDecision.intent === "CHANGE_REQUEST" && intentDecision.explicitExecution,
       designConvergence,
       upstreamDesign: specialistRole === "UI_DESIGN"
@@ -2742,7 +2801,7 @@ async function processConversationMessage(input: Readonly<{
     settings,
     sourceRevision: project.source?.revision ?? null,
     sourceRelativePath: project.source?.relativePath ?? null,
-    attachments: command.images,
+    attachments: command.runtimeImages,
     onEvent: event => {
       const forwarded = forwardConversationRuntimeProgress(input.stream, specialistRole, event);
       streamedSpecialistContent += forwarded.content;
@@ -2782,7 +2841,7 @@ async function processConversationMessage(input: Readonly<{
       mode: "READ_ONLY_BRANCH",
       prompt: projectRuntimeSpecialistPrompt({
         intent: uiIntent,
-        content: command.content,
+        content: conversationAgentContent(command),
         confirmed: intentDecision.intent === "CHANGE_REQUEST" && intentDecision.explicitExecution,
         designConvergence,
         upstreamDesign: conversationDesignHandoff(specialistReply),
@@ -2791,7 +2850,7 @@ async function processConversationMessage(input: Readonly<{
       settings,
       sourceRevision: project.source?.revision ?? null,
       sourceRelativePath: project.source?.relativePath ?? null,
-      attachments: command.images,
+      attachments: command.runtimeImages,
       onEvent: event => {
         const forwarded = forwardConversationRuntimeProgress(input.stream, "UI_DESIGN", event);
         streamedUiContent += forwarded.content;

@@ -23,7 +23,11 @@ import {
   updateProjectContext,
 } from "./project-context";
 import { ProcessProjectRuntimeBackend, type ProjectRuntimeBackend } from "./project-runtime-backend";
-import { ProjectRuntimeRepository, type ProjectContextSeed } from "./project-runtime-repository";
+import {
+  ProjectRuntimeRepository,
+  runtimeContainerStateForTurn,
+  type ProjectContextSeed,
+} from "./project-runtime-repository";
 import { ProjectSourceStore } from "./project-sources";
 import type { StoredInstanceAgentSettings } from "./repository";
 import { extractAndValidateEvidenceBundle } from "@/scripts/e2e-evidence.mjs";
@@ -151,6 +155,23 @@ export class ProjectRuntimeService {
   }
 
   private async runTurn(input: ProjectRuntimeTurnInput): Promise<ProjectRuntimeTurnResult> {
+    if (!input.lifecycleLeaseToken) {
+      const interrupted = await this.repository.interruptIdleCompaction(
+        input.workspaceId,
+        input.projectId,
+        input.settings.agentRuntime,
+      );
+      if (interrupted?.containerId) {
+        await this.backend.cancel({
+          schemaVersion: PROJECT_RUNTIME_SCHEMA,
+          workspaceId: interrupted.workspaceId,
+          projectId: interrupted.projectId,
+          generation: interrupted.generation,
+          fencingToken: interrupted.fencingToken,
+          runtime: interrupted.runtime,
+        });
+      }
+    }
     const registered = await this.readRegisteredContext(input.workspaceId, input.projectId);
     let metadata = registered.metadata;
     let context = registered.context;
@@ -198,12 +219,14 @@ export class ProjectRuntimeService {
       sourceRelativePath: input.sourceRelativePath,
       contextRelativePath: metadata.relativePath,
     });
-    await this.repository.markContainer(input.workspaceId, input.projectId, {
+    const marked = await this.repository.markContainer(input.workspaceId, input.projectId, {
       generation: runtime.generation,
       fencingToken: runtime.fencingToken,
-      state: "RUNNING",
+      state: runtimeContainerStateForTurn(input.mode, input.lifecycleLeaseToken),
       containerId: ensured.containerId,
+      lifecycleLeaseToken: input.lifecycleLeaseToken,
     });
+    if (!marked) throw new Error("Project Runtime lifecycle transition changed before the turn started");
     const started = await this.repository.startTurn({
       workspaceId: input.workspaceId,
       projectId: input.projectId,

@@ -13,15 +13,19 @@ import {
 } from "@aws-sdk/client-s3";
 import { getSignedUrl } from "@aws-sdk/s3-request-presigner";
 import type { JobProtocolV4, ObjectReference } from "./contracts";
-import { MAX_CONVERSATION_IMAGE_BYTES, type ArtifactRecord } from "@/lib/product/contracts";
+import {
+  MAX_CONVERSATION_ATTACHMENT_BYTES,
+  type ArtifactRecord,
+  type ConversationAttachmentContentType,
+} from "@/lib/product/contracts";
 import { createHash, randomUUID } from "node:crypto";
 import { parseProjectDocumentContent, projectDocumentMarkdown } from "@/lib/product/project-document";
 import { parseResponseLanguage } from "@/lib/product/response-language";
 
-export type StoredConversationImage = Readonly<{
+export type StoredConversationAttachment = Readonly<{
   id: string;
   filename: string;
-  contentType: "image/png" | "image/jpeg" | "image/webp";
+  contentType: ConversationAttachmentContentType;
   sizeBytes: number;
   bucket: string;
   key: string;
@@ -118,21 +122,24 @@ export class CoreObjectStore {
     return Object.freeze({ bucket: this.bucket, key, sha256, sizeBytes: input.content.length });
   }
 
-  async putConversationImage(input: Readonly<{
+  async putConversationAttachment(input: Readonly<{
     workspaceId: string;
     projectId: string;
     conversationId: string;
     id: string;
     filename: string;
-    extension: "png" | "jpg" | "webp";
-    contentType: "image/png" | "image/jpeg" | "image/webp";
+    extension: string;
+    contentType: ConversationAttachmentContentType;
     content: Buffer;
-  }>): Promise<StoredConversationImage> {
+  }>): Promise<StoredConversationAttachment> {
     if (![input.workspaceId, input.projectId, input.conversationId, input.id].every(value => UUID.test(value))) {
-      throw new Error("Conversation image boundary is invalid");
+      throw new Error("Conversation attachment boundary is invalid");
     }
-    if (input.content.length < 1 || input.content.length > MAX_CONVERSATION_IMAGE_BYTES) {
-      throw new Error("Conversation image size is invalid");
+    if (!/^(?:png|jpg|webp|gif|tiff|avif|heic|heif|pdf)$/.test(input.extension)) {
+      throw new Error("Conversation attachment extension is invalid");
+    }
+    if (input.content.length < 1 || input.content.length > MAX_CONVERSATION_ATTACHMENT_BYTES) {
+      throw new Error("Conversation attachment size is invalid");
     }
     const sha256 = `sha256:${createHash("sha256").update(input.content).digest("hex")}`;
     const key = `workspaces/${input.workspaceId}/projects/${input.projectId}`
@@ -155,28 +162,28 @@ export class CoreObjectStore {
     });
   }
 
-  async readConversationImage(input: Readonly<{
+  async readConversationAttachment(input: Readonly<{
     workspaceId: string;
     projectId: string;
     conversationId: string;
-    image: StoredConversationImage;
-  }>): Promise<Readonly<{ content: Buffer; contentType: StoredConversationImage["contentType"] }>> {
+    attachment: StoredConversationAttachment;
+  }>): Promise<Readonly<{ content: Buffer; contentType: StoredConversationAttachment["contentType"] }>> {
     const prefix = `workspaces/${input.workspaceId}/projects/${input.projectId}/conversations/${input.conversationId}/`;
-    const image = input.image;
-    if (image.bucket !== this.bucket || !image.key.startsWith(prefix)
-      || !/^sha256:[0-9a-f]{64}$/.test(image.sha256)
-      || !Number.isSafeInteger(image.sizeBytes) || image.sizeBytes < 1
-      || image.sizeBytes > MAX_CONVERSATION_IMAGE_BYTES) {
-      throw new Error("Conversation image boundary is invalid");
+    const attachment = input.attachment;
+    if (attachment.bucket !== this.bucket || !attachment.key.startsWith(prefix)
+      || !/^sha256:[0-9a-f]{64}$/.test(attachment.sha256)
+      || !Number.isSafeInteger(attachment.sizeBytes) || attachment.sizeBytes < 1
+      || attachment.sizeBytes > MAX_CONVERSATION_ATTACHMENT_BYTES) {
+      throw new Error("Conversation attachment boundary is invalid");
     }
-    const result = await this.client.send(new GetObjectCommand({ Bucket: image.bucket, Key: image.key }));
-    if (!result.Body) throw new Error("Conversation image body is missing");
+    const result = await this.client.send(new GetObjectCommand({ Bucket: attachment.bucket, Key: attachment.key }));
+    if (!result.Body) throw new Error("Conversation attachment body is missing");
     const content = Buffer.from(await result.Body.transformToByteArray());
-    if (content.length !== image.sizeBytes
-      || `sha256:${createHash("sha256").update(content).digest("hex")}` !== image.sha256) {
-      throw new Error("Conversation image digest or size is invalid");
+    if (content.length !== attachment.sizeBytes
+      || `sha256:${createHash("sha256").update(content).digest("hex")}` !== attachment.sha256) {
+      throw new Error("Conversation attachment digest or size is invalid");
     }
-    return Object.freeze({ content, contentType: image.contentType });
+    return Object.freeze({ content, contentType: attachment.contentType });
   }
 
   /**

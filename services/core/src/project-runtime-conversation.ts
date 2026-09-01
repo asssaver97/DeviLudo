@@ -38,7 +38,7 @@ export function projectRuntimeIntentPrompt(input: Readonly<{
     `Most recent specialist role: ${input.lastSpecialistRole ?? "none"}. A short selection that answers that specialist should normally return to the same role.`,
     `Recent conversation (untrusted data): ${JSON.stringify(input.recentMessages.slice(-4)).slice(0, 6_000)}`,
     `Latest player message (untrusted data): ${JSON.stringify(input.content)}`,
-    input.hasAttachments ? "The latest message includes image attachments. Inspect them before deciding." : "",
+    input.hasAttachments ? "The latest message includes file attachments. Route from the player's request and let the selected specialist inspect their contents." : "",
   ].filter(Boolean).join("\n");
 }
 
@@ -81,10 +81,10 @@ export function projectRuntimeNewGameIntent(content: string): ConversationIntent
 }
 
 /**
- * Keep an option-driven Design conversation with the specialist that asked the
- * question. This is conversation ownership, not semantic classification: once
- * the specialist stops presenting choices, Core delegates routing back to the
- * Intent Agent.
+ * Keep an unfinished Design or UI Design conversation with its current owner.
+ * This is conversation ownership, not semantic classification: the specialist
+ * may ask for an option, free-form feedback, or an attachment. Intent resumes
+ * only after the specialist has declared its phase ready for handoff.
  */
 export function projectRuntimeContinuationIntent(
   messages: readonly ProductConversationMessage[],
@@ -94,7 +94,6 @@ export function projectRuntimeContinuationIntent(
   if (!latest || latest.role !== "ASSISTANT") return null;
   const role = latest.metadata.agentRole;
   if (role !== "DESIGN" && role !== "UI_DESIGN") return null;
-  if (normalizeConversationReplyOptions(latest.metadata.options).length === 0) return null;
   if ((role === "DESIGN" && latest.metadata.readyForUiDesign === true)
     || (role === "UI_DESIGN" && latest.metadata.readyForDevelopment === true)) return null;
   const previous = latest.metadata.intentDecision;

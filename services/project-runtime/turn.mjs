@@ -12,6 +12,9 @@ import {
   structuredRuntimeOutput,
 } from "./runtime-events.mjs";
 
+const MAX_ATTACHMENT_PATHS = 20;
+const MAX_PROMPT_CHARS = 1_000_000;
+
 // Source changes must remain writable by the trusted Core project group so
 // server-side checkpointing and generated-asset retirement stay possible.
 process.umask(0o002);
@@ -36,7 +39,11 @@ const mcpTokenFile = process.env.DEVILUDO_MCP_TOKEN_FILE ?? "/run/deviludo/mcp-t
 const codexModelsCacheFile = process.env.DEVILUDO_CODEX_MODELS_CACHE_FILE
   ?? `/run/deviludo/${request.turnId}/models-cache.json`;
 const startedAt = new Date().toISOString();
-const previous = await readJson(sessionFile);
+const storedSession = await readJson(sessionFile);
+// Intent is a stateless semantic router. Its prompt already contains the compact
+// routing snapshot, so resuming a long role transcript only adds latency and
+// makes a simple option reply pay for unrelated conversation history.
+const previous = request.role === "INTENT" ? null : storedSession;
 const nativeSessionId = previous?.nativeSessionId ?? randomUUID();
 await verifySkillManifest();
 await installNativeSkills();
@@ -160,6 +167,7 @@ if (request.runtime === "CLAUDE_CODE") {
   if (modelCatalog) args.push("--config", `model_catalog_json=${modelCatalog}`);
   if (!official) args.push("--config", `model_providers.${provider}.env_key=DEVILUDO_CODEX_PROVIDER_API_KEY`);
   if (request.model !== "account-default") args.push("-m", request.model);
+  if (request.role === "INTENT") args.push("--config", "model_reasoning_effort=low");
   for (const attachmentPath of request.attachmentPaths) args.push("-i", attachmentPath);
   args.push("-C", writable ? sourceDirectory : "/opt/deviludo/readonly-workspace");
   // Every turn gets an isolated CODEX_HOME copy. A read-only branch can resume
@@ -172,7 +180,7 @@ if (request.runtime === "CLAUDE_CODE") {
 }
 
 const result = await run(command, args, environment, input).finally(async () => {
-  if (ephemeralCodexHome && request.mode !== "READ_ONLY_BRANCH") {
+  if (ephemeralCodexHome && request.mode !== "READ_ONLY_BRANCH" && request.role !== "INTENT") {
     await persistCodexSessions(ephemeralCodexHome);
   }
   await Promise.all([
@@ -184,7 +192,7 @@ const result = await run(command, args, environment, input).finally(async () => 
   ]);
 });
 const sessionId = result.sessionId ?? nativeSessionId;
-if (request.mode !== "READ_ONLY_BRANCH") {
+if (request.mode !== "READ_ONLY_BRANCH" && request.role !== "INTENT") {
   await mkdir(`${stateRoot}/sessions`, { recursive: true, mode: 0o700 });
   await writeFile(sessionFile, JSON.stringify({ nativeSessionId: sessionId, role: request.role, updatedAt: new Date().toISOString() }), { mode: 0o600 });
 }
@@ -283,7 +291,8 @@ function validateRequest(value) {
     || !["PRIMARY", "READ_ONLY_BRANCH", "COMPACT"].includes(value.mode)
     || !["CLAUDE_CODE", "CODEX_CLI"].includes(value.runtime)
     || !/^[0-9a-f-]{36}$/i.test(value.turnId)
-    || typeof value.prompt !== "string" || value.prompt.length < 1 || value.prompt.length > 100000
+    || !Array.isArray(value.attachmentPaths) || value.attachmentPaths.length > MAX_ATTACHMENT_PATHS
+    || typeof value.prompt !== "string" || value.prompt.length < 1 || value.prompt.length > MAX_PROMPT_CHARS
     || typeof value.baseUrl !== "string" || typeof value.model !== "string") {
     throw new Error("Project Runtime turn request is invalid");
   }

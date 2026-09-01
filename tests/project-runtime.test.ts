@@ -8,6 +8,8 @@ import { zstdCompress } from "node:zlib";
 import { isDevelopmentAuthorization, type ProductConversationMessage } from "@/lib/product/contracts";
 import type { ProjectRuntimeTurnResult } from "@/lib/product/project-runtime";
 import {
+  MAX_PROJECT_RUNTIME_ATTACHMENT_PATHS,
+  MAX_PROJECT_RUNTIME_PROMPT_CHARS,
   PROJECT_RUNTIME_IDLE_MS,
   PROJECT_RUNTIME_PAUSED_DESTROY_MS,
 } from "@/lib/product/project-runtime";
@@ -60,7 +62,11 @@ import {
   validateNarrativeDeliveryProof,
   visualEvidenceCheckpoints,
 } from "@/services/core/src/project-runtime-service";
-import { ProjectRuntimeRepository } from "@/services/core/src/project-runtime-repository";
+import {
+  ProjectRuntimeRepository,
+  runtimeContainerStateForTurn,
+} from "@/services/core/src/project-runtime-repository";
+import { ProjectRuntimeLifecycle } from "@/services/core/src/project-runtime-lifecycle";
 import {
   createRuntimeEventLineBuffer,
   createStructuredContentDeltaExtractor,
@@ -106,6 +112,53 @@ test("Runtime turns wait through lifecycle compaction without consuming a workfl
     async () => { throw new Error("Runtime backend failed"); },
     { wait: async () => { throw new Error("must not wait"); } },
   ), /Runtime backend failed/);
+});
+
+test("foreground work can interrupt an idle compaction before the Runtime is paused", async () => {
+  let completed = false;
+  let released = false;
+  let paused = false;
+  const claim = Object.freeze({
+    workspaceId,
+    projectId,
+    runtime: "CODEX_CLI" as const,
+    generation: 4,
+    fencingToken: 7,
+    state: "COMPACTING" as const,
+    containerId: "runtime-container",
+    activeRole: null,
+    activeTurnId: null,
+    lastActivityAt: new Date(0).toISOString(),
+    pausedAt: null,
+    action: "PAUSE" as const,
+    leaseToken: "10000000-0000-4000-8000-000000000099",
+  });
+  const runtimes = {
+    claimPressureLifecycle: async () => null,
+    claimLifecycle: async () => claim,
+    lifecycleClaimActive: async () => false,
+    completeLifecycle: async () => { completed = true; return true; },
+    failLifecycle: async () => { released = true; return true; },
+  };
+  const service = {
+    reconcileRuntimes: async () => ({ attached: 0, destroyed: 0, missing: 0 }),
+    pauseRuntime: async () => { paused = true; },
+  };
+  const repository = { readAgentSettings: async () => null };
+  const lifecycle = new ProjectRuntimeLifecycle(runtimes as never, service as never, repository as never);
+  await lifecycle.runOnce();
+  const result = await lifecycle.runOnce();
+  assert.equal(result?.action, "INTERRUPTED");
+  assert.equal(paused, false);
+  assert.equal(completed, false);
+  assert.equal(released, true);
+});
+
+test("lifecycle compaction preserves the compacting container state", () => {
+  assert.equal(runtimeContainerStateForTurn("COMPACT", "lifecycle-lease"), "COMPACTING");
+  assert.equal(runtimeContainerStateForTurn("COMPACT"), "RUNNING");
+  assert.equal(runtimeContainerStateForTurn("PRIMARY", "lifecycle-lease"), "RUNNING");
+  assert.equal(runtimeContainerStateForTurn("READ_ONLY_BRANCH", "lifecycle-lease"), "RUNNING");
 });
 
 test("Design and UI Design completion accept only the current turn's durable next-stage handoff", () => {
@@ -179,7 +232,7 @@ test("persistent Runtime intent selects exactly one role and rejects contradicto
   }), /Each option object needs a concise label and one short description/);
 });
 
-test("option-driven Design replies continue without another Intent Agent turn", () => {
+test("unfinished Design replies continue without another Intent Agent turn", () => {
   const newGame = projectRuntimeNewGameIntent(
     "读取公开素材，并制作同名游戏。游戏内容参考人物设定与故事大纲。",
   );
@@ -219,9 +272,15 @@ test("option-driven Design replies continue without another Intent Agent turn", 
     actionable: true,
     summary: "我想让每轮保留一条记忆",
   });
-  assert.equal(projectRuntimeContinuationIntent([message(Object.freeze({
+  assert.deepEqual(projectRuntimeContinuationIntent([message(Object.freeze({
     agentRole: "DESIGN", readyForUiDesign: false, options: Object.freeze([]), intentDecision,
-  }))], "改做 UI"), null);
+  }))], "已上传你要求的完整正文"), {
+    intent: "CHANGE_REQUEST",
+    targetRole: "DESIGN",
+    explicitExecution: false,
+    actionable: true,
+    summary: "已上传你要求的完整正文",
+  });
   assert.equal(projectRuntimeContinuationIntent([message(Object.freeze({
     agentRole: "DESIGN", readyForUiDesign: true,
     options: Object.freeze([Object.freeze({ label: "继续", description: "已完成设计。" })]), intentDecision,
@@ -328,7 +387,7 @@ test("development authorization labels remain explicit UI actions", () => {
   }, "UI_DESIGN"), "START_DEVELOPMENT");
 });
 
-test("Intent routes role boundaries while option-driven design replies preserve their specialist", async () => {
+test("Intent routes role boundaries while unfinished design replies preserve their specialist", async () => {
   const [api, conversation, intentSkill] = await Promise.all([
     readFile(new URL("../services/core/src/api.ts", import.meta.url), "utf8"),
     readFile(new URL("../services/core/src/project-runtime-conversation.ts", import.meta.url), "utf8"),
@@ -337,11 +396,15 @@ test("Intent routes role boundaries while option-driven design replies preserve 
   assert.doesNotMatch(api, /lightweightProjectRuntimeIntent/);
   assert.doesNotMatch(conversation, /lightweightProjectRuntimeIntent|const mutation =|const developmentRole =/);
   assert.match(api, /onStart\("INTENT"\)[\s\S]*role: "INTENT"[\s\S]*parseProjectRuntimeIntent/);
+  const intentTurn = api.slice(api.indexOf('input.stream?.onStart("INTENT")'), api.indexOf("input.stream?.onComplete", api.indexOf('input.stream?.onStart("INTENT")')));
+  assert.match(intentTurn, /content: command\.content/);
+  assert.doesNotMatch(intentTurn, /conversationAgentContent|attachments: command\.runtimeImages/);
   assert.match(api, /const intentDecision = projectRuntimeNewGameIntent\(command\.content\)/);
-  assert.match(api, /project\.workflowState === "DRAFT" && !pending[\s\S]*projectRuntimeContinuationIntent/);
+  assert.doesNotMatch(api, /project\.workflowState === "DRAFT" && !pending[\s\S]*projectRuntimeContinuationIntent/);
+  assert.match(api, /const continuedIntent = projectRuntimeContinuationIntent\([\s\S]*existingConversation/);
   assert.match(intentSkill, /semantic router at ambiguous conversation entry points and role boundaries/);
   assert.match(intentSkill, /assigns new-game creation directly to Design/);
-  assert.match(intentSkill, /preserve an active Design or UI Design choice conversation without invoking you/);
+  assert.match(intentSkill, /preserves an unfinished Design or UI Design conversation without invoking you/);
   assert.match(intentSkill, /UI\/UX redesign[\s\S]*even when the player also says to implement them/);
   assert.match(projectRuntimeIntentPrompt({
     content: "重新设计并实现游戏界面 UI",
@@ -350,6 +413,11 @@ test("Intent routes role boundaries while option-driven design replies preserve 
     workflowState: "RELEASE_PENDING",
     recentMessages: [],
   }), /Route UI redesign or unresolved interface decisions to UI_DESIGN even when the player also says to implement them/);
+});
+
+test("Runtime attachment and prompt limits admit parsed multi-page PDFs", () => {
+  assert.equal(MAX_PROJECT_RUNTIME_ATTACHMENT_PATHS, 20);
+  assert.equal(MAX_PROJECT_RUNTIME_PROMPT_CHARS, 1_000_000);
 });
 
 test("specialist output is attributed to the real persistent role session", () => {
@@ -1808,6 +1876,9 @@ test("Core has one Runtime path and controlled task images cannot execute Agent 
   assert.match(turn, /mcp_servers\.deviludo\.env_vars/);
   assert.match(turn, /ephemeralMcpConfig/);
   assert.match(turn, /request\.role === "INTENT"[\s\S]*model_reasoning_effort=low/);
+  assert.match(turn, /const previous = request\.role === "INTENT" \? null : storedSession/);
+  assert.match(turn, /ephemeralCodexHome[\s\S]*request\.role !== "INTENT"/);
+  assert.match(runtimeService, /interruptIdleCompaction[\s\S]*backend\.cancel/);
   assert.match(turn, /liveWebSearch = request\.role === "DESIGN" \|\| request\.role === "UI_DESIGN"/);
   assert.match(turn, /liveWebSearch \? \["--search"\] : \[\]/);
   assert.match(turn, /liveWebSearch \? "WebSearch," : ""/);
