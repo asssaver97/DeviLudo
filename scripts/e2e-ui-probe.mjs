@@ -247,7 +247,11 @@ function assertionReference(assertion) {
 function compareAssertion(assertion, previous, actual) {
   switch (assertion.operator) {
     case "EXISTS": return actual !== undefined && actual !== null;
-    case "CHANGED": return actual !== undefined && stableJson(actual) !== stableJson(previous);
+    // A transition may legitimately remove a previously published control or
+    // field. The pre-action reference guard guarantees that CHANGED never
+    // succeeds from an invented baseline, so disappearance is evidence of a
+    // real transition instead of a 15-second postcondition timeout.
+    case "CHANGED": return previous !== undefined && stableJson(actual) !== stableJson(previous);
     case "EQUALS": return actual === assertion.value;
     case "NOT_EQUALS": return actual !== assertion.value;
     case "GREATER_THAN": return typeof actual === "number" && actual > assertion.value;

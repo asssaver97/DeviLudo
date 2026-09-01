@@ -7,7 +7,11 @@ import type { CoreRepository } from "./repository";
 import { CoreObjectStore } from "./object-store";
 import { ProjectSourceStore } from "./project-sources";
 import type { CoreHostServices } from "./access";
-import { runtimeTurnHandoff, type ProjectRuntimeService } from "./project-runtime-service";
+import {
+  hasCurrentTurnSourceCheckpoint,
+  runtimeTurnHandoff,
+  type ProjectRuntimeService,
+} from "./project-runtime-service";
 import type { ProjectRuntimeRole } from "@/lib/product/contracts";
 import { resolveAgentModel } from "./agent-settings";
 
@@ -229,6 +233,9 @@ export async function runSandbox(
             if (!context.source || context.source.revision <= inputRevision) {
               throw new Error("Development Agent completed without creating a new source checkpoint");
             }
+            if (!hasCurrentTurnSourceCheckpoint(context, runtimeResult.turnId)) {
+              throw new Error("Development Agent completed without a successful current-turn source checkpoint");
+            }
             if (context.workflow.buildRequestedByTurnId !== runtimeResult.turnId) {
               throw new Error("Development Agent completed without requesting the controlled build");
             }
@@ -236,10 +243,18 @@ export async function runSandbox(
           const testPlanningHandoff = role === "TEST" && job.payload.purpose === "TEST_PLAN"
             ? runtimeTurnHandoff(context, runtimeResult.turnId, "TEST", "DEVELOPMENT")
             : null;
-          const hasCurrentTestPlan = Boolean(context.e2e.planRevision && context.e2e.plan);
+          const latestTestPlan = role === "TEST" && job.payload.purpose === "TEST_PLAN"
+            ? await projectRuntime.readLatestTestPlan(job.workspaceId, job.projectId)
+            : null;
+          const hasCurrentTestPlan = latestTestPlan?.createdByTurnId === runtimeResult.turnId;
+          const sourceContractHandoff = !hasCurrentTestPlan
+            && testPlanningHandoff
+            && runtimeResult.structured.reason === "SOURCE_PROBE_CONTRACT_MISSING"
+            ? testPlanningHandoff
+            : null;
           if (role === "TEST" && job.payload.purpose === "TEST_PLAN"
-            && !hasCurrentTestPlan && !testPlanningHandoff) {
-            throw new Error("Test Agent completed without persisting a complete test plan");
+            && !hasCurrentTestPlan && !sourceContractHandoff) {
+            throw new Error("Test Agent completed without persisting a complete current-turn test plan");
           }
           const testRuns = context.testSummary && Array.isArray(context.testSummary.runs)
             ? context.testSummary.runs
@@ -247,12 +262,17 @@ export async function runSandbox(
           const configurationReplan = role === "TEST" && job.payload.purpose === "TEST_VERDICT"
             && testRuns.some(run => run && typeof run === "object"
               && (run as Record<string, unknown>).failureClass === "CONFIGURATION");
-          const structured = testPlanningHandoff && !hasCurrentTestPlan
+          const structured: Readonly<Record<string, unknown>> = hasCurrentTestPlan
+            ? Object.freeze({
+                planId: latestTestPlan.id,
+                planRevision: latestTestPlan.planRevision,
+              })
+            : sourceContractHandoff
             ? Object.freeze({
                 verdict: "FAIL",
                 handoff: Object.freeze({
                   toRole: "DEVELOPMENT",
-                  summary: String(testPlanningHandoff.summary),
+                  summary: String(sourceContractHandoff.summary),
                 }),
                 reason: "SOURCE_PROBE_CONTRACT_MISSING",
               })
@@ -274,7 +294,7 @@ export async function runSandbox(
             sourceRevision: context.source?.revision ?? null,
             planRevision: context.e2e.planRevision ?? null,
             verdict: structured.verdict ?? null,
-            handoff: designHandoff ?? uiDesignHandoff ?? testPlanningHandoff ?? structured.handoff ?? null,
+            handoff: designHandoff ?? uiDesignHandoff ?? sourceContractHandoff ?? structured.handoff ?? null,
             responseLanguage,
             agentRuntime: settings.agentRuntime,
             model: resolveAgentModel(

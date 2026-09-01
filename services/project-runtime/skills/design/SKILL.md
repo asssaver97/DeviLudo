@@ -47,6 +47,20 @@ Cover this design inventory at a depth proportional to the game's scope:
 - experience: required information, feedback, telegraphs, game feel, pacing, onboarding intent, accessibility outcomes, and how the player learns without relying on unexplained text; specify what must be understood, not how screens are arranged;
 - proof: smallest playable slice, major design risks, tunable parameters, exploit checks, and observable acceptance goals.
 
+### Narrative and Content Completeness
+
+For a story-driven, campaign, adventure, quest, or chapter-based game, content structure is part of gameplay scope—not reversible flavor text. A request for a complete, coherent story is a material design change even when its genre, central conflict, and mechanics already match the canonical project. Never answer such a complaint by merely restating the existing loop, declaring it already covered, or handing an unchanged document forward.
+
+The opening is authored story content, not a title screen or a first-choice prompt. Establish the protagonist's immediate situation, the relevant relationships, the inciting incident, and why the first decision matters before asking for a consequential choice. For every planned scene or quest, persist an implementation-facing beat contract containing its incoming cause/state, immediate dramatic objective, character-specific action and reaction, meaningful complication or reveal, persistent consequence, and causal exit into the next beat. A chapter/scene title list, a collection of one-line prompts, a counter that advances through nominal scenes, or one shared choice/response template reused across the campaign is not a complete narrative design.
+
+The approved `projectDocument.gameplay` must carry those scene-level beat contracts—not only chapter names—so DEVELOPMENT receives the complete authored story after the read-only Design turn ends. Preserve enough concrete dialogue intent, knowledge boundaries, revelations, transitions, and payoffs that implementation does not need to invent the missing middle or infer how one scene causes the next.
+
+Formalize an implementable narrative contract at the requested delivery scope. Define the opening state and inciting incident; the ordered acts, chapters, quests, or scenes; the cause-and-effect transition that earns each next beat; each principal character's goal, knowledge, relationship state, and change across those beats; what choices persist and pay off later; the escalation, reversal, climax, resolution, and reachable endings; and the minimum authored content needed for the intended session length. Branches may reconverge, but their consequences must remain visible and coherent. Affinity, trust, flags, inventory, or other narrative state must change through authored events and cannot substitute for the events themselves.
+
+Distinguish the **proof slice** from the **shippable content scope**. The smallest playable slice validates a risky interaction; it never authorizes DEVELOPMENT to deliver only one scene, a mechanics showcase, a synopsis, a placeholder chapter, or a button that jumps to a simulated ending when the player requested the complete game or story. When the player has supplied the high-level direction, resolve reversible beat-level details yourself and complete the narrative blueprint instead of reopening a questionnaire.
+
+Add observable requirements and E2E goals for narrative scope: a fresh path must traverse the authored beginning, middle escalation, climax, and earned ending; at least one early decision must visibly change a later scene; character knowledge and relationship state must remain causal across chapter boundaries; and no completion state may be reached through a demo, debug, cheat, skip-to-ending, forced-win, or state-seeding action. Name concrete chapter or beat identities in the project document and goals so UI_DESIGN, DEVELOPMENT, and TEST cannot mistake one representative scene for the whole story.
+
 ## Continue From Imported-Project Analysis
 
 When invoked after an import, read the completed Analysis Agent report from canonical context before proposing anything. Treat its source findings as evidence, not as a design decision or development plan. Preserve working behavior and already-expressed project intent unless a deliberate change is clearly justified.
@@ -96,6 +110,8 @@ For economies and progression, define sources, sinks, caps, gates, pacing, failu
 Check every proposed feature against a named pillar and loop layer. Cut or defer features that do not strengthen either. When one decision changes, identify which rules, systems, goals, asset bindings, onboarding steps, or prior assumptions it invalidates; update the complete affected design rather than stacking a contradictory exception on top.
 
 Define the minimum playable game or vertical slice that proves the core fun hypothesis. Prototype high-risk interactions before content volume, meta-progression, cosmetic polish, or secondary modes. Keep illustrative numbers as labeled starting values or ranges unless the rule depends on an exact threshold.
+
+If the player requested a complete game, campaign, or story, also define the complete delivery inventory. Do not let the vertical slice silently replace that inventory.
 
 ## Formalize a Ready Proposal
 

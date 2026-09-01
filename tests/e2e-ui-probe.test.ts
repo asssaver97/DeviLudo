@@ -152,6 +152,23 @@ describe("deviludo.e2e-ui-probe", () => {
     ], snapshot() as never), ["PROGRESS:loop", "CONTROL:missing.value"]);
   });
 
+  test("accepts disappearance of a pre-action control as a CHANGED transition", () => {
+    const before = snapshot({ controls: [{
+      id: "opening-continue", scope: "GAMEPLAY", visible: true, enabled: true,
+      text: "Continue", value: "", rect: { x: 540, y: 600, width: 220, height: 50 },
+    }] });
+    const after = snapshot({ sequence: 8, controls: [{
+      id: "choice-a", scope: "GAMEPLAY", visible: true, enabled: true,
+      text: "Choose", value: "", rect: { x: 120, y: 500, width: 300, height: 60 },
+    }] });
+    const [result] = evaluateProbeAssertions([
+      { source: "CONTROL", targetId: "opening-continue", property: "visible", operator: "CHANGED" },
+    ], before as never, after as never);
+    assert.equal(result?.previous, true);
+    assert.equal(result?.actual, null);
+    assert.equal(result?.passed, true);
+  });
+
   test("requires enabled input targets but permits disabled post-action visual regions", () => {
     const disabled = snapshot({ controls: [{ ...snapshot().controls[0], enabled: false }] });
     assert.throws(() => resolveProbeControl(disabled as never, "primary-control"), /visible and enabled/);

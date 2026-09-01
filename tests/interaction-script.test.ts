@@ -62,6 +62,7 @@ describe("current InteractionScript validation", () => {
 
   it("enforces event and wait limits", () => {
     assert.equal(validateInteractionScript({ events: [] }), false);
+    assert.equal(validateInteractionScript({ events: Array.from({ length: 256 }, () => ({ type: "wait", delay_ms: 1 })) }), true);
     assert.equal(validateInteractionScript({ events: Array.from({ length: MAX_INTERACTION_EVENTS + 1 }, () => ({ type: "wait", delay_ms: 1 })) }), false);
     assert.equal(validateInteractionScript({ events: [{ type: "wait", delay_ms: 300_001 }] }), false);
   });

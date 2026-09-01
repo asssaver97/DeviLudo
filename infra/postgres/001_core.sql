@@ -1590,8 +1590,22 @@ SET search_path = pg_catalog, deviludo
 AS $$
 DECLARE
   inputs jsonb;
+  unresolved_assets integer;
 BEGIN
   IF NEW.kind <> 'BUILD' THEN RETURN NEW; END IF;
+  SELECT count(*)::integer
+    INTO unresolved_assets
+    FROM deviludo.asset_manifests manifest
+    JOIN deviludo.asset_items item
+      ON item.workspace_id = manifest.workspace_id AND item.manifest_id = manifest.id
+   WHERE manifest.workspace_id = NEW.workspace_id
+     AND manifest.project_id = NEW.project_id
+     AND manifest.workflow_id = NEW.workflow_id
+     AND item.asset_type <> 'music'
+     AND item.status NOT IN ('generated', 'uploaded', 'existing');
+  IF unresolved_assets > 0 THEN
+    RAISE EXCEPTION 'BUILD requires every planned visual asset to be supplied';
+  END IF;
   SELECT coalesce(jsonb_agg(jsonb_build_object(
     'assetKey', item.asset_key,
     'bucket', item.bucket,
@@ -1806,7 +1820,6 @@ BEGIN
        WHERE manifest.workspace_id = job.workspace_id
          AND manifest.project_id = job.project_id
          AND manifest.workflow_id = job.workflow_id
-         AND manifest.auto_generate_enabled = true
          AND EXISTS (
            SELECT 1
              FROM deviludo.asset_items item
@@ -2891,8 +2904,8 @@ $$;
 
 -- Advance deliveries whose generated/uploaded art is now complete. This is a
 -- cross-workspace scheduler primitive, so it owns the same narrow BYPASSRLS role
--- as job claiming. Turning auto-generation off is an explicit request to use
--- placeholders and therefore also releases the gate.
+-- as job claiming. Disabling automatic generation means the workflow waits for
+-- player uploads; it must never reinterpret unresolved art as placeholders.
 CREATE OR REPLACE FUNCTION deviludo.advance_asset_workflows(p_batch_size integer DEFAULT 20)
 RETURNS integer
 LANGUAGE plpgsql
@@ -2948,15 +2961,12 @@ BEGIN
             AND coalesce(active_development.payload->>'role', 'DEVELOPMENT') = 'DEVELOPMENT'
             AND coalesce(active_development.payload->>'purpose', 'DEVELOPMENT') = 'DEVELOPMENT'
        )
-       AND (
-         manifest.auto_generate_enabled = false
-         OR NOT EXISTS (
-           SELECT 1 FROM deviludo.asset_items item
-            WHERE item.workspace_id = manifest.workspace_id
-              AND item.manifest_id = manifest.id
-              AND item.asset_type <> 'music'
-              AND item.status NOT IN ('generated', 'uploaded', 'existing')
-         )
+       AND NOT EXISTS (
+         SELECT 1 FROM deviludo.asset_items item
+          WHERE item.workspace_id = manifest.workspace_id
+            AND item.manifest_id = manifest.id
+            AND item.asset_type <> 'music'
+            AND item.status NOT IN ('generated', 'uploaded', 'existing')
        )
      ORDER BY workflow.updated_at, workflow.id
      FOR UPDATE OF workflow SKIP LOCKED
@@ -3328,6 +3338,35 @@ BEGIN
      WHERE workspace_id = workflow.workspace_id AND workflow_id = workflow.id
        AND kind = ANY(downstream_stages)
        AND state IN ('QUEUED', 'RETRY', 'RUNNING');
+    UPDATE deviludo.agent_turns turn_row
+       SET state = 'CANCELLED', lease_token = NULL,
+           mcp_token_hash = NULL, mcp_token_expires_at = NULL,
+           completed_at = clock_timestamp(),
+           output_summary = 'superseded by stage rerun from ' || rerun_stage::text
+      FROM deviludo.jobs job
+     WHERE turn_row.workspace_id = workflow.workspace_id
+       AND turn_row.project_id = workflow.project_id
+       AND turn_row.state = 'RUNNING'
+       AND job.workspace_id = turn_row.workspace_id
+       AND job.workflow_id = workflow.id
+       AND turn_row.output_summary = 'workflow-job:' || job.id::text
+       AND job.state = 'CANCELLED';
+    UPDATE deviludo.agent_sessions session
+       SET active_turn_id = NULL, updated_at = clock_timestamp()
+     WHERE session.workspace_id = workflow.workspace_id
+       AND session.project_id = workflow.project_id
+       AND session.active_turn_id IS NOT NULL
+       AND EXISTS (
+         SELECT 1
+           FROM deviludo.agent_turns turn_row
+           JOIN deviludo.jobs job
+             ON job.workspace_id = turn_row.workspace_id
+            AND turn_row.output_summary = 'workflow-job:' || job.id::text
+          WHERE turn_row.workspace_id = session.workspace_id
+            AND turn_row.id = session.active_turn_id
+            AND job.workflow_id = workflow.id
+            AND job.state = 'CANCELLED'
+       );
     IF rerun_stage = 'E2E_PLATFORM_RUN' THEN
       SELECT EXISTS (
         SELECT 1
@@ -3493,6 +3532,34 @@ BEGIN
            updated_at = clock_timestamp()
      WHERE workspace_id = workflow.workspace_id AND workflow_id = workflow.id
        AND state IN ('QUEUED', 'RETRY', 'RUNNING');
+    UPDATE deviludo.agent_turns turn_row
+       SET state = 'CANCELLED', lease_token = NULL,
+           mcp_token_hash = NULL, mcp_token_expires_at = NULL,
+           completed_at = clock_timestamp(), output_summary = 'workflow cancelled'
+      FROM deviludo.jobs job
+     WHERE turn_row.workspace_id = workflow.workspace_id
+       AND turn_row.project_id = workflow.project_id
+       AND turn_row.state = 'RUNNING'
+       AND job.workspace_id = turn_row.workspace_id
+       AND job.workflow_id = workflow.id
+       AND turn_row.output_summary = 'workflow-job:' || job.id::text
+       AND job.state = 'CANCELLED';
+    UPDATE deviludo.agent_sessions session
+       SET active_turn_id = NULL, updated_at = clock_timestamp()
+     WHERE session.workspace_id = workflow.workspace_id
+       AND session.project_id = workflow.project_id
+       AND session.active_turn_id IS NOT NULL
+       AND EXISTS (
+         SELECT 1
+           FROM deviludo.agent_turns turn_row
+           JOIN deviludo.jobs job
+             ON job.workspace_id = turn_row.workspace_id
+            AND turn_row.output_summary = 'workflow-job:' || job.id::text
+          WHERE turn_row.workspace_id = session.workspace_id
+            AND turn_row.id = session.active_turn_id
+            AND job.workflow_id = workflow.id
+            AND job.state = 'CANCELLED'
+       );
   END IF;
   RETURN true;
 END

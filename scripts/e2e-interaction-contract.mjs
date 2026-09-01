@@ -9,6 +9,7 @@ const GAMEPAD_BUTTONS = new Set([
   "LEFT_SHOULDER", "RIGHT_SHOULDER", "DPAD_UP", "DPAD_DOWN", "DPAD_LEFT", "DPAD_RIGHT",
 ]);
 const GAMEPAD_AXES = new Set(["LEFT_X", "LEFT_Y", "RIGHT_X", "RIGHT_Y"]);
+export const MAX_GUEST_INTERACTION_EVENTS = 512;
 
 export const CORE_START_ASSERTIONS = Object.freeze([
   Object.freeze({ source: "STATE", key: "screen_mode", operator: "EQUALS", value: "MENU" }),
@@ -27,7 +28,8 @@ export function validateGuestInteractionScript(value, journeyRequirements, playe
   if (!value || typeof value !== "object" || Array.isArray(value)
     || !Array.isArray(journeyRequirements) || !(playerRequirements instanceof Set)
     || Object.hasOwn(value, "version") || Object.hasOwn(value, "schemaVersion")
-    || !Array.isArray(value.events) || value.events.length < 1 || value.events.length > 200) return false;
+    || !Array.isArray(value.events) || value.events.length < 1
+    || value.events.length > MAX_GUEST_INTERACTION_EVENTS) return false;
   const allowedRequirements = new Set(journeyRequirements);
   const steps = new Set();
   const checkpoints = new Set();

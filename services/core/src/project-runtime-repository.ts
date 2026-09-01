@@ -151,7 +151,9 @@ export class ProjectRuntimeRepository {
            workspace_id, project_id, workflow_id, auto_generate_enabled
          ) VALUES ($1::uuid, $2::uuid, $3::uuid, true)
          ON CONFLICT (workspace_id, project_id) DO UPDATE
-           SET workflow_id = EXCLUDED.workflow_id, updated_at = clock_timestamp()
+           SET workflow_id = EXCLUDED.workflow_id,
+               auto_generate_enabled = true,
+               updated_at = clock_timestamp()
          RETURNING id::text`,
         [input.workspaceId, input.projectId, input.workflowId],
       );
@@ -186,6 +188,7 @@ export class ProjectRuntimeRepository {
                     AND deviludo.asset_items.frame_count IS NOT DISTINCT FROM EXCLUDED.frame_count
                     AND deviludo.asset_items.dimensions IS NOT DISTINCT FROM EXCLUDED.dimensions
                     AND deviludo.asset_items.status IN ('generated', 'uploaded', 'existing')
+                    AND ($9 <> 'GENERATED' OR deviludo.asset_items.status <> 'existing')
                    THEN deviludo.asset_items.status ELSE 'planned' END,
                  bucket = CASE
                    WHEN deviludo.asset_items.asset_type = EXCLUDED.asset_type
@@ -227,7 +230,7 @@ export class ProjectRuntimeRepository {
                  generation_lease_token = NULL,
                  updated_at = clock_timestamp()`,
           [input.workspaceId, manifestId, assetKey, assetType, description,
-            generationPrompt, frameCount, dimensions],
+            generationPrompt, frameCount, dimensions, origin],
         );
       }
       await client.query(
@@ -271,7 +274,7 @@ export class ProjectRuntimeRepository {
   async readLatestTestPlan(workspaceId: string, projectId: string): Promise<Readonly<Record<string, unknown>> | null> {
     const result = await this.database.withWorkspace(workspaceId, client => client.query(
       `SELECT id::text, requirement_revision, source_revision, plan_revision,
-              plan_sha256, plan, created_at::text
+              plan_sha256, plan, created_by_turn_id::text, created_at::text
          FROM deviludo.test_plans_v2
         WHERE workspace_id = $1::uuid AND project_id = $2::uuid
         ORDER BY source_revision DESC, plan_revision DESC LIMIT 1`,
@@ -284,6 +287,34 @@ export class ProjectRuntimeRepository {
       planRevision: Number(result.rows[0].plan_revision),
       sha256: result.rows[0].plan_sha256,
       plan: result.rows[0].plan,
+      createdByTurnId: result.rows[0].created_by_turn_id,
+      createdAt: result.rows[0].created_at,
+    }) : null;
+  }
+
+  async readTestPlanRevision(
+    workspaceId: string,
+    projectId: string,
+    sourceRevision: number,
+    planRevision: number,
+  ): Promise<Readonly<Record<string, unknown>> | null> {
+    const result = await this.database.withWorkspace(workspaceId, client => client.query(
+      `SELECT id::text, requirement_revision, source_revision, plan_revision,
+              plan_sha256, plan, created_by_turn_id::text, created_at::text
+         FROM deviludo.test_plans_v2
+        WHERE workspace_id = $1::uuid AND project_id = $2::uuid
+          AND source_revision = $3 AND plan_revision = $4
+        LIMIT 1`,
+      [workspaceId, projectId, sourceRevision, planRevision],
+    ));
+    return result.rows[0] ? Object.freeze({
+      id: result.rows[0].id,
+      requirementRevision: Number(result.rows[0].requirement_revision),
+      sourceRevision: Number(result.rows[0].source_revision),
+      planRevision: Number(result.rows[0].plan_revision),
+      sha256: result.rows[0].plan_sha256,
+      plan: result.rows[0].plan,
+      createdByTurnId: result.rows[0].created_by_turn_id,
       createdAt: result.rows[0].created_at,
     }) : null;
   }
@@ -698,8 +729,12 @@ export class ProjectRuntimeRepository {
               AND state NOT IN ('SUCCEEDED', 'FAILED', 'CANCELLED')`, [workspaceId, projectId],
         );
       } else {
-        const stoppedWorkflows = await client.query<{ id: string; resume_state: string | null }>(
-          `SELECT id::text, state_data->>'resumeState' AS resume_state
+        const stoppedWorkflows = await client.query<{
+          id: string;
+          resume_state: string | null;
+          target_platforms: string[];
+        }>(
+          `SELECT id::text, state_data->>'resumeState' AS resume_state, target_platforms
              FROM deviludo.workflow_instances
             WHERE workspace_id = $1::uuid AND project_id = $2::uuid AND state = 'STOPPED'
             FOR UPDATE`,
@@ -741,7 +776,7 @@ export class ProjectRuntimeRepository {
             await client.query(
               `SELECT deviludo.enqueue_job($1::uuid, $2::uuid, $3::uuid, 'BUILD', NULL, $4, $5::jsonb)`,
               [workspaceId, workflow.id, projectId, `${workflow.id}:resume:build:${resumedAt}`,
-                JSON.stringify({ resumed: true })],
+                JSON.stringify({ resumed: true, targetPlatforms: workflow.target_platforms })],
             );
           } else if (resume === "TEST_PLANNING" || resume === "TESTING") {
             await client.query(

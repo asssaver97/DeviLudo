@@ -7,6 +7,7 @@ import { promisify } from "node:util";
 const execute = promisify(execFile);
 const FRAME_INTERVAL_MS = 200;
 const MAX_VIDEO_BYTES = 768 * 1024 * 1024;
+const MAX_INTERACTION_EVENTS = 512;
 
 /**
  * Owns every operating-system interaction for one native game process. The
@@ -55,7 +56,9 @@ export class GameTestEnvironment {
   }
 
   async sequence(events, timeoutMs) {
-    if (!Array.isArray(events) || events.length < 1 || events.length > 200) throw new Error("Input sequence is invalid");
+    if (!Array.isArray(events) || events.length < 1 || events.length > MAX_INTERACTION_EVENTS) {
+      throw new Error("Input sequence is invalid");
+    }
     const groups = [];
     for (const event of events) {
       const transport = String(event?.type ?? "").startsWith("gamepad_") ? "gamepad" : "desktop";

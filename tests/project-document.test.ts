@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import {
+  applyAgentProjectDocumentPatch,
   createInitialProjectDocument,
   normalizeAgentProjectDocumentContent,
   parseProjectDocumentContent,
@@ -60,6 +61,29 @@ test("verbose Agent document items are split to the strict storage contract", ()
   assert.ok(content.features.length > 1);
   assert.ok(content.features.every(feature => feature.length <= 300));
   assert.equal(content.features.join(""), verboseFeature);
+  assert.deepEqual(parseProjectDocumentContent(content), content);
+});
+
+test("structured specialist patches are converted to readable project document prose", () => {
+  const current = createInitialProjectDocument("双线人生", "一款叙事经营游戏", {
+    coreLoop: ["推进事件"],
+    acceptanceCriteria: ["完成故事"],
+  }, "zh");
+  const content = applyAgentProjectDocumentPatch(current, {
+    gameplay: {
+      campaignStructure: ["第一章：双重承诺", "第二章：公开压力"],
+      narrativeCausality: "首章承诺改变第二章的解释空间。",
+    },
+    features: ["六章故事", { persistentChoices: "早期选择在结局回收" }],
+    ignoredProviderField: "不得进入项目文档",
+  });
+
+  assert.match(content.gameplay, /campaignStructure/u);
+  assert.match(content.gameplay, /第一章：双重承诺/u);
+  assert.match(content.gameplay, /narrativeCausality：首章承诺/u);
+  assert.deepEqual(content.features, ["六章故事", "persistentChoices：早期选择在结局回收"]);
+  assert.equal(content.introduction, current.introduction);
+  assert.equal("ignoredProviderField" in content, false);
   assert.deepEqual(parseProjectDocumentContent(content), content);
 });
 

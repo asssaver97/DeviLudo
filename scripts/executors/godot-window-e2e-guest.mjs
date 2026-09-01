@@ -61,6 +61,8 @@ const PROBE_TIMEOUT_MS = 15_000;
 const MIN_STATE_TRANSITION_DIFFERENCE_RATIO = 0.001;
 const MIN_FULL_FRAME_TRANSITION_PIXELS = 32;
 const MAX_SCREENSHOTS = 64;
+const MAX_JOURNEY_TIMEOUT_MS = 900_000;
+const MIN_JOURNEY_EVENT_BUDGET_MS = 1_500;
 const ADAPTIVE_ROLLOUT_COUNT = 3;
 const ADAPTIVE_REQUIRED_SUCCESSES = 2;
 const MIN_ADAPTIVE_GAMEPLAY_PROGRESS_TRANSITIONS = 2;
@@ -449,7 +451,7 @@ async function executeJourney(gamePackage, journey, runLabel, recordEvidence) {
     currentProbe = await waitForProbeSnapshot(probePath, { sessionNonce, pid: launched.pid }, PROBE_TIMEOUT_MS);
     for (const event of journey.interactionScript.events) {
       assertPlatformBudget();
-      if (Date.now() - journeyStarted > journey.timeoutMs) throw productFailure("JOURNEY_TIMEOUT", `${journey.id} 超过 ${journey.timeoutMs}ms`);
+      if (Date.now() - journeyStarted > journey.timeoutMs) throw configurationFailure("JOURNEY_TIMEOUT", `${journey.id} 超过测试计划分配的 ${journey.timeoutMs}ms`);
       if (!await processAlive(launched.pid)) throw productFailure("GAME_CRASHED", `真实窗口旅程 ${journey.id} 执行期间游戏退出`);
       if (event.delay_ms) await delay(event.delay_ms);
       if (event.type === "wait") continue;
@@ -491,7 +493,13 @@ async function executeJourney(gamePackage, journey, runLabel, recordEvidence) {
           }, before, event.postconditions, PROBE_TIMEOUT_MS);
         } catch (error) {
           inputResponseMs = Date.now() - responseStartedAt;
-          inputResponses.push({ runId, stepId: event.stepId, source: "DETERMINISTIC", latencyMs: inputResponseMs });
+          // A Probe contract timeout is not a successful game response. Feeding
+          // its full observation deadline into the performance distribution
+          // manufactures a stutter sample and can replace the actionable
+          // semantic failure (for example an invalid or duplicate control ID)
+          // with a generic GAME_STUTTER_DETECTED verdict. Keep the duration on
+          // the failed step for diagnosis, but benchmark only observed
+          // postcondition responses.
           const detail = error instanceof Error ? error.message : String(error);
           const assertions = evaluateProbeAssertions(event.postconditions, before, before);
           if (recordEvidence) {
@@ -511,7 +519,6 @@ async function executeJourney(gamePackage, journey, runLabel, recordEvidence) {
           throw productFailure("PROBE_NOT_UPDATED", `${journey.id}/${event.stepId}: ${detail}`);
         }
         inputResponseMs = Date.now() - responseStartedAt;
-        inputResponses.push({ runId, stepId: event.stepId, source: "DETERMINISTIC", latencyMs: inputResponseMs });
         const after = postconditionResult.snapshot;
         const assertions = postconditionResult.assertions;
         const beforeDigest = probeStateDigest(before);
@@ -544,6 +551,11 @@ async function executeJourney(gamePackage, journey, runLabel, recordEvidence) {
           );
           throw productFailure("ACTION_STATE_UNCHANGED", `${journey.id}/${event.stepId} 未产生可验证状态变化`);
         }
+        // Only a proven postcondition transition is a game response sample.
+        // A Probe update that keeps waiting until the observation deadline
+        // because one assertion never becomes true is failure evidence, not a
+        // 15-second input latency measurement.
+        inputResponses.push({ runId, stepId: event.stepId, source: "DETERMINISTIC", latencyMs: inputResponseMs });
         if (recordEvidence) event.coversRequirementIds.forEach(id => coveredPlayerRequirements.add(id));
         currentProbe = after;
         continue;
@@ -555,9 +567,7 @@ async function executeJourney(gamePackage, journey, runLabel, recordEvidence) {
       }
       currentProbe = await waitForProbeSnapshot(probePath, { sessionNonce, pid: launched.pid }, PROBE_TIMEOUT_MS);
       const checkpointAssertions = evaluateProbeAssertions(event.assertions, previousCheckpoint?.probe ?? currentProbe, currentProbe);
-      if (checkpointAssertions.some(assertion => !assertion.passed)) {
-        throw productFailure("CHECKPOINT_PROBE_FAILED", `${journey.id}/${event.id} Probe 状态断言失败`);
-      }
+      const checkpointAssertionsPassed = checkpointAssertions.every(assertion => assertion.passed);
       // A Probe snapshot is written by the game thread after its layout frame,
       // but the native window compositor can still expose the previous frame
       // briefly. Capturing immediately produced impossible evidence where the
@@ -622,7 +632,9 @@ async function executeJourney(gamePackage, journey, runLabel, recordEvidence) {
         if (screenshots.length >= MAX_SCREENSHOTS) throw productFailure("SCREENSHOT_LIMIT_EXCEEDED", "E2E 截图超过 64 张");
         screenshots.push({ id: evidenceId, path: screenshotPath });
         checkpointRecord = {
-          journeyId: journey.id, checkpointId: event.id, role: event.role, status: "PASSED",
+          journeyId: journey.id, checkpointId: event.id, role: event.role,
+          status: checkpointAssertionsPassed ? "PASSED" : "FAILED",
+          ...(checkpointAssertionsPassed ? {} : { failureCode: "CHECKPOINT_PROBE_FAILED" }),
           screenshot: `screenshots/${evidenceId}.png`, capturedAt: new Date().toISOString(),
           window: { pid: capture.pid, width: capture.width, height: capture.height }, priorInputs: [...priorInputs],
           probe: { sequence: currentProbe.sequence, sceneId: currentProbe.sceneId, digest: probeStateDigest(currentProbe) },
@@ -631,6 +643,9 @@ async function executeJourney(gamePackage, journey, runLabel, recordEvidence) {
           outputAssertion: event.expectedOutput ? { expectedOutput: event.expectedOutput, observed: true, auxiliary: true } : null,
         };
         checkpoints.push(checkpointRecord);
+      }
+      if (!checkpointAssertionsPassed) {
+        throw productFailure("CHECKPOINT_PROBE_FAILED", `${journey.id}/${event.id} Probe 状态断言失败`);
       }
       try {
         assetPlacementEvidence = await verifyCheckpointAssetPlacements({
@@ -666,7 +681,9 @@ async function executeJourney(gamePackage, journey, runLabel, recordEvidence) {
       previousCheckpoint = { id: event.id, path: screenshotPath, inputCount: priorInputs.length, probe: currentProbe };
     }
   } catch (error) {
-    executionError = String(error?.message ?? error).startsWith("INFRASTRUCTURE:") || isProductFailure(error)
+    executionError = String(error?.message ?? error).startsWith("INFRASTRUCTURE:")
+      || isProductFailure(error)
+      || isConfigurationFailure(error)
       ? error
       : productFailure("INPUT_OR_WINDOW_FAILED", error instanceof Error ? error.message : String(error));
   } finally {
@@ -855,7 +872,11 @@ async function runAdaptiveRollout(gamePackage, manifest, rolloutIndex) {
         break;
       }
       const nativeEvents = policyNativeEvents(decision.actions);
-      const signature = jsonDigest({ screenshot: screenshot.sha256, actions: decision.actions });
+      // Repeated dialogue screens can legitimately expose the same pixels and
+      // require the same action while their published story/progress state is
+      // advancing. A loop exists only when the state, pixels, and action all
+      // repeat; omitting Probe state falsely stopped authored multi-beat scenes.
+      const signature = jsonDigest({ probe: beforeDigest, screenshot: screenshot.sha256, actions: decision.actions });
       const seen = (loopSignatures.get(signature) ?? 0) + 1;
       loopSignatures.set(signature, seen);
       if (seen >= 3) { failureCode = "PLAYER_ACTION_LOOP"; break; }
@@ -1738,7 +1759,15 @@ function assertManifest(value) {
         || feature.checkNames.some(name => !stableId(name) || unitNames.has(name))) throw productFailure("E2E_MANIFEST_INVALID", `单元测试项无效：${feature.id}`);
       feature.checkNames.forEach(name => unitNames.add(name));
     } else if (feature.verificationMethod === "interactive") {
-      if (!validLaunchProfile(feature.launchProfile) || !Number.isInteger(feature.timeoutMs) || feature.timeoutMs < 1 || feature.timeoutMs > 300_000
+      if (validInteractionScript(feature.interactionScript, feature.requirementIds, playerRequirements)
+        && Number.isInteger(feature.timeoutMs)
+        && feature.timeoutMs < Math.min(MAX_JOURNEY_TIMEOUT_MS, feature.interactionScript.events.length * MIN_JOURNEY_EVENT_BUDGET_MS)) {
+        throw configurationFailure(
+          "TEST_PLAN_TIMEOUT_INSUFFICIENT",
+          `${feature.id} 的 timeoutMs ${feature.timeoutMs} 不足以执行 ${feature.interactionScript.events.length} 个真实交互事件`,
+        );
+      }
+      if (!validLaunchProfile(feature.launchProfile) || !Number.isInteger(feature.timeoutMs) || feature.timeoutMs < 1 || feature.timeoutMs > MAX_JOURNEY_TIMEOUT_MS
         || !validInteractionScript(feature.interactionScript, feature.requirementIds, playerRequirements)) throw productFailure("E2E_MANIFEST_INVALID", `真实操作旅程无效：${feature.id}`);
       journeys += 1;
       const events = feature.interactionScript.events;

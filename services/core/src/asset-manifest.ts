@@ -268,7 +268,11 @@ export class AssetManifestStore {
       for (const source of normalized) {
         const aliases = sourceImageAliases(source.strippedPath);
         const basename = source.strippedPath.split("/").at(-1) ?? source.strippedPath;
+        // A planned GENERATED item must be fulfilled by the image-generation
+        // queue. A Development-authored file at the expected generated path is
+        // only a fallback and must never be promoted into accepted art.
         const candidates = items.filter(item => !["generated", "uploaded"].includes(item.status)
+          && (item.status === "existing" || item.generationPrompt === undefined)
           && (aliases.has(item.assetKey)
             || (item.assetKey.split("/").at(-1) === basename && baseCounts.get(basename) === 1)));
         const matched = candidates.length === 1 ? candidates[0] : null;
@@ -288,7 +292,7 @@ export class AssetManifestStore {
           continue;
         }
         const assetKey = sourceInventoryKey(source.strippedPath);
-        if (occupied.has(assetKey)) continue;
+        if (occupied.has(assetKey) || [...aliases].some(alias => occupied.has(alias))) continue;
         const result = await client.query(
           `INSERT INTO deviludo.asset_items(
              workspace_id, manifest_id, asset_key, asset_type, description,
@@ -505,6 +509,7 @@ export async function reconcileExistingSourceAssets(
               generation_lease_expires_at = NULL, updated_at = clock_timestamp()
         WHERE asset.workspace_id = $1::uuid
           AND asset.asset_key = $2
+          AND (asset.status = 'existing' OR asset.generation_prompt IS NULL)
           AND asset.manifest_id = (
             SELECT id FROM deviludo.asset_manifests
              WHERE workspace_id = $1::uuid AND project_id = $4::uuid

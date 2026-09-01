@@ -103,6 +103,14 @@ test("a blocked workflow can be reopened from an explicitly selected rerun stage
   assert.match(signal, /WHEN 'UI_DESIGN' THEN 'uiDesign'/);
 });
 
+test("workflow cancellation releases the persistent Agent turn before rerun", async () => {
+  const sql = await readFile(sqlUrl, "utf8");
+  const signal = functionSource(sql, "accept_workflow_signal");
+  assert.match(signal, /CANCEL_REQUESTED[\s\S]*UPDATE deviludo\.agent_turns turn_row[\s\S]*state = 'CANCELLED'/);
+  assert.match(signal, /UPDATE deviludo\.agent_sessions session[\s\S]*active_turn_id = NULL/);
+  assert.match(signal, /turn_row\.output_summary = 'workflow-job:' \|\| job\.id::text/);
+});
+
 test("completed UI Design, Development and Test Agent turns publish durable player-facing messages", async () => {
   const sql = await readFile(sqlUrl, "utf8");
   const publish = functionSource(sql, "publish_development_agent_message");
@@ -118,10 +126,23 @@ test("completed UI Design, Development and Test Agent turns publish durable play
 test("asset readiness cannot overtake an active Development Agent turn", async () => {
   const sql = await readFile(sqlUrl, "utf8");
   const advance = functionSource(sql, "advance_asset_workflows");
+  const complete = functionSource(sql, "complete_agent_turn_job");
   assert.match(advance, /source\.state = 'SUCCEEDED'/);
   assert.match(advance, /coalesce\(source\.payload->>'role', 'DEVELOPMENT'\) = 'DEVELOPMENT'/);
   assert.match(advance, /coalesce\(source\.payload->>'purpose', 'DEVELOPMENT'\) = 'DEVELOPMENT'/);
   assert.match(advance, /NOT EXISTS \([\s\S]*active_development\.state IN \('QUEUED', 'RUNNING', 'RETRY'\)[\s\S]*active_development\.payload->>'role'/);
+  assert.doesNotMatch(advance, /manifest\.auto_generate_enabled = false/);
+  assert.doesNotMatch(complete, /manifest\.auto_generate_enabled = true/);
+});
+
+test("artifact builds fail closed while any planned visual asset is unresolved", async () => {
+  const sql = await readFile(sqlUrl, "utf8");
+  const snapshot = functionSource(sql, "snapshot_artifact_build_assets");
+  assert.match(snapshot, /IF NEW\.kind <> 'BUILD' THEN RETURN NEW/);
+  assert.match(snapshot, /item\.asset_type <> 'music'/);
+  assert.match(snapshot, /item\.status NOT IN \('generated', 'uploaded', 'existing'\)/);
+  assert.match(snapshot, /IF unresolved_assets > 0 THEN[\s\S]*RAISE EXCEPTION 'BUILD requires every planned visual asset to be supplied'/);
+  assert.match(snapshot, /item\.status IN \('generated', 'uploaded'\)/);
 });
 
 test("music assets are upload-only and never enter image generation or block builds", async () => {

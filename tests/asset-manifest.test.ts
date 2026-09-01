@@ -345,6 +345,32 @@ describe("Asset manifest store", () => {
     assert.deepEqual(view?.completion, { total: 1, uploaded: 1, failed: 0, complete: true });
   });
 
+  it("does not let a source placeholder satisfy a planned generated asset", async () => {
+    const { database, calls } = fakeDatabase(call => {
+      if (call.text.includes("INSERT INTO deviludo.asset_manifests")) {
+        return { rows: [{ id: manifestId }], rowCount: 1 };
+      }
+      if (call.text.includes("SELECT") && call.text.includes("FROM deviludo.asset_items")) {
+        return { rows: [itemRow({
+          asset_key: "sprites/player_idle",
+          asset_type: "sprite",
+          generation_prompt: "Generate a finished authored player portrait for the production game.",
+          status: "planned",
+        })] };
+      }
+      return { rows: [], rowCount: 0 };
+    });
+    const changed = await new AssetManifestStore(database).synchronizeSourceImages({
+      workspaceId,
+      projectId,
+      workflowId: "20000000-0000-4000-8000-000000000004",
+      sourcePaths: ["assets/generated/sprites/player_idle.png"],
+    });
+    assert.equal(changed, 0);
+    assert.equal(calls.length, 2);
+    assert.equal(calls.some(call => call.text.includes("SET status = 'existing'")), false);
+  });
+
   it("treats a project with no manifest as empty rather than an error", async () => {
     const { database, calls } = fakeDatabase(() => ({ rows: [] }));
     assert.equal(await new AssetManifestStore(database).read(workspaceId, projectId), null);

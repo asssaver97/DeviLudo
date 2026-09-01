@@ -92,6 +92,7 @@ import type {
 import { E2ePkiIssuer } from "./e2e-pki";
 import { E2E_INFRASTRUCTURE_DOMAINS } from "@/lib/runtime/e2e-failure";
 import {
+  applyAgentProjectDocumentPatch,
   createInitialProjectDocument,
   parseProjectDocumentContent,
   synchronizeSpecificationWithProjectDocument,
@@ -2899,10 +2900,10 @@ async function applyConfirmedConversationChange(input: Readonly<{
       decisionIdempotencyKey: input.decisionIdempotencyKey,
     });
   }
-  const document = parseProjectDocumentContent({
-    ...input.project.document.content,
-    ...input.changeRequest.documentPatch,
-  });
+  const document = applyAgentProjectDocumentPatch(
+    input.project.document.content,
+    input.changeRequest.documentPatch,
+  );
   const specification = synchronizeSpecificationWithProjectDocument(input.project.specification, document);
   const specificationObject = await input.objectStore.putSpecification({
     workspaceId: input.workspaceId,

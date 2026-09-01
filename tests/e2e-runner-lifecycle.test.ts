@@ -31,6 +31,11 @@ test("the guest accepts a semantic mouse journey with post-action Oracle evidenc
   assert.equal(validateGuestInteractionScript(script, ["req-new-game"], new Set(["req-new-game"])), true);
 });
 
+test("long-form journeys preserve room for production inputs and per-scene screenshots", () => {
+  const events = Array.from({ length: 256 }, () => ({ type: "wait", delay_ms: 1 }));
+  assert.equal(validateGuestInteractionScript({ events }, [], new Set()), true);
+});
+
 test("an omitted optional regression argument stays empty instead of reading argv[0]", () => {
   const argv = ["/usr/local/bin/node", "/opt/deviludo/local-tart-guest-runner.mjs", "test", "--artifact", "/tmp/build.tar.gz"];
   assert.equal(readCliArgument(argv, "--regression"), "");
@@ -266,12 +271,28 @@ test("the production Guest, relay, executor and node all wire the lifecycle guar
   assert.match(guest, /driver\("find-pid", \["--executable", executable\]/);
   assert.doesNotMatch(guest, /execute\("ps", \["-ax", "-o", "pid=,command="\]/);
   assert.match(guest, /POSTCONDITION_TRANSITION_MISSING/);
+  assert.match(guest, /JOURNEY_TIMEOUT[\s\S]*configurationFailure/);
+  assert.match(guest, /TEST_PLAN_TIMEOUT_INSUFFICIENT/);
   assert.match(guest, /checkpointAssertions = evaluateProbeAssertions[\s\S]*await delay\(CHECKPOINT_VISUAL_SETTLE_MS\);[\s\S]*testEnvironment\.capture\(screenshotPath\)/);
+  assert.match(guest, /status: checkpointAssertionsPassed \? "PASSED" : "FAILED"[\s\S]*failureCode: "CHECKPOINT_PROBE_FAILED"[\s\S]*checkpoints\.push\(checkpointRecord\)[\s\S]*if \(!checkpointAssertionsPassed\)[\s\S]*throw productFailure\("CHECKPOINT_PROBE_FAILED"/);
+  const failedProbeObservation = guest.match(
+    /postconditionResult = await waitForProbePostconditions[\s\S]*?catch \(error\) \{([\s\S]*?)const detail =/,
+  );
+  assert.ok(failedProbeObservation);
+  assert.doesNotMatch(failedProbeObservation[1] ?? "", /inputResponses\.push/);
+  const failedPostconditionBranch = guest.match(
+    /if \(!assertionsPassed \|\| !stateChanged \|\| !transitionProven\) \{([\s\S]*?)\n\s+\}\n\s+\/\/ Only a proven postcondition transition/,
+  );
+  assert.ok(failedPostconditionBranch);
+  assert.doesNotMatch(failedPostconditionBranch[1] ?? "", /inputResponses\.push/);
+  assert.match(guest, /\/\/ Only a proven postcondition transition[\s\S]*?inputResponses\.push/);
   assert.match(guest, /!transitionProven\) throw configurationFailure\([\s\S]*POSTCONDITION_TRANSITION_MISSING/);
   assert.match(guest, /missingChangedAssertionReferences\(event\.postconditions, before\)[\s\S]*TEST_PLAN_REFERENCE_MISSING/);
+  assert.match(guest, /isProductFailure\(error\)[\s\S]*isConfigurationFailure\(error\)[\s\S]*INPUT_OR_WINDOW_FAILED/);
   assert.match(guest, /Project Runtime is completing a lifecycle transition/);
   assert.match(guest, /let executionError = null;[\s\S]*failures\.some\(failure => failure\.startsWith\("GODOT_SCRIPT_ERROR"\)\)[\s\S]*if \(executionError\) throw executionError/);
   assert.match(guest, /decision\.screenIntegrity === "PRODUCT_DEFECT"[\s\S]*VISUAL_INTEGRITY_DEFECT/);
+  assert.match(guest, /jsonDigest\(\{ probe: beforeDigest, screenshot: screenshot\.sha256, actions: decision\.actions \}\)/);
   assert.match(guest, /if \(rollout\.failureCode === "VISUAL_INTEGRITY_DEFECT"\) break/);
   assert.match(guest, /adaptiveRollouts\.find\(rollout => rollout\.failureCode === "VISUAL_INTEGRITY_DEFECT"\)[\s\S]*throw productFailure\([\s\S]*"VISUAL_INTEGRITY_DEFECT"/);
   assert.match(guest, /relativePointForTarget\(target, action\.x, action\.y\)[\s\S]*basis-point offsets inside the stable target/);

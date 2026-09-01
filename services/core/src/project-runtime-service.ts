@@ -1,7 +1,6 @@
 import { lstat, mkdir, mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import { createHash, randomUUID } from "node:crypto";
 import { join, relative, resolve, sep } from "node:path";
-import { tmpdir } from "node:os";
 import sharp from "sharp";
 import { PROJECT_RUNTIME_ROLES, type E2eGoal, type ProjectRuntimeRole } from "@/lib/product/contracts";
 import { parseProjectDocumentContent, type ProjectDocumentContent } from "@/lib/product/project-document";
@@ -43,8 +42,8 @@ const ROLE_TOOLS = Object.freeze({
   ANALYSIS: new Set(["context.read", "source.list", "source.read", "diagnostics.run", "context.update_analysis", "conversation.reply"]),
   DESIGN: new Set(["context.read", "requirements.update", "project_document.update", "e2e_goals.update", "conversation.reply", "handoff.create"]),
   UI_DESIGN: new Set(["context.read", "source.list", "source.read", "evidence.read", "project_document.update", "e2e_goals.update", "conversation.reply", "handoff.create"]),
-  DEVELOPMENT: new Set(["context.read", "source.list", "source.read", "source.checkpoint", "assets.plan", "assets.cleanup", "build.request", "conversation.reply", "handoff.create"]),
-  TEST: new Set(["context.read", "source.list", "source.read", "test_plan.replace", "e2e.start", "e2e.observe", "evidence.read", "test.verdict", "conversation.reply", "handoff.create"]),
+  DEVELOPMENT: new Set(["context.read", "source.list", "source.read", "evidence.read", "source.checkpoint", "assets.plan", "assets.cleanup", "build.request", "conversation.reply", "handoff.create"]),
+  TEST: new Set(["context.read", "source.list", "source.read", "test_plan.replace", "test_plan.revise_timeout", "e2e.start", "e2e.observe", "evidence.read", "test.verdict", "conversation.reply", "handoff.create"]),
 });
 const READ_ONLY_TOOLS = new Set([
   "context.read", "source.list", "source.read", "evidence.read", "conversation.reply",
@@ -53,9 +52,14 @@ const LIFECYCLE_RETRY_INTERVAL_MS = 1_000;
 // Match the scheduler's bounded lifecycle lease. A workflow attempt must not
 // be consumed while another owner can still be legitimately compacting it.
 const LIFECYCLE_RETRY_LIMIT = 900;
-const AGENT_EVIDENCE_ARCHIVE_MAX_BYTES = 128 * 1024 * 1024;
+// Long authored journeys can legitimately contain dozens of lossless 1280x720
+// checkpoints plus the run video. Keep this below the producer's 1 GiB hard
+// limit, but large enough for Test and repair Agents to inspect those reports.
+export const AGENT_EVIDENCE_ARCHIVE_MAX_BYTES = 512 * 1024 * 1024;
 const AGENT_EVIDENCE_IMAGE_MAX_BYTES = 3 * 1024 * 1024;
-const AGENT_EVIDENCE_ROLES = Object.freeze(["START", "READY", "PROGRESS", "COMPLETION"] as const);
+const AGENT_EVIDENCE_ROLES = Object.freeze(["START", "READY", "ACTION", "PROGRESS", "COMPLETION"] as const);
+const AGENT_EVIDENCE_IMAGE_LIMIT = 64;
+const AGENT_EVIDENCE_PAGE_LIMIT = 6;
 
 type ProjectArtifactReader = Readonly<{
   readProjectArtifact(input: Readonly<{
@@ -89,6 +93,7 @@ export class ProjectRuntimeService {
   private readonly contexts: ProjectContextStore;
   private readonly sources: ProjectSourceStore;
   private readonly locks = new Map<string, Promise<void>>();
+  private readonly rejectedNarrativeSourceDigests = new Map<string, string>();
 
   constructor(
     private readonly repository: ProjectRuntimeRepository,
@@ -139,6 +144,10 @@ export class ProjectRuntimeService {
       () => this.runTurn(input),
       { retryLimit: input.lifecycleLeaseToken ? 0 : LIFECYCLE_RETRY_LIMIT },
     );
+  }
+
+  readLatestTestPlan(workspaceId: string, projectId: string): Promise<Readonly<Record<string, unknown>> | null> {
+    return this.repository.readLatestTestPlan(workspaceId, projectId);
   }
 
   private async runTurn(input: ProjectRuntimeTurnInput): Promise<ProjectRuntimeTurnResult> {
@@ -295,6 +304,7 @@ export class ProjectRuntimeService {
       }).catch(() => undefined);
       throw error;
     } finally {
+      this.rejectedNarrativeSourceDigests.delete(started.id);
       await rm(stagedAttachments.directory, { recursive: true, force: true }).catch(() => undefined);
     }
   }
@@ -540,14 +550,14 @@ export class ProjectRuntimeService {
     if (authorization.mode !== "PRIMARY" && !READ_ONLY_TOOLS.has(input.name)) {
       throw new Error(`${input.name} is not authorized in ${authorization.mode} mode`);
     }
-    const validatedArguments = boundedObject(input.arguments);
+    const validatedArguments = boundedObject(input.arguments, projectRuntimeToolArgumentLimit(input.name));
     const callId = await this.repository.beginToolCall({
       ...input,
       sessionId: authorization.sessionId,
       arguments: summarizeToolAuditValue(validatedArguments),
     });
     try {
-      const result = await this.executeTool(input);
+      const result = await this.executeTool({ ...input, arguments: validatedArguments });
       await this.repository.finishToolCall(input.workspaceId, callId, summarizeToolAuditValue(result));
       return result;
     } catch (error) {
@@ -563,7 +573,8 @@ export class ProjectRuntimeService {
     name: string; arguments: Readonly<Record<string, unknown>>;
   }>): Promise<Readonly<Record<string, unknown>>> {
     if (input.name === "context.read") {
-      return Object.freeze({ context: await this.readContext(input.workspaceId, input.projectId) });
+      const context = await this.readContext(input.workspaceId, input.projectId);
+      return Object.freeze({ context: projectRuntimeContextView(context, input.role) });
     }
     if (input.name === "source.list") return Object.freeze({ paths: await this.listSource(input.workspaceId, input.projectId) });
     if (input.name === "source.read") {
@@ -627,15 +638,24 @@ export class ProjectRuntimeService {
       }
       return this.mutateResult(input.workspaceId, input.projectId, current => updateProjectContext(current, {
         handoffs: Object.freeze([...current.handoffs, Object.freeze({
-          ...handoff, id: input.turnId, fromRole: input.role, toRole,
+          id: input.turnId, fromRole: input.role, toRole,
           summary, ...(uiSpecification ? { uiSpecification } : {}), createdAt: new Date().toISOString(),
-        })].slice(-100)),
+        })].slice(-20)),
       }));
     }
-    if (input.name === "source.checkpoint") return this.checkpointSource(input.workspaceId, input.projectId);
-    if (input.name === "build.request") return this.updateWorkflow(input.workspaceId, input.projectId, { state: "BUILDING", buildRequestedByTurnId: input.turnId });
+    if (input.name === "source.checkpoint") {
+      return this.checkpointSource(
+        input.workspaceId,
+        input.projectId,
+        input.turnId,
+        input.arguments.narrativeProof,
+      );
+    }
+    if (input.name === "build.request") {
+      return this.requestBuildAfterCurrentTurnCheckpoint(input.workspaceId, input.projectId, input.turnId);
+    }
     if (input.name === "test_plan.replace") {
-      const draftPlan = boundedObject(input.arguments.plan);
+      const draftPlan = boundedObject(input.arguments.plan, MAX_TEST_PLAN_TOOL_ARGUMENT_BYTES);
       const before = await this.readContext(input.workspaceId, input.projectId);
       if (!before.source) throw new Error("A test plan requires a published source revision");
       const candidatePlan = freezeTestPlan(draftPlan, before);
@@ -668,6 +688,56 @@ export class ProjectRuntimeService {
         planSha256: stored.sha256,
       });
     }
+    if (input.name === "test_plan.revise_timeout") {
+      const before = await this.readContext(input.workspaceId, input.projectId);
+      if (!before.source) throw new Error("A test plan requires a published source revision");
+      const basePlanRevision = Number(input.arguments.basePlanRevision);
+      const timeoutMs = Number(input.arguments.timeoutMs);
+      if (!Number.isInteger(basePlanRevision) || basePlanRevision < 1
+        || !Number.isInteger(timeoutMs) || timeoutMs < 1 || timeoutMs > 900_000) {
+        throw new Error("A test plan timeout revision requires a valid basePlanRevision and timeoutMs");
+      }
+      const storedBase = await this.repository.readTestPlanRevision(
+        input.workspaceId,
+        input.projectId,
+        before.source.revision,
+        basePlanRevision,
+      );
+      if (!storedBase) throw new Error("The requested base Test plan does not exist for the current source revision");
+      const candidatePlan = freezeTestPlan(
+        reviseTestPlanTimeout(boundedObject(storedBase.plan, MAX_TEST_PLAN_TOOL_ARGUMENT_BYTES), timeoutMs),
+        before,
+      );
+      await this.validatePublishedProbeReferences(input.workspaceId, input.projectId, candidatePlan);
+      const context = await this.mutateContext(input.workspaceId, input.projectId, current => {
+        if (!current.source || current.source.revision !== before.source!.revision
+          || current.e2e.goalRevision !== before.e2e.goalRevision) {
+          throw new Error("The source or E2E goals changed while the Test Agent was revising its plan timeout");
+        }
+        return updateProjectContext(current, { e2e: Object.freeze({
+          ...current.e2e,
+          planRevision: (current.e2e.planRevision ?? 0) + 1,
+          plan: candidatePlan,
+        }) });
+      });
+      const stored = await this.repository.recordTestPlan({
+        workspaceId: input.workspaceId,
+        projectId: input.projectId,
+        turnId: input.turnId,
+        requirementRevision: Math.max(1, context.e2e.goalRevision),
+        sourceRevision: context.source!.revision,
+        planRevision: context.e2e.planRevision!,
+        plan: context.e2e.plan!,
+      });
+      return Object.freeze({
+        accepted: true,
+        contextRevision: context.revision,
+        basePlanRevision,
+        planId: stored.id,
+        planRevision: context.e2e.planRevision,
+        planSha256: stored.sha256,
+      });
+    }
     if (input.name === "test.verdict") {
       const testSummary = boundedObject(input.arguments);
       const current = await this.readContext(input.workspaceId, input.projectId);
@@ -689,8 +759,16 @@ export class ProjectRuntimeService {
     }
     if (input.name === "evidence.read") {
       const runs = await this.repository.readTestEvidence(input.workspaceId, input.projectId);
-      const visualEvidence = await this.readVisualEvidence(input.workspaceId, input.projectId, runs);
-      return Object.freeze({ runs, ...visualEvidence });
+      const visualEvidence = await this.readVisualEvidence(
+        input.workspaceId,
+        input.projectId,
+        runs,
+        input.arguments,
+      );
+      // e2e.observe owns history discovery. Repeating every historical run on
+      // each six-image page needlessly floods the model context and can force
+      // compaction before a long visual review finishes.
+      return Object.freeze({ runs: evidenceRunsForVisualRead(runs), ...visualEvidence });
     }
     if (input.name === "diagnostics.run") {
       return Object.freeze({ accepted: true, delegatedTo: "controlled-host-gateway", bounded: true });
@@ -702,9 +780,13 @@ export class ProjectRuntimeService {
     workspaceId: string,
     projectId: string,
     runs: readonly Readonly<Record<string, unknown>>[],
+    selector: Readonly<Record<string, unknown>>,
   ): Promise<Readonly<Record<string, unknown>>> {
     const selected = latestEvidenceReport(runs);
     if (!selected) return Object.freeze({ visualEvidence: Object.freeze({ available: false, reason: "NO_E2E_REPORT" }) });
+    if (typeof selector.runId === "string" && selector.runId !== selected.runId) {
+      throw new Error(`Evidence run ${selector.runId} is not the latest completed run`);
+    }
     if (!this.artifactReader) {
       return Object.freeze({ visualEvidence: Object.freeze({
         available: false,
@@ -718,7 +800,14 @@ export class ProjectRuntimeService {
       ...selected.object,
       maximumBytes: AGENT_EVIDENCE_ARCHIVE_MAX_BYTES,
     });
-    const directory = await mkdtemp(join(tmpdir(), "deviludo-agent-evidence-"));
+    // The Core container intentionally has a small tmpfs at /tmp. E2E bundles
+    // can be much larger than that after videos and checkpoint frames are
+    // included, so extracting there turns valid evidence into an ENOSPC
+    // verdict. Keep transient evidence on the bounded project-data volume and
+    // remove it in the finally block below.
+    const temporaryRoot = agentEvidenceTemporaryRoot(this.projectsRoot);
+    await mkdir(temporaryRoot, { recursive: true, mode: 0o700 });
+    const directory = await mkdtemp(join(temporaryRoot, "read-"));
     try {
       const archivePath = join(directory, "evidence.zip");
       const extractionRoot = join(directory, "extracted");
@@ -731,14 +820,12 @@ export class ProjectRuntimeService {
       const reportCheckpoints = Array.isArray(validated.report.checkpoints)
         ? validated.report.checkpoints
         : [];
+      const availableCheckpoints = visualEvidenceCheckpoints(reportCheckpoints);
+      const selectedCheckpoints = selectVisualEvidenceCheckpoints(availableCheckpoints, selector);
       const evidenceImages: Readonly<Record<string, unknown>>[] = [];
-      for (const role of AGENT_EVIDENCE_ROLES) {
-        const checkpoint = reportCheckpoints.find(item => {
-          if (!item || typeof item !== "object" || Array.isArray(item)) return false;
-          const record = item as Record<string, unknown>;
-          return record.role === role && record.status === "PASSED" && typeof record.screenshot === "string";
-        }) as Record<string, unknown> | undefined;
-        if (!checkpoint) continue;
+      for (const selection of selectedCheckpoints) {
+        const checkpoint = selection.checkpoint;
+        const role = String(checkpoint.role);
         const relativeScreenshot = String(checkpoint.screenshot);
         const screenshotPath = resolve(extractionRoot, relativeScreenshot);
         const boundedPath = relative(extractionRoot, screenshotPath);
@@ -758,6 +845,7 @@ export class ProjectRuntimeService {
           targetPlatform: selected.targetPlatform,
           checkpointId: typeof checkpoint.checkpointId === "string" ? checkpoint.checkpointId : role.toLowerCase(),
           checkpointRole: role,
+          contentIndex: selection.contentIndex,
           mimeType: "image/jpeg",
           sizeBytes: image.length,
           data: image.toString("base64"),
@@ -769,7 +857,14 @@ export class ProjectRuntimeService {
           runId: selected.runId,
           targetPlatform: selected.targetPlatform,
           reportOutcome: validated.report.outcome,
-          imageCount: evidenceImages.length,
+          imageCount: availableCheckpoints.length,
+          returnedImageCount: evidenceImages.length,
+          checkpoints: Object.freeze(availableCheckpoints.map((checkpoint, index) => Object.freeze({
+            contentIndex: index + 1,
+            checkpointId: typeof checkpoint.checkpointId === "string"
+              ? checkpoint.checkpointId : String(checkpoint.role).toLowerCase(),
+            checkpointRole: String(checkpoint.role),
+          }))),
         }),
         evidenceImages: Object.freeze(evidenceImages),
       });
@@ -778,12 +873,36 @@ export class ProjectRuntimeService {
     }
   }
 
-  private async checkpointSource(workspaceId: string, projectId: string): Promise<Readonly<Record<string, unknown>>> {
+  private async checkpointSource(
+    workspaceId: string,
+    projectId: string,
+    turnId: string,
+    narrativeProof: unknown,
+  ): Promise<Readonly<Record<string, unknown>>> {
     const context = await this.readContext(workspaceId, projectId);
     const uiSpecification = latestUiSpecification(context);
     if (uiSpecification) assertRequiredUiAssets(uiSpecification, context.assetPlan);
     const revision = (context.source?.revision ?? 0) + 1;
     const directory = join(resolve(this.projectsRoot), "workspaces", workspaceId, "projects", projectId, "runtime", "worktree");
+    const narrativeScenes = requiredNarrativeSceneAssetKeys(context);
+    const checkpointAssetPlanDigest = stableDigest(context.assetPlan);
+    if (narrativeScenes.length > 0) {
+      const narrativeSourceDigest = await narrativeProofSourceDigest(directory, narrativeProof);
+      if (this.rejectedNarrativeSourceDigests.get(turnId) === narrativeSourceDigest) {
+        throw new Error(
+          "Narrative source is unchanged after a content-quality rejection; edit the production story source before retrying source.checkpoint",
+        );
+      }
+      try {
+        await validateNarrativeDeliveryProof(directory, narrativeScenes, narrativeProof);
+      } catch (error) {
+        if (isNarrativeSourceQualityRejection(error)) {
+          this.rejectedNarrativeSourceDigests.set(turnId, narrativeSourceDigest);
+        }
+        throw error;
+      }
+      this.rejectedNarrativeSourceDigests.delete(turnId);
+    }
     await this.requireProbePublisher(directory);
     // ProjectSourceStore validates every path and rejects links while publishing.
     const stored = await this.sources.publishDirectory({ workspaceId, projectId, revision, directory });
@@ -793,8 +912,33 @@ export class ProjectRuntimeService {
       source: Object.freeze({ revision, sha256: stored.digest, relativePath: stored.relativePath }),
       e2e: Object.freeze({ ...current.e2e, planRevision: null, plan: null }),
       testSummary: null,
+      workflow: Object.freeze({
+        ...current.workflow,
+        sourceCheckpointedByTurnId: turnId,
+        sourceCheckpointRevision: revision,
+        sourceCheckpointAssetPlanDigest: checkpointAssetPlanDigest,
+        buildRequestedByTurnId: null,
+      }),
     }));
-    return Object.freeze({ revision, sha256: stored.digest, relativePath: stored.relativePath });
+    return Object.freeze({ revision, sha256: stored.digest, relativePath: stored.relativePath,
+      narrativeScenesVerified: narrativeScenes.length });
+  }
+
+  private async requestBuildAfterCurrentTurnCheckpoint(
+    workspaceId: string,
+    projectId: string,
+    turnId: string,
+  ): Promise<Readonly<Record<string, unknown>>> {
+    return this.mutateResult(workspaceId, projectId, current => {
+      if (!hasCurrentTurnSourceCheckpoint(current, turnId)) {
+        throw new Error("A controlled build requires a successful source checkpoint from the current Development turn");
+      }
+      return updateProjectContext(current, { workflow: Object.freeze({
+        ...current.workflow,
+        state: "BUILDING",
+        buildRequestedByTurnId: turnId,
+      }) });
+    });
   }
 
   private async listSource(workspaceId: string, projectId: string): Promise<readonly string[]> {
@@ -1153,6 +1297,70 @@ export class ProjectRuntimeService {
   }
 }
 
+export function agentEvidenceTemporaryRoot(projectsRoot: string): string {
+  return join(resolve(projectsRoot), ".runtime-tmp", "agent-evidence");
+}
+
+export function visualEvidenceCheckpoints(
+  checkpoints: readonly unknown[],
+): readonly Readonly<Record<string, unknown>>[] {
+  return Object.freeze(checkpoints.flatMap(item => {
+    if (!item || typeof item !== "object" || Array.isArray(item)) return [];
+    const checkpoint = item as Record<string, unknown>;
+    return checkpoint.status === "PASSED"
+      && AGENT_EVIDENCE_ROLES.includes(checkpoint.role as typeof AGENT_EVIDENCE_ROLES[number])
+      && typeof checkpoint.screenshot === "string"
+      ? [Object.freeze(checkpoint)] : [];
+  }).slice(0, AGENT_EVIDENCE_IMAGE_LIMIT));
+}
+
+type VisualEvidenceSelection = Readonly<{
+  contentIndex: number;
+  checkpoint: Readonly<Record<string, unknown>>;
+}>;
+
+/**
+ * MCP transports at most six native images in one tool result. Select the
+ * requested global checkpoint page before encoding image bytes so later
+ * ACTION/PROGRESS/COMPLETION frames remain reachable instead of being silently
+ * discarded by the transport formatter.
+ */
+export function selectVisualEvidenceCheckpoints(
+  checkpoints: readonly Readonly<Record<string, unknown>>[],
+  selector: Readonly<Record<string, unknown>>,
+): readonly VisualEvidenceSelection[] {
+  const indexed = checkpoints.map((checkpoint, index) => Object.freeze({
+    contentIndex: index + 1,
+    checkpoint,
+  }));
+  const checkpointId = typeof selector.checkpointId === "string" ? selector.checkpointId : null;
+  if (checkpointId) {
+    return Object.freeze(indexed.filter(item => item.checkpoint.checkpointId === checkpointId).slice(0, 1));
+  }
+
+  if (Array.isArray(selector.contentIndices)) {
+    const requested = new Set(selector.contentIndices.filter(value =>
+      Number.isInteger(value) && Number(value) >= 1 && Number(value) <= checkpoints.length));
+    return Object.freeze(indexed.filter(item => requested.has(item.contentIndex)).slice(0, AGENT_EVIDENCE_PAGE_LIMIT));
+  }
+
+  const startContentIndex = Number.isInteger(selector.startContentIndex)
+    ? Number(selector.startContentIndex) : null;
+  const endContentIndex = Number.isInteger(selector.endContentIndex)
+    ? Number(selector.endContentIndex) : null;
+  if (startContentIndex !== null || endContentIndex !== null) {
+    const start = Math.max(1, startContentIndex ?? 1);
+    const end = Math.min(checkpoints.length, endContentIndex ?? start + AGENT_EVIDENCE_PAGE_LIMIT - 1);
+    return Object.freeze(indexed.filter(item =>
+      item.contentIndex >= start && item.contentIndex <= end).slice(0, AGENT_EVIDENCE_PAGE_LIMIT));
+  }
+
+  const offset = Number.isInteger(selector.imageOffset) ? Math.max(0, Number(selector.imageOffset)) : 0;
+  const requestedLimit = Number.isInteger(selector.imageLimit) ? Number(selector.imageLimit) : AGENT_EVIDENCE_PAGE_LIMIT;
+  const limit = Math.max(1, Math.min(AGENT_EVIDENCE_PAGE_LIMIT, requestedLimit));
+  return Object.freeze(indexed.slice(offset, offset + limit));
+}
+
 type PhysicalRuntimeIdentity = Readonly<{
   workspaceId: string;
   projectId: string;
@@ -1206,6 +1414,61 @@ function contextFromSeed(current: ProjectContext, seed: ProjectContextSeed, init
  * comparison can reject an otherwise identical approved snapshot. Sort object
  * keys recursively while preserving array order before comparing JSON values.
  */
+export function projectRuntimeContextView(
+  context: ProjectContext,
+  role: ProjectRuntimeRole,
+): Readonly<Record<string, unknown>> {
+  const roles = Object.freeze(Object.fromEntries(PROJECT_RUNTIME_ROLES.map(agentRole => {
+    const roleContext = context.roles[agentRole];
+    return [agentRole, Object.freeze({
+      ...roleContext,
+      summary: roleContext.summary.slice(0, 2_000),
+    })];
+  })));
+  const includeUiSpecification = ["UI_DESIGN", "DEVELOPMENT", "TEST"].includes(role);
+  const seenTransitions = new Set<string>();
+  const handoffs: Readonly<Record<string, unknown>>[] = [];
+  for (let index = context.handoffs.length - 1; index >= 0; index -= 1) {
+    const handoff = context.handoffs[index];
+    const transition = `${String(handoff.fromRole ?? "")}>${String(handoff.toRole ?? "")}`;
+    if (seenTransitions.has(transition)) continue;
+    seenTransitions.add(transition);
+    handoffs.unshift(Object.freeze({
+      id: handoff.id,
+      fromRole: handoff.fromRole,
+      toRole: handoff.toRole,
+      summary: typeof handoff.summary === "string" ? handoff.summary.slice(0, 8_000) : "",
+      createdAt: handoff.createdAt,
+      ...(includeUiSpecification && handoff.uiSpecification !== undefined
+        ? { uiSpecification: handoff.uiSpecification }
+        : {}),
+    }));
+  }
+  const recentConversation = Object.freeze(context.recentConversation.slice(-12).map(message => Object.freeze({
+    ...message,
+    ...(typeof message.summary === "string" ? { summary: message.summary.slice(0, 2_000) } : {}),
+  })));
+  const testSummary = role === "TEST" || !context.testSummary
+    ? context.testSummary
+    : Object.freeze(Object.fromEntries(Object.entries(context.testSummary)
+      .filter(([key]) => key !== "uiReview")));
+  return Object.freeze({
+    ...context,
+    assetPlan: ["UI_DESIGN", "DEVELOPMENT", "TEST"].includes(role)
+      ? context.assetPlan
+      : Object.freeze([]),
+    e2e: Object.freeze({
+      ...context.e2e,
+      plan: role === "TEST" ? context.e2e.plan : null,
+    }),
+    testSummary,
+    roles,
+    handoffs: Object.freeze(handoffs),
+    recentConversation,
+    recentTools: Object.freeze(context.recentTools.slice(-24)),
+  });
+}
+
 export function sameJson(left: unknown, right: unknown): boolean {
   const canonicalize = (_key: string, value: unknown): unknown => {
     if (!value || typeof value !== "object" || Array.isArray(value)) return value;
@@ -1278,16 +1541,51 @@ function controlFromPhysical(value: PhysicalRuntimeIdentity): ProjectRuntimeCont
   });
 }
 
-function boundedObject(value: unknown): Readonly<Record<string, unknown>> {
+const DEFAULT_TOOL_ARGUMENT_BYTES = 64_000;
+// A complete authored campaign can legitimately need hundreds of deterministic
+// events (per-exchange checkpoints plus the actions that resolve them). Keep
+// the structural 512-event limit as the real bound, while allowing the JSON
+// envelope to carry those validated events and their requirement coverage.
+export const MAX_TEST_PLAN_TOOL_ARGUMENT_BYTES = 2_000_000;
+export const MAX_SOURCE_CHECKPOINT_TOOL_ARGUMENT_BYTES = 512_000;
+
+export function projectRuntimeToolArgumentLimit(name: string): number {
+  if (name === "test_plan.replace") return MAX_TEST_PLAN_TOOL_ARGUMENT_BYTES;
+  if (name === "source.checkpoint") return MAX_SOURCE_CHECKPOINT_TOOL_ARGUMENT_BYTES;
+  return DEFAULT_TOOL_ARGUMENT_BYTES;
+}
+
+function boundedObject(
+  value: unknown,
+  maximumBytes = DEFAULT_TOOL_ARGUMENT_BYTES,
+): Readonly<Record<string, unknown>> {
   if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error("Tool argument must be an object");
   const serialized = JSON.stringify(value);
-  if (serialized.length > 64_000 || /(?:api.?key|credential|auth.?token|password|secret)/i.test(serialized)) {
+  // `boundedObject` is also used directly as an Array.map callback, whose
+  // second argument is the item index. Treat only an explicitly wider limit as
+  // an override so those call sites retain the default envelope.
+  const byteLimit = maximumBytes >= DEFAULT_TOOL_ARGUMENT_BYTES
+    ? maximumBytes : DEFAULT_TOOL_ARGUMENT_BYTES;
+  if (serialized.length > byteLimit || containsSensitiveToolArgument(value)) {
     throw new Error("Tool argument summary is unsafe or too large");
   }
   return Object.freeze(JSON.parse(serialized));
 }
 
 const SENSITIVE_AUDIT_KEY = /(?:api.?key|authorization|credential|mcp.?token|password|provider.?token|secret)/i;
+
+/**
+ * Reject credential-bearing argument fields without scanning player-authored
+ * prose. Narrative and test descriptions can legitimately contain words such
+ * as "secret"; treating any occurrence in a serialized value as a credential
+ * made otherwise valid test plans impossible to persist.
+ */
+export function containsSensitiveToolArgument(value: unknown): boolean {
+  if (Array.isArray(value)) return value.some(containsSensitiveToolArgument);
+  if (!value || typeof value !== "object") return false;
+  return Object.entries(value).some(([key, nested]) =>
+    SENSITIVE_AUDIT_KEY.test(key) || containsSensitiveToolArgument(nested));
+}
 const MAX_AUDIT_BYTES = 8_000;
 
 export function summarizeToolAuditValue(value: unknown): Readonly<Record<string, unknown>> {
@@ -1571,6 +1869,279 @@ export function latestUiSpecification(
   return null;
 }
 
+const NARRATIVE_ANCHOR_FIELDS = Object.freeze([
+  "entry", "objective", "exchanges", "reveal", "consequence", "transition",
+] as const);
+const NARRATIVE_EXCHANGE_ANCHOR_FIELDS = Object.freeze(["prompt", "choices"] as const);
+const NARRATIVE_CHOICE_ANCHOR_FIELDS = Object.freeze(["action", "response"] as const);
+
+/**
+ * A numbered scene-art contract means UI Design expects authored narrative
+ * scenes rather than interchangeable level decoration. Development must prove
+ * that every one of those scenes has its own implemented beats before Core
+ * publishes a source revision.
+ */
+export function requiredNarrativeSceneAssetKeys(
+  context: Pick<ProjectContext, "assetPlan">,
+): readonly string[] {
+  const candidates = context.assetPlan.flatMap(asset => {
+    const key = String(asset.key ?? "");
+    const match = /^scene-(\d{2,3})(?:-|$)/.exec(key);
+    return match ? [{ key, order: Number(match[1]) }] : [];
+  });
+  if (candidates.length < 2) return Object.freeze([]);
+  candidates.sort((left, right) => left.order - right.order || left.key.localeCompare(right.key));
+  const seenOrders = new Set<number>();
+  for (const candidate of candidates) {
+    if (candidate.order < 1 || seenOrders.has(candidate.order)) {
+      throw new Error("Numbered narrative scene assets must use unique positive scene numbers");
+    }
+    seenOrders.add(candidate.order);
+  }
+  for (let order = 1; order <= candidates[candidates.length - 1]!.order; order += 1) {
+    if (!seenOrders.has(order)) throw new Error("Numbered narrative scene assets must form one contiguous sequence");
+  }
+  return Object.freeze(candidates.map(candidate => candidate.key));
+}
+
+export function hasCurrentTurnSourceCheckpoint(
+  context: Pick<ProjectContext, "source" | "workflow" | "assetPlan">,
+  turnId: string,
+): boolean {
+  return Boolean(context.source)
+    && context.workflow.sourceCheckpointedByTurnId === turnId
+    && Number(context.workflow.sourceCheckpointRevision ?? 0) === context.source!.revision
+    && context.workflow.sourceCheckpointAssetPlanDigest === stableDigest(context.assetPlan);
+}
+
+export async function validateNarrativeDeliveryProof(
+  sourceRoot: string,
+  requiredSceneKeys: readonly string[],
+  value: unknown,
+): Promise<void> {
+  const proof = boundedObject(value, MAX_SOURCE_CHECKPOINT_TOOL_ARGUMENT_BYTES);
+  assertOnlyKeys(proof, ["opening", "scenes"], "Narrative delivery proof");
+  const opening = boundedObject(proof.opening);
+  assertOnlyKeys(opening, ["sourcePath", "anchors"], "Narrative opening proof");
+  const scenes = arrayOfObjects(proof.scenes);
+  if (scenes.length !== requiredSceneKeys.length) {
+    throw new Error(`Narrative delivery proof must cover all ${requiredSceneKeys.length} authored scenes exactly`);
+  }
+
+  const root = resolve(sourceRoot);
+  const sourceCache = new Map<string, string>();
+  const sourceText = async (pathValue: unknown): Promise<string> => {
+    if (typeof pathValue !== "string" || !pathValue.trim() || pathValue.length > 1_000) {
+      throw new Error("Narrative delivery proof contains an invalid source path");
+    }
+    const projectPath = normalizeProjectPath(pathValue);
+    const cached = sourceCache.get(projectPath);
+    if (cached !== undefined) return cached;
+    const target = resolve(root, projectPath);
+    if (!target.startsWith(`${root}${sep}`)) throw new Error("Narrative proof source path escapes the project");
+    const info = await lstat(target);
+    if (!info.isFile() || info.isSymbolicLink() || info.size < 1 || info.size > 4 * 1024 * 1024) {
+      throw new Error(`Narrative proof source is not a bounded text file: ${projectPath}`);
+    }
+    const bytes = await readFile(target);
+    if (bytes.includes(0)) throw new Error(`Narrative proof source is not text: ${projectPath}`);
+    const normalized = normalizeNarrativeAnchor(bytes.toString("utf8"));
+    sourceCache.set(projectPath, normalized);
+    return normalized;
+  };
+
+  const globallyUniqueAnchors = new Set<string>();
+  const structurallyUniqueChoiceAnchors = new Set<string>();
+  const choicePhraseOccurrences = new Map<string, number>();
+  const verifyAnchor = async (candidate: unknown, sourcePath: unknown, label: string): Promise<void> => {
+    if (typeof candidate !== "string" || candidate.length > 1_000) {
+      throw new Error(`${label} is invalid`);
+    }
+    const anchor = normalizeNarrativeAnchor(candidate);
+    if (Array.from(anchor).length < 12 || /(?:%[a-z]|\$\{|\{\{|\}\})/i.test(anchor)
+      || globallyUniqueAnchors.has(anchor)) {
+      throw new Error(`${label} must be unique authored text without formatting placeholders`);
+    }
+    const source = await sourceText(sourcePath);
+    if (!source.includes(anchor)) throw new Error(`${label} is not present in its declared source file`);
+    globallyUniqueAnchors.add(anchor);
+  };
+
+  if (!Array.isArray(opening.anchors) || opening.anchors.length < 4 || opening.anchors.length > 24) {
+    throw new Error("Narrative opening proof requires at least four authored source anchors");
+  }
+  for (let index = 0; index < opening.anchors.length; index += 1) {
+    await verifyAnchor(opening.anchors[index], opening.sourcePath, `Narrative opening anchor ${index + 1}`);
+  }
+
+  const expectedKeys = new Set(requiredSceneKeys);
+  const seenKeys = new Set<string>();
+  for (const candidate of scenes) {
+    assertOnlyKeys(candidate, ["id", "title", "sourcePath", "anchors"], "Narrative scene proof");
+    const id = String(candidate.id ?? "");
+    const title = typeof candidate.title === "string" ? normalizeNarrativeAnchor(candidate.title) : "";
+    if (!expectedKeys.has(id) || seenKeys.has(id) || !title || title.length > 200) {
+      throw new Error("Narrative delivery proof has a missing, duplicate, or unexpected scene");
+    }
+    seenKeys.add(id);
+    const anchors = boundedObject(candidate.anchors);
+    assertOnlyKeys(anchors, NARRATIVE_ANCHOR_FIELDS, `Narrative scene ${id} anchors`);
+    for (const field of NARRATIVE_ANCHOR_FIELDS) {
+      if (!(field in anchors)) throw new Error(`Narrative scene ${id} is missing its ${field} anchor`);
+      if (field !== "exchanges") {
+        await verifyAnchor(anchors[field], candidate.sourcePath, `Narrative scene ${id} ${field} anchor`);
+      }
+    }
+    const exchanges = arrayOfObjects(anchors.exchanges);
+    const sceneChoiceAnchors = new Map<string, string[]>();
+    if (exchanges.length < 3 || exchanges.length > 12) {
+      throw new Error(`Narrative scene ${id} requires at least three authored exchanges`);
+    }
+    for (let exchangeIndex = 0; exchangeIndex < exchanges.length; exchangeIndex += 1) {
+      const exchange = exchanges[exchangeIndex]!;
+      assertOnlyKeys(exchange, NARRATIVE_EXCHANGE_ANCHOR_FIELDS,
+        `Narrative scene ${id} exchange ${exchangeIndex + 1}`);
+      if (!("prompt" in exchange) || !("choices" in exchange)) {
+        throw new Error(`Narrative scene ${id} exchange ${exchangeIndex + 1} requires a prompt and choices`);
+      }
+      await verifyAnchor(exchange.prompt, candidate.sourcePath,
+        `Narrative scene ${id} exchange ${exchangeIndex + 1} prompt anchor`);
+      const choices = arrayOfObjects(exchange.choices);
+      if (choices.length < 2 || choices.length > 6) {
+        throw new Error(`Narrative scene ${id} exchange ${exchangeIndex + 1} requires two to six authored choices`);
+      }
+      for (let choiceIndex = 0; choiceIndex < choices.length; choiceIndex += 1) {
+        const choice = choices[choiceIndex]!;
+        assertOnlyKeys(choice, NARRATIVE_CHOICE_ANCHOR_FIELDS,
+          `Narrative scene ${id} exchange ${exchangeIndex + 1} choice ${choiceIndex + 1}`);
+        for (const field of NARRATIVE_CHOICE_ANCHOR_FIELDS) {
+          if (!(field in choice)) {
+            throw new Error(`Narrative scene ${id} exchange ${exchangeIndex + 1} choice ${choiceIndex + 1} is missing its ${field} anchor`);
+          }
+          await verifyAnchor(choice[field], candidate.sourcePath,
+            `Narrative scene ${id} exchange ${exchangeIndex + 1} choice ${choiceIndex + 1} ${field} anchor`);
+          const structuralAnchor = normalizeNarrativeChoiceStructure(String(choice[field]));
+          if (structurallyUniqueChoiceAnchors.has(structuralAnchor)) {
+            throw new Error(
+              `Narrative scene ${id} exchange ${exchangeIndex + 1} choice ${choiceIndex + 1} ${field} anchor `
+              + "must be scene-specific authored text, not repeated numbered boilerplate",
+            );
+          }
+          const priorSceneAnchors = sceneChoiceAnchors.get(field) ?? [];
+          if (priorSceneAnchors.some(prior => narrativeChoiceNearDuplicate(prior, structuralAnchor))) {
+            throw new Error(
+              `Narrative scene ${id} exchange ${exchangeIndex + 1} choice ${choiceIndex + 1} ${field} anchor `
+              + "near-duplicates another choice instead of authoring a distinct decision or consequence",
+            );
+          }
+          priorSceneAnchors.push(structuralAnchor);
+          sceneChoiceAnchors.set(field, priorSceneAnchors);
+          structurallyUniqueChoiceAnchors.add(structuralAnchor);
+          for (const phrase of narrativeChoicePhraseKeys(String(choice[field]))) {
+            const occurrences = (choicePhraseOccurrences.get(phrase) ?? 0) + 1;
+            if (occurrences > 5) {
+              throw new Error(
+                `Narrative scene ${id} exchange ${exchangeIndex + 1} choice ${choiceIndex + 1} ${field} anchor `
+                + "repeats a boilerplate phrase across too many choices",
+              );
+            }
+            choicePhraseOccurrences.set(phrase, occurrences);
+          }
+        }
+      }
+    }
+  }
+  if (requiredSceneKeys.some(key => !seenKeys.has(key))) {
+    throw new Error("Narrative delivery proof does not cover every required scene");
+  }
+}
+
+async function narrativeProofSourceDigest(sourceRoot: string, value: unknown): Promise<string> {
+  const proof = boundedObject(value, MAX_SOURCE_CHECKPOINT_TOOL_ARGUMENT_BYTES);
+  const opening = boundedObject(proof.opening);
+  const paths = new Set<string>();
+  if (typeof opening.sourcePath === "string" && opening.sourcePath.trim()) {
+    paths.add(normalizeProjectPath(opening.sourcePath));
+  }
+  for (const scene of arrayOfObjects(proof.scenes)) {
+    if (typeof scene.sourcePath === "string" && scene.sourcePath.trim()) {
+      paths.add(normalizeProjectPath(scene.sourcePath));
+    }
+  }
+  const root = resolve(sourceRoot);
+  const digest = createHash("sha256");
+  for (const projectPath of [...paths].sort()) {
+    const target = resolve(root, projectPath);
+    if (!target.startsWith(`${root}${sep}`)) throw new Error("Narrative proof source path escapes the project");
+    const info = await lstat(target);
+    if (!info.isFile() || info.isSymbolicLink() || info.size < 1 || info.size > 4 * 1024 * 1024) {
+      throw new Error(`Narrative proof source is not a bounded text file: ${projectPath}`);
+    }
+    const bytes = await readFile(target);
+    if (bytes.includes(0)) throw new Error(`Narrative proof source is not text: ${projectPath}`);
+    digest.update(projectPath).update("\0").update(bytes).update("\0");
+  }
+  return `sha256:${digest.digest("hex")}`;
+}
+
+function isNarrativeSourceQualityRejection(error: unknown): boolean {
+  if (!(error instanceof Error)) return false;
+  return error.message.includes("not repeated numbered boilerplate")
+    || error.message.includes("repeats a boilerplate phrase")
+    || error.message.includes("near-duplicates another choice");
+}
+
+function normalizeNarrativeAnchor(value: string): string {
+  return value.normalize("NFKC").replace(/\s+/g, " ").trim();
+}
+
+function normalizeNarrativeChoiceStructure(value: string): string {
+  return normalizeNarrativeAnchor(value)
+    .toLocaleLowerCase("und")
+    .replace(/\p{Number}+/gu, "#")
+    .replace(/\s*#(?:\s*[场章节幕轮步项次])?/gu, "#")
+    .replace(/[\p{Punctuation}\p{Symbol}\s]+/gu, "")
+    .trim();
+}
+
+function narrativeChoicePhraseKeys(value: string): ReadonlySet<string> {
+  const prose = normalizeNarrativeChoiceStructure(value).replace(/#/g, "");
+  const keys = new Set<string>();
+  const characters = Array.from(prose);
+  // Eight visible characters is long enough to avoid ordinary connective
+  // prose while still catching a repeated wrapper whose unique suffix merely
+  // quotes the current prompt (for example, "先正面回答……并单独归档").
+  const phraseLength = 8;
+  for (let index = 0; index + phraseLength <= characters.length; index += 1) {
+    keys.add(characters.slice(index, index + phraseLength).join(""));
+  }
+  return keys;
+}
+
+function narrativeChoiceNearDuplicate(left: string, right: string): boolean {
+  const leftPairs = narrativeCharacterPairs(left);
+  const rightPairs = narrativeCharacterPairs(right);
+  const smallerSize = Math.min(leftPairs.size, rightPairs.size);
+  if (smallerSize < 8) return false;
+  let shared = 0;
+  for (const pair of leftPairs) {
+    if (rightPairs.has(pair)) shared += 1;
+  }
+  // Adding the current prompt, a timestamp, or connective filler around an
+  // existing answer preserves nearly all of the shorter answer's character
+  // pairs. That is proof decoration, not a new player decision.
+  return shared / smallerSize >= 0.78;
+}
+
+function narrativeCharacterPairs(value: string): ReadonlySet<string> {
+  const characters = Array.from(value.replace(/#/g, ""));
+  const pairs = new Set<string>();
+  for (let index = 0; index + 1 < characters.length; index += 1) {
+    pairs.add(`${characters[index]}${characters[index + 1]}`);
+  }
+  return pairs;
+}
+
 export function normalizeUiTestReview(
   value: unknown,
   specification: Readonly<Record<string, unknown>>,
@@ -1749,6 +2320,15 @@ export function latestEvidenceReport(
   return null;
 }
 
+export function evidenceRunsForVisualRead(
+  runs: readonly Readonly<Record<string, unknown>>[],
+): readonly Readonly<Record<string, unknown>>[] {
+  const selected = latestEvidenceReport(runs);
+  if (!selected) return Object.freeze([]);
+  const run = runs.find(candidate => candidate.id === selected.runId);
+  return Object.freeze(run ? [run] : []);
+}
+
 function assetSourcePath(asset: Readonly<Record<string, unknown>>): string | null {
   const source = typeof asset.sourcePath === "string" ? asset.sourcePath
     : typeof asset.expectedResourcePath === "string" && asset.expectedResourcePath.startsWith("res://")
@@ -1822,11 +2402,18 @@ export function bundledCjkFontValidationError(
 export function unobservedTestPlanAssetPlacements(
   plan: Readonly<Record<string, unknown>>,
 ): readonly Readonly<{ targetId: string; checkpointRole: string }>[] {
-  const manifest = boundedObject(plan.testManifest);
+  const manifest = boundedObject(plan.testManifest, MAX_TEST_PLAN_TOOL_ARGUMENT_BYTES);
   const events: Readonly<Record<string, unknown>>[] = [];
   if (Array.isArray(manifest.features)) {
     for (const feature of manifest.features) {
-      const script = boundedObject(boundedObject(feature).interactionScript);
+      const boundedFeature = boundedObject(feature, MAX_TEST_PLAN_TOOL_ARGUMENT_BYTES);
+      // Artifact and source-backed requirements are valid non-interactive
+      // features. They have no interactionScript and therefore cannot
+      // contribute screenshot checkpoints for asset-placement coverage.
+      if (!boundedFeature.interactionScript
+        || typeof boundedFeature.interactionScript !== "object"
+        || Array.isArray(boundedFeature.interactionScript)) continue;
+      const script = boundedObject(boundedFeature.interactionScript, MAX_TEST_PLAN_TOOL_ARGUMENT_BYTES);
       if (Array.isArray(script.events)) events.push(...script.events.map(boundedObject));
     }
   }
@@ -1836,11 +2423,6 @@ export function unobservedTestPlanAssetPlacements(
       && boundedObject(candidate).targetId === targetId);
   };
   const placementObserved = (targetId: string, checkpointRole: string): boolean => {
-    if (checkpointRole === "ACTION") {
-      return events.some(event => (event.type !== "checkpoint" && event.type !== "wait"
-        && [event.targetId, event.fromTargetId, event.toTargetId].includes(targetId))
-        || referencesTarget(event.postconditions, targetId));
-    }
     return events.some(event => event.type === "checkpoint" && event.role === checkpointRole
       && (checkpointRole === "START" || checkpointRole === "READY"
         || event.changeTargetId === targetId
@@ -1856,6 +2438,79 @@ export function unobservedTestPlanAssetPlacements(
       ? [Object.freeze({ targetId, checkpointRole })]
       : [];
   }));
+}
+
+/**
+ * A special interaction branch replaces the normal dialogue choice list.
+ * Reject a checkpoint that claims the normal list is visible immediately
+ * before driving a crisis, verification, recovery, or ending control. This is
+ * a plan-authoring contradiction, not a product failure.
+ */
+export function specialBranchCheckpointMismatches(
+  manifest: Readonly<Record<string, unknown>>,
+): readonly string[] {
+  const mismatches: string[] = [];
+  const features = Array.isArray(manifest.features) ? manifest.features : [];
+  const specialTarget = /^(?:crisis-|verification-|timeline-seal(?:$|-))/u;
+  for (const featureValue of features) {
+    if (!featureValue || typeof featureValue !== "object" || Array.isArray(featureValue)) continue;
+    const script = (featureValue as Readonly<Record<string, unknown>>).interactionScript;
+    if (!script || typeof script !== "object" || Array.isArray(script)) continue;
+    const events = Array.isArray((script as Readonly<Record<string, unknown>>).events)
+      ? (script as Readonly<Record<string, unknown>>).events as readonly unknown[] : [];
+    for (let index = 0; index < events.length - 1; index += 1) {
+      const currentValue = events[index];
+      const nextValue = events[index + 1];
+      if (!currentValue || typeof currentValue !== "object" || Array.isArray(currentValue)
+        || !nextValue || typeof nextValue !== "object" || Array.isArray(nextValue)) continue;
+      const checkpoint = currentValue as Readonly<Record<string, unknown>>;
+      const next = nextValue as Readonly<Record<string, unknown>>;
+      const nextTarget = typeof next.targetId === "string" ? next.targetId : "";
+      if (checkpoint.type !== "checkpoint" || !specialTarget.test(nextTarget)) continue;
+      const assertsDefaultList = checkpoint.changeTargetId === "dialogue-choice-list"
+        || (Array.isArray(checkpoint.assertions) && checkpoint.assertions.some(value => {
+          if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+          const assertion = value as Readonly<Record<string, unknown>>;
+          return assertion.source === "CONTROL" && assertion.targetId === "dialogue-choice-list";
+        }));
+      if (assertsDefaultList) {
+        mismatches.push(`${String(checkpoint.id ?? `checkpoint-${index + 1}`)} -> ${nextTarget}`);
+      }
+    }
+  }
+  return Object.freeze(mismatches);
+}
+
+export function finalSealPostconditionMismatches(
+  manifest: Readonly<Record<string, unknown>>,
+): readonly string[] {
+  const mismatches: string[] = [];
+  const features = Array.isArray(manifest.features) ? manifest.features : [];
+  for (const featureValue of features) {
+    if (!featureValue || typeof featureValue !== "object" || Array.isArray(featureValue)) continue;
+    const script = (featureValue as Readonly<Record<string, unknown>>).interactionScript;
+    if (!script || typeof script !== "object" || Array.isArray(script)) continue;
+    const events = Array.isArray((script as Readonly<Record<string, unknown>>).events)
+      ? (script as Readonly<Record<string, unknown>>).events as readonly unknown[] : [];
+    for (let index = 1; index < events.length; index += 1) {
+      const previousValue = events[index - 1];
+      const currentValue = events[index];
+      if (!previousValue || typeof previousValue !== "object" || Array.isArray(previousValue)
+        || !currentValue || typeof currentValue !== "object" || Array.isArray(currentValue)) continue;
+      const previous = previousValue as Readonly<Record<string, unknown>>;
+      const current = currentValue as Readonly<Record<string, unknown>>;
+      if (previous.targetId !== "timeline-seal" || current.targetId !== "action-confirm"
+        || !Array.isArray(current.postconditions)) continue;
+      const assertsSceneAdvance = current.postconditions.some(value => {
+        if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+        const assertion = value as Readonly<Record<string, unknown>>;
+        return assertion.source === "PROGRESS" && assertion.key === "scene_number"
+          && assertion.operator === "CHANGED";
+      });
+      if (assertsSceneAdvance) mismatches.push(String(current.stepId ?? `event-${index + 1}`));
+    }
+  }
+  return Object.freeze(mismatches);
 }
 
 function probePublisherLiterals(texts: readonly string[]): Readonly<{ matches(value: string): boolean }> {
@@ -1890,6 +2545,31 @@ function probePublisherLiterals(texts: readonly string[]): Readonly<{ matches(va
   return Object.freeze({ matches: (value: string) => exact.has(value) || patterns.some(pattern => pattern.test(value)) });
 }
 
+export function reviseTestPlanTimeout(
+  value: Readonly<Record<string, unknown>>,
+  timeoutMs: number,
+): Readonly<Record<string, unknown>> {
+  if (!Number.isInteger(timeoutMs) || timeoutMs < 1 || timeoutMs > 900_000) {
+    throw new Error("A revised Test plan timeout must be an integer from 1 through 900000");
+  }
+  const testManifest = structuredClone(boundedObject(value.testManifest, MAX_TEST_PLAN_TOOL_ARGUMENT_BYTES));
+  if (!Array.isArray(testManifest.features)) throw new Error("The base Test plan has no feature list");
+  let revisedInteractiveFeatures = 0;
+  const features = testManifest.features.map(candidate => {
+    const feature = boundedObject(candidate, MAX_TEST_PLAN_TOOL_ARGUMENT_BYTES);
+    if (feature.verificationMethod !== "interactive") return structuredClone(feature);
+    revisedInteractiveFeatures += 1;
+    return Object.freeze({ ...structuredClone(feature), timeoutMs });
+  });
+  if (revisedInteractiveFeatures === 0) throw new Error("The base Test plan has no interactive feature timeout to revise");
+  return Object.freeze({
+    testManifest: Object.freeze({ ...testManifest, features: Object.freeze(features) }),
+    assetPlacementPlan: Object.freeze(structuredClone(
+      boundedObject(value.assetPlacementPlan, MAX_TEST_PLAN_TOOL_ARGUMENT_BYTES),
+    )),
+  });
+}
+
 function freezeTestPlan(value: Readonly<Record<string, unknown>>, context: ProjectContext): Readonly<Record<string, unknown>> {
   const manifest = value.testManifest;
   const validationError = testManifestValidationError(manifest);
@@ -1899,6 +2579,13 @@ function freezeTestPlan(value: Readonly<Record<string, unknown>>, context: Proje
   const goalIds = context.e2e.goals.map(goal => String(goal.id ?? "")).filter(Boolean);
   if (goalIds.some(id => !manifestRequirementIds.has(id))) {
     throw new Error("The Test Agent plan does not cover every current E2E goal ID");
+  }
+  const missingNarrativeCheckpoints = missingNarrativeExchangeCheckpoints(
+    manifest,
+    requiredNarrativeSceneAssetKeys(context),
+  );
+  if (missingNarrativeCheckpoints.length > 0) {
+    throw new Error(`The Test Agent plan must capture every authored narrative exchange before choosing: ${missingNarrativeCheckpoints.join(", ")}`);
   }
   const placement = boundedObject(value.assetPlacementPlan);
   const visualAssetPlan = context.assetPlan.filter(asset => String(asset.assetType ?? "").toLowerCase() !== "music");
@@ -1929,6 +2616,14 @@ function freezeTestPlan(value: Readonly<Record<string, unknown>>, context: Proje
     throw new Error(`The Test Agent plan does not explicitly observe conditional asset targets at their planned checkpoint roles: ${unobservedPlacements
       .map(item => `${item.targetId}@${item.checkpointRole}`).join(", ")}`);
   }
+  const specialBranchMismatches = specialBranchCheckpointMismatches(manifest);
+  if (specialBranchMismatches.length > 0) {
+    throw new Error(`The Test Agent plan asserts the default dialogue choice list before a special branch control: ${specialBranchMismatches.join(", ")}`);
+  }
+  const finalSealMismatches = finalSealPostconditionMismatches(manifest);
+  if (finalSealMismatches.length > 0) {
+    throw new Error(`The Test Agent plan expects scene_number to advance after the final timeline seal confirmation: ${finalSealMismatches.join(", ")}`);
+  }
   const coverage = Object.freeze(Object.fromEntries(manifest.requirements.map(requirement => [
     requirement.requirementId,
     Object.freeze(manifest.features.filter(feature => feature.requirementIds.includes(requirement.requirementId)).map(feature => feature.id)),
@@ -1949,6 +2644,54 @@ function freezeTestPlan(value: Readonly<Record<string, unknown>>, context: Proje
     contractDigest,
     executionPlan: planE2eExecution(manifest),
   });
+}
+
+/**
+ * A source checkpoint proves authored strings exist; the E2E plan must prove
+ * that each declared exchange is separately reachable and rendered. Requiring
+ * the scene/beat pair in the same screenshot checkpoint prevents a planner
+ * from sampling chapter labels while shared choices silently repeat beneath
+ * changing prompts.
+ */
+export function missingNarrativeExchangeCheckpoints(
+  manifest: Readonly<Record<string, unknown>>,
+  requiredSceneKeys: readonly string[],
+): readonly string[] {
+  if (requiredSceneKeys.length < 2) return Object.freeze([]);
+  const observed = new Set<string>();
+  const features = Array.isArray(manifest.features) ? manifest.features : [];
+  for (const featureValue of features) {
+    if (!featureValue || typeof featureValue !== "object") continue;
+    const feature = featureValue as Readonly<Record<string, unknown>>;
+    const script = feature.interactionScript;
+    if (!script || typeof script !== "object") continue;
+    const events = Array.isArray((script as Readonly<Record<string, unknown>>).events)
+      ? (script as Readonly<Record<string, unknown>>).events as readonly unknown[] : [];
+    for (const eventValue of events) {
+      if (!eventValue || typeof eventValue !== "object") continue;
+      const event = eventValue as Readonly<Record<string, unknown>>;
+      if (event.type !== "checkpoint" || event.role === "START" || !Array.isArray(event.assertions)) continue;
+      let sceneNumber: number | null = null;
+      let sceneBeat: number | null = null;
+      for (const assertionValue of event.assertions) {
+        if (!assertionValue || typeof assertionValue !== "object") continue;
+        const assertion = assertionValue as Readonly<Record<string, unknown>>;
+        if (assertion.source !== "PROGRESS" || assertion.operator !== "EQUALS"
+          || typeof assertion.value !== "number" || !Number.isInteger(assertion.value)) continue;
+        if (assertion.key === "scene_number") sceneNumber = assertion.value;
+        if (assertion.key === "scene_beat") sceneBeat = assertion.value;
+      }
+      if (sceneNumber !== null && sceneBeat !== null) observed.add(`${sceneNumber}:${sceneBeat}`);
+    }
+  }
+  const missing: string[] = [];
+  for (let sceneNumber = 1; sceneNumber <= requiredSceneKeys.length; sceneNumber += 1) {
+    for (let sceneBeat = 0; sceneBeat < 3; sceneBeat += 1) {
+      const key = `${sceneNumber}:${sceneBeat}`;
+      if (!observed.has(key)) missing.push(`scene ${sceneNumber} beat ${sceneBeat + 1}`);
+    }
+  }
+  return Object.freeze(missing);
 }
 
 function stableDigest(value: unknown): string {

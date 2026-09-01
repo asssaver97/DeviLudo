@@ -10,6 +10,8 @@ import { resolveAgentModel } from "./agent-settings";
 import type { ProductConversationGroupReply } from "./product-conversation";
 import type { StoredInstanceAgentSettings } from "./repository";
 
+const MAX_IMPLEMENTATION_BRIEF_LENGTH = 12_000;
+
 export function projectRuntimeIntentPrompt(input: Readonly<{
   content: string;
   hasAttachments: boolean;
@@ -135,11 +137,13 @@ export function projectRuntimeSpecialistPrompt(input: Readonly<{
         ? "The player has authorized execution. Prepare the complete role-owned proposal; Core will persist it only after the readiness gate passes. This conversation branch remains read-only."
         : "Prepare a concise implementation proposal only. Do not mutate project state or source before confirmation.",
     "Return one JSON object with content, readyForUiDesign, readyForDevelopment, options, implementationBrief, projectDocumentPatch, and e2eGoalDelta. Every options entry must be an object with string label and description fields; never return a bare string option.",
-    "projectDocumentPatch is an object. e2eGoalDelta contains add, replace, and retire arrays. Use empty values when not applicable.",
+    "projectDocumentPatch is a partial project document: introduction, gameplay, and uiDesign must be strings; categories and features must be arrays of strings. Put rich design detail into those prose strings rather than nested objects. e2eGoalDelta contains add, replace, and retire arrays. Use empty values when not applicable.",
     input.intent.targetRole === "DESIGN"
       ? "DESIGN owns gameplay only. Set readyForUiDesign=true when gameplay is complete, always set readyForDevelopment=false, and do not provide a development plan or confirmation question. Keep the patch and goal delta empty while material gameplay decisions remain unresolved."
       : input.intent.targetRole === "UI_DESIGN"
         ? "UI_DESIGN owns interface design only. Set readyForDevelopment=true only when the complete UI specification and combined gameplay/UI handoff are ready. Set readyForUiDesign=false. Keep the patch and goal delta empty while material UI decisions remain unresolved."
+      : input.intent.targetRole === "DEVELOPMENT"
+        ? "DEVELOPMENT owns the implementation proposal. For an actionable CHANGE_REQUEST, set readyForDevelopment=true once the requested source fix and verification scope are concrete enough for the writable primary workflow; this read-only branch only prepares that handoff and never edits files itself. Keep readyForUiDesign=false and keep the patch and goal delta empty. For a QUESTION, keep both readiness flags false."
         : "Set both readiness flags false unless the role-specific Skill explicitly owns one of them. Keep the patch and goal delta empty when they are not applicable.",
     ["DESIGN", "UI_DESIGN"].includes(input.intent.targetRole)
       ? "Design choice UX: prefer one material decision per reply, but never turn one system into a serial parameter interview. When its plausible answers are foreseeable, put 2-4 mutually exclusive answers in options instead of asking the player to type. Each option object needs a concise label and one short description of its impact/tradeoff. Put the recommended answer first and mark its label （推荐） in Chinese or (Recommended) in English; keep labels within 160 characters and descriptions within 300 characters. Never add a manual-answer option such as 自己输入意见 or Enter my own answer: any text the player types and sends through the composer is already their own answer. Use options=[] only when no choice is requested or useful presets are genuinely impossible."
@@ -202,15 +206,17 @@ export function parseProjectRuntimeReply(
   responseLanguage: "en" | "zh" = "en",
   designAction: "NONE" | "AWAITING_CONFIRMATION" | "START_DEVELOPMENT" = "NONE",
 ): ProductConversationGroupReply {
-  const value = Object.keys(result.structured).length ? result.structured : parseObjectOrContent(result.content);
+  const parsedValue = Object.keys(result.structured).length ? result.structured : parseObjectOrContent(result.content);
+  const value = normalizeProjectRuntimeReplyValue(parsedValue);
   const rawContent = typeof value.content === "string" && value.content.trim()
     ? value.content.trim()
     : result.content.trim();
   if (!rawContent) throw new Error(`${role} Agent returned no reply`);
-  const readyForDevelopment = role === "UI_DESIGN" && value.readyForDevelopment === true;
+  const readyForDevelopment = (role === "UI_DESIGN" || role === "DEVELOPMENT")
+    && value.readyForDevelopment === true;
   const readyForUiDesign = role === "DESIGN" && value.readyForUiDesign === true;
   const parsedImplementationBrief = typeof value.implementationBrief === "string"
-    ? value.implementationBrief.trim().slice(0, 20_000)
+    ? value.implementationBrief.trim().slice(0, MAX_IMPLEMENTATION_BRIEF_LENGTH)
     : "";
   const content = readyDesignContent(rawContent, value, role, readyForDevelopment, responseLanguage, designAction);
   const patch = objectOrNull(value.projectDocumentPatch);
@@ -289,21 +295,91 @@ function readyDesignContent(
 }
 
 export function implementationBrief(result: ProjectRuntimeTurnResult, fallback: string): string {
-  const value = Object.keys(result.structured).length ? result.structured : parseObjectOrContent(result.content);
+  const parsedValue = Object.keys(result.structured).length ? result.structured : parseObjectOrContent(result.content);
+  const value = normalizeProjectRuntimeReplyValue(parsedValue);
   return typeof value.implementationBrief === "string" && value.implementationBrief.trim()
-    ? value.implementationBrief.trim().slice(0, 20_000)
+    ? value.implementationBrief.trim().slice(0, MAX_IMPLEMENTATION_BRIEF_LENGTH)
     : fallback;
 }
 
 function parseObject(content: string): Readonly<Record<string, unknown>> {
   const fenced = content.match(/```json\s*([\s\S]*?)```/i)?.[1] ?? content;
-  const value = JSON.parse(fenced.trim());
+  const source = fenced.trim();
+  let value: unknown;
+  try {
+    value = JSON.parse(source);
+  } catch (error) {
+    const repaired = repairTrailingObjectClosures(source);
+    if (!repaired) throw error;
+    value = JSON.parse(repaired);
+  }
   if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error("Agent output is not an object");
   return Object.freeze(value as Record<string, unknown>);
 }
 
 function parseObjectOrContent(content: string): Readonly<Record<string, unknown>> {
-  try { return parseObject(content); } catch { return Object.freeze({ content }); }
+  try {
+    return parseObject(content);
+  } catch (error) {
+    const trimmed = content.trim();
+    if (trimmed.startsWith("{") || /^```json\b/iu.test(trimmed)) throw error;
+    return Object.freeze({ content });
+  }
+}
+
+/**
+ * Some providers occasionally truncate an otherwise complete structured reply
+ * immediately before its final object delimiters. Repair only that narrow case:
+ * strings and arrays must already be complete, closing delimiters must never be
+ * out of order, and at most four trailing object braces may be missing.
+ */
+function repairTrailingObjectClosures(source: string): string | null {
+  if (!source.startsWith("{")) return null;
+  let objectDepth = 0;
+  let arrayDepth = 0;
+  let inString = false;
+  let escaped = false;
+  for (const character of source) {
+    if (inString) {
+      if (escaped) escaped = false;
+      else if (character === "\\") escaped = true;
+      else if (character === '"') inString = false;
+      continue;
+    }
+    if (character === '"') {
+      inString = true;
+      continue;
+    }
+    if (character === "{") objectDepth += 1;
+    else if (character === "}") {
+      objectDepth -= 1;
+      if (objectDepth < 0) return null;
+    } else if (character === "[") arrayDepth += 1;
+    else if (character === "]") {
+      arrayDepth -= 1;
+      if (arrayDepth < 0) return null;
+    }
+  }
+  if (inString || escaped || arrayDepth !== 0 || objectDepth < 1 || objectDepth > 4) return null;
+  return `${source}${"}".repeat(objectDepth)}`;
+}
+
+function normalizeProjectRuntimeReplyValue(
+  value: Readonly<Record<string, unknown>>,
+): Readonly<Record<string, unknown>> {
+  const briefObject = objectOrNull(value.implementationBrief);
+  if (!briefObject) return value;
+  const {
+    projectDocumentPatch: nestedProjectDocumentPatch,
+    e2eGoalDelta: nestedE2eGoalDelta,
+    ...briefFields
+  } = briefObject;
+  return Object.freeze({
+    ...value,
+    implementationBrief: Object.keys(briefFields).length > 0 ? JSON.stringify(briefFields) : "",
+    projectDocumentPatch: value.projectDocumentPatch ?? nestedProjectDocumentPatch ?? null,
+    e2eGoalDelta: value.e2eGoalDelta ?? nestedE2eGoalDelta,
+  });
 }
 
 function objectOrNull(value: unknown): Readonly<Record<string, unknown>> | null {

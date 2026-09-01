@@ -31,20 +31,36 @@ import {
   projectRuntimeSpecialistPrompt,
 } from "@/services/core/src/project-runtime-conversation";
 import {
+  AGENT_EVIDENCE_ARCHIVE_MAX_BYTES,
+  agentEvidenceTemporaryRoot,
   bundledCjkFontValidationError,
+  containsSensitiveToolArgument,
+  evidenceRunsForVisualRead,
+  finalSealPostconditionMismatches,
+  hasCurrentTurnSourceCheckpoint,
   latestEvidenceReport,
   latestUiSpecification,
+  missingNarrativeExchangeCheckpoints,
   normalizeUiSpecification,
   normalizeUiTestReview,
+  projectRuntimeContextView,
+  projectRuntimeToolArgumentLimit,
+  reviseTestPlanTimeout,
+  requiredNarrativeSceneAssetKeys,
   requiredUiAssetProblems,
   retryProjectRuntimeLifecycle,
   runtimeTurnHandoff,
+  selectVisualEvidenceCheckpoints,
   sameJson,
+  specialBranchCheckpointMismatches,
   summarizeRuntimeToolCalls,
   summarizeToolAuditValue,
   unobservedTestPlanAssetPlacements,
   unpublishedTestPlanProbeReferences,
+  validateNarrativeDeliveryProof,
+  visualEvidenceCheckpoints,
 } from "@/services/core/src/project-runtime-service";
+import { ProjectRuntimeRepository } from "@/services/core/src/project-runtime-repository";
 import {
   createRuntimeEventLineBuffer,
   createStructuredContentDeltaExtractor,
@@ -364,6 +380,121 @@ test("specialist output is attributed to the real persistent role session", () =
   assert.equal(reply.model, "test-model");
 });
 
+test("specialist replies recover trailing object closures and hoist fields nested by a missing delimiter", () => {
+  const malformed = JSON.stringify({
+    content: "已完成六章十八场的连贯叙事设计。",
+    readyForUiDesign: true,
+    readyForDevelopment: false,
+    options: [],
+    implementationBrief: {
+      chapters: 6,
+      scenes: 18,
+      details: "完整叙事".repeat(4_000),
+      projectDocumentPatch: { gameplay: { narrativeStructure: "six-chapter" } },
+      e2eGoalDelta: {
+        add: [{ description: "从开端完成至因选择累积得到的结局", source: "ACCEPTANCE" }],
+        replace: [],
+        retire: [],
+      },
+    },
+  }).slice(0, -1);
+  const runtimeResult = Object.freeze({
+    ...result("DESIGN", {}),
+    content: malformed,
+    structured: Object.freeze({}),
+  });
+  const reply = parseProjectRuntimeReply(runtimeResult, "DESIGN", {
+    agentRuntime: "CODEX_CLI",
+    baseUrl: "https://chatgpt.com",
+    primaryModel: "primary",
+    modelOverrides: { intent: null, analysis: null, design: null, uiDesign: null, development: null, test: null },
+    imageModel: null,
+    credentialSecretRef: "vault://instance/agent-runtime/api-key/versions/10000000-0000-4000-8000-000000000004",
+    credentialVersion: "10000000-0000-4000-8000-000000000004",
+    apiKeyMask: "••••",
+    apiKeyFingerprint: "sha256:000000000000",
+    testPolicyReady: true,
+    testPolicyCheckedRevision: 3,
+    revision: 3,
+    updatedBy: "test",
+    updatedAt: new Date(0).toISOString(),
+  }, "zh");
+
+  assert.equal(reply.content, "已完成六章十八场的连贯叙事设计。");
+  assert.equal(reply.readyForUiDesign, true);
+  assert.deepEqual(reply.projectDocumentPatch, { gameplay: { narrativeStructure: "six-chapter" } });
+  assert.deepEqual(reply.e2eGoalDelta.add, [
+    { description: "从开端完成至因选择累积得到的结局", source: "ACCEPTANCE" },
+  ]);
+  assert.match(reply.implementationBrief, /"chapters":6/u);
+  assert.doesNotMatch(reply.implementationBrief, /projectDocumentPatch|e2eGoalDelta/u);
+  assert.equal(reply.implementationBrief.length, 12_000);
+});
+
+test("specialist replies reject malformed structured-looking JSON instead of persisting it as chat text", () => {
+  const runtimeResult = Object.freeze({
+    ...result("DESIGN", {}),
+    content: '{"content":"broken",]',
+    structured: Object.freeze({}),
+  });
+  assert.throws(() => parseProjectRuntimeReply(runtimeResult, "DESIGN", {
+    agentRuntime: "CODEX_CLI",
+    baseUrl: "https://chatgpt.com",
+    primaryModel: "primary",
+    modelOverrides: { intent: null, analysis: null, design: null, uiDesign: null, development: null, test: null },
+    imageModel: null,
+    credentialSecretRef: "vault://instance/agent-runtime/api-key/versions/10000000-0000-4000-8000-000000000004",
+    credentialVersion: "10000000-0000-4000-8000-000000000004",
+    apiKeyMask: "••••",
+    apiKeyFingerprint: "sha256:000000000000",
+    testPolicyReady: true,
+    testPolicyCheckedRevision: 3,
+    revision: 3,
+    updatedBy: "test",
+    updatedAt: new Date(0).toISOString(),
+  }), SyntaxError);
+});
+
+test("context.read exposes a current role view instead of replaying unbounded handoff history", () => {
+  const bulky = "历史冗余".repeat(10_000);
+  const uiSpecification = Object.freeze({ schema: "deviludo.ui-specification.v1", visualThesis: "纸本叙事" });
+  const base = createProjectContext({ workspaceId, projectId, language: "zh", concept: "完整故事" });
+  const context = updateProjectContext(base, {
+    assetPlan: Object.freeze([{ key: "portrait-xiaotian" }]),
+    e2e: Object.freeze({
+      goalRevision: 1,
+      goals: Object.freeze([{ id: "story", description: "完整旅程", source: "ACCEPTANCE" }]),
+      planRevision: 1,
+      plan: Object.freeze({ journeys: [bulky] }),
+    }),
+    testSummary: Object.freeze({ verdict: "PASS", uiReview: Object.freeze({ frames: bulky }) }),
+    handoffs: Object.freeze([
+      Object.freeze({ id: "old-design", fromRole: "DESIGN", toRole: "UI_DESIGN", summary: "旧设计", opaquePayload: bulky }),
+      Object.freeze({ id: "new-design", fromRole: "DESIGN", toRole: "UI_DESIGN", summary: "新设计", opaquePayload: bulky }),
+      Object.freeze({ id: "ui", fromRole: "UI_DESIGN", toRole: "DEVELOPMENT", summary: "实现 UI", uiSpecification, opaquePayload: bulky }),
+    ]),
+    recentConversation: Object.freeze(Array.from({ length: 20 }, (_, index) => Object.freeze({
+      role: "DESIGN",
+      summary: `${index}:${"对话".repeat(2_000)}`,
+    }))),
+  });
+
+  const designView = projectRuntimeContextView(context, "DESIGN") as typeof context;
+  assert.equal(designView.assetPlan.length, 0);
+  assert.equal(designView.e2e.plan, null);
+  assert.equal(designView.testSummary && "uiReview" in designView.testSummary, false);
+  assert.equal(designView.recentConversation.length, 12);
+  assert.equal(String(designView.recentConversation[0]?.summary).length, 2_000);
+  assert.deepEqual(designView.handoffs.map(handoff => handoff.id), ["new-design", "ui"]);
+  assert.equal("opaquePayload" in designView.handoffs[0]!, false);
+  assert.equal("uiSpecification" in designView.handoffs[1]!, false);
+  assert.ok(JSON.stringify(designView).length < JSON.stringify(context).length / 2);
+
+  const developmentView = projectRuntimeContextView(context, "DEVELOPMENT") as typeof context;
+  assert.deepEqual(developmentView.assetPlan, context.assetPlan);
+  assert.deepEqual(developmentView.handoffs[1]?.uiSpecification, uiSpecification);
+});
+
 test("ready UI Design replies end with one development plan and the localized final action", () => {
   const settings = {
     agentRuntime: "CODEX_CLI" as const,
@@ -640,6 +771,36 @@ test("incomplete design discovery cannot stage or execute an implementation chan
   assert.equal(implementationChangeReady(question, true), false);
 });
 
+test("an actionable Development conversation can hand a concrete fix to the writable workflow", () => {
+  const developmentSettings = {
+    agentRuntime: "CODEX_CLI" as const,
+    baseUrl: "https://chatgpt.com",
+    primaryModel: "primary",
+    modelOverrides: { intent: null, analysis: null, design: null, uiDesign: null, development: null, test: null },
+    imageModel: null,
+    credentialSecretRef: "vault://instance/agent-runtime/api-key/versions/10000000-0000-4000-8000-000000000004",
+    credentialVersion: "10000000-0000-4000-8000-000000000004",
+    apiKeyMask: "••••",
+    apiKeyFingerprint: "sha256:000000000000",
+    testPolicyReady: true,
+    testPolicyCheckedRevision: 3,
+    revision: 3,
+    updatedBy: "test",
+    updatedAt: new Date(0).toISOString(),
+  };
+  const reply = parseProjectRuntimeReply(result("DEVELOPMENT", {
+    content: "The source fix is scoped and ready for implementation.",
+    readyForUiDesign: false,
+    readyForDevelopment: true,
+    options: [],
+    implementationBrief: "Persist player-visible choice copy and verify every recap and ending.",
+    projectDocumentPatch: {},
+    e2eGoalDelta: { add: [], replace: [], retire: [] },
+  }), "DEVELOPMENT", developmentSettings, "en");
+  assert.equal(reply.readyForDevelopment, true);
+  assert.match(reply.implementationBrief, /player-visible choice copy/);
+});
+
 test("project context is zstd-compressed, digest-verified, atomic durable state", async () => {
   const root = await mkdtemp(join(tmpdir(), "deviludo-context-"));
   try {
@@ -757,6 +918,20 @@ test("evidence reports are selected from the newest run and preserve their verif
   });
 });
 
+test("paged visual evidence returns only the selected run instead of replaying run history", () => {
+  const runs = [
+    { id: "run-new", targetPlatform: "macos", evidenceSummary: { outputObjects: [{
+      kind: "E2E_REPORT", bucket: "artifacts", key: "workspaces/w/projects/p/new.zip",
+      sha256: `sha256:${"a".repeat(64)}`, sizeBytes: 1234,
+    }] } },
+    { id: "run-old", targetPlatform: "linux", evidenceSummary: { outputObjects: [{
+      kind: "E2E_REPORT", bucket: "artifacts", key: "workspaces/w/projects/p/old.zip",
+      sha256: `sha256:${"b".repeat(64)}`, sizeBytes: 1234,
+    }] } },
+  ];
+  assert.deepEqual(evidenceRunsForVisualRead(runs), [runs[0]]);
+});
+
 test("MCP evidence output carries native image blocks without printing base64 in text", () => {
   const bytes = Buffer.from("small visual evidence");
   const encoded = bytes.toString("base64");
@@ -767,6 +942,7 @@ test("MCP evidence output carries native image blocks without printing base64 in
       targetPlatform: "macos",
       checkpointId: "ready",
       checkpointRole: "READY",
+      contentIndex: 7,
       mimeType: "image/jpeg",
       sizeBytes: bytes.length,
       data: encoded,
@@ -783,8 +959,63 @@ test("MCP evidence output carries native image blocks without printing base64 in
     checkpointRole: "READY",
     mimeType: "image/jpeg",
     sizeBytes: bytes.length,
-    contentIndex: 1,
+    contentIndex: 7,
   });
+});
+
+test("Agent evidence is extracted on the project-data volume instead of the container tmpfs", () => {
+  assert.equal(
+    agentEvidenceTemporaryRoot("/var/lib/deviludo-projects"),
+    "/var/lib/deviludo-projects/.runtime-tmp/agent-evidence",
+  );
+});
+
+test("Agent evidence accepts complete long-journey reports while remaining below the producer limit", () => {
+  assert.equal(AGENT_EVIDENCE_ARCHIVE_MAX_BYTES, 512 * 1024 * 1024);
+  assert.ok(AGENT_EVIDENCE_ARCHIVE_MAX_BYTES > 135_934_979);
+  assert.ok(AGENT_EVIDENCE_ARCHIVE_MAX_BYTES < 1024 * 1024 * 1024);
+});
+
+test("Agent visual evidence includes every passed authored ACTION checkpoint", () => {
+  const checkpoints = visualEvidenceCheckpoints([
+    { checkpointId: "start", role: "START", status: "PASSED", screenshot: "screenshots/start.png" },
+    { checkpointId: "scene-01", role: "ACTION", status: "PASSED", screenshot: "screenshots/scene-01.png" },
+    { checkpointId: "scene-02", role: "ACTION", status: "PASSED", screenshot: "screenshots/scene-02.png" },
+    { checkpointId: "failed", role: "ACTION", status: "FAILED", screenshot: "screenshots/failed.png" },
+  ]);
+  assert.deepEqual(checkpoints.map(item => item.checkpointId), ["start", "scene-01", "scene-02"]);
+});
+
+test("Agent visual evidence pages make later checkpoints reachable within the six-image MCP envelope", () => {
+  const checkpoints = visualEvidenceCheckpoints(Array.from({ length: 14 }, (_, index) => ({
+    checkpointId: `scene-${String(index + 1).padStart(2, "0")}`,
+    role: "ACTION",
+    status: "PASSED",
+    screenshot: `screenshots/scene-${index + 1}.png`,
+  })));
+  assert.deepEqual(
+    selectVisualEvidenceCheckpoints(checkpoints, {}).map(item => item.contentIndex),
+    [1, 2, 3, 4, 5, 6],
+  );
+  assert.deepEqual(
+    selectVisualEvidenceCheckpoints(checkpoints, { imageOffset: 6, imageLimit: 6 }).map(item => item.contentIndex),
+    [7, 8, 9, 10, 11, 12],
+  );
+  assert.deepEqual(
+    selectVisualEvidenceCheckpoints(checkpoints, { startContentIndex: 9, endContentIndex: 14 })
+      .map(item => item.contentIndex),
+    [9, 10, 11, 12, 13, 14],
+  );
+  assert.deepEqual(
+    selectVisualEvidenceCheckpoints(checkpoints, { contentIndices: [2, 8, 14] })
+      .map(item => item.contentIndex),
+    [2, 8, 14],
+  );
+  assert.deepEqual(
+    selectVisualEvidenceCheckpoints(checkpoints, { checkpointId: "scene-12" })
+      .map(item => item.contentIndex),
+    [12],
+  );
 });
 
 test("UI Design persistence tools expose exact input contracts", () => {
@@ -915,6 +1146,39 @@ test("Development asset planning advertises the durable generation contract", ()
   assert.match(String(schema.properties.assets.items.properties.expectedResourcePath?.pattern), /assets\/generated/);
 });
 
+test("a replacement generated-asset plan reopens generation and rejects source placeholders", async () => {
+  const calls: Array<{ text: string; values: readonly unknown[] }> = [];
+  const database = {
+    pool: {} as never,
+    async withWorkspace<T>(_workspaceId: string, callback: (client: never) => Promise<T>): Promise<T> {
+      const client = {
+        async query(text: string, values: readonly unknown[] = []) {
+          calls.push({ text, values });
+          return text.includes("INSERT INTO deviludo.asset_manifests")
+            ? { rows: [{ id: "20000000-0000-4000-8000-000000000003" }], rowCount: 1 }
+            : { rows: [], rowCount: 1 };
+        },
+      };
+      return callback(client as never);
+    },
+  };
+  await new ProjectRuntimeRepository(database as never).replaceAssetManifestPlan({
+    workspaceId,
+    projectId,
+    workflowId: "20000000-0000-4000-8000-000000000004",
+    assets: [{
+      key: "story-background",
+      assetType: "background",
+      origin: "GENERATED",
+      description: "Finished authored story art.",
+      generationPrompt: "Generate finished authored story art with a clear focal subject and no UI text.",
+    }],
+  });
+  assert.match(calls[0]!.text, /auto_generate_enabled = true/u);
+  assert.match(calls[1]!.text, /\$9 <> 'GENERATED'[\s\S]*status <> 'existing'/u);
+  assert.equal(calls[1]!.values[8], "GENERATED");
+});
+
 test("Analysis MCP advertises the complete canonical report schema", () => {
   const schema = toolInputSchema("context.update_analysis") as {
     required: readonly string[];
@@ -937,7 +1201,9 @@ test("Test MCP advertises the current complete manifest contract", () => {
       plan: {
         required: readonly string[];
         properties: {
-          testManifest: { required: readonly string[]; properties: Record<string, unknown> };
+          testManifest: { required: readonly string[]; properties: Record<string, unknown> & {
+            features: { items: { properties: { interactionScript: { properties: { events: { maxItems: number } } } } } };
+          } };
           assetPlacementPlan: { required: readonly string[] };
         };
       };
@@ -949,9 +1215,56 @@ test("Test MCP advertises the current complete manifest contract", () => {
     "schema", "inputProfiles", "primaryInputProfile", "adaptivePlayer", "requirements", "features",
   ]);
   assert.ok(schema.properties.plan.properties.testManifest.properties.adaptivePlayer);
+  assert.equal(schema.properties.plan.properties.testManifest.properties
+    .features.items.properties.interactionScript.properties.events.maxItems, 512);
   assert.deepEqual(schema.properties.plan.properties.assetPlacementPlan.required, [
     "schema", "plannedAssetKeys", "placements", "unmappedAssetKeys",
   ]);
+  const timeoutRevision = toolInputSchema("test_plan.revise_timeout") as {
+    required: readonly string[];
+    properties: { basePlanRevision: Record<string, unknown>; timeoutMs: Record<string, unknown> };
+  };
+  assert.deepEqual(timeoutRevision.required, ["basePlanRevision", "timeoutMs"]);
+  assert.equal(timeoutRevision.properties.timeoutMs.maximum, 900000);
+});
+
+test("timeout-only Test plan revisions preserve every non-timeout field", () => {
+  const base = Object.freeze({
+    testManifest: Object.freeze({
+      schema: "deviludo.test-manifest",
+      marker: Object.freeze({ source: "accepted-plan" }),
+      features: Object.freeze([
+        Object.freeze({ id: "journey", verificationMethod: "interactive", timeoutMs: 300000, interactionScript: Object.freeze({ events: Object.freeze([{ type: "checkpoint", id: "start" }]) }) }),
+        Object.freeze({ id: "unit", verificationMethod: "unit", timeoutMs: 12000, checkNames: Object.freeze(["story-contract"]) }),
+      ]),
+    }),
+    assetPlacementPlan: Object.freeze({ schema: "deviludo.asset-placement-plan", plannedAssetKeys: Object.freeze(["opening"]), placements: Object.freeze([]), unmappedAssetKeys: Object.freeze([]) }),
+    executionPlan: Object.freeze({ mustNotSurvive: true }),
+  });
+  const revised = reviseTestPlanTimeout(base, 900000) as {
+    testManifest: { features: readonly Record<string, unknown>[]; marker: Record<string, unknown> };
+    assetPlacementPlan: Record<string, unknown>;
+    executionPlan?: unknown;
+  };
+  assert.equal(revised.testManifest.features[0]?.timeoutMs, 900000);
+  assert.equal(revised.testManifest.features[1]?.timeoutMs, 12000);
+  assert.deepEqual(revised.testManifest.marker, { source: "accepted-plan" });
+  assert.deepEqual(revised.assetPlacementPlan, base.assetPlacementPlan);
+  assert.equal(revised.executionPlan, undefined);
+  assert.equal((base.testManifest.features[0] as Record<string, unknown>).timeoutMs, 300000);
+});
+
+test("complete Test plans and narrative checkpoints receive bounded larger tool envelopes", () => {
+  assert.equal(projectRuntimeToolArgumentLimit("test_plan.replace"), 2_000_000);
+  assert.equal(projectRuntimeToolArgumentLimit("source.checkpoint"), 512_000);
+  assert.equal(projectRuntimeToolArgumentLimit("assets.plan"), 64_000);
+  assert.equal(projectRuntimeToolArgumentLimit("context.read"), 64_000);
+});
+
+test("tool argument safety checks sensitive fields without rejecting narrative prose", () => {
+  assert.equal(containsSensitiveToolArgument({ description: "A secret changes the story." }), false);
+  assert.equal(containsSensitiveToolArgument({ plan: { credentialSecretRef: "vault://example" } }), true);
+  assert.equal(containsSensitiveToolArgument([{ password: "must-not-pass" }]), true);
 });
 
 test("source.read advertises bounded line ranges for large source files", () => {
@@ -964,6 +1277,312 @@ test("source.read advertises bounded line ranges for large source files", () => 
   assert.equal(schema.additionalProperties, false);
   assert.equal(schema.properties.startLine?.minimum, 1);
   assert.equal(schema.properties.endLine?.minimum, 1);
+});
+
+test("source.checkpoint advertises exact authored narrative proof fields", () => {
+  const schema = toolInputSchema("source.checkpoint") as {
+    additionalProperties: boolean;
+    properties: Record<string, Record<string, unknown>>;
+  };
+  assert.equal(schema.additionalProperties, false);
+  const proof = schema.properties.narrativeProof as {
+    required: readonly string[];
+    properties: Record<string, Record<string, unknown>>;
+  };
+  assert.deepEqual(proof.required, ["opening", "scenes"]);
+  const scenes = proof.properties.scenes as { items: { properties: Record<string, Record<string, unknown>> } };
+  const anchors = scenes.items.properties.anchors as {
+    required: readonly string[];
+    properties: Record<string, {
+      minItems?: number;
+      items?: {
+        required: readonly string[];
+        properties?: Record<string, unknown>;
+      };
+    }>;
+  };
+  assert.deepEqual(anchors.required, [
+    "entry", "objective", "exchanges", "reveal", "consequence", "transition",
+  ]);
+  assert.equal(anchors.properties.exchanges?.minItems, 3);
+  assert.deepEqual(anchors.properties.exchanges?.items?.required, ["prompt", "choices"]);
+  const choices = anchors.properties.exchanges?.items?.properties?.choices as {
+    minItems?: number; maxItems?: number; items?: { required: readonly string[] };
+  };
+  assert.equal(choices.minItems, 2);
+  assert.equal(choices.maxItems, 6);
+  assert.deepEqual(choices.items?.required, ["action", "response"]);
+});
+
+test("controlled builds require the source checkpoint created by the current Development turn", () => {
+  const assetPlan = [{ key: "scene-01-intro" }, { key: "scene-02-choice" }];
+  const current = {
+    source: { revision: 65, sha256: `sha256:${"a".repeat(64)}`, relativePath: "source/65" },
+    assetPlan,
+    workflow: {
+      sourceCheckpointedByTurnId: "turn-current",
+      sourceCheckpointRevision: 65,
+      sourceCheckpointAssetPlanDigest: "sha256:fad29b97832315ba44931df3dd78b4bd9a97dcc9c67843aac49477543e6186df",
+    },
+  };
+  assert.equal(hasCurrentTurnSourceCheckpoint(current, "turn-current"), true);
+  assert.equal(hasCurrentTurnSourceCheckpoint(current, "turn-old"), false);
+  assert.equal(hasCurrentTurnSourceCheckpoint({
+    ...current,
+    workflow: { ...current.workflow, sourceCheckpointRevision: 64 },
+  }, "turn-current"), false);
+  assert.equal(hasCurrentTurnSourceCheckpoint({
+    ...current,
+    assetPlan: [...assetPlan, { key: "scene-03-ending" }],
+  }, "turn-current"), false);
+  assert.equal(hasCurrentTurnSourceCheckpoint({ ...current, source: null }, "turn-current"), false);
+});
+
+test("numbered scene art requires unique source-backed narrative beats before checkpoint", async () => {
+  assert.deepEqual(requiredNarrativeSceneAssetKeys({ assetPlan: [
+    { key: "ui-title" },
+    { key: "scene-02-old-message" },
+    { key: "scene-01-private-dinner" },
+  ] }), ["scene-01-private-dinner", "scene-02-old-message"]);
+
+  const root = await mkdtemp(join(tmpdir(), "deviludo-narrative-proof-"));
+  try {
+    const opening = [
+      "Opening establishes the current relationship before any choice.",
+      "Opening names the first concrete promise and its exact deadline.",
+      "Opening introduces the returning character through a visible cause.",
+      "Opening ends on a conflict the player now understands completely.",
+    ];
+    const authoredActions = [
+      "Offer the sealed dinner receipt before cancelling the public seat.",
+      "Keep the private meal intact and transfer production duties to Mei.",
+      "Fund one studio week with an independently logged personal deposit.",
+      "Publish the equipment approver while preserving Rui's right to decline.",
+      "Move the appointment to five only after both calendars record consent.",
+      "Ask the photographer for the uncropped timestamp and accept the delay.",
+      "Disclose the supplier connection before any press question can distort it.",
+      "Separate the private itinerary from the fields needed for public audit.",
+      "Correct the archived statement even though the correction harms reputation.",
+      "Give each witness only the file that belongs to their own investigation.",
+      "Freeze the launch so the relationship evidence can be checked tonight.",
+      "Return final authority to both characters and accept their separate outcomes.",
+    ];
+    const authoredResponses = [
+      "Tian files the receipt beside the promise and asks for the cancellation proof.",
+      "The producer accepts the handoff, but the late arrival remains visible.",
+      "Ying marks the deposit as a conflict rather than treating it as affection.",
+      "Rui signs the boundary because withdrawal remains possible after disclosure.",
+      "Both calendars now show the change and preserve who approved the new hour.",
+      "The uncropped photograph confirms transit without erasing the missed dinner.",
+      "Reporters connect the vendor record to the premiere and open a formal audit.",
+      "Each woman keeps her own interpretation because private knowledge stays isolated.",
+      "The correction stops a new contradiction while leaving the earlier damage intact.",
+      "Neither witness receives the other's confidential conclusion or missing evidence.",
+      "The studio launch slips, buying time without restoring the career points spent.",
+      "Two independent conclusions close the timeline and preserve every earned cost.",
+    ];
+    const sceneAnchors = (number: number) => ({
+      entry: `Scene ${number} authored entry beat has its own visible dramatic event.`,
+      objective: `Scene ${number} authored objective beat has its own visible dramatic event.`,
+      exchanges: Array.from({ length: 3 }, (_, index) => ({
+        prompt: `Scene ${number} exchange ${index + 1} has a distinct authored dramatic prompt.`,
+        choices: Array.from({ length: 2 }, (_, choiceIndex) => ({
+          action: authoredActions[(number - 1) * 6 + index * 2 + choiceIndex],
+          response: authoredResponses[(number - 1) * 6 + index * 2 + choiceIndex],
+        })),
+      })),
+      reveal: `Scene ${number} authored reveal beat has its own visible dramatic event.`,
+      consequence: `Scene ${number} authored consequence beat has its own visible dramatic event.`,
+      transition: `Scene ${number} authored transition beat has its own visible dramatic event.`,
+    });
+    const first = sceneAnchors(1);
+    const second = sceneAnchors(2);
+    await writeFile(join(root, "story.gd"), [
+      ...opening,
+      ...Object.values(first).flatMap(value => Array.isArray(value)
+        ? value.flatMap(exchange => [exchange.prompt, ...exchange.choices.flatMap(choice => Object.values(choice))]) : [value]),
+      ...Object.values(second).flatMap(value => Array.isArray(value)
+        ? value.flatMap(exchange => [exchange.prompt, ...exchange.choices.flatMap(choice => Object.values(choice))]) : [value]),
+    ].join("\n"));
+    const proof = {
+      opening: { sourcePath: "story.gd", anchors: opening },
+      scenes: [
+        { id: "scene-01-private-dinner", title: "Private dinner", sourcePath: "story.gd", anchors: first },
+        { id: "scene-02-old-message", title: "Old message", sourcePath: "story.gd", anchors: second },
+      ],
+    };
+    await assert.doesNotReject(validateNarrativeDeliveryProof(
+      root,
+      ["scene-01-private-dinner", "scene-02-old-message"],
+      proof,
+    ));
+    await assert.rejects(validateNarrativeDeliveryProof(
+      root,
+      ["scene-01-private-dinner", "scene-02-old-message"],
+      {
+        ...proof,
+        scenes: [
+          proof.scenes[0],
+          { ...proof.scenes[1], anchors: { ...second, transition: first.transition } },
+        ],
+      },
+    ), /unique authored text/);
+    await assert.rejects(validateNarrativeDeliveryProof(
+      root,
+      ["scene-01-private-dinner", "scene-02-old-message"],
+      {
+        ...proof,
+        scenes: [
+          { ...proof.scenes[0], anchors: { ...first, reveal: "This missing reveal is not implemented in the source file." } },
+          proof.scenes[1],
+        ],
+      },
+    ), /not present/);
+    await assert.rejects(validateNarrativeDeliveryProof(
+      root,
+      ["scene-01-private-dinner", "scene-02-old-message"],
+      {
+        ...proof,
+        scenes: [
+          { ...proof.scenes[0], anchors: { ...first, exchanges: first.exchanges.slice(0, 2) } },
+          proof.scenes[1],
+        ],
+      },
+    ), /at least three authored exchanges/);
+    await assert.rejects(validateNarrativeDeliveryProof(
+      root,
+      ["scene-01-private-dinner", "scene-02-old-message"],
+      {
+        ...proof,
+        scenes: [
+          { ...proof.scenes[0], anchors: { ...first, exchanges: first.exchanges.map((exchange, index) => (
+            index === 0 ? { ...exchange, choices: exchange.choices.slice(0, 1) } : exchange
+          )) } },
+          proof.scenes[1],
+        ],
+      },
+    ), /requires two to six authored choices/);
+    const numberedBoilerplate = (scene: number, exchange: number, choice: number) =>
+      `I answer scene ${scene} exchange ${exchange} choice ${choice} while preserving the record.`;
+    const boilerplateProof = {
+      ...proof,
+      scenes: proof.scenes.map((scene, sceneIndex) => ({
+        ...scene,
+        anchors: {
+          ...scene.anchors,
+          exchanges: scene.anchors.exchanges.map((exchange, exchangeIndex) => ({
+            ...exchange,
+            choices: exchange.choices.map((choice, choiceIndex) => ({
+              ...choice,
+              action: numberedBoilerplate(sceneIndex + 1, exchangeIndex + 1, choiceIndex + 1),
+            })),
+          })),
+        },
+      })),
+    };
+    await writeFile(join(root, "story.gd"), [
+      await readFile(join(root, "story.gd"), "utf8"),
+      ...boilerplateProof.scenes.flatMap(scene => scene.anchors.exchanges
+        .flatMap(exchange => exchange.choices.map(choice => choice.action))),
+    ].join("\n"));
+    await assert.rejects(validateNarrativeDeliveryProof(
+      root,
+      ["scene-01-private-dinner", "scene-02-old-message"],
+      boilerplateProof,
+    ), /not repeated numbered boilerplate/);
+    const repeatedPhraseProof = {
+      ...proof,
+      scenes: proof.scenes.map(scene => ({
+        ...scene,
+        anchors: {
+          ...scene.anchors,
+          exchanges: scene.anchors.exchanges.map(exchange => ({
+            ...exchange,
+            choices: exchange.choices.map(choice => ({
+              action: `${choice.action} This answer is separately archived for later evidence comparison.`,
+              response: `${choice.response} This reply is separately archived for later evidence comparison.`,
+            })),
+          })),
+        },
+      })),
+    };
+    await writeFile(join(root, "story.gd"), [
+      await readFile(join(root, "story.gd"), "utf8"),
+      ...repeatedPhraseProof.scenes.flatMap(scene => scene.anchors.exchanges
+        .flatMap(exchange => exchange.choices.flatMap(choice => [choice.action, choice.response]))),
+    ].join("\n"));
+    await assert.rejects(validateNarrativeDeliveryProof(
+      root,
+      ["scene-01-private-dinner", "scene-02-old-message"],
+      repeatedPhraseProof,
+    ), /repeats a boilerplate phrase/);
+    const promptWrapperProof = {
+      ...proof,
+      scenes: proof.scenes.map((scene, sceneIndex) => ({
+        ...scene,
+        anchors: {
+          ...scene.anchors,
+          exchanges: scene.anchors.exchanges.map((exchange, exchangeIndex) => ({
+            ...exchange,
+            choices: exchange.choices.map((choice, choiceIndex) => ({
+              ...choice,
+              action: `${choice.action}；但我会先正面回答“场景${sceneIndex + 1}问题${exchangeIndex + 1}选项${choiceIndex + 1}”，并让这轮选择单独归档。`,
+            })),
+          })),
+        },
+      })),
+    };
+    await writeFile(join(root, "story.gd"), [
+      await readFile(join(root, "story.gd"), "utf8"),
+      ...promptWrapperProof.scenes.flatMap(scene => scene.anchors.exchanges
+        .flatMap(exchange => exchange.choices.map(choice => choice.action))),
+    ].join("\n"));
+    await assert.rejects(validateNarrativeDeliveryProof(
+      root,
+      ["scene-01-private-dinner", "scene-02-old-message"],
+      promptWrapperProof,
+    ), /repeats a boilerplate phrase/);
+    const nearDuplicateProof = structuredClone(proof);
+    nearDuplicateProof.scenes[0].anchors.exchanges[1].choices[0].action =
+      "Offer the sealed dinner receipt after Tian checks the clock before cancelling the public seat.";
+    await writeFile(join(root, "story.gd"), [
+      await readFile(join(root, "story.gd"), "utf8"),
+      nearDuplicateProof.scenes[0].anchors.exchanges[1].choices[0].action,
+    ].join("\n"));
+    await assert.rejects(validateNarrativeDeliveryProof(
+      root,
+      ["scene-01-private-dinner", "scene-02-old-message"],
+      nearDuplicateProof,
+    ), /near-duplicates another choice/);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("narrative Test plans must capture every declared scene exchange", () => {
+  const checkpoint = (sceneNumber: number, sceneBeat: number) => ({
+    type: "checkpoint",
+    role: sceneNumber === 2 && sceneBeat === 2 ? "COMPLETION" : "ACTION",
+    assertions: [
+      { source: "PROGRESS", key: "scene_number", operator: "EQUALS", value: sceneNumber },
+      { source: "PROGRESS", key: "scene_beat", operator: "EQUALS", value: sceneBeat },
+    ],
+  });
+  const complete = {
+    features: [{ interactionScript: { events: [
+      checkpoint(1, 0), checkpoint(1, 1), checkpoint(1, 2),
+      checkpoint(2, 0), checkpoint(2, 1), checkpoint(2, 2),
+    ] } }],
+  };
+  assert.deepEqual(missingNarrativeExchangeCheckpoints(
+    complete,
+    ["scene-01-opening", "scene-02-ending"],
+  ), []);
+  assert.deepEqual(missingNarrativeExchangeCheckpoints({
+    features: [{ interactionScript: { events: [
+      checkpoint(1, 0), checkpoint(1, 1), checkpoint(2, 0), checkpoint(2, 2),
+    ] } }],
+  }, ["scene-01-opening", "scene-02-ending"]), ["scene 1 beat 3", "scene 2 beat 2"]);
 });
 
 test("Test plans cannot freeze Probe references absent from the current publisher source", () => {
@@ -1023,6 +1642,114 @@ test("conditional asset placements require an explicit scripted observation at t
     source: "CONTROL", targetId: "ending-perfect-concealment", property: "visible", operator: "EQUALS", value: true,
   } as never);
   assert.deepEqual(unobservedTestPlanAssetPlacements(plan), []);
+});
+
+test("complete campaign placement checks accept a bounded feature larger than the default tool envelope", () => {
+  const filler = Array.from({ length: 400 }, (_, index) => ({
+    type: "click",
+    stepId: `campaign-step-${index}-${"x".repeat(120)}`,
+    targetId: "dialogue-continue",
+    postconditions: [{ source: "PROGRESS", key: "scene_beat", operator: "CHANGED" }],
+  }));
+  const plan = {
+    testManifest: { features: [{ interactionScript: { events: [
+      ...filler,
+      { type: "checkpoint", role: "ACTION", changeTargetId: "scene-18-art", assertions: [] },
+    ] } }] },
+    assetPlacementPlan: { placements: [{ targetId: "scene-18-art", checkpointRole: "ACTION" }] },
+  };
+  assert.ok(JSON.stringify(plan.testManifest.features[0]).length > 64_000);
+  assert.deepEqual(unobservedTestPlanAssetPlacements(plan), []);
+});
+
+test("an ACTION asset requires an ACTION checkpoint rather than an unrelated action postcondition", () => {
+  const placement = { targetId: "scene-02-art", checkpointRole: "ACTION" };
+  const plan = {
+    testManifest: { features: [{ interactionScript: { events: [{
+      type: "click",
+      targetId: "dialogue-choice-1",
+      postconditions: [{
+        source: "CONTROL", targetId: "scene-02-art", property: "visible", operator: "EQUALS", value: true,
+      }],
+    }] } }] },
+    assetPlacementPlan: { placements: [placement] },
+  };
+  assert.deepEqual(unobservedTestPlanAssetPlacements(plan), [placement]);
+  plan.testManifest.features[0].interactionScript.events.push({
+    type: "checkpoint",
+    role: "ACTION",
+    changeTargetId: "scene-02-art",
+    assertions: [{
+      source: "CONTROL", targetId: "scene-02-art", property: "visible", operator: "EQUALS", value: true,
+    }],
+  } as never);
+  assert.deepEqual(unobservedTestPlanAssetPlacements(plan), []);
+});
+
+test("asset observation accepts valid non-interactive manifest features", () => {
+  const plan = {
+    testManifest: { features: [
+      {
+        id: "artifact-gates",
+        verificationMethod: "artifact",
+        requirementIds: ["release-gate"],
+      },
+      {
+        id: "visual-check",
+        verificationMethod: "interactive",
+        interactionScript: { events: [{
+          type: "checkpoint",
+          role: "ACTION",
+          changeTargetId: "scene-02-art",
+          assertions: [],
+        }] },
+      },
+    ] },
+    assetPlacementPlan: { placements: [{
+      targetId: "scene-02-art",
+      checkpointRole: "ACTION",
+    }] },
+  };
+  assert.deepEqual(unobservedTestPlanAssetPlacements(plan), []);
+});
+
+test("Test plans cannot assert the default dialogue list before a special branch action", () => {
+  const manifest = { features: [{ interactionScript: { events: [
+    {
+      type: "checkpoint",
+      id: "crisis-third-exchange",
+      role: "ACTION",
+      changeTargetId: "dialogue-choice-list",
+      assertions: [{ source: "CONTROL", targetId: "dialogue-choice-list", property: "visible", operator: "EQUALS", value: true }],
+    },
+    { type: "click", targetId: "crisis-recovery-choice-a" },
+  ] } }] };
+  assert.deepEqual(specialBranchCheckpointMismatches(manifest), [
+    "crisis-third-exchange -> crisis-recovery-choice-a",
+  ]);
+  const corrected = structuredClone(manifest);
+  corrected.features[0].interactionScript.events[0].changeTargetId = "crisis-countdown";
+  corrected.features[0].interactionScript.events[0].assertions = [{
+    source: "CONTROL", targetId: "crisis-countdown", property: "visible", operator: "EQUALS", value: true,
+  }];
+  assert.deepEqual(specialBranchCheckpointMismatches(corrected), []);
+});
+
+test("the final timeline seal cannot require the last scene number to advance", () => {
+  const manifest = { features: [{ interactionScript: { events: [
+    { type: "click", stepId: "choose-seal", targetId: "timeline-seal" },
+    {
+      type: "click",
+      stepId: "confirm-seal",
+      targetId: "action-confirm",
+      postconditions: [{ source: "PROGRESS", key: "scene_number", operator: "CHANGED" }],
+    },
+  ] } }] };
+  assert.deepEqual(finalSealPostconditionMismatches(manifest), ["confirm-seal"]);
+  manifest.features[0].interactionScript.events[1].postconditions = [
+    { source: "STATE", key: "ending", operator: "CHANGED" },
+  ];
+  assert.deepEqual(finalSealPostconditionMismatches(manifest), []);
 });
 
 test("MCP audit records summarize large tool results and redact credentials", () => {
@@ -1108,6 +1835,9 @@ test("all six signed role Skills exist and define the intended boundary", async 
   assert.match(designSkill, /readyForUiDesign/);
   assert.match(designSkill, /UI_DESIGN handoff/);
   assert.match(designSkill, /Do not design screen layouts/);
+  assert.match(designSkill, /Narrative and Content Completeness/);
+  assert.match(designSkill, /proof slice[\s\S]*shippable content scope/);
+  assert.match(designSkill, /no completion state may be reached through a demo, debug, cheat, skip-to-ending/);
   assert.doesNotMatch(designSkill, /toRole":"DEVELOPMENT/);
   const uiDesignSkill = await readFile(new URL("../services/project-runtime/skills/ui-design/SKILL.md", import.meta.url), "utf8");
   assert.match(uiDesignSkill, /stable lowercase-hyphen control IDs/);
@@ -1136,16 +1866,26 @@ test("all six signed role Skills exist and define the intended boundary", async 
   assert.match(developmentSkill, /Do not convert client geometry through `get_screen_transform\(\)`/);
   assert.match(developmentSkill, /Do not substitute `get_stretch_transform\(\)`/);
   assert.match(developmentSkill, /do not move the rendered UI to compensate/);
+  assert.match(developmentSkill, /entire approved delivery scope/);
+  assert.match(developmentSkill, /directly sets routes, affinity, trust, inventory, clues, objectives, or verification flags/);
   assert.match(testSkill, /sole test-manifest contract/);
   assert.match(testSkill, /call `source_list` and then `source_read`/);
   assert.match(testSkill, /return REPLAN without a Development handoff/);
   assert.match(testSkill, /preserve that exit activation and assert the lifecycle field it changes/);
   assert.match(testSkill, /A checkpoint role label alone does not prove that a conditional ending, overlay, or result screen was reached/);
   assert.match(testSkill, /do not ask DEVELOPMENT to expose an ending asset on an unrelated earlier screen/);
+  assert.match(testSkill, /Requirement IDs are evidence obligations/);
+  assert.match(testSkill, /one representative scene proves only that scene/);
+  assert.match(testSkill, /Core rejects explicit bypass control identifiers/);
   assert.match(testSkill, /`inputProfiles` contains one or both unique values `KEYBOARD_MOUSE` and `GAMEPAD`/);
   assert.match(testSkill, /`PROJECT_CONCEPT` is design context only/);
-  assert.match(testSkill, /Every interactive feature includes integer `timeoutMs` from 1 through 300000/);
+  assert.match(testSkill, /Every interactive feature includes integer `timeoutMs` from 1 through 900000/);
+  assert.match(testSkill, /When `TEST_PLAN_TIMEOUT_INSUFFICIENT` is the only failure, do not regenerate or rewrite the accepted plan/);
+  assert.match(testSkill, /Call `test_plan_revise_timeout` with the failed run's exact `planRevision`/);
+  assert.match(testSkill, /never assert a generic default-scene choice container that the branch intentionally replaces/);
   assert.match(testSkill, /Supply every `adaptivePlayer` field in the first call/);
+  assert.match(testSkill, /bounded usability\/discovery check, not a second deterministic campaign replay/);
+  assert.match(testSkill, /adaptive goal itself requires more production decisions than its declared `maxDecisions`/);
   assert.match(testSkill, /Write `launchProfile` as the object/);
   assert.match(testSkill, /Never emit `event`, `eventType`, `captureMode`, `actions`, or `requirementIds` aliases/);
   assert.match(testSkill, /Never use an empty or partial plan to probe validation/);
@@ -1155,6 +1895,13 @@ test("all six signed role Skills exist and define the intended boundary", async 
   assert.doesNotMatch(testSkill, /"key":"loop"/);
   assert.match(testSkill, /validation rejection is a correctable plan-authoring error/);
   assert.match(testSkill, /only no-plan completion is the durable `SOURCE_PROBE_CONTRACT_MISSING` Development handoff/);
+  assert.match(testSkill, /multiple `ACTION` checkpoints/);
+  assert.match(testSkill, /An action or postcondition that merely references the target is not screenshot evidence/);
+  assert.match(testSkill, /player-visible implementation identifiers as product failures/);
+  assert.match(testSkill, /a technically persistent raw ID is not a coherent narrative callback/);
+  assert.match(developmentSkill, /Stable control IDs, choice IDs such as `choice-a`/);
+  assert.match(developmentSkill, /must never be rendered as dialogue, choice text, callbacks, summaries, ledgers, result copy, or labels/);
+  assert.match(testSkill, /every passed START, READY, ACTION, PROGRESS, and COMPLETION checkpoint frame/);
 });
 
 test("UI Design uses the signed hyphenated Skill slug everywhere in the Runtime", async () => {
@@ -1164,6 +1911,30 @@ test("UI Design uses the signed hyphenated Skill slug everywhere in the Runtime"
   assert.match(runtimeTurn, /deviludo-\$\{roleSkillSlug\}/);
   assert.doesNotMatch(runtimeTurn, /request\.role\.toLowerCase\(\)/);
   assert.doesNotMatch(runtimeTurn, /\["intent", "analysis", "design", "development", "test"\]/);
+});
+
+test("resuming a stopped Build preserves the workflow target platforms", async () => {
+  const repository = await readFile(
+    new URL("../services/core/src/project-runtime-repository.ts", import.meta.url),
+    "utf8",
+  );
+  assert.match(repository, /state_data->>'resumeState' AS resume_state, target_platforms/);
+  assert.match(repository, /JSON\.stringify\(\{ resumed: true, targetPlatforms: workflow\.target_platforms \}\)/);
+  assert.doesNotMatch(repository, /resume:build:[\s\S]{0,300}JSON\.stringify\(\{ resumed: true \}\)/);
+});
+
+test("Test planning cannot reuse a stale plan or turn a plan-authoring error into Development work", async () => {
+  const repository = await readFile(
+    new URL("../services/core/src/project-runtime-repository.ts", import.meta.url), "utf8",
+  );
+  const sandbox = await readFile(new URL("../services/core/src/sandbox.ts", import.meta.url), "utf8");
+  assert.match(repository, /created_by_turn_id::text/);
+  assert.match(repository, /createdByTurnId: result\.rows\[0\]\.created_by_turn_id/);
+  assert.match(sandbox, /latestTestPlan\?\.createdByTurnId === runtimeResult\.turnId/);
+  assert.match(sandbox, /runtimeResult\.structured\.reason === "SOURCE_PROBE_CONTRACT_MISSING"/);
+  assert.match(sandbox, /completed without persisting a complete current-turn test plan/);
+  assert.match(sandbox, /handoff: designHandoff \?\? uiDesignHandoff \?\? sourceContractHandoff/);
+  assert.doesNotMatch(sandbox, /handoff: designHandoff \?\? uiDesignHandoff \?\? testPlanningHandoff/);
 });
 
 function result(role: ProjectRuntimeTurnResult["role"], structured: Readonly<Record<string, unknown>>): ProjectRuntimeTurnResult {

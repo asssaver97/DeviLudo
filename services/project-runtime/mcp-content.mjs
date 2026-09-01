@@ -26,7 +26,8 @@ export function formatProjectToolResult(result) {
         checkpointRole: candidate.checkpointRole,
         mimeType: candidate.mimeType,
         sizeBytes,
-        contentIndex: index + 1,
+        contentIndex: Number.isInteger(candidate.contentIndex) && candidate.contentIndex > 0
+          ? candidate.contentIndex : index + 1,
       }),
       content: Object.freeze({ type: "image", data: candidate.data, mimeType: candidate.mimeType }),
     });

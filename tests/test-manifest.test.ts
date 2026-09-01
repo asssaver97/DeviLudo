@@ -103,6 +103,30 @@ describe("test-manifest", () => {
     assert.equal(validateTestManifest(invalid), false);
   });
 
+  test("rejects a terminal adaptive goal that cannot fit its decision budget", () => {
+    const manifest = completeManifest();
+    const core = manifest.features[0]!;
+    const filler = Array.from({ length: 20 }, (_, index) => ({
+      type: "click" as const,
+      stepId: `story-beat-${index}`,
+      intent: "FEATURE_ACTION" as const,
+      targetId: "feature-control",
+      coversRequirementIds: ["req-core-loop"],
+      postconditions: [changedTurn],
+    }));
+    const ending = { source: "STATE" as const, key: "ending", operator: "EXISTS" as const };
+    const events = core.interactionScript!.events.flatMap(event => event.type === "checkpoint" && event.role === "COMPLETION"
+      ? [...filler, { ...event, assertions: [...event.assertions, ending] }]
+      : [event]);
+    const invalid = {
+      ...manifest,
+      adaptivePlayer: { ...manifest.adaptivePlayer, maxDecisions: 20, successAssertions: [changedTurn, ending] },
+      features: [{ ...core, interactionScript: { events } }, ...manifest.features.slice(1)],
+    };
+    assert.match(testManifestValidationError(invalid) ?? "", /evidenced only at COMPLETION.*beyond maxDecisions 20/);
+    assert.equal(validateTestManifest(invalid), false);
+  });
+
   test("returns actionable contract errors instead of misclassifying an invalid plan as infrastructure", () => {
     const manifest = completeManifest();
     assert.match(testManifestValidationError({
@@ -199,6 +223,20 @@ describe("test-manifest", () => {
     }, ...manifest.features.slice(1)] }), false);
   });
 
+  test("rejects deterministic acceptance paths that use explicit completion bypass controls", () => {
+    const manifest = completeManifest();
+    const core = manifest.features[0]!;
+    const events = core.interactionScript!.events.map(event => event.type === "click" && event.intent === "COMPLETE_LOOP"
+      ? { ...event, stepId: "confirm-final-demo", targetId: "choice-final-demo" }
+      : event);
+    const invalid = {
+      ...manifest,
+      features: [{ ...core, interactionScript: { events } }, ...manifest.features.slice(1)],
+    };
+    assert.match(testManifestValidationError(invalid) ?? "", /development-only bypass control choice-final-demo/);
+    assert.equal(validateTestManifest(invalid), false);
+  });
+
   test("does not accept checkpoint marker aliases", () => {
     const manifest = completeManifest();
     const core = manifest.features[0];
@@ -221,6 +259,27 @@ describe("test-manifest", () => {
       ...manifest,
       features: [{ ...core, interactionScript: { events } }, ...manifest.features.slice(1)],
     }), false);
+  });
+
+  test("reserves enough timeout for long native-input journeys", () => {
+    const manifest = completeManifest();
+    const core = manifest.features[0];
+    const events = Array.from({ length: 210 }, (_, index) => ({
+      type: "wait" as const,
+      delay_ms: index + 1,
+    }));
+    const interactionScript = { events: [...core.interactionScript!.events, ...events] };
+    const minimumTimeoutMs = interactionScript.events.length * 1_500;
+    const tooShort = {
+      ...manifest,
+      features: [{ ...core, timeoutMs: minimumTimeoutMs - 1, interactionScript }, ...manifest.features.slice(1)],
+    };
+    assert.equal(validateTestManifest(tooShort), false);
+    assert.match(testManifestValidationError(tooShort) ?? "", new RegExp(`at least ${minimumTimeoutMs}`));
+    assert.equal(validateTestManifest({
+      ...manifest,
+      features: [{ ...core, timeoutMs: 900_000, interactionScript }, ...manifest.features.slice(1)],
+    }), true);
   });
 
   test("forces coreLoop and default acceptance requirements through real player actions", () => {

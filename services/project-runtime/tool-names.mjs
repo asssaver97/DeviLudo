@@ -3,8 +3,8 @@ export const ROLE_TO_CANONICAL_TOOLS = Object.freeze({
   ANALYSIS: Object.freeze(["context.read", "source.list", "source.read", "diagnostics.run", "context.update_analysis", "conversation.reply"]),
   DESIGN: Object.freeze(["context.read", "requirements.update", "project_document.update", "e2e_goals.update", "conversation.reply", "handoff.create"]),
   UI_DESIGN: Object.freeze(["context.read", "source.list", "source.read", "evidence.read", "project_document.update", "e2e_goals.update", "conversation.reply", "handoff.create"]),
-  DEVELOPMENT: Object.freeze(["context.read", "source.list", "source.read", "source.checkpoint", "assets.plan", "assets.cleanup", "build.request", "conversation.reply", "handoff.create"]),
-  TEST: Object.freeze(["context.read", "source.list", "source.read", "test_plan.replace", "e2e.start", "e2e.observe", "evidence.read", "test.verdict", "conversation.reply", "handoff.create"]),
+  DEVELOPMENT: Object.freeze(["context.read", "source.list", "source.read", "evidence.read", "source.checkpoint", "assets.plan", "assets.cleanup", "build.request", "conversation.reply", "handoff.create"]),
+  TEST: Object.freeze(["context.read", "source.list", "source.read", "test_plan.replace", "test_plan.revise_timeout", "e2e.start", "e2e.observe", "evidence.read", "test.verdict", "conversation.reply", "handoff.create"]),
 });
 
 export function nativeToolName(canonicalName) {
@@ -73,8 +73,41 @@ export function toolInputSchema(canonicalName) {
       }),
     });
   }
+  if (canonicalName === "evidence.read") {
+    return Object.freeze({
+      type: "object",
+      additionalProperties: false,
+      properties: Object.freeze({
+        runId: { type: "string", minLength: 1, maxLength: 100 },
+        imageOffset: { type: "integer", minimum: 0, maximum: 63, description: "Zero-based checkpoint image offset." },
+        imageLimit: { type: "integer", minimum: 1, maximum: 6, description: "Native images returned in this page." },
+        contentIndices: {
+          type: "array",
+          minItems: 1,
+          maxItems: 6,
+          uniqueItems: true,
+          items: { type: "integer", minimum: 1, maximum: 64 },
+        },
+        startContentIndex: { type: "integer", minimum: 1, maximum: 64 },
+        endContentIndex: { type: "integer", minimum: 1, maximum: 64 },
+        checkpointId: { type: "string", minLength: 1, maxLength: 500 },
+      }),
+    });
+  }
+  if (canonicalName === "source.checkpoint") return sourceCheckpointInputSchema();
   if (canonicalName === "assets.plan") return assetPlanInputSchema();
   if (canonicalName === "test_plan.replace") return testPlanReplaceInputSchema();
+  if (canonicalName === "test_plan.revise_timeout") {
+    return Object.freeze({
+      type: "object",
+      additionalProperties: false,
+      required: Object.freeze(["basePlanRevision", "timeoutMs"]),
+      properties: Object.freeze({
+        basePlanRevision: Object.freeze({ type: "integer", minimum: 1 }),
+        timeoutMs: Object.freeze({ type: "integer", minimum: 1, maximum: 900000 }),
+      }),
+    });
+  }
   if (canonicalName === "test.verdict") return testVerdictInputSchema();
   if (canonicalName !== "context.update_analysis") {
     return Object.freeze({ type: "object", additionalProperties: true });
@@ -118,6 +151,86 @@ export function toolInputSchema(canonicalName) {
         }),
       }),
     }),
+  });
+}
+
+function sourceCheckpointInputSchema() {
+  const anchor = { type: "string", minLength: 12, maxLength: 1_000 };
+  return Object.freeze({
+    type: "object",
+    additionalProperties: false,
+    properties: {
+      narrativeProof: {
+        type: "object",
+        additionalProperties: false,
+        required: ["opening", "scenes"],
+        properties: {
+          opening: {
+            type: "object",
+            additionalProperties: false,
+            required: ["sourcePath", "anchors"],
+            properties: {
+              sourcePath: { type: "string", minLength: 1, maxLength: 1_000 },
+              anchors: { type: "array", minItems: 4, maxItems: 24, items: anchor },
+            },
+          },
+          scenes: {
+            type: "array",
+            minItems: 2,
+            maxItems: 200,
+            items: {
+              type: "object",
+              additionalProperties: false,
+              required: ["id", "title", "sourcePath", "anchors"],
+              properties: {
+                id: { type: "string", pattern: "^scene-[0-9]{2,3}[a-z0-9-]*$" },
+                title: { type: "string", minLength: 1, maxLength: 200 },
+                sourcePath: { type: "string", minLength: 1, maxLength: 1_000 },
+                anchors: {
+                  type: "object",
+                  additionalProperties: false,
+                  required: ["entry", "objective", "exchanges", "reveal", "consequence", "transition"],
+                  properties: {
+                    entry: anchor,
+                    objective: anchor,
+                    exchanges: {
+                      type: "array",
+                      minItems: 3,
+                      maxItems: 12,
+                      items: {
+                        type: "object",
+                        additionalProperties: false,
+                        required: ["prompt", "choices"],
+                        properties: {
+                          prompt: anchor,
+                          choices: {
+                            type: "array",
+                            minItems: 2,
+                            maxItems: 6,
+                            items: {
+                              type: "object",
+                              additionalProperties: false,
+                              required: ["action", "response"],
+                              properties: {
+                                action: anchor,
+                                response: anchor,
+                              },
+                            },
+                          },
+                        },
+                      },
+                    },
+                    reveal: anchor,
+                    consequence: anchor,
+                    transition: anchor,
+                  },
+                },
+              },
+            },
+          },
+        },
+      },
+    },
   });
 }
 
@@ -397,9 +510,9 @@ function testPlanReplaceInputSchema() {
         type: "object",
         additionalProperties: false,
         required: ["events"],
-        properties: { events: { type: "array", minItems: 1, maxItems: 200, items: interactionEvent } },
+        properties: { events: { type: "array", minItems: 1, maxItems: 512, items: interactionEvent } },
       },
-      timeoutMs: { type: "integer", minimum: 1, maximum: 300000 },
+      timeoutMs: { type: "integer", minimum: 1, maximum: 900000 },
       coreJourney: { type: "boolean" },
       launchProfile: {
         type: "object",

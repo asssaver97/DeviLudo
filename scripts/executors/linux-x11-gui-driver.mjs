@@ -2,6 +2,7 @@
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 const execute = promisify(execFile);
+const MAX_INTERACTION_EVENTS = 512;
 const [command] = process.argv.slice(2);
 const value = name => { const index = process.argv.indexOf(name); if (index < 0) throw new Error(`missing ${name}`); return process.argv[index + 1]; };
 const pid = value("--pid");
@@ -40,7 +41,9 @@ else if (command === "event") {
   await sendEvent(event, windowId);
 } else if (command === "sequence") {
   const events = JSON.parse(value("--events"));
-  if (!Array.isArray(events) || events.length < 1 || events.length > 200) throw new Error("input sequence is invalid");
+  if (!Array.isArray(events) || events.length < 1 || events.length > MAX_INTERACTION_EVENTS) {
+    throw new Error("input sequence is invalid");
+  }
   // Recover earlier xdotool and X11 overhead on the next wait instead of
   // accumulating it across a timing-sensitive journey.
   const startedAt = performance.now();

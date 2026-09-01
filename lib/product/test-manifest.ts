@@ -17,7 +17,8 @@ export const MAX_TEST_REQUIREMENTS = 500 as const;
 export const MAX_TEST_FEATURES = 500 as const;
 export const MAX_INTERACTIVE_JOURNEYS = 32 as const;
 export const MAX_SCREENSHOT_CHECKPOINTS = 64 as const;
-export const MAX_JOURNEY_TIMEOUT_MS = 300_000 as const;
+export const MAX_JOURNEY_TIMEOUT_MS = 900_000 as const;
+export const MIN_JOURNEY_EVENT_BUDGET_MS = 1_500 as const;
 export const MIN_PLATFORM_E2E_TIMEOUT_MS = 30 * 60_000;
 export const MAX_PLATFORM_E2E_TIMEOUT_MS = 90 * 60_000;
 export const MIN_ADAPTIVE_ROLLOUT_TIMEOUT_MS = 240_000;
@@ -261,11 +262,19 @@ export function testManifestValidationError(value: unknown): string | null {
       if (actionWithoutTransitionOracle) {
         return `features[${index}] action ${actionWithoutTransitionOracle} must include a CHANGED postcondition for the exact STATE, PROGRESS, CONTROL, or SCENE value changed by that input`;
       }
+      const bypassAction = firstBypassAction(item.interactionScript);
+      if (bypassAction) {
+        return `features[${index}] action ${bypassAction.stepId} targets development-only bypass control ${bypassAction.identifier}; deterministic acceptance must reach outcomes through the production player journey`;
+      }
       if (!validateInteractionScript(item.interactionScript)) {
         return `features[${index}].interactionScript is invalid; use events ordered START -> START_SESSION -> READY -> PRIMARY_ACTION/FEATURE_ACTION -> PROGRESS -> COMPLETE_LOOP -> COMPLETION`;
       }
       if (!Number.isInteger(item.timeoutMs) || Number(item.timeoutMs) < 1 || Number(item.timeoutMs) > MAX_JOURNEY_TIMEOUT_MS) {
         return `features[${index}].timeoutMs must be an integer from 1 to ${MAX_JOURNEY_TIMEOUT_MS}`;
+      }
+      const minimumTimeoutMs = minimumJourneyTimeoutMs(item.interactionScript as InteractionScript);
+      if (Number(item.timeoutMs) < minimumTimeoutMs) {
+        return `features[${index}].timeoutMs must be at least ${minimumTimeoutMs} for ${String((item.interactionScript as InteractionScript).events.length)} interaction events`;
       }
       if (!validLaunchProfile(item.launchProfile)) {
         return `features[${index}].launchProfile must be exactly {"type":"FRESH"} or a valid SCENARIO profile`;
@@ -381,6 +390,8 @@ export function testManifestValidationError(value: unknown): string | null {
   if (missingInteractiveCoverage.length) {
     return `native interaction actions do not cover player requirements: ${boundedIdList(missingInteractiveCoverage)}`;
   }
+  const adaptiveBudgetError = adaptiveCompletionBudgetError(manifest);
+  if (adaptiveBudgetError) return adaptiveBudgetError;
   if (!validateTestManifest(value)) {
     return "manifest semantics are invalid: provide one FRESH core-loop journey ordered START -> START_SESSION -> READY -> PRIMARY_ACTION -> PROGRESS -> COMPLETE_LOOP -> COMPLETION; every action needs unique stepId, intent, coversRequirementIds, and postconditions; cover every player requirement with real actions and every requirement with a non-manual feature";
   }
@@ -458,7 +469,9 @@ export function validateTestManifest(value: unknown): value is TestManifest {
     } else if (item.verificationMethod === "interactive") {
       if (!validateInteractionScript(item.interactionScript)
         || firstActionWithoutTransitionOracle(item.interactionScript) !== null
+        || firstBypassAction(item.interactionScript) !== null
         || !Number.isInteger(item.timeoutMs) || Number(item.timeoutMs) < 1 || Number(item.timeoutMs) > MAX_JOURNEY_TIMEOUT_MS
+        || Number(item.timeoutMs) < minimumJourneyTimeoutMs(item.interactionScript as InteractionScript)
         || !validLaunchProfile(item.launchProfile)) return false;
       interactiveJourneys += 1;
       checkpointCount += interactionCheckpointCount(item.interactionScript);
@@ -500,9 +513,60 @@ export function validateTestManifest(value: unknown): value is TestManifest {
   return interactiveJourneys >= 1 && interactiveJourneys <= MAX_INTERACTIVE_JOURNEYS
     && checkpointCount >= 3 && checkpointCount <= MAX_SCREENSHOT_CHECKPOINTS
     && hasCoreJourney
+    && adaptiveCompletionBudgetError(manifest) === null
     && (manifest.inputProfiles as TestInputProfile[]).every(profile => exercisedInputProfiles.has(profile))
     && [...requirementIds].every(requirementId => automatedCoverage.has(requirementId))
     && [...playerRequirementIds].every(requirementId => interactiveCoverage.has(requirementId));
+}
+
+export function minimumJourneyTimeoutMs(script: InteractionScript): number {
+  return Math.min(MAX_JOURNEY_TIMEOUT_MS, script.events.length * MIN_JOURNEY_EVENT_BUDGET_MS);
+}
+
+/**
+ * The adaptive player observes the production UI after each decision. A
+ * success condition that the deterministic contract exposes only at its final
+ * checkpoint cannot be used as a bounded discovery goal when that journey is
+ * already longer than the adaptive decision budget. Requiring it produced an
+ * unwinnable 40-decision replay of 18-scene campaigns.
+ */
+export function adaptiveCompletionBudgetError(manifest: Readonly<Record<string, unknown>>): string | null {
+  const adaptive = manifest.adaptivePlayer;
+  const features = manifest.features;
+  if (!adaptive || typeof adaptive !== "object" || Array.isArray(adaptive)
+    || !Array.isArray((adaptive as Record<string, unknown>).successAssertions)
+    || !Number.isInteger((adaptive as Record<string, unknown>).maxDecisions)
+    || !Array.isArray(features)) return null;
+  const successAssertions = (adaptive as Record<string, unknown>).successAssertions as unknown[];
+  const maxDecisions = Number((adaptive as Record<string, unknown>).maxDecisions);
+  for (const candidate of features) {
+    if (!candidate || typeof candidate !== "object" || Array.isArray(candidate)) continue;
+    const feature = candidate as Record<string, unknown>;
+    if (feature.coreJourney !== true || !validateInteractionScript(feature.interactionScript)) continue;
+    const script = feature.interactionScript as InteractionScript;
+    const actions = interactionActionEvents(script);
+    if (actions.length <= maxDecisions) continue;
+    const completion = script.events.find(event => event.type === "checkpoint" && event.role === "COMPLETION");
+    if (!completion || completion.type !== "checkpoint") continue;
+    const earlierAssertions = script.events
+      .filter(event => event !== completion)
+      .flatMap(event => event.type === "checkpoint" ? event.assertions
+        : event.type === "wait" ? [] : event.postconditions);
+    const completionOnly = successAssertions.find(success => validateProbeAssertion(success)
+      && completion.assertions.some(candidateAssertion => sameAssertionReferenceAndOperator(candidateAssertion, success))
+      && !earlierAssertions.some(candidateAssertion => sameAssertionReferenceAndOperator(candidateAssertion, success)));
+    if (completionOnly && validateProbeAssertion(completionOnly)) {
+      const reference = completionOnly.key ?? completionOnly.targetId ?? completionOnly.source;
+      return `adaptivePlayer success assertion ${reference} is evidenced only at COMPLETION after ${actions.length} deterministic actions, beyond maxDecisions ${maxDecisions}; use a bounded representative-loop assertion instead of the terminal campaign outcome`;
+    }
+  }
+  return null;
+}
+
+function sameAssertionReferenceAndOperator(left: ProbeAssertion, right: ProbeAssertion): boolean {
+  return left.source === right.source && left.key === right.key
+    && left.targetId === right.targetId && left.property === right.property
+    && left.operator === right.operator && left.value === right.value;
 }
 
 export function planE2eExecution(manifest: TestManifest, currentRegressionMs = 0): E2eExecutionPlan {
@@ -676,6 +740,34 @@ function firstActionWithoutTransitionOracle(value: unknown): string | null {
       || !action.postconditions.some(assertion => assertion && typeof assertion === "object"
         && !Array.isArray(assertion) && (assertion as { operator?: unknown }).operator === "CHANGED")) {
       return typeof action.stepId === "string" ? action.stepId : "<missing-stepId>";
+    }
+  }
+  return null;
+}
+
+/**
+ * Acceptance evidence must traverse the same production path available to a
+ * player. A development shortcut can make every Probe assertion true while
+ * skipping the content and progression those assertions are meant to prove.
+ * Keep the check deliberately narrow to explicit bypass identifiers so normal
+ * in-world controls such as a network test or a playable demo remain valid.
+ */
+function firstBypassAction(value: unknown): Readonly<{ stepId: string; identifier: string }> | null {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  const events = (value as { events?: unknown }).events;
+  if (!Array.isArray(events)) return null;
+  const bypass = /(?:^|-)(?:debug|cheat)(?:-|$)|(?:^|-)skip-(?:to|ahead|ending|level|chapter)(?:-|$)|(?:^|-)(?:force-win|unlock-all|final-demo|ending-demo|demo-ending)(?:-|$)/;
+  for (const event of events) {
+    if (!event || typeof event !== "object" || Array.isArray(event)) continue;
+    const action = event as Record<string, unknown>;
+    if (action.intent === undefined) continue;
+    for (const identifier of [action.targetId, action.stepId]) {
+      if (typeof identifier === "string" && bypass.test(identifier)) {
+        return Object.freeze({
+          stepId: typeof action.stepId === "string" ? action.stepId : "<missing-stepId>",
+          identifier,
+        });
+      }
     }
   }
   return null;

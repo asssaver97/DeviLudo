@@ -72,6 +72,26 @@ export function normalizeAgentProjectDocumentContent(value: unknown): ProjectDoc
   });
 }
 
+/**
+ * Specialist Agents may use nested objects to preserve an implementable design
+ * (chapters, causal rules, screen blueprints, and so on), while the public
+ * project document intentionally stores human-readable prose. Convert only the
+ * five declared document fields at this trust boundary instead of shallowly
+ * merging provider JSON into the strict persisted schema.
+ */
+export function applyAgentProjectDocumentPatch(
+  current: ProjectDocumentContent,
+  patch: Readonly<Record<string, unknown>>,
+): ProjectDocumentContent {
+  return normalizeAgentProjectDocumentContent({
+    introduction: patchedText(current.introduction, patch.introduction),
+    gameplay: patchedText(current.gameplay, patch.gameplay),
+    uiDesign: patchedText(current.uiDesign, patch.uiDesign),
+    categories: patchedList(current.categories, patch.categories),
+    features: patchedList(current.features, patch.features),
+  });
+}
+
 export function projectDocumentMarkdown(
   projectName: string,
   content: ProjectDocumentContent,
@@ -176,6 +196,48 @@ function agentText(value: unknown, label: string): string {
   return normalized.length <= MAX_TEXT_LENGTH
     ? normalized
     : `${normalized.slice(0, MAX_TEXT_LENGTH - 1)}…`;
+}
+
+function patchedText(current: string, value: unknown): string {
+  if (value === undefined || value === null) return current;
+  return typeof value === "string" ? value : structuredDocumentText(value);
+}
+
+function patchedList(current: readonly string[], value: unknown): readonly string[] {
+  if (value === undefined || value === null) return current;
+  if (Array.isArray(value)) return value.map(item => typeof item === "string" ? item : structuredDocumentText(item));
+  if (value && typeof value === "object") {
+    return Object.entries(value as Record<string, unknown>)
+      .map(([key, item]) => `${key}：${structuredDocumentText(item)}`);
+  }
+  return [String(value)];
+}
+
+function structuredDocumentText(value: unknown, depth = 0): string {
+  if (typeof value === "string") return value.trim();
+  if (typeof value === "number" || typeof value === "boolean") return String(value);
+  if (value === null || value === undefined) return "";
+  if (Array.isArray(value)) {
+    return value
+      .map((item, index) => `${index + 1}. ${structuredDocumentText(item, depth + 1)}`)
+      .filter(item => !/^\d+\.\s*$/u.test(item))
+      .join("\n");
+  }
+  if (typeof value === "object") {
+    const indent = "  ".repeat(depth);
+    return Object.entries(value as Record<string, unknown>)
+      .map(([key, item]) => {
+        const rendered = structuredDocumentText(item, depth + 1);
+        if (!rendered) return "";
+        const multiline = rendered.includes("\n");
+        return multiline
+          ? `${indent}${key}：\n${rendered.split("\n").map(line => `${indent}  ${line}`).join("\n")}`
+          : `${indent}${key}：${rendered}`;
+      })
+      .filter(Boolean)
+      .join("\n");
+  }
+  return String(value);
 }
 
 function agentList(value: unknown, label: string): string[] {

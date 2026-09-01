@@ -106,8 +106,14 @@ function toolDescription(name) {
   if (name === "test_plan.replace") {
     return "Persist the complete current Test Agent plan. Follow this tool's input schema exactly and use only source-read Probe keys and semantic control IDs. A validation error is a correctable plan-authoring error: revise the payload and retry; it is not E2E infrastructure failure.";
   }
+  if (name === "test_plan.revise_timeout") {
+    return "Clone an accepted plan revision for the current source and change only interactive timeoutMs values. Use this instead of regenerating a plan when TEST_PLAN_TIMEOUT_INSUFFICIENT is the only failure.";
+  }
   if (name === "test.verdict") {
     return "Persist the evidence-backed Test Agent verdict. PASS requires an exact per-checkpoint UI review whenever the latest UI Design handoff includes a structured UI specification; describe visible screenshot pixels and fail any blank undecorated content panel or approved fallback violation.";
+  }
+  if (name === "evidence.read") {
+    return "Read verified E2E screenshots as native images. Each call returns at most six images and includes the complete ordered checkpoint catalog. Read every page with imageOffset/imageLimit, or request exact 1-based contentIndices/checkpointId; do not assume the first page represents the full run.";
   }
   return `DeviLudo built-in ${name} tool. Access is enforced for the ${role} role and audited by turn.`;
 }

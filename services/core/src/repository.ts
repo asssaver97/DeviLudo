@@ -43,6 +43,7 @@ import type {
 import { executorReceiptSigningPayload } from "./contracts";
 import { normalizeAgentModel, normalizeAgentModelOverrides } from "./agent-settings";
 import {
+  applyAgentProjectDocumentPatch,
   createInitialProjectDocument,
   parseProjectDocumentContent,
   projectDocumentMarkdown,
@@ -2726,7 +2727,10 @@ export class CoreRepository {
         await client.query(`UPDATE deviludo.implementation_change_requests SET state = 'SUPERSEDED', updated_at = clock_timestamp() WHERE id = $1::uuid`, [change.id]);
         throw Object.assign(new Error("Project document changed while the proposal was awaiting a decision"), { statusCode: 409, code: "CHANGE_REQUEST_STALE" });
       }
-      const document = parseProjectDocumentContent({ ...documentRow.rows[0].content, ...change.project_document_patch });
+      const document = applyAgentProjectDocumentPatch(
+        parseProjectDocumentContent(documentRow.rows[0].content),
+        change.project_document_patch,
+      );
       const specification = synchronizeSpecificationWithProjectDocument(
         productSpecificationFromState(current.state_data), document,
       );
