@@ -170,8 +170,20 @@ test("Test Agent jobs are semantically deduplicated and retry storms terminate",
   assert.match(claim, /superseded by canonical Test Agent turn/i);
   assert.match(claim, /exhausted_job\.attempt >= exhausted_job\.max_attempts/);
   assert.match(claim, /SET state = 'BLOCKED'/);
-  assert.match(fail, /attempts_exhausted := job\.attempt >= job\.max_attempts/);
+  assert.match(fail, /attempts_exhausted := NOT worker_interrupted AND job\.attempt >= job\.max_attempts/);
   assert.match(fail, /product_failure OR configuration_failure OR attempts_exhausted/);
+});
+
+test("worker restarts and expired leases do not consume workflow retry attempts", async () => {
+  const sql = await readFile(sqlUrl, "utf8");
+  const fail = functionSource(sql, "fail_job");
+  const recover = functionSource(sql, "recover_expired_jobs");
+  assert.match(fail, /worker_interrupted := position\('WORKER_INTERRUPTED:' IN p_reason\) = 1/);
+  assert.match(fail, /attempt = CASE WHEN worker_interrupted THEN greatest\(job\.attempt - 1, 0\)/);
+  assert.match(fail, /WHEN worker_interrupted THEN fencing_token \+ 1/);
+  assert.match(fail, /IF worker_interrupted THEN\s+NULL;/);
+  assert.match(recover, /attempt = greatest\(attempt - 1, 0\)/);
+  assert.match(recover, /fencing_token = fencing_token \+ 1/);
 });
 
 test("Builder, platform tests and Steam are the only disposable job settlements", async () => {

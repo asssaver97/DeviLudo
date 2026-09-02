@@ -312,6 +312,11 @@ export class ProjectRuntimeSupervisor {
         },
       });
     } catch (error) {
+      if (signal.aborted) {
+        await this.options.docker([
+          "exec", name, "/usr/local/bin/deviludo-runtime-io", "cancel", request.turnId,
+        ], 15_000).catch(() => undefined);
+      }
       const logs = await this.options.docker(["logs", "--tail", "40", name], 10_000).catch(() => "");
       const message = error instanceof Error ? error.message : String(error);
       throw new Error(logs.trim() ? `${message}; Runtime startup log: ${logs.trim().slice(-2_000)}` : message);

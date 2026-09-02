@@ -186,6 +186,7 @@ services:
 
   core-sandbox:
     <<: *core
+    stop_grace_period: 30s
     environment:
       <<: *core-environment
       DEVILUDO_CORE_ROLE: sandbox

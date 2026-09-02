@@ -108,6 +108,7 @@ export async function runSandbox(
   while (!signal.aborted) {
     let job: JobProtocolV4 | null = null;
     let admissionReservationId: string | null = null;
+    let leaseLost = false;
     try {
       if (backend.probe) {
         try {
@@ -139,8 +140,16 @@ export async function runSandbox(
       signal.addEventListener("abort", abortJob, { once: true });
       const heartbeat = setInterval(() => {
         void repository.heartbeat(job as JobProtocolV4)
-          .then(accepted => { if (!accepted) jobController.abort(); })
-          .catch(() => jobController.abort());
+          .then(accepted => {
+            if (!accepted) {
+              leaseLost = true;
+              jobController.abort();
+            }
+          })
+          .catch(() => {
+            leaseLost = true;
+            jobController.abort();
+          });
       }, 2_000);
       let progressWrites = Promise.resolve();
       try {
@@ -196,6 +205,7 @@ export async function runSandbox(
             prompt: runtimeJobPrompt(job, role), responseLanguage, settings,
             sourceRevision: project.source?.revision ?? null,
             sourceRelativePath: project.source?.relativePath ?? null,
+            signal: jobController.signal,
             onEvent: event => {
               if (!event.content) return;
               const content = event.kind === "CONTENT_DELTA"
@@ -372,7 +382,13 @@ export async function runSandbox(
           await hostServices.admission.cancel({ reservationId: admissionReservationId }).catch(() => undefined);
           admissionReservationId = null;
         }
-        const message = error instanceof Error ? error.message : String(error);
+        const interruptedByShutdown = signal.aborted;
+        const infrastructuralInterruption = interruptedByShutdown || leaseLost;
+        const message = interruptedByShutdown
+          ? "Worker shutdown interrupted execution; the job will resume automatically"
+          : leaseLost
+            ? "Job lease changed; stale execution was cancelled"
+          : error instanceof Error ? error.message : String(error);
         if (job.jobKind === "AGENT_TURN") {
           await discardOrphanedAgentSource(repository, projectSources, job).catch(cleanupError => {
             console.error(JSON.stringify({
@@ -382,10 +398,18 @@ export async function runSandbox(
               message: cleanupError instanceof Error ? cleanupError.message : String(cleanupError),
             }));
           });
-          await repository.appendJobProgress(job, "FAILED", message).catch(() => undefined);
+          await repository.appendJobProgress(
+            job,
+            infrastructuralInterruption ? "PHASE" : "FAILED",
+            message,
+          ).catch(() => undefined);
         }
-        await repository.fail(job, message).catch(() => undefined);
-        if (projectRuntime) {
+        if (interruptedByShutdown) {
+          await repository.fail(job, `WORKER_INTERRUPTED:${message}`).catch(() => undefined);
+        } else if (!leaseLost) {
+          await repository.fail(job, message).catch(() => undefined);
+        }
+        if (projectRuntime && !infrastructuralInterruption) {
           await projectRuntime.recordWorkflowJobFailure({
             workspaceId: job.workspaceId,
             projectId: job.projectId,

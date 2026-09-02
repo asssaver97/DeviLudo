@@ -56,6 +56,27 @@ test("credentials and MCP token are turn-scoped files and are erased after execu
   assert.doesNotMatch(turn, /codexAuthFile = `\$\{stateRoot\}/);
 });
 
+test("cancelled Runtime turns terminate their exact provider process group", async () => {
+  const [supervisor, turn, io, sandbox, runtimeService, compose] = await Promise.all([
+    readFile(new URL("../services/sandbox-executor/src/project-runtime-supervisor.ts", import.meta.url), "utf8"),
+    readFile(new URL("../services/project-runtime/turn.mjs", import.meta.url), "utf8"),
+    readFile(new URL("../services/project-runtime/io.mjs", import.meta.url), "utf8"),
+    readFile(new URL("../services/core/src/sandbox.ts", import.meta.url), "utf8"),
+    readFile(new URL("../services/core/src/project-runtime-service.ts", import.meta.url), "utf8"),
+    readFile(new URL("../infra/docker-compose.yml", import.meta.url), "utf8"),
+  ]);
+  assert.match(runtimeService, /}, input\.signal, input\.onEvent\)/);
+  assert.match(sandbox, /signal: jobController\.signal/);
+  assert.match(sandbox, /WORKER_INTERRUPTED:/);
+  assert.match(supervisor, /deviludo-runtime-io", "cancel",\s*request\.turnId/);
+  assert.match(turn, /writeFile\(turnPidFile, `\$\{process\.pid\}\\n`/);
+  assert.match(turn, /detached: true/);
+  assert.match(turn, /process\.kill\(-pid, signal\)/);
+  assert.match(io, /readFile\(`\/proc\/\$\{pid\}\/environ`/);
+  assert.match(io, /DEVILUDO_AGENT_TURN_ID=\$\{expectedTurnId\}/);
+  assert.match(compose, /core-sandbox:[\s\S]*stop_grace_period: 30s/);
+});
+
 test("executor startup preserves current project containers and removes only disposable task containers", async () => {
   const daemon = await readFile(new URL("../services/sandbox-executor/src/daemon.ts", import.meta.url), "utf8");
   assert.match(daemon, /ProjectRuntimeSupervisor/);

@@ -3850,7 +3850,9 @@ DECLARE
   workflow deviludo.workflow_instances%ROWTYPE;
   product_failure boolean;
   configuration_failure boolean;
+  worker_interrupted boolean;
   attempts_exhausted boolean;
+  recorded_reason text;
 BEGIN
   SELECT * INTO job FROM deviludo.jobs
    WHERE id = p_job_id AND state = 'RUNNING'
@@ -3866,26 +3868,38 @@ BEGIN
   product_failure := job.kind = 'BUILD' AND position('BUILD_PRODUCT:' IN p_reason) > 0;
   configuration_failure := position('CONFIGURATION:' IN p_reason) > 0
     OR position('CREDENTIAL:' IN p_reason) > 0;
-  attempts_exhausted := job.attempt >= job.max_attempts;
+  worker_interrupted := position('WORKER_INTERRUPTED:' IN p_reason) = 1;
+  attempts_exhausted := NOT worker_interrupted AND job.attempt >= job.max_attempts;
+  recorded_reason := CASE WHEN worker_interrupted
+    THEN substr(p_reason, length('WORKER_INTERRUPTED:') + 1)
+    ELSE p_reason END;
 
   UPDATE deviludo.jobs SET
-      state = CASE WHEN product_failure OR configuration_failure OR attempts_exhausted OR job.kind = 'STEAM_PUBLISH'
+      state = CASE WHEN worker_interrupted THEN 'RETRY'::deviludo.job_state
+                   WHEN product_failure OR configuration_failure OR attempts_exhausted OR job.kind = 'STEAM_PUBLISH'
                    THEN 'FAILED'::deviludo.job_state ELSE 'RETRY'::deviludo.job_state END,
       available_at = clock_timestamp() + interval '15 seconds',
+      attempt = CASE WHEN worker_interrupted THEN greatest(job.attempt - 1, 0) ELSE job.attempt END,
       lease_owner = NULL, lease_token = NULL, lease_expires_at = NULL,
-      heartbeat_at = NULL, last_error = left(p_reason, 2000),
+      heartbeat_at = NULL, last_error = left(recorded_reason, 2000),
+      fencing_token = CASE WHEN worker_interrupted THEN fencing_token + 1 ELSE fencing_token END,
       updated_at = clock_timestamp()
    WHERE workspace_id = job.workspace_id AND id = job.id;
   INSERT INTO deviludo.workflow_events(workspace_id, workflow_id, event_kind, event_data, idempotency_key)
   VALUES (job.workspace_id, job.workflow_id,
-    CASE WHEN product_failure OR configuration_failure OR attempts_exhausted OR job.kind = 'STEAM_PUBLISH'
+    CASE WHEN NOT worker_interrupted
+      AND (product_failure OR configuration_failure OR attempts_exhausted OR job.kind = 'STEAM_PUBLISH')
       THEN 'JOB_FAILED' ELSE 'JOB_RETRY_SCHEDULED' END,
     jsonb_build_object('jobId', job.id, 'attempt', job.attempt,
-      'reason', left(p_reason, 2000)),
-    'job-failure:' || job.id::text || ':' || job.attempt::text)
+      'reason', left(recorded_reason, 2000)),
+    CASE WHEN worker_interrupted
+      THEN 'job-interrupted:' || job.id::text || ':' || job.fencing_token::text
+      ELSE 'job-failure:' || job.id::text || ':' || job.attempt::text END)
   ON CONFLICT (workspace_id, workflow_id, idempotency_key) DO NOTHING;
 
-  IF product_failure THEN
+  IF worker_interrupted THEN
+    NULL;
+  ELSIF product_failure THEN
     UPDATE deviludo.workflow_instances SET state = 'DEVELOPING', version = version + 1,
       updated_at = clock_timestamp()
      WHERE workspace_id = workflow.workspace_id AND id = workflow.id;
@@ -3928,19 +3942,21 @@ BEGIN
   WITH expired AS (
     UPDATE deviludo.jobs
        SET state = 'RETRY',
+           attempt = greatest(attempt - 1, 0),
            available_at = clock_timestamp() + interval '15 seconds',
            lease_owner = NULL, lease_token = NULL, lease_expires_at = NULL,
            heartbeat_at = NULL, last_error = 'lease expired',
+           fencing_token = fencing_token + 1,
            updated_at = clock_timestamp()
      WHERE state = 'RUNNING' AND lease_expires_at < clock_timestamp()
-     RETURNING workspace_id, workflow_id, id, attempt
+     RETURNING workspace_id, workflow_id, id, attempt, fencing_token
   ), events AS (
     INSERT INTO deviludo.workflow_events(
       workspace_id, workflow_id, event_kind, event_data, idempotency_key
     )
     SELECT workspace_id, workflow_id, 'JOB_RETRY_SCHEDULED',
       jsonb_build_object('jobId', id, 'attempt', attempt, 'reason', 'lease expired'),
-      'lease-expired:' || id::text || ':' || attempt::text
+      'lease-expired:' || id::text || ':' || fencing_token::text
       FROM expired
     ON CONFLICT (workspace_id, workflow_id, idempotency_key) DO NOTHING
   )

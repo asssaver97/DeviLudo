@@ -36,9 +36,11 @@ const sessionFile = `${stateRoot}/sessions/${roleSkillSlug}.json`;
 const skillFile = `/opt/deviludo/skills/${roleSkillSlug}/SKILL.md`;
 const credentialFile = process.env.DEVILUDO_PROVIDER_CREDENTIAL_FILE ?? "/run/deviludo/provider-credential";
 const mcpTokenFile = process.env.DEVILUDO_MCP_TOKEN_FILE ?? "/run/deviludo/mcp-token";
+const turnPidFile = `/run/deviludo/${request.turnId}/turn.pid`;
 const codexModelsCacheFile = process.env.DEVILUDO_CODEX_MODELS_CACHE_FILE
   ?? `/run/deviludo/${request.turnId}/models-cache.json`;
 const startedAt = new Date().toISOString();
+await writeFile(turnPidFile, `${process.pid}\n`, { mode: 0o600 });
 const storedSession = await readJson(sessionFile);
 // Intent is a stateless semantic router. Its prompt already contains the compact
 // routing snapshot, so resuming a long role transcript only adds latency and
@@ -212,7 +214,20 @@ process.stdout.write(`${JSON.stringify({
 })}\n`);
 
 async function run(executable, args, env, stdin) {
-  const child = spawn(executable, args, { cwd: sourceDirectory, env, stdio: ["pipe", "pipe", "pipe"] });
+  const child = spawn(executable, args, {
+    cwd: sourceDirectory,
+    env,
+    stdio: ["pipe", "pipe", "pipe"],
+    detached: true,
+  });
+  let forceKill;
+  const stop = () => {
+    signalProcessGroup(child.pid, "SIGTERM");
+    forceKill ??= setTimeout(() => signalProcessGroup(child.pid, "SIGKILL"), 5_000);
+    forceKill.unref();
+  };
+  process.once("SIGTERM", stop);
+  process.once("SIGINT", stop);
   if (stdin) child.stdin.end(stdin); else child.stdin.end();
   const decoder = new TextDecoder();
   let stdout = "";
@@ -252,10 +267,17 @@ async function run(executable, args, env, stdin) {
     stderr += text;
     runtimeErrors.push(text);
   });
-  const exitCode = await new Promise((resolve, reject) => {
-    child.once("error", reject);
-    child.once("close", resolve);
-  });
+  let exitCode;
+  try {
+    exitCode = await new Promise((resolve, reject) => {
+      child.once("error", reject);
+      child.once("close", resolve);
+    });
+  } finally {
+    process.removeListener("SIGTERM", stop);
+    process.removeListener("SIGINT", stop);
+    if (forceKill) clearTimeout(forceKill);
+  }
   const trailing = decoder.decode();
   stdout += trailing;
   runtimeEvents.push(trailing);
@@ -273,6 +295,15 @@ async function run(executable, args, env, stdin) {
   }
   if (exitCode !== 0) throw new Error(`${executable} exited ${String(exitCode)}: ${stderr.slice(-4000)}`);
   return { content: content.at(-1) ?? finalRuntimeContent(stdout), toolCalls, sessionId };
+}
+
+function signalProcessGroup(pid, signal) {
+  if (!Number.isSafeInteger(pid) || pid <= 1) return;
+  try {
+    process.kill(-pid, signal);
+  } catch (error) {
+    if (error?.code !== "ESRCH") throw error;
+  }
 }
 
 async function readStdin() {

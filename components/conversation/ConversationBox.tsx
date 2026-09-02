@@ -117,6 +117,7 @@ export function ConversationBox({
         : text("正在准备会话", "Preparing conversation");
   const followLatestMessage = useRef(true);
   const hasPrimaryAction = primaryAction !== null && primaryAction !== undefined;
+  const previousHasPrimaryAction = useRef(hasPrimaryAction);
   const latestProgressSequence = agentProgress?.events.at(-1)?.sequence ?? null;
   const latestOptionMessageId = useMemo(() => {
     if (sending || agentProgress?.running) return null;
@@ -143,7 +144,9 @@ export function ConversationBox({
   }, [disabled, focusKey]);
 
   useLayoutEffect(() => {
-    if (!hasPrimaryAction) return;
+    const appeared = hasPrimaryAction && !previousHasPrimaryAction.current;
+    previousHasPrimaryAction.current = hasPrimaryAction;
+    if (!appeared) return;
     composer.current?.scrollIntoView({ block: "nearest" });
   }, [hasPrimaryAction]);
 

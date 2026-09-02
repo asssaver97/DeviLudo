@@ -5,6 +5,7 @@ import { useRouter } from "next/navigation";
 import {
   useCallback,
   useEffect,
+  useLayoutEffect,
   useMemo,
   useRef,
   useState,
@@ -146,8 +147,9 @@ export function ProjectStudio({ projectId }: { projectId: string }) {
   const [iterations, setIterations] = useState<readonly ProductWorkflowIterationSummary[]>([]);
   const [selectedWorkflowId, setSelectedWorkflowId] = useState<string | null>(null);
   const [historicalIteration, setHistoricalIteration] = useState<ProductWorkflowIterationDetail | null>(null);
-  const [conversationFocusKey, setConversationFocusKey] = useState(0);
+  const [conversationFocusKey, setConversationFocusKey] = useState<number | undefined>(undefined);
   const conversationSelectionRevision = useRef(0);
+  const deliveryPipelineRef = useRef<HTMLElement | null>(null);
   const [artifactAccess, setArtifactAccess] = useState<ArtifactAccess | null>(null);
   const agentProgressCursor = useRef(0);
   const [deleting, setDeleting] = useState(false);
@@ -163,6 +165,15 @@ export function ProjectStudio({ projectId }: { projectId: string }) {
   const [assetManifestView, setAssetManifestView] = useState<AssetManifestPayload | null>(null);
   const [retryingAssets, setRetryingAssets] = useState(false);
   const [deliveryConfigExpanded, setDeliveryConfigExpanded] = useState(false);
+  const projectReady = project !== null;
+
+  useLayoutEffect(() => {
+    if (!projectReady) return;
+    const pipeline = deliveryPipelineRef.current;
+    if (!pipeline) return;
+    pipeline.focus({ preventScroll: true });
+    pipeline.scrollIntoView({ block: "start" });
+  }, [projectId, projectReady]);
   const [localGit, setLocalGit] = useState<LocalGitState | null>(null);
   const [localGitError, setLocalGitError] = useState<string | null>(null);
   const [newBranchName, setNewBranchName] = useState("");
@@ -573,7 +584,7 @@ export function ProjectStudio({ projectId }: { projectId: string }) {
       setArtifacts([]);
       setAssetPanelExpanded(false);
       startConversation();
-      setConversationFocusKey(value => value + 1);
+      setConversationFocusKey(value => (value ?? 0) + 1);
       expireCached(clientCacheKeys.artifacts(projectId));
       await Promise.all([loadIterations(), loadArtifacts(true)]);
     } catch (reason) {
@@ -1009,7 +1020,12 @@ export function ProjectStudio({ projectId }: { projectId: string }) {
       </section>
       {error ? <div className="inline-notice danger">{error}</div> : null}
 
-      <section aria-label={text("交付流程", "Delivery pipeline")} className="product-delivery-pipeline">
+      <section
+        aria-label={text("交付流程", "Delivery pipeline")}
+        className="product-delivery-pipeline"
+        ref={deliveryPipelineRef}
+        tabIndex={-1}
+      >
         <header className="product-delivery-pipeline-header">
           <div className="product-delivery-pipeline-title">
             <div><span className="eyebrow">DELIVERY PIPELINE</span><h2>{text(`交付流程 · 第 ${viewedIterationNumber} 轮`, `DELIVERY PIPELINE · ITERATION ${viewedIterationNumber}`)}</h2></div>

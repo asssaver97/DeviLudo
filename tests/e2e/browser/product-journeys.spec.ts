@@ -71,6 +71,7 @@ test("display typography, readable body copy and English locale persist across t
   await page.goto(`/projects/${project.id}`);
   const pipeline = page.getByRole("region", { name: "Delivery pipeline" });
   await expect(pipeline).toBeVisible();
+  await expect(pipeline).toBeFocused();
   await expect(page.getByRole("heading", { name: "DELIVERY PIPELINE" })).toBeVisible();
   await expect(page.getByRole("heading", { name: "CONVERSATION HISTORY" })).toBeVisible();
   await expect(page.getByText("NOT STARTED", { exact: true })).toHaveCount(4);

@@ -201,7 +201,7 @@ test("the scheduler recovers an expired lease and increments fencing on the next
   const recovered = await stack.waitForProject(project.id, value => value.jobs.some(job => (
     job.id === first.jobId && job.state === "RETRY" && job.lastError === "lease expired"
   )));
-  expect(projectJob(recovered, "E2E_PLATFORM_RUN", "macos").attempt).toBe(1);
+  expect(projectJob(recovered, "E2E_PLATFORM_RUN", "macos").attempt).toBe(0);
 
   await stack.updateJob(first.jobId, "available");
   const reclaimed = await claim(stack, mac);

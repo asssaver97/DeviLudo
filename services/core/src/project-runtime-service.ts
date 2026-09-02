@@ -90,6 +90,7 @@ type ProjectRuntimeTurnInput = Readonly<{
   sourceRelativePath: string | null;
   lifecycleLeaseToken?: string;
   attachments?: readonly Readonly<{ content: Buffer; extension: "png" | "jpg" | "webp" }>[];
+  signal?: AbortSignal;
   onEvent?: (event: ProjectRuntimeProgressEvent) => void;
 }>;
 
@@ -218,7 +219,7 @@ export class ProjectRuntimeService {
       runtimeImage,
       sourceRelativePath: input.sourceRelativePath,
       contextRelativePath: metadata.relativePath,
-    });
+    }, input.signal);
     const marked = await this.repository.markContainer(input.workspaceId, input.projectId, {
       generation: runtime.generation,
       fencingToken: runtime.fencingToken,
@@ -269,7 +270,7 @@ export class ProjectRuntimeService {
         mcpToken: started.mcpToken,
         leaseToken: started.leaseToken,
         leaseExpiresAt: new Date(Date.now() + 24 * 60 * 60_000).toISOString(),
-      }, undefined, input.onEvent);
+      }, input.signal, input.onEvent);
       if (input.role === "ANALYSIS" && input.mode === "PRIMARY") {
         const durable = await this.readContext(input.workspaceId, input.projectId);
         if (durable.workflow.analysisTurnId !== result.turnId) {
