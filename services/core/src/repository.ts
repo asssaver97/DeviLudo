@@ -2825,7 +2825,7 @@ export class CoreRepository {
           `UPDATE deviludo.workflow_instances
               SET state = 'DESIGNING', version = version + 1,
                   development_actor_id = $2::uuid,
-                  state_data = state_data || jsonb_build_object(
+                  state_data = (state_data - 'resumeState' - 'stopReason') || jsonb_build_object(
                     'specification', $3::jsonb, 'responseLanguage', $4::text,
                     'e2eGoalRevision', $5::bigint
                   ), updated_at = clock_timestamp()

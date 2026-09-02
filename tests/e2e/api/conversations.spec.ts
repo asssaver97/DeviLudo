@@ -331,9 +331,17 @@ test("project conversations apply explicit feedback, defer tentative changes, an
   expect(draftConversation.messages[1].metadata).toMatchObject({
     source: "AI_AGENT",
     appliedToDraft: false,
-    readyForDevelopment: true,
+    readyForUiDesign: true,
+    readyForDevelopment: false,
     projectDocumentUpdated: false,
     options: expectedOptions,
+  });
+  expect(draftConversation.messages[2].metadata).toMatchObject({
+    source: "AI_AGENT",
+    agentRole: "UI_DESIGN",
+    readyForUiDesign: false,
+    readyForDevelopment: true,
+    projectDocumentUpdated: false,
   });
   const runtimeTurnId = String(draftConversation.messages[1].metadata.runtimeTurnId);
   expect(runtimeTurnId).toMatch(/^[0-9a-f-]{36}$/i);
@@ -386,6 +394,7 @@ test("project conversations apply explicit feedback, defer tentative changes, an
   expect(lockedConversation.messages[1].content).toContain("测试设计 Agent");
   expect(lockedBody.workflowAction).toBe("AWAITING_CONFIRMATION");
   expect(lockedBody.changeRequest.state).toBe("PENDING");
+  expect((await stack.readProject(lockedProject.id)).workflowState).toBe("STOPPED");
   expect((await stack.readProject(lockedProject.id)).specification.revisionNotes).toEqual(notesBefore);
 
   const followUp = await stack.web("/api/conversations/messages", {
@@ -401,6 +410,7 @@ test("project conversations apply explicit feedback, defer tentative changes, an
   expect(followUpBody.intentDecision.intent).toBe("QUESTION");
   expect(followUpBody.workflowAction).toBe("NONE");
   expect(followUpBody.project.pendingImplementationChange).toBeNull();
+  expect((await stack.readProject(lockedProject.id)).workflowState).toBe("TEST_PLANNING");
   expect(await stack.queryRows<{ decision: string; state: string }>(`
     SELECT decision, state
       FROM deviludo.implementation_change_requests
@@ -552,7 +562,9 @@ test("messages during Agent generation are intent-routed and confirmed changes s
     };
   expect(questionResult.intentDecision).toMatchObject({ intent: "QUESTION", targetRole: "DESIGN" });
   expect(questionResult.workflowAction).toBe("NONE");
-  expect(questionResult.conversation.messages).toHaveLength(2);
+  expect(questionResult.conversation.messages.map(message => (
+    message.role === "USER" ? "USER" : message.metadata.agentRole
+  ))).toEqual(["USER", "DESIGN", "UI_DESIGN"]);
   expect((await stack.readProject(project.id)).document.revision).toBe(documentBefore);
   expect(await stack.queryRows<{ state: string; fencing_token: string }>(`
     SELECT state::text, fencing_token::text FROM deviludo.jobs WHERE id = '${jobId}'::uuid
@@ -575,10 +587,19 @@ test("messages during Agent generation are intent-routed and confirmed changes s
   expect(proposedBody.intentDecision).toMatchObject({ intent: "CHANGE_REQUEST", explicitExecution: false });
   expect(proposedBody.workflowAction).toBe("AWAITING_CONFIRMATION");
   expect(proposedBody.changeRequest.state).toBe("PENDING");
-  expect(proposedBody.conversation.messages.slice(-2).map(message => (
+  expect(proposedBody.conversation.messages.slice(-3).map(message => (
     message.role === "USER" ? "USER" : message.metadata.agentRole
-  ))).toEqual(["USER", "DESIGN"]);
+  ))).toEqual(["USER", "DESIGN", "UI_DESIGN"]);
   expect((await stack.readProject(project.id)).document.revision).toBe(documentBefore);
+  expect((await stack.readProject(project.id)).workflowState).toBe("STOPPED");
+  expect(await stack.queryRows<{ state: string; fencing_token: string; lease_token: string | null }>(`
+    SELECT state::text, fencing_token::text, lease_token::text
+      FROM deviludo.jobs WHERE id = '${jobId}'::uuid
+  `)).toEqual([{ state: "CANCELLED", fencing_token: "2", lease_token: null }]);
+  expect(await stack.queryRows<{ stop_reason: string; resume_state: string }>(`
+    SELECT state_data->>'stopReason' AS stop_reason, state_data->>'resumeState' AS resume_state
+      FROM deviludo.workflow_instances WHERE id = '${project.workflowId}'::uuid
+  `)).toEqual([{ stop_reason: "CONVERSATION_CHANGE", resume_state: "DEVELOPING" }]);
 
   const confirmKey = `confirm:${randomUUID()}`;
   const decisionUrl = `/api/projects/${project.id}/change-requests/${proposedBody.changeRequest.id}/decision`;

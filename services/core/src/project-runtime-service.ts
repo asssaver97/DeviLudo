@@ -514,11 +514,31 @@ export class ProjectRuntimeService {
   }
 
   setWorkflowStopped(workspaceId: string, projectId: string, stopped: boolean) {
-    return this.controlWorkflow(workspaceId, projectId, stopped);
+    return this.controlWorkflow(workspaceId, projectId, stopped, "USER");
   }
 
-  private async controlWorkflow(workspaceId: string, projectId: string, stopped: boolean) {
+  pauseWorkflowForConversationChange(workspaceId: string, projectId: string) {
+    return this.controlWorkflow(workspaceId, projectId, true, "CONVERSATION_CHANGE");
+  }
+
+  async resumeWorkflowAfterConversationChange(workspaceId: string, projectId: string) {
+    if (!(await this.repository.isConversationChangePaused(workspaceId, projectId))) return null;
+    return this.controlWorkflow(workspaceId, projectId, false, "CONVERSATION_CHANGE");
+  }
+
+  private async controlWorkflow(
+    workspaceId: string,
+    projectId: string,
+    stopped: boolean,
+    reason: "USER" | "CONVERSATION_CHANGE",
+  ) {
     const current = await this.repository.readContainer(workspaceId, projectId);
+    // Fence durable work before terminating a running process. Otherwise the
+    // interrupted workflow worker can persist a retry/failure in the gap
+    // between Docker cancellation and the database state change.
+    const runtime = stopped
+      ? await this.repository.setStopped(workspaceId, projectId, true, reason)
+      : null;
     if (current?.containerId) {
       await this.backend.destroy({
         schemaVersion: PROJECT_RUNTIME_SCHEMA,
@@ -529,7 +549,8 @@ export class ProjectRuntimeService {
         runtime: current.runtime,
       }).catch(() => undefined);
     }
-    const runtime = await this.repository.setStopped(workspaceId, projectId, stopped);
+    const settledRuntime = runtime
+      ?? await this.repository.setStopped(workspaceId, projectId, false, reason);
     const workflowState = stopped
       ? "STOPPED"
       : await this.repository.readWorkflowState(workspaceId, projectId) ?? "DEVELOPING";
@@ -537,7 +558,7 @@ export class ProjectRuntimeService {
       state: workflowState,
       stopped,
     });
-    return Object.freeze({ ...context, runtime });
+    return Object.freeze({ ...context, runtime: settledRuntime });
   }
 
   private async stageAttachments(

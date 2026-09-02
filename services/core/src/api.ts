@@ -1371,6 +1371,7 @@ export async function runApi(
       let workflowAction: ConversationWorkflowAction = "NONE";
       if (decision === "REJECT") {
         await repository.rejectImplementationChange(workspace.id, project.id, changeRequest.id, idempotencyKey);
+        await projectRuntime.resumeWorkflowAfterConversationChange(workspace.id, project.id);
       } else {
         workflowAction = await applyConfirmedConversationChange({
           repository, objectStore, workspaceId: workspace.id, project, changeRequest,
@@ -2574,7 +2575,7 @@ async function processConversationMessage(input: Readonly<{
 
   workspace ??= await requireSelectedWorkspace(request, repository, principal);
   if (!projectId) throw new Error("Conversation project is required");
-  const project = await repository.readProject(workspace.id, projectId);
+  let project = await repository.readProject(workspace.id, projectId);
   if (!project) throw httpError(404, "PROJECT_NOT_FOUND", "项目已不存在");
   const settings = await repository.readAgentSettings();
   if (!settings) throw httpError(424, "AGENT_CONFIG_REQUIRED", "Configure the project Agent Runtime before using the project conversation");
@@ -2730,6 +2731,7 @@ async function processConversationMessage(input: Readonly<{
       await repository.rejectImplementationChange(
         workspace.id, projectId, pending.id, requestIdempotencyKey(request, "change-decision"),
       );
+      await input.projectRuntime.resumeWorkflowAfterConversationChange(workspace.id, projectId);
       const updatedProject = await repository.readProject(workspace.id, projectId) ?? project;
       return Object.freeze({
         statusCode: created ? 201 : 200, setWorkspaceCookie: false,
@@ -2776,6 +2778,22 @@ async function processConversationMessage(input: Readonly<{
     });
   }
 
+  const resumePausedDeliveryAfterResponse = Boolean(
+    pending && intentDecision.intent !== "CHANGE_REQUEST",
+  );
+  let pausedDeliveryForChange = false;
+  if (intentDecision.intent === "CHANGE_REQUEST" && intentDecision.actionable) {
+    const latestProject = await repository.readProject(workspace.id, projectId) ?? project;
+    if ([
+      "ANALYZING", "DESIGNING", "UI_DESIGNING", "DEVELOPING",
+      "BUILDING", "TEST_PLANNING", "TESTING",
+    ].includes(latestProject.workflowState)) {
+      await input.projectRuntime.pauseWorkflowForConversationChange(workspace.id, projectId);
+      pausedDeliveryForChange = true;
+      project = await repository.readProject(workspace.id, projectId) ?? latestProject;
+    }
+  }
+
   const specialistRole = intentDecision.targetRole;
   const designConvergence = ["DESIGN", "UI_DESIGN"].includes(specialistRole)
     ? designConversationConvergence(existingConversation?.messages ?? Object.freeze([]), command.content)
@@ -2807,7 +2825,12 @@ async function processConversationMessage(input: Readonly<{
       streamedSpecialistContent += forwarded.content;
       hasStreamedSpecialistProcess ||= forwarded.process;
     },
-  }).catch(error => { throw httpError(424, "AGENT_CONVERSATION_FAILED", error instanceof Error ? error.message : "Project Agent failed"); });
+  }).catch(async error => {
+    if (pausedDeliveryForChange) {
+      await input.projectRuntime.resumeWorkflowAfterConversationChange(workspace.id, projectId).catch(() => undefined);
+    }
+    throw httpError(424, "AGENT_CONVERSATION_FAILED", error instanceof Error ? error.message : "Project Agent failed");
+  });
   const specialistReply = parseProjectRuntimeReply(
     specialistResult,
     specialistRole,
@@ -2856,7 +2879,12 @@ async function processConversationMessage(input: Readonly<{
         streamedUiContent += forwarded.content;
         hasStreamedUiProcess ||= forwarded.process;
       },
-    }).catch(error => { throw httpError(424, "UI_DESIGN_AGENT_FAILED", error instanceof Error ? error.message : "UI Design Agent failed"); });
+    }).catch(async error => {
+      if (pausedDeliveryForChange) {
+        await input.projectRuntime.resumeWorkflowAfterConversationChange(workspace.id, projectId).catch(() => undefined);
+      }
+      throw httpError(424, "UI_DESIGN_AGENT_FAILED", error instanceof Error ? error.message : "UI Design Agent failed");
+    });
     const uiReply = parseProjectRuntimeReply(
       uiResult, "UI_DESIGN", settings, command.responseLanguage, designReplyAction(uiIntent, "UI_DESIGN"),
     );
@@ -2891,6 +2919,9 @@ async function processConversationMessage(input: Readonly<{
     responseLanguage: command.responseLanguage,
   });
   if (!implementationChangeReady(effectiveIntent, effectiveReply.readyForDevelopment)) {
+    if (resumePausedDeliveryAfterResponse) {
+      await input.projectRuntime.resumeWorkflowAfterConversationChange(workspace.id, projectId);
+    }
     const updatedProject = await repository.readProject(workspace.id, projectId) ?? project;
     return Object.freeze({
       statusCode: created ? 201 : 200, setWorkspaceCookie: false,

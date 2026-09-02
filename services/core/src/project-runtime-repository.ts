@@ -746,35 +746,59 @@ export class ProjectRuntimeRepository {
     });
   }
 
-  async setStopped(workspaceId: string, projectId: string, stopped: boolean): Promise<RuntimeRecord> {
+  async setStopped(
+    workspaceId: string,
+    projectId: string,
+    stopped: boolean,
+    reason: "USER" | "CONVERSATION_CHANGE" = "USER",
+  ): Promise<RuntimeRecord> {
     return this.database.withWorkspace(workspaceId, async client => {
       const container = await lockedContainer(client, workspaceId, projectId);
       if (stopped) {
+        const interruption = reason === "CONVERSATION_CHANGE"
+          ? "paused for conversation design"
+          : "stopped by user";
         await client.query(
           `UPDATE deviludo.agent_turns SET state = 'CANCELLED', lease_token = NULL,
                   mcp_token_hash = NULL, mcp_token_expires_at = NULL,
-                  completed_at = clock_timestamp(), output_summary = 'stopped by user'
+                  completed_at = clock_timestamp(), output_summary = $3
             WHERE workspace_id = $1::uuid AND project_id = $2::uuid AND state = 'RUNNING'`,
-          [workspaceId, projectId],
+          [workspaceId, projectId, interruption],
         );
         await client.query(
           `UPDATE deviludo.agent_sessions SET active_turn_id = NULL, updated_at = clock_timestamp()
             WHERE workspace_id = $1::uuid AND project_id = $2::uuid`, [workspaceId, projectId],
         );
+        if (reason === "CONVERSATION_CHANGE") {
+          await client.query(
+            `INSERT INTO deviludo.job_progress_events(
+               workspace_id, project_id, workflow_id, job_id, event_kind, content
+             )
+             SELECT workspace_id, project_id, workflow_id, id, 'SUPERSEDED',
+                    'Superseded by a conversation design change'
+               FROM deviludo.jobs
+              WHERE workspace_id = $1::uuid AND project_id = $2::uuid
+                AND kind <> 'STEAM_PUBLISH' AND state IN ('QUEUED', 'RETRY', 'RUNNING')`,
+            [workspaceId, projectId],
+          );
+        }
         await client.query(
           `UPDATE deviludo.jobs SET state = 'CANCELLED', fencing_token = fencing_token + 1,
                   lease_owner = NULL, lease_token = NULL, lease_expires_at = NULL,
-                  heartbeat_at = NULL, last_error = 'stopped by user', updated_at = clock_timestamp()
+                  heartbeat_at = NULL, last_error = $3, updated_at = clock_timestamp()
             WHERE workspace_id = $1::uuid AND project_id = $2::uuid
               AND kind <> 'STEAM_PUBLISH' AND state IN ('QUEUED', 'RETRY', 'RUNNING')`,
-          [workspaceId, projectId],
+          [workspaceId, projectId, interruption],
         );
         await client.query(
           `UPDATE deviludo.workflow_instances
-              SET state_data = state_data || jsonb_build_object('resumeState', state::text),
+              SET state_data = state_data || jsonb_build_object(
+                    'resumeState', state::text, 'stopReason', $3::text
+                  ),
                   state = 'STOPPED', version = version + 1, updated_at = clock_timestamp()
             WHERE workspace_id = $1::uuid AND project_id = $2::uuid
-              AND state NOT IN ('SUCCEEDED', 'FAILED', 'CANCELLED')`, [workspaceId, projectId],
+              AND state NOT IN ('SUCCEEDED', 'STOPPED', 'FAILED', 'CANCELLED')`,
+          [workspaceId, projectId, reason],
         );
       } else {
         const stoppedWorkflows = await client.query<{
@@ -794,7 +818,7 @@ export class ProjectRuntimeRepository {
                     WHEN state_data->>'resumeState' IN ('ANALYZING','DESIGNING','UI_DESIGNING','DEVELOPING','BUILDING','TEST_PLANNING','TESTING')
                       THEN (state_data->>'resumeState')::deviludo.workflow_state
                     ELSE 'DEVELOPING'::deviludo.workflow_state END,
-                  state_data = state_data - 'resumeState', version = version + 1,
+                  state_data = state_data - 'resumeState' - 'stopReason', version = version + 1,
                   updated_at = clock_timestamp()
             WHERE workspace_id = $1::uuid AND project_id = $2::uuid AND state = 'STOPPED'`,
           [workspaceId, projectId],
@@ -854,6 +878,22 @@ export class ProjectRuntimeRepository {
         fencing_token: Number(container.fencing_token) + 1, state: nextState,
         container_id: null, paused_at: null,
         destroyed_at: stopped ? null : new Date().toISOString(), last_activity_at: new Date().toISOString() });
+    });
+  }
+
+  async isConversationChangePaused(workspaceId: string, projectId: string): Promise<boolean> {
+    return this.database.withWorkspace(workspaceId, async client => {
+      const result = await client.query<{ paused: boolean }>(
+        `SELECT coalesce((
+           SELECT state = 'STOPPED' AND state_data->>'stopReason' = 'CONVERSATION_CHANGE'
+             FROM deviludo.workflow_instances
+            WHERE workspace_id = $1::uuid AND project_id = $2::uuid
+            ORDER BY iteration_number DESC
+            LIMIT 1
+         ), false) AS paused`,
+        [workspaceId, projectId],
+      );
+      return result.rows[0]?.paused === true;
     });
   }
 
