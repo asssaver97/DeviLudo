@@ -26,20 +26,25 @@ export function ProjectSteamPanel(props: Readonly<{
   const [channel, setChannel] = useState<"TEST" | "DEFAULT">("TEST");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
+  const [browserSession, setBrowserSession] = useState<{ state: "CONNECTED" | "DISCONNECTED" | "LOGIN_REQUIRED" | "UNAVAILABLE"; checkedAt: string | null }>({ state: "UNAVAILABLE", checkedAt: null });
 
   const fetchPanel = useCallback(async (signal?: AbortSignal) => {
-    const [settingsResponse, releasesResponse] = await Promise.all([
+    const [settingsResponse, releasesResponse, browserResponse] = await Promise.all([
       fetch(`/api/projects/${encodeURIComponent(props.projectId)}/steam-settings`, { cache: "no-store", signal }),
       fetch(`/api/projects/${encodeURIComponent(props.projectId)}/steam-releases`, { cache: "no-store", signal }),
+      fetch("/api/settings/steam/browser-session", { cache: "no-store", signal }),
     ]);
     const settingsPayload = await settingsResponse.json() as { settings?: ProjectSteamSettings | null; editable?: boolean; message?: string };
     const releasesPayload = await releasesResponse.json() as { releases?: readonly SteamRelease[]; message?: string };
+    const browserPayload = await browserResponse.json() as { session?: typeof browserSession; message?: string };
     if (!settingsResponse.ok) throw new Error(errorText(settingsPayload.message, "Steam 项目配置读取失败", "Unable to load Steam project settings"));
     if (!releasesResponse.ok) throw new Error(errorText(releasesPayload.message, "Steam 发布历史读取失败", "Unable to load Steam release history"));
+    if (!browserResponse.ok) throw new Error(errorText(browserPayload.message, "Steamworks 会话读取失败", "Unable to load Steamworks session"));
     return Object.freeze({
       settings: settingsPayload.settings ?? null,
       editable: settingsPayload.editable === true,
       releases: releasesPayload.releases ?? Object.freeze([]),
+      browserSession: browserPayload.session ?? { state: "UNAVAILABLE" as const, checkedAt: null },
     });
   }, [errorText, props.projectId]);
 
@@ -53,6 +58,7 @@ export function ProjectSteamPanel(props: Readonly<{
     setMacosDepot(value?.depots.macos ?? "");
     setTestBranch(value?.testBranch ?? "deviludo-test");
     setReleases(payload.releases);
+    setBrowserSession(payload.browserSession);
   }, []);
 
   const load = useCallback(async (signal?: AbortSignal) => {
@@ -115,6 +121,17 @@ export function ProjectSteamPanel(props: Readonly<{
     }
   }
 
+  async function changeBrowserSession(method: "GET" | "POST" | "DELETE") {
+    setBusy(true); setError("");
+    try {
+      const response = await fetch("/api/settings/steam/browser-session", { method });
+      const payload = await response.json() as { session?: typeof browserSession; message?: string };
+      if (!response.ok || !payload.session) throw new Error(errorText(payload.message, "Steamworks 会话操作失败", "Steamworks session action failed"));
+      setBrowserSession(payload.session);
+    } catch (reason) { setError(reason instanceof Error ? reason.message : String(reason)); }
+    finally { setBusy(false); }
+  }
+
   const currentRelease = releases.find(release => release.workflowId === props.workflowId) ?? null;
   return (
     <section className={`panel-card product-steam-panel${props.compact ? " is-compact" : ""}`} aria-label={text("Steam 发布", "Steam releases")}>
@@ -134,6 +151,12 @@ export function ProjectSteamPanel(props: Readonly<{
           </div>
           {editable && !props.readOnly ? <button className="button button-secondary" disabled={busy || !appId || (!linuxDepot && !windowsDepot && !macosDepot)} type="submit">{text("保存项目配置", "SAVE PROJECT SETTINGS")}</button> : null}
           <small>{text("构建凭证在全局设置中维护；这里仅保存项目的 App、Depot 与测试分支。", "The build credential is maintained in global Settings; this section stores only the project's App, depots, and test branch.")}</small>
+          <div className="steam-browser-session-controls">
+            <span><b>{text("Steamworks 受管会话", "MANAGED STEAMWORKS SESSION")}</b><small>{browserSession.state}</small></span>
+            <button className="button button-secondary" disabled={busy || browserSession.state === "UNAVAILABLE"} onClick={() => void changeBrowserSession("POST")} type="button">{text("连接 Steamworks", "CONNECT STEAMWORKS")}</button>
+            <button className="button button-secondary" disabled={busy || browserSession.state === "UNAVAILABLE"} onClick={() => void changeBrowserSession("GET")} type="button">{text("验证会话", "VERIFY SESSION")}</button>
+            <button className="button button-secondary" disabled={busy || ["UNAVAILABLE", "DISCONNECTED"].includes(browserSession.state)} onClick={() => void changeBrowserSession("DELETE")} type="button">{text("清除会话", "CLEAR SESSION")}</button>
+          </div>
         </form>
       </details>
 
@@ -150,13 +173,18 @@ export function ProjectSteamPanel(props: Readonly<{
           }}>
             <label>{text("版本", "Version")}<input aria-label={text("Steam 版本", "Steam version")} onChange={event => setVersion(event.target.value)} placeholder="1.0.0" value={version} /></label>
             <label>{text("目标", "Channel")}<select onChange={event => setChannel(event.target.value as "TEST" | "DEFAULT")} value={channel}><option value="TEST">{text("测试分支", "Test branch")}</option><option value="DEFAULT">default</option></select></label>
-            <button className="button button-primary" disabled={busy || !settings || !version} type="submit">{text("批准并上传 Steam", "APPROVE & UPLOAD TO STEAM")}</button>
+            <button className="button button-primary" disabled={busy || !settings || !version} type="submit">{busy ? text("正在启动准备节点…", "STARTING PREPARATION…") : text("批准并上传 Steam", "APPROVE & UPLOAD TO STEAM")}</button>
           </form>
         </div>
       ) : null}
 
       {currentRelease?.state === "FAILED" && !props.readOnly ? (
-        <button className="button button-primary" disabled={busy} onClick={() => void request(`/api/projects/${encodeURIComponent(props.projectId)}/rerun-stage`, { stage: "STEAM_PUBLISH" })} type="button">{text("重试本次 Steam 上传", "RETRY THIS STEAM UPLOAD")}</button>
+        <button className="button button-primary" disabled={busy} onClick={() => void request(
+          currentRelease.failureStage === "STEAM_PREPARATION"
+            ? `/api/projects/${encodeURIComponent(props.projectId)}/steam-preparation/retry`
+            : `/api/projects/${encodeURIComponent(props.projectId)}/rerun-stage`,
+          currentRelease.failureStage === "STEAM_PREPARATION" ? { workflowId: props.workflowId } : { stage: "STEAM_PUBLISH" },
+        )} type="button">{currentRelease.failureStage === "STEAM_PREPARATION" ? text("重试商店与 Depot 准备", "RETRY STORE & DEPOTS") : text("重试本次 Steam 上传", "RETRY THIS STEAM UPLOAD")}</button>
       ) : null}
 
       {releases.length ? <div className="product-steam-release-list">
@@ -181,6 +209,7 @@ function steamReleaseLabel(
   text: (chinese: string, english: string) => string,
 ): string {
   const labels: Record<SteamRelease["state"], readonly [string, string]> = {
+    PREPARING: ["准备商店与 Depot", "PREPARING STORE & DEPOTS"],
     UPLOADING: ["上传中", "UPLOADING"],
     FAILED: ["上传失败", "FAILED"],
     LIVE_TEST: ["测试分支已上线", "LIVE ON TEST"],

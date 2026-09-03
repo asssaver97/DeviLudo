@@ -25,6 +25,9 @@ export type CoreConfig = Readonly<{
   localDirectoryBindings: boolean;
   localProjectBridgeUrl: string | null;
   localProjectBridgeToken: string | null;
+  steamPreparationEnabled: boolean;
+  localSteamworksBridgeUrl: string | null;
+  localSteamworksBridgeToken: string | null;
   telemetryEndpoint: string | null;
   installationId: string;
   releaseVersion: string;
@@ -104,6 +107,18 @@ export function loadCoreConfig(env: NodeJS.ProcessEnv = process.env): CoreConfig
   if (localDirectoryBindings && !/^[A-Za-z0-9_-]{40,200}$/.test(localProjectBridgeToken ?? "")) {
     throw new Error("DEVILUDO_LOCAL_PROJECT_BRIDGE_TOKEN is invalid");
   }
+  const steamPreparationEnabled = env.DEVILUDO_STEAM_PREPARATION_ENABLED === "1"
+    || (env.NODE_ENV !== "production" && env.DEVILUDO_STEAM_PREPARATION_ENABLED !== "0"
+      && Boolean(env.DEVILUDO_STEAMWORKS_BRIDGE_TOKEN?.trim()));
+  const localSteamworksBridgeUrl = steamPreparationEnabled
+    ? normalizeLocalSteamworksBridgeUrl(env.DEVILUDO_STEAMWORKS_BRIDGE_INTERNAL_URL ?? "http://local-steamworks-bridge-proxy:8792")
+    : null;
+  const localSteamworksBridgeToken = steamPreparationEnabled
+    ? env.DEVILUDO_STEAMWORKS_BRIDGE_TOKEN?.trim() ?? ""
+    : null;
+  if (steamPreparationEnabled && !/^[A-Za-z0-9_-]{40,200}$/.test(localSteamworksBridgeToken ?? "")) {
+    throw new Error("DEVILUDO_STEAMWORKS_BRIDGE_TOKEN is invalid");
+  }
   const telemetryEndpoint = normalizeTelemetryEndpoint(
     env.DEVILUDO_TELEMETRY_ENDPOINT?.trim() || DEFAULT_TELEMETRY_ENDPOINT,
     env.NODE_ENV,
@@ -136,10 +151,23 @@ export function loadCoreConfig(env: NodeJS.ProcessEnv = process.env): CoreConfig
     localDirectoryBindings,
     localProjectBridgeUrl,
     localProjectBridgeToken,
+    steamPreparationEnabled,
+    localSteamworksBridgeUrl,
+    localSteamworksBridgeToken,
     telemetryEndpoint,
     installationId,
     releaseVersion,
   });
+}
+
+function normalizeLocalSteamworksBridgeUrl(value: string): string {
+  let url: URL;
+  try { url = new URL(value); } catch { throw new Error("DEVILUDO_STEAMWORKS_BRIDGE_INTERNAL_URL is invalid"); }
+  if (url.protocol !== "http:" || url.hostname !== "local-steamworks-bridge-proxy"
+    || url.username || url.password || url.pathname !== "/" || url.search || url.hash) {
+    throw new Error("DEVILUDO_STEAMWORKS_BRIDGE_INTERNAL_URL is invalid");
+  }
+  return url.href.replace(/\/$/, "");
 }
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;

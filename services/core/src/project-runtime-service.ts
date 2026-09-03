@@ -39,6 +39,7 @@ const ROLE_TO_MODEL = Object.freeze({
   UI_DESIGN: "uiDesign",
   DEVELOPMENT: "development",
   TEST: "test",
+  PUBLISHING: null,
 } as const);
 
 const ROLE_TOOLS = Object.freeze({
@@ -48,9 +49,10 @@ const ROLE_TOOLS = Object.freeze({
   UI_DESIGN: new Set(["context.read", "source.list", "source.read", "evidence.read", "project_document.update", "e2e_goals.update", "conversation.reply", "handoff.create"]),
   DEVELOPMENT: new Set(["context.read", "source.list", "source.read", "evidence.read", "source.checkpoint", "assets.plan", "assets.cleanup", "build.request", "conversation.reply", "handoff.create"]),
   TEST: new Set(["context.read", "source.list", "source.read", "test_plan.replace", "test_plan.revise_timeout", "e2e.start", "e2e.observe", "evidence.read", "test.verdict", "conversation.reply", "handoff.create"]),
+  PUBLISHING: new Set(["context.read", "source.list", "source.read", "evidence.read", "steam.settings.read", "steam.delivery_draft.replace"]),
 });
 const READ_ONLY_TOOLS = new Set([
-  "context.read", "source.list", "source.read", "evidence.read", "conversation.reply",
+  "context.read", "source.list", "source.read", "evidence.read", "conversation.reply", "steam.settings.read",
 ]);
 const LIFECYCLE_RETRY_INTERVAL_MS = 1_000;
 // Match the scheduler's bounded lifecycle lease. A workflow attempt must not
@@ -259,7 +261,9 @@ export class ProjectRuntimeService {
         runtime: input.settings.agentRuntime,
         runtimeImage,
         baseUrl: input.settings.baseUrl,
-        model: resolveAgentModel(input.settings.primaryModel, input.settings.modelOverrides, ROLE_TO_MODEL[input.role]),
+        model: ROLE_TO_MODEL[input.role] === null
+          ? input.settings.primaryModel
+          : resolveAgentModel(input.settings.primaryModel, input.settings.modelOverrides, ROLE_TO_MODEL[input.role]!),
         sourceRevision: input.sourceRevision,
         sourceRelativePath: input.sourceRelativePath,
         contextRevision: context.revision,
@@ -626,6 +630,22 @@ export class ProjectRuntimeService {
       return this.readSource(input.workspaceId, input.projectId, String(input.arguments.path ?? ""), {
         startLine: input.arguments.startLine,
         endLine: input.arguments.endLine,
+      });
+    }
+    if (input.name === "steam.settings.read") {
+      return Object.freeze({ settings: await this.repository.readPublishingSteamSettings(
+        input.workspaceId, input.projectId, input.turnId,
+      ) });
+    }
+    if (input.name === "steam.delivery_draft.replace") {
+      const draft = normalizeSteamDeliveryDraft(input.arguments.draft);
+      const steam = await this.repository.readPublishingSteamSettings(input.workspaceId, input.projectId, input.turnId);
+      validateSteamDraftCoverage(draft, steam.targetPlatforms);
+      return this.repository.replaceSteamDeliveryDraft({
+        workspaceId: input.workspaceId,
+        projectId: input.projectId,
+        turnId: input.turnId,
+        draft,
       });
     }
     if (["conversation.reply", "workflow.intent_decision"].includes(input.name)) return Object.freeze({ accepted: true });
@@ -1598,6 +1618,69 @@ export function projectRuntimeToolArgumentLimit(name: string): number {
   if (name === "test_plan.replace") return MAX_TEST_PLAN_TOOL_ARGUMENT_BYTES;
   if (name === "source.checkpoint") return MAX_SOURCE_CHECKPOINT_TOOL_ARGUMENT_BYTES;
   return DEFAULT_TOOL_ARGUMENT_BYTES;
+}
+
+export function normalizeSteamDeliveryDraft(value: unknown): Readonly<Record<string, unknown>> {
+  const draft = boundedObject(value, 256_000);
+  if (draft.schemaVersion !== "deviludo.steam-delivery-draft.v1") throw new Error("Steam delivery draft schemaVersion is invalid");
+  const forbidden = /^(?:app_?id|depot_?id|id|api.?key|authorization|cookie|credential|password|secret|token)$/i;
+  const visit = (candidate: unknown): void => {
+    if (!candidate || typeof candidate !== "object") return;
+    if (Array.isArray(candidate)) return candidate.forEach(visit);
+    for (const [key, child] of Object.entries(candidate as Record<string, unknown>)) {
+      if (forbidden.test(key)) throw new Error(`Steam delivery draft cannot contain ${key}`);
+      visit(child);
+    }
+  };
+  visit(draft);
+  const localizations = arrayOfObjects(draft.localizations);
+  const languages = arrayOfObjects(draft.languages);
+  const requirements = arrayOfObjects(draft.systemRequirements);
+  const launchOptions = arrayOfObjects(draft.launchOptions);
+  const depots = arrayOfObjects(draft.depots);
+  const screenshots = arrayOfObjects(draft.screenshots);
+  const artwork = boundedObject(draft.artwork);
+  if (localizations.length < 1 || !localizations.some(item => item.language === "english")
+    || screenshots.length !== 5 || new Set(screenshots.map(item => item.checkpointId)).size !== 5
+    || !arrayOfStrings(draft.tags).length || !languages.length || !requirements.length
+    || !launchOptions.length || !depots.length
+    || typeof draft.installDirectory !== "string" || !draft.installDirectory.trim()
+    || typeof artwork.landscapePrompt !== "string" || artwork.landscapePrompt.trim().length < 20
+    || typeof artwork.portraitPrompt !== "string" || artwork.portraitPrompt.trim().length < 20) {
+    throw new Error("Steam delivery draft is incomplete");
+  }
+  const platforms = new Set(["linux", "windows", "macos"]);
+  if ([...requirements, ...launchOptions, ...depots].some(item => !platforms.has(String(item.platform)))) {
+    throw new Error("Steam delivery draft contains an invalid platform");
+  }
+  return draft;
+}
+
+export function validateSteamDraftCoverage(draft: Readonly<Record<string, unknown>>, targetPlatforms: readonly string[]): void {
+  const localizations = arrayOfObjects(draft.localizations);
+  const languages = arrayOfObjects(draft.languages);
+  const requirements = arrayOfObjects(draft.systemRequirements);
+  const launches = arrayOfObjects(draft.launchOptions);
+  const depots = arrayOfObjects(draft.depots);
+  const codes = (items: readonly Readonly<Record<string, unknown>>[], key: string) => items.map(item => String(item[key] ?? ""));
+  const localizationCodes = codes(localizations, "language");
+  const languageCodes = codes(languages, "language");
+  const target = [...new Set(targetPlatforms)].sort();
+  const exactSet = (left: readonly string[], right: readonly string[]) => {
+    const normalized = [...new Set(left)].sort();
+    return normalized.length === left.length && JSON.stringify(normalized) === JSON.stringify([...new Set(right)].sort());
+  };
+  if (!exactSet(localizationCodes, languageCodes)) {
+    throw new Error("Steam delivery draft must provide copy for every declared game language exactly once");
+  }
+  if (!exactSet(codes(requirements, "platform"), target) || !exactSet(codes(depots, "platform"), target)) {
+    throw new Error("Steam delivery draft must cover every target platform exactly once");
+  }
+  const launchPlatforms = codes(launches, "platform");
+  if (target.some(platform => !launchPlatforms.includes(platform))
+    || launchPlatforms.some(platform => !target.includes(platform))) {
+    throw new Error("Steam delivery draft launch options must cover only the target platforms");
+  }
 }
 
 function boundedObject(

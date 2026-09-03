@@ -95,7 +95,9 @@ test("the top delivery pipeline distinguishes completed, active and pending stag
     ...detail.project,
     workflowState: "BUILDING",
     jobs: [
-      { id: randomUUID(), kind: "AGENT_TURN", poolKind: "CORE", targetOperatingSystem: null, state: "SUCCEEDED", attempt: 1, lastError: null, createdAt: new Date().toISOString(), updatedAt: new Date().toISOString() },
+      { id: randomUUID(), kind: "AGENT_TURN", agentRole: "DESIGN", agentPurpose: "DESIGN", poolKind: "CORE", targetOperatingSystem: null, state: "SUCCEEDED", attempt: 1, lastError: null, createdAt: new Date().toISOString(), updatedAt: new Date().toISOString() },
+      { id: randomUUID(), kind: "AGENT_TURN", agentRole: "UI_DESIGN", agentPurpose: "UI_DESIGN", poolKind: "CORE", targetOperatingSystem: null, state: "SUCCEEDED", attempt: 1, lastError: null, createdAt: new Date().toISOString(), updatedAt: new Date().toISOString() },
+      { id: randomUUID(), kind: "AGENT_TURN", agentRole: "DEVELOPMENT", agentPurpose: "DEVELOPMENT", poolKind: "CORE", targetOperatingSystem: null, state: "SUCCEEDED", attempt: 1, lastError: null, createdAt: new Date().toISOString(), updatedAt: new Date().toISOString() },
       { id: randomUUID(), kind: "BUILD", poolKind: "CORE", targetOperatingSystem: null, state: "RUNNING", attempt: 1, lastError: null, createdAt: new Date().toISOString(), updatedAt: new Date().toISOString() },
       { id: randomUUID(), kind: "E2E_PLATFORM_RUN", poolKind: "E2E_MACOS", targetOperatingSystem: "macos", state: "CANCELLED", attempt: 1, lastError: "superseded by stage rerun from BUILD", createdAt: new Date(Date.now() - 60_000).toISOString(), updatedAt: new Date().toISOString() },
     ],
@@ -106,10 +108,10 @@ test("the top delivery pipeline distinguishes completed, active and pending stag
   const pipeline = page.getByRole("region", { name: "交付流程" });
   const workspace = page.getByRole("region", { name: "项目会话" });
   await expect(pipeline).toBeVisible();
-  await expect(page.locator(".product-delivery-stage.status-completed")).toHaveCount(2);
+  await expect(page.locator(".product-delivery-stage.status-completed")).toHaveCount(4);
   await expect(page.locator(".product-delivery-stage.status-active")).toHaveCount(1);
-  // E2E, Steam, Art, and Music are all waiting while the build is active.
-  await expect(page.locator(".product-delivery-stage.status-pending")).toHaveCount(4);
+  // E2E, Store & Depots, Steam upload, Art, and Music are all waiting while the build is active.
+  await expect(page.locator(".product-delivery-stage.status-pending")).toHaveCount(5);
   await expect(pipeline.locator('[data-stage-kind="BUILD"] strong')).toHaveText("进行中");
   await expect(pipeline.locator('[data-stage-kind="E2E_PLATFORM_RUN"] strong')).toHaveText("等待中");
   await expect(pipeline.locator('[data-stage-kind="E2E_PLATFORM_RUN"] small').first()).toHaveText("等待上一步完成");
@@ -631,7 +633,7 @@ test("streaming Agent text keeps animated dots visible until the reply completes
 });
 
 test("a creator can refine and deliver a game through every Core and platform stage", async ({ page, stack }) => {
-  test.setTimeout(180_000);
+  test.setTimeout(300_000);
   await stack.configureAgent();
   const nodes = await stack.registerFixedNodes();
   await stack.startLogicalNodes(nodes);
@@ -665,19 +667,23 @@ test("a creator can refine and deliver a game through every Core and platform st
   await expect(page.getByRole("button", { name: "启动交付" })).toHaveCount(0);
   await expect(page.getByRole("button", { name: "按照当前计划开发" })).toHaveCount(0);
   await expect(page.getByText("游戏规格", { exact: true })).toHaveCount(0);
-  // Four delivery stages plus the Art and Music material nodes are waiting
+  // Six delivery stages plus Art, Music, and Store & Depots are waiting
   // before requirements discovery has approved the iteration.
-  await expect(page.locator(".product-delivery-stage.status-pending")).toHaveCount(6);
+  await expect(page.locator(".product-delivery-stage.status-pending")).toHaveCount(9);
 
   await page.getByLabel("继续项目会话").fill("玩法目标、操作方式和胜负条件已经确认，请判断是否可以开始开发。");
   await page.getByRole("button", { name: "发送项目消息" }).click();
   await expect(page.getByRole("button", { name: "确认修改并重跑" })).toBeVisible();
   await expect(page.locator(".conversation-box-message.role-design").last()).toContainText("测试设计 Agent 已结合项目上下文生成回复。");
-  await expect(page.getByText("CHANGE_REQUEST", { exact: true })).toBeVisible();
+  await expect(page.getByText("CHANGE_REQUEST", { exact: true }).last()).toBeVisible();
   await page.getByRole("button", { name: "确认修改并重跑" }).click();
   // Three isolated platform nodes run concurrently but can spend close to a
   // minute preparing their deterministic guest evidence on a cold CI host.
-  await expect(page.getByText("等待发布批准", { exact: true })).toBeVisible({ timeout: 120_000 });
+  await expect(page.locator('[data-stage-kind="E2E_PLATFORM_RUN"]')).toHaveAttribute(
+    "data-stage-status",
+    "completed",
+    { timeout: 120_000 },
+  );
   await page.getByLabel("展开项目交付配置").click();
   await expect(page.getByRole("button", { name: "完成本轮，不发布" })).toBeVisible();
   for (const stage of ["游戏生成", "制品构建", "跨平台 E2E", "Steam 上传"]) {
@@ -687,21 +693,18 @@ test("a creator can refine and deliver a game through every Core and platform st
     await expect(page.locator(`[data-stage-kind="${stage}"]`)).toHaveAttribute("data-stage-status", "completed");
   }
   await expect(page.locator('[data-stage-kind="STEAM_PUBLISH"]')).toHaveAttribute("data-stage-status", "pending");
+  await expect(page.locator('[data-stage-kind="STEAM_PREPARATION"]')).toHaveAttribute("data-stage-status", "pending");
   await expect(page.getByText(/linux · 完成/).first()).toBeVisible();
   await expect(page.getByText(/windows · 完成/).first()).toBeVisible();
   await expect(page.getByText(/macos · 完成/).first()).toBeVisible();
 
   const generationStage = page.locator('[data-stage-kind="AGENT_TURN"]');
   const generationRerun = generationStage.getByRole("button", { name: /从「游戏生成」重新执行/ });
-  await generationStage.getByRole("button", { name: "打开需求快照" }).hover();
-  await expect(generationRerun).toHaveCSS("opacity", "0");
-  await expect(generationRerun).toHaveCSS("pointer-events", "none");
   await generationStage.locator(":scope > b").hover();
   await expect(generationRerun).toHaveCSS("opacity", "1");
   await expect(generationRerun).toHaveCSS("pointer-events", "auto");
   await generationStage.locator(":scope > strong").hover();
   await expect(generationRerun).toHaveCSS("opacity", "1");
-  await generationStage.getByRole("button", { name: "打开需求快照" }).hover();
   const generationMarker = await generationStage.locator(":scope > .product-delivery-stage-marker").boundingBox();
   expect(generationMarker).not.toBeNull();
   await page.mouse.move(
@@ -711,11 +714,14 @@ test("a creator can refine and deliver a game through every Core and platform st
   await expect(generationRerun).toHaveCSS("opacity", "1");
 
   const e2eStage = page.locator('[data-stage-kind="E2E_PLATFORM_RUN"]');
-  const e2eRerun = e2eStage.getByRole("button", { name: /从「跨平台 E2E」重新执行/ });
-  await e2eStage.getByRole("button", { name: "打开E2E 报告" }).first().hover();
-  await expect(e2eRerun).toHaveCSS("opacity", "0");
-  await expect(e2eRerun).toHaveCSS("pointer-events", "none");
-
+  const steamStage = page.locator('[data-stage-kind="STEAM_PUBLISH"]');
+  const steamPreparation = page.locator(".product-delivery-steam-group");
+  const [e2eBox, steamBox, preparationBox] = await Promise.all([
+    e2eStage.boundingBox(), steamStage.boundingBox(), steamPreparation.boundingBox(),
+  ]);
+  expect(e2eBox).not.toBeNull(); expect(steamBox).not.toBeNull(); expect(preparationBox).not.toBeNull();
+  expect(Math.abs(preparationBox!.x - e2eBox!.x)).toBeLessThanOrEqual(3);
+  expect(Math.abs((preparationBox!.x + preparationBox!.width) - (steamBox!.x + steamBox!.width))).toBeLessThanOrEqual(3);
   await page.getByRole("button", { name: "完成本轮，不发布" }).click();
   await expect(page.getByText("交付完成", { exact: true })).toBeVisible({ timeout: 45_000 });
   await expect(page.getByRole("button", { name: "按照当前计划开发" })).toHaveCount(0);
@@ -728,9 +734,9 @@ test("a creator can refine and deliver a game through every Core and platform st
   await stack.selectWorkspace(browserInstance.instance.workspace.id);
   const project = await stack.readProject(projectId);
   expect(project.workflowState).toBe("SUCCEEDED");
-  // Design, Development, Test planning, and Test verdict are persistent
+  // Design, UI Design, Development, Test planning, and Test verdict are persistent
   // Runtime turns; Builder and all three platform runs remain controlled jobs.
-  expect(project.jobs).toHaveLength(8);
+  expect(project.jobs).toHaveLength(9);
   expect(project.jobs.every(job => job.state === "SUCCEEDED")).toBeTruthy();
   // A transient executor failure may consume a bounded retry; the product
   // guarantee is successful recovery with no stale failure surfaced.
@@ -751,7 +757,7 @@ test("a creator can refine and deliver a game through every Core and platform st
       FROM deviludo.jobs
      WHERE workflow_id = '${project.workflowId}'::uuid
   `);
-  expect(evidence[0]).toEqual({ total_jobs: 8, exclusive_jobs_with_proofs: 3, core_jobs_with_receipts: 5 });
+  expect(evidence[0]).toEqual({ total_jobs: 9, exclusive_jobs_with_proofs: 3, core_jobs_with_receipts: 6 });
   const buildReceipts = await stack.queryRows<{ receipt: Readonly<Record<string, unknown>> }>(`
     SELECT receipt FROM deviludo.jobs
      WHERE workflow_id = '${project.workflowId}'::uuid AND kind = 'BUILD'

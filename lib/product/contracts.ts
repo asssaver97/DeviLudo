@@ -137,7 +137,7 @@ function conversationReplyOption(value: unknown): ConversationReplyOption | null
  * the project group chat. Intent is a transient router and Analysis owns the
  * import report; neither is presented as a permanent chat participant.
  */
-export const PROJECT_RUNTIME_ROLES = ["INTENT", "ANALYSIS", ...PROJECT_AGENT_ROLES] as const;
+export const PROJECT_RUNTIME_ROLES = ["INTENT", "ANALYSIS", ...PROJECT_AGENT_ROLES, "PUBLISHING"] as const;
 export type ProjectRuntimeRole = typeof PROJECT_RUNTIME_ROLES[number];
 
 export const PROJECT_RUNTIME_STATES = ["CREATING", "RUNNING", "PAUSING", "PAUSED", "COMPACTING", "DESTROYED", "STOPPED", "FAILED"] as const;
@@ -448,12 +448,49 @@ export type SteamRelease = Readonly<{
   releaseNumber: number;
   channel: "TEST" | "DEFAULT";
   targetBranch: string;
-  state: "UPLOADING" | "FAILED" | "LIVE_TEST" | "AWAITING_DEFAULT_PROMOTION" | "LIVE_DEFAULT";
+  state: "PREPARING" | "UPLOADING" | "FAILED" | "LIVE_TEST" | "AWAITING_DEFAULT_PROMOTION" | "LIVE_DEFAULT";
+  failureStage: "STEAM_PREPARATION" | "STEAM_PUBLISH" | null;
   steamBuildId: string | null;
   failureMessage: string | null;
   createdAt: string;
   uploadedAt: string | null;
   liveAt: string | null;
+}>;
+
+export const STEAM_PREPARATION_STATES = [
+  "PENDING", "DRAFTING", "GENERATING_ASSETS", "SYNCING", "SAVED", "FAILED", "LOGIN_REQUIRED",
+] as const;
+export type SteamPreparationState = typeof STEAM_PREPARATION_STATES[number];
+
+export type SteamStoreAsset = Readonly<{
+  id: string;
+  key: string;
+  kind: "STORE" | "LIBRARY" | "SCREENSHOT";
+  width: number;
+  height: number;
+  sha256: string;
+  sizeBytes: number;
+  previewUrl?: string;
+}>;
+
+export type SteamDeliveryPreparation = Readonly<{
+  workflowId: string;
+  projectId: string;
+  releaseId: string;
+  state: SteamPreparationState;
+  sourceRevision: number;
+  draftRevision: number;
+  draft: Readonly<Record<string, unknown>> | null;
+  generatedLanguages: readonly string[];
+  validatedIds: Readonly<{ appId: string; depots: Readonly<Record<string, string>> }> | null;
+  browserSession: Readonly<{ state: "CONNECTED" | "DISCONNECTED" | "LOGIN_REQUIRED" | "UNAVAILABLE"; checkedAt: string | null }>;
+  assets: readonly SteamStoreAsset[];
+  receipt: Readonly<Record<string, unknown>> | null;
+  failureCode: string | null;
+  failureMessage: string | null;
+  createdAt: string;
+  updatedAt: string;
+  savedAt: string | null;
 }>;
 
 export const AGENT_PROGRESS_EVENT_KINDS = [
@@ -483,6 +520,7 @@ export const WORKFLOW_LABELS: Readonly<Record<string, string>> = Object.freeze({
   TEST_PLANNING: "测试规划中",
   TESTING: "跨平台测试中",
   RELEASE_APPROVAL_PENDING: "等待发布批准",
+  STEAM_PREPARING: "准备 Steam 商店与 Depot",
   STEAM_PUBLISHING: "Steam 发布中",
   SUCCEEDED: "交付完成",
   BLOCKED: "等待配置",

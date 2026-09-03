@@ -30,6 +30,7 @@
     "test:e2e": "node scripts/run-e2e.mjs",
     "test:e2e:platform": "node scripts/real-platform-e2e.mjs",
     "test:e2e:headed": "node scripts/run-e2e.mjs --headed",
+    "test:steamworks:smoke": "node scripts/steamworks-smoke.mjs",
     "test:e2e:install": "playwright install chromium firefox webkit",
     "local:down": "node scripts/local-down.mjs",
     "local:reset": "node scripts/local-down.mjs --volumes",

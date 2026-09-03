@@ -2095,9 +2095,39 @@ textarea {
   z-index: 2;
 }
 
+.product-delivery-stage[data-stage-kind="E2E_PLATFORM_RUN"]::before {
+  border-left: 2px dashed #397c66;
+  bottom: -50px;
+  content: "";
+  position: absolute;
+  right: 0;
+  top: 17px;
+  z-index: 0;
+}
+
+.product-delivery-steam-junction {
+  background: #397c66;
+  height: 5px;
+  position: absolute;
+  right: -2px;
+  top: 15px;
+  transform: rotate(45deg);
+  width: 5px;
+  z-index: 2;
+}
+
 .product-delivery-material-group {
   border: 2px dashed #40536a;
   grid-column: 4 / 6;
+  margin: 0;
+  min-width: 0;
+  padding: 17px 8px 16px;
+  position: relative;
+}
+
+.product-delivery-steam-group {
+  border: 2px dashed #40536a;
+  grid-column: 6 / 8;
   margin: 0;
   min-width: 0;
   padding: 17px 8px 16px;
@@ -2114,6 +2144,7 @@ textarea {
 }
 
 .product-delivery-material-group > legend,
+.product-delivery-steam-group > legend,
 .product-delivery-artifacts-dock > legend {
   align-items: baseline;
   background: #0b131e;
@@ -2128,10 +2159,125 @@ textarea {
 }
 
 .product-delivery-material-group > legend small,
+.product-delivery-steam-group > legend small,
 .product-delivery-artifacts-dock > legend small {
   color: #65758a;
   font-size: 7px;
   letter-spacing: .04em;
+}
+
+.product-delivery-steam-stages {
+  grid-template-columns: minmax(0, 1fr);
+}
+
+.steam-preparation-detail {
+  background: #080e17;
+  border: 1px solid #334157;
+  margin: 10px 4px 0;
+  padding: 12px;
+}
+
+.steam-preparation-detail > p {
+  color: #8ea1b8;
+  font: 9px/1.6 var(--font-geist-mono), monospace;
+  margin: 0;
+}
+
+.steam-preparation-detail dl {
+  display: grid;
+  gap: 1px;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  margin: 0;
+}
+
+.steam-preparation-detail dl > div {
+  background: #0d1723;
+  min-width: 0;
+  padding: 8px;
+}
+
+.steam-preparation-detail dt,
+.steam-preparation-detail dd {
+  font-family: var(--font-geist-mono), monospace;
+  overflow-wrap: anywhere;
+}
+
+.steam-preparation-detail dt {
+  color: #66758a;
+  font-size: 7px;
+  text-transform: uppercase;
+}
+
+.steam-preparation-detail dd {
+  color: #c6d3e2;
+  font-size: 8px;
+  margin: 4px 0 0;
+}
+
+.steam-preparation-assets {
+  display: grid;
+  gap: 6px;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  margin-top: 10px;
+}
+
+.steam-preparation-assets figure {
+  background: #111d2a;
+  border: 1px solid #35465d;
+  margin: 0;
+  min-width: 0;
+}
+
+.steam-preparation-assets img,
+.steam-preparation-assets > figure > span {
+  aspect-ratio: 16 / 9;
+  display: block;
+  object-fit: cover;
+  width: 100%;
+}
+
+.steam-preparation-assets > figure > span {
+  align-content: center;
+  color: #53657c;
+  font: 900 9px var(--font-geist-mono), monospace;
+  text-align: center;
+}
+
+.steam-preparation-assets figcaption {
+  color: #a9bad0;
+  font: 7px/1.4 var(--font-geist-mono), monospace;
+  overflow-wrap: anywhere;
+  padding: 5px;
+}
+
+.steam-preparation-assets figcaption small {
+  color: #63748a;
+  display: block;
+}
+
+.steam-browser-session-controls {
+  align-items: center;
+  border-top: 1px solid #334157;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 12px;
+  padding-top: 12px;
+}
+
+.steam-browser-session-controls > span {
+  display: grid;
+  margin-right: auto;
+}
+
+.steam-browser-session-controls b,
+.steam-browser-session-controls small {
+  font-family: var(--font-geist-mono), monospace;
+}
+
+.steam-browser-session-controls b {
+  color: #c5d3e4;
+  font-size: 9px;
 }
 
 .product-delivery-artifacts-dock > legend {

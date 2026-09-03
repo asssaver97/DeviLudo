@@ -49,6 +49,7 @@ import { ConversationBox } from "./conversation/ConversationBox";
 import { AssetAutoGenerationSetting } from "./AssetAutoGenerationSetting";
 import { AssetManifestPanel, type AssetManifestPayload } from "./AssetManifestPanel";
 import { ProjectSteamPanel } from "./ProjectSteamPanel";
+import { SteamPreparationNode } from "./SteamPreparationNode";
 import { ArrowIcon, PlusIcon, RerunIcon } from "./console/Icons";
 import { localeTag, useLanguage } from "./i18n/LanguageProvider";
 
@@ -1171,6 +1172,7 @@ export function ProjectStudio({ projectId }: { projectId: string }) {
                 <li className={`product-delivery-stage status-${view.kind}`} data-stage-kind={kind} data-stage-status={view.kind} key={kind}>
                   <div className="product-delivery-stage-marker product-delivery-stage-rerun-target" aria-hidden="true">{view.symbol}</div>
                   {kind === "AGENT_TURN" ? <span aria-hidden="true" className="product-delivery-material-junction" /> : null}
+                  {kind === "E2E_PLATFORM_RUN" ? <span aria-hidden="true" className="product-delivery-steam-junction" /> : null}
                   <b className="product-delivery-stage-rerun-target">{text(chineseLabel, englishLabel)}</b>
                   <strong className="product-delivery-stage-rerun-target">{view.label}</strong>
                   <small>{inProfile
@@ -1190,7 +1192,7 @@ export function ProjectStudio({ projectId }: { projectId: string }) {
                         `Re-run from ${englishLabel}; every later stage runs again`,
                       )}
                       className="product-delivery-stage-rerun-icon"
-                      disabled={busy || !canRerunStages || (rerunnableKind === "STEAM_PUBLISH" && project.workflowState !== "FAILED")}
+                      disabled={busy || !canRerunStages || (rerunnableKind === "STEAM_PUBLISH" && !jobs.some(job => job.state === "FAILED"))}
                       onClick={() => void mutate("rerun-stage", { stage: rerunnableKind })}
                       type="button"
                     >
@@ -1307,6 +1309,13 @@ export function ProjectStudio({ projectId }: { projectId: string }) {
                 </li>
               </ol>
             </fieldset>
+            <SteamPreparationNode
+              onChanged={async () => { await Promise.all([loadProject(true), loadIterations(), loadArtifacts(true)]); }}
+              projectId={projectId}
+              readOnly={viewingHistoricalIteration}
+              workflowId={viewingHistoricalIteration ? historicalIteration.workflowId : project.workflowId}
+              workflowState={viewedWorkflowState}
+            />
           </div>
         </div>
         {canRerunStages ? (
@@ -1747,7 +1756,7 @@ export function pipelineJobsForStage(
 export function runningAgentJobForConversation(
   jobs: ProductProjectDetail["jobs"],
 ): ProductProjectDetail["jobs"][number] | null {
-  const agentJobs = jobs.filter(job => job.kind === "AGENT_TURN");
+  const agentJobs = jobs.filter(job => job.kind === "AGENT_TURN" && job.agentRole !== "PUBLISHING");
   const active = latestUpdatedJob(agentJobs.filter(job => job.state === "RUNNING"))
     ?? latestUpdatedJob(agentJobs.filter(job => job.state === "RETRY"));
   if (active) return active;

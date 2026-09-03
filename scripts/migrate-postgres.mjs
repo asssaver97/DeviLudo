@@ -93,6 +93,24 @@ const DEVELOPMENT_FUNCTION_REFRESHES = Object.freeze({
   }),
 });
 const DEVELOPMENT_SCHEMA_REFRESHES = Object.freeze({
+  "sha256:1f51776e3ade63dd609ad18eae682f0bdfb5eefcc1ddb024eacbb7aa61a564a9": Object.freeze({
+    targetDigest: "sha256:c6cfa696971d419d7d25d2c6eb6901b9f33d5944bfd28afa482e23dde76a20ee",
+    schema: "STEAM_DELIVERY_PREPARATION",
+    functions: Object.freeze([
+      "complete_agent_turn_job", "accept_workflow_signal", "complete_job", "fail_job",
+      "claim_steam_preparation", "mark_steam_preparation_syncing", "complete_steam_preparation",
+      "fail_steam_preparation", "retry_steam_preparation",
+    ]),
+  }),
+  "sha256:0743ff5b1cd235cec7268fd3533a819f6f1657d8a46aa72492471f7542054a38": Object.freeze({
+    targetDigest: "sha256:c6cfa696971d419d7d25d2c6eb6901b9f33d5944bfd28afa482e23dde76a20ee",
+    schema: "STEAM_DELIVERY_PREPARATION",
+    functions: Object.freeze([
+      "complete_agent_turn_job", "accept_workflow_signal", "complete_job", "fail_job",
+      "claim_steam_preparation", "mark_steam_preparation_syncing", "complete_steam_preparation",
+      "fail_steam_preparation", "retry_steam_preparation",
+    ]),
+  }),
   "sha256:914ad147269c91486c8bc6eca5c238fad7053d65e53adf76bda97ea65a88dc4d": Object.freeze({
     targetDigest: "sha256:4c51210e34a01b477f112ee82c9373d49cf949389894b9bc9a4ef084b1d11427",
     schema: "UPLOAD_ONLY_MUSIC_ASSETS",
@@ -184,6 +202,18 @@ try {
       for (const functionName of refresh.functions) {
         await client.query(functionDefinition(baselineSource, functionName));
       }
+      if ("schema" in refresh && refresh.schema === "STEAM_DELIVERY_PREPARATION") {
+        for (const signature of [
+          "claim_steam_preparation(integer)", "mark_steam_preparation_syncing(uuid, uuid, uuid)",
+          "complete_steam_preparation(uuid, uuid, uuid, jsonb)",
+          "fail_steam_preparation(uuid, uuid, uuid, text, text, boolean)",
+        ]) {
+          await client.query(`REVOKE ALL ON FUNCTION deviludo.${signature} FROM PUBLIC`);
+          await client.query(`GRANT EXECUTE ON FUNCTION deviludo.${signature} TO deviludo_scheduler`);
+        }
+        await client.query("REVOKE ALL ON FUNCTION deviludo.retry_steam_preparation(uuid, text, uuid) FROM PUBLIC");
+        await client.query("GRANT EXECUTE ON FUNCTION deviludo.retry_steam_preparation(uuid, text, uuid) TO deviludo_api");
+      }
       const metadata = await client.query(
         `UPDATE deviludo.schema_metadata
             SET source_digest = $1
@@ -239,6 +269,19 @@ function compatibleDevelopmentSchemaRefresh(current, ledger, targetDigest) {
 
 async function prepareDevelopmentSchemaRefresh(database, schema) {
   if (schema === "UPLOAD_ONLY_MUSIC_ASSETS") return;
+  if (schema === "STEAM_DELIVERY_PREPARATION") {
+    await database.query("BEGIN");
+    try {
+      await database.query("ALTER TYPE deviludo.workflow_state ADD VALUE IF NOT EXISTS 'STEAM_PREPARING' BEFORE 'STEAM_PUBLISHING'");
+      await database.query("ALTER TYPE deviludo.agent_role ADD VALUE IF NOT EXISTS 'PUBLISHING' AFTER 'TEST'");
+      await database.query("ALTER TYPE deviludo.steam_release_state ADD VALUE IF NOT EXISTS 'PREPARING' BEFORE 'UPLOADING'");
+      await database.query("COMMIT");
+    } catch (error) {
+      await database.query("ROLLBACK");
+      throw error;
+    }
+    return;
+  }
   if (schema !== "UI_DESIGN_ROLE") throw new Error("Compatible development schema refresh is invalid");
   await database.query("BEGIN");
   try {
@@ -252,6 +295,27 @@ async function prepareDevelopmentSchemaRefresh(database, schema) {
 }
 
 async function applyDevelopmentSchemaRefresh(database, schema) {
+  if (schema === "STEAM_DELIVERY_PREPARATION") {
+    await database.query("ALTER TABLE deviludo.steam_releases ALTER COLUMN state SET DEFAULT 'PREPARING'");
+    await database.query(`ALTER TABLE deviludo.steam_releases
+      ADD COLUMN IF NOT EXISTS failure_stage text
+      CHECK (failure_stage IS NULL OR failure_stage IN ('STEAM_PREPARATION', 'STEAM_PUBLISH'))`);
+    await database.query(tableDefinition(baselineSource, "steam_delivery_preparations"));
+    await database.query(`CREATE INDEX steam_delivery_preparations_claim
+      ON deviludo.steam_delivery_preparations(state, updated_at)
+      WHERE state IN ('GENERATING_ASSETS', 'SYNCING')`);
+    await database.query(tableDefinition(baselineSource, "steam_store_assets"));
+    for (const table of ["steam_delivery_preparations", "steam_store_assets"]) {
+      await database.query(`ALTER TABLE deviludo.${table} ENABLE ROW LEVEL SECURITY`);
+      await database.query(`ALTER TABLE deviludo.${table} FORCE ROW LEVEL SECURITY`);
+      await database.query(`CREATE POLICY workspace_isolation ON deviludo.${table}
+        USING (workspace_id = deviludo.current_workspace_id())
+        WITH CHECK (workspace_id = deviludo.current_workspace_id())`);
+    }
+    await database.query("GRANT SELECT, INSERT, UPDATE, DELETE ON deviludo.steam_delivery_preparations, deviludo.steam_store_assets TO deviludo_api, deviludo_scheduler");
+    await database.query("GRANT SELECT, INSERT, UPDATE ON deviludo.steam_delivery_preparations TO deviludo_sandbox");
+    return;
+  }
   if (schema === "UPLOAD_ONLY_MUSIC_ASSETS") {
     await database.query("ALTER TABLE deviludo.asset_items DROP CONSTRAINT asset_items_asset_type_check");
     await database.query(`ALTER TABLE deviludo.asset_items
@@ -298,6 +362,17 @@ async function applyDevelopmentSchemaRefresh(database, schema) {
       AND jsonb_typeof(content->'features') = 'array'
       AND jsonb_array_length(content->'features') BETWEEN 1 AND 32
     )`);
+}
+
+function tableDefinition(source, tableName) {
+  if (!/^[a-z][a-z0-9_]*$/.test(tableName)) throw new Error("Compatible table name is invalid");
+  const marker = `CREATE TABLE deviludo.${tableName} (`;
+  const start = source.indexOf(marker);
+  const end = start < 0 ? -1 : source.indexOf("\n);", start);
+  if (start < 0 || end < 0 || source.indexOf(marker, start + marker.length) >= 0) {
+    throw new Error(`Compatible table ${tableName} is incomplete`);
+  }
+  return source.slice(start, end + "\n);".length);
 }
 
 function functionDefinition(source, functionName) {

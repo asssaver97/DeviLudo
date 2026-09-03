@@ -11,21 +11,21 @@ test("fresh baseline exposes only the persistent multi-Agent workflow contract",
     "AGENT_TURN", "BUILD", "E2E_PLATFORM_RUN", "STEAM_PUBLISH",
   ]);
   assert.deepEqual(enumValues(sql, "agent_role"), [
-    "INTENT", "ANALYSIS", "DESIGN", "UI_DESIGN", "DEVELOPMENT", "TEST",
+    "INTENT", "ANALYSIS", "DESIGN", "UI_DESIGN", "DEVELOPMENT", "TEST", "PUBLISHING",
   ]);
   assert.deepEqual(enumValues(sql, "agent_container_state"), [
     "CREATING", "RUNNING", "PAUSING", "PAUSED", "COMPACTING", "DESTROYED", "STOPPED", "FAILED",
   ]);
   assert.deepEqual(enumValues(sql, "workflow_state"), [
     "DRAFT", "ANALYZING", "DESIGNING", "UI_DESIGNING", "DEVELOPING", "BUILDING", "TEST_PLANNING",
-    "TESTING", "RELEASE_APPROVAL_PENDING", "STEAM_PUBLISHING",
+    "TESTING", "RELEASE_APPROVAL_PENDING", "STEAM_PREPARING", "STEAM_PUBLISHING",
     "SUCCEEDED", "BLOCKED", "STOPPED", "FAILED", "CANCELLED",
   ]);
   assert.doesNotMatch(sql, /AGENT_GENERATION|PROJECT_DOCUMENT_MAINTENANCE|job_guidance_messages|repair_count < 5/);
   assert.doesNotMatch(sql, /superseded[\s\S]{0,400}state <> 'CANCELLED'/i);
 });
 
-test("the new durable model stores contexts, six sessions, turns, handoffs, plans and evidence", async () => {
+test("the new durable model stores contexts, seven sessions, turns, handoffs, plans and evidence", async () => {
   const sql = await readFile(sqlUrl, "utf8");
   for (const table of [
     "project_contexts", "agent_containers", "agent_sessions", "agent_turns",
@@ -41,6 +41,37 @@ test("the new durable model stores contexts, six sessions, turns, handoffs, plan
   assert.match(sql, /fencing_token bigint/);
   assert.match(sql, /plan_sha256 text NOT NULL CHECK \(plan_sha256 ~ '\^sha256:/);
   assert.match(sql, /FOREIGN KEY \(workspace_id, plan_id\) REFERENCES deviludo\.test_plans_v2/);
+});
+
+test("Steam preparation is workspace-isolated and gates SteamPipe behind a verified Save receipt", async () => {
+  const sql = await readFile(sqlUrl, "utf8");
+  for (const table of ["steam_delivery_preparations", "steam_store_assets"]) {
+    assert.match(sql, new RegExp(`CREATE TABLE deviludo\\.${table}\\s*\\(`));
+    assert.ok(sql.includes(`'${table}'`), `${table} must be covered by forced workspace RLS`);
+  }
+  assert.deepEqual(enumValues(sql, "steam_release_state"), [
+    "PREPARING", "UPLOADING", "FAILED", "LIVE_TEST", "AWAITING_DEFAULT_PROMOTION", "LIVE_DEFAULT",
+  ]);
+  const approved = functionSource(sql, "accept_workflow_signal");
+  assert.match(approved, /state = 'STEAM_PREPARING'/);
+  assert.match(approved, /'role', 'PUBLISHING', 'purpose', 'PUBLISHING'/);
+  assert.match(approved, /e2e_job\.payload->>'sourceRevision'.*preparation_source_revision/);
+  assert.doesNotMatch(approved, /publishing:approved:[\s\S]{0,1000}'STEAM_PUBLISH'/);
+  const claimed = functionSource(sql, "claim_steam_preparation");
+  assert.match(claimed, /state IN \('GENERATING_ASSETS', 'SYNCING'\)/);
+  assert.match(claimed, /workflow\.state = 'STEAM_PREPARING'/);
+  const completed = functionSource(sql, "complete_steam_preparation");
+  assert.match(completed, /p_receipt->>'action'.*'SAVE'/);
+  assert.match(completed, /state = 'SAVED'/);
+  assert.match(completed, /state = 'STEAM_PUBLISHING'/);
+  assert.match(completed, /GET DIAGNOSTICS changed = ROW_COUNT;[\s\S]*IF changed <> 1 THEN RETURN false/);
+  assert.match(completed, /'STEAM_PUBLISH'/);
+  const failed = functionSource(sql, "fail_steam_preparation");
+  assert.match(failed, /failure_stage = 'STEAM_PREPARATION'/);
+  assert.match(failed, /id = p_workflow_id AND state = 'STEAM_PREPARING'/);
+  const failedJob = functionSource(sql, "fail_job");
+  assert.match(failedJob, /job\.payload->>'role' = 'PUBLISHING'[\s\S]*failure_stage = 'STEAM_PREPARATION'/);
+  assert.match(sql, /failure_stage = 'STEAM_PUBLISH'/);
 });
 
 test("Runtime lifecycle claims exactly five-minute idle and thirty-minute paused thresholds", async () => {

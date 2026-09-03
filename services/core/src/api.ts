@@ -1448,6 +1448,63 @@ export async function runApi(
     });
   });
 
+  app.get<{ Params: { projectId: string }; Querystring: { workflowId?: string } }>(
+    "/v1/projects/:projectId/steam-preparation",
+    async (request, reply) => {
+      const principal = productAccess(request, config);
+      const workspace = await requireSelectedWorkspace(request, repository, principal);
+      const project = await repository.readProject(workspace.id, request.params.projectId);
+      if (!project) return reply.code(404).send({ code: "PROJECT_NOT_FOUND" });
+      const workflowId = request.query.workflowId ?? project.workflowId;
+      if (!UUID.test(workflowId)) return reply.code(400).send({ code: "INVALID_WORKFLOW_ID" });
+      const preparation = await repository.readSteamPreparation(workspace.id, project.id, workflowId);
+      if (!preparation) return reply.header("cache-control", "no-store").send({ preparation: null });
+      const [session, objects] = await Promise.all([
+        steamworksBrowserSession(config, workspace.id, "GET", false),
+        repository.readSteamPreparationAssetObjects(workspace.id, project.id, workflowId),
+      ]);
+      const previews = new Map((await Promise.all(objects.map(async object => [
+        object.key,
+        (await objectStore.authorizeSteamStoreAsset({ workspaceId: workspace.id, projectId: project.id,
+          bucket: object.bucket, key: object.objectKey, sha256: object.sha256, sizeBytes: object.sizeBytes })).url,
+      ] as const))).map(entry => entry));
+      return reply.header("cache-control", "no-store").send({ preparation: Object.freeze({
+        ...preparation, browserSession: session,
+        assets: preparation.assets.map(asset => Object.freeze({ ...asset, previewUrl: previews.get(asset.key) })),
+      }) });
+    },
+  );
+
+  app.post<{ Params: { projectId: string } }>("/v1/projects/:projectId/steam-preparation/retry", async (request, reply) => {
+    const principal = productAccess(request, config);
+    const workspace = await requireSelectedWorkspace(request, repository, principal);
+    const project = await repository.readProject(workspace.id, request.params.projectId);
+    if (!project) return reply.code(404).send({ code: "PROJECT_NOT_FOUND" });
+    const body = objectBody(request.body);
+    const workflowId = typeof body.workflowId === "string" ? body.workflowId : project.workflowId;
+    if (!UUID.test(workflowId)) return reply.code(400).send({ code: "INVALID_WORKFLOW_ID" });
+    const accepted = await repository.retrySteamPreparation({ workspaceId: workspace.id, projectId: project.id, workflowId,
+      idempotencyKey: requestIdempotencyKey(request, `steam-preparation-retry:${workflowId}`),
+      requestedByActorId: principal.actorId });
+    return reply.code(accepted ? 202 : 200).send({ accepted });
+  });
+
+  app.get("/v1/settings/steam/browser-session", async (request, reply) => {
+    const principal = productAccess(request, config);
+    const workspace = await requireSelectedWorkspace(request, repository, principal);
+    return reply.header("cache-control", "no-store").send({ session: await steamworksBrowserSession(config, workspace.id, "GET") });
+  });
+  app.post("/v1/settings/steam/browser-session", async (request, reply) => {
+    const principal = productAccess(request, config);
+    const workspace = await requireSelectedWorkspace(request, repository, principal);
+    return reply.send({ session: await steamworksBrowserSession(config, workspace.id, "POST") });
+  });
+  app.delete("/v1/settings/steam/browser-session", async (request, reply) => {
+    const principal = productAccess(request, config);
+    const workspace = await requireSelectedWorkspace(request, repository, principal);
+    return reply.send({ session: await steamworksBrowserSession(config, workspace.id, "DELETE") });
+  });
+
   app.put<{ Params: { projectId: string } }>("/v1/projects/:projectId/steam-settings", async (request, reply) => {
     const principal = productAccess(request, config);
     const workspace = await requireSelectedWorkspace(request, repository, principal);
@@ -1498,6 +1555,7 @@ export async function runApi(
       version,
       channel,
       requestedByActorId: principal.actorId,
+      automatedPreparation: config.steamPreparationEnabled,
     });
     return reply.code(result.accepted ? 202 : 200).send(result);
   });
@@ -2149,6 +2207,25 @@ export async function runApi(
   });
   await aborted;
   await Promise.all([app.close(), importAnalysisWorker]);
+}
+
+async function steamworksBrowserSession(config: CoreConfig, workspaceId: string, method: "GET" | "POST" | "DELETE", verify = true) {
+  if (!config.steamPreparationEnabled || !config.localSteamworksBridgeUrl || !config.localSteamworksBridgeToken) {
+    return Object.freeze({ state: "UNAVAILABLE" as const, checkedAt: null });
+  }
+  try {
+    const response = await fetch(`${config.localSteamworksBridgeUrl}/internal/steamworks/session?workspaceId=${workspaceId}&verify=${verify ? "1" : "0"}`, {
+      method, headers: { "x-deviludo-bridge-token": config.localSteamworksBridgeToken },
+      redirect: "error", signal: AbortSignal.timeout(method === "DELETE" ? 15_000 : 70_000),
+    });
+    const body = await response.json().catch(() => ({})) as Record<string, unknown>;
+    if (!response.ok) throw new Error("Steamworks browser bridge is unavailable");
+    const state = ["CONNECTED", "DISCONNECTED", "LOGIN_REQUIRED"].includes(String(body.state))
+      ? body.state as "CONNECTED" | "DISCONNECTED" | "LOGIN_REQUIRED" : "UNAVAILABLE";
+    return Object.freeze({ state, checkedAt: typeof body.checkedAt === "string" ? body.checkedAt : null });
+  } catch {
+    return Object.freeze({ state: "UNAVAILABLE" as const, checkedAt: null });
+  }
 }
 
 type ConversationMessageCommand = Readonly<{

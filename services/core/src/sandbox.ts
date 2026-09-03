@@ -307,11 +307,9 @@ export async function runSandbox(
             handoff: designHandoff ?? uiDesignHandoff ?? sourceContractHandoff ?? structured.handoff ?? null,
             responseLanguage,
             agentRuntime: settings.agentRuntime,
-            model: resolveAgentModel(
-              settings.primaryModel,
-              settings.modelOverrides,
-              role === "UI_DESIGN" ? "uiDesign"
-                : role.toLowerCase() as "design" | "development" | "test",
+            model: role === "PUBLISHING" ? settings.primaryModel : resolveAgentModel(
+              settings.primaryModel, settings.modelOverrides,
+              role === "UI_DESIGN" ? "uiDesign" : role.toLowerCase() as "design" | "development" | "test",
             ),
             settingsRevision: settings.revision,
           }));
@@ -425,7 +423,7 @@ export async function runSandbox(
 
 function runtimeJobRole(payload: Readonly<Record<string, unknown>>): ProjectRuntimeRole {
   const role = payload.role ?? "DEVELOPMENT";
-  if (!["DESIGN", "UI_DESIGN", "DEVELOPMENT", "TEST"].includes(String(role))) {
+  if (!["DESIGN", "UI_DESIGN", "DEVELOPMENT", "TEST", "PUBLISHING"].includes(String(role))) {
     throw new Error("AGENT_TURN job role is invalid");
   }
   return role as ProjectRuntimeRole;
@@ -442,6 +440,9 @@ function runtimeJobPrompt(job: JobProtocolV4, role: ProjectRuntimeRole): string 
   const purpose = typeof job.payload.purpose === "string" ? job.payload.purpose : role;
   const handoff = job.payload.testHandoff ?? job.payload.uiDesignHandoff
     ?? job.payload.designHandoff ?? job.payload.implementationBrief ?? null;
+  if (role === "PUBLISHING") {
+    return "Create and persist the complete Steam store and depot delivery draft from the latest passing E2E evidence. Do not include App IDs, Depot IDs, credentials, or unverified claims.";
+  }
   if (role === "DESIGN") {
     return [
       `Apply the approved gameplay requirement revision and create a complete UI_DESIGN handoff. Purpose: ${purpose}.`,

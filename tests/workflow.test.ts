@@ -53,6 +53,14 @@ test("the workflow runs Design, UI Design, Development, Build, Test plan, every 
   assert.deepEqual(transition.enqueue, []);
 
   transition = transitionWorkflow(transition.snapshot, { kind: "RELEASE_APPROVED", approvalId: "approval-1" });
+  assert.equal(transition.snapshot.state, "STEAM_PREPARING");
+  assert.deepEqual(transition.enqueue.map(job => [job.jobKind, job.agentRole]), [["AGENT_TURN", "PUBLISHING"]]);
+
+  transition = transitionWorkflow(transition.snapshot, { kind: "JOB_SUCCEEDED", jobId: "publishing-1", jobKind: "AGENT_TURN", agentRole: "PUBLISHING", purpose: "PUBLISHING", targetOperatingSystem: null });
+  assert.equal(transition.snapshot.state, "STEAM_PREPARING");
+  assert.deepEqual(transition.enqueue, []);
+
+  transition = transitionWorkflow(transition.snapshot, { kind: "STEAM_PREPARATION_SAVED", preparationId: "prep-1" });
   assert.equal(transition.snapshot.state, "STEAM_PUBLISHING");
   assert.deepEqual(transition.enqueue.map(job => job.jobKind), ["STEAM_PUBLISH"]);
 

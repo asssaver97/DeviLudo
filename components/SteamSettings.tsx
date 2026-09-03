@@ -19,12 +19,19 @@ export function SteamSettings() {
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [notice, setNotice] = useState("");
+  const [browserSession, setBrowserSession] = useState<{ state: "CONNECTED" | "DISCONNECTED" | "LOGIN_REQUIRED" | "UNAVAILABLE"; checkedAt: string | null }>({ state: "UNAVAILABLE", checkedAt: null });
 
   const fetchSettings = useCallback(async (signal?: AbortSignal) => {
-    const response = await fetch("/api/settings/steam", { cache: "no-store", signal });
+    const [response, sessionResponse] = await Promise.all([
+      fetch("/api/settings/steam", { cache: "no-store", signal }),
+      fetch("/api/settings/steam/browser-session", { cache: "no-store", signal }),
+    ]);
     const payload = await response.json() as { settings?: PublicSteamSettings | null; editable?: boolean; message?: string };
     if (!response.ok) throw new Error(errorText(payload.message, "Steam 配置读取失败", "Unable to load Steam settings"));
-    return Object.freeze({ settings: payload.settings ?? null, editable: payload.editable === true });
+    const sessionPayload = await sessionResponse.json() as { session?: typeof browserSession; message?: string };
+    if (!sessionResponse.ok) throw new Error(errorText(sessionPayload.message, "Steamworks 会话读取失败", "Unable to load Steamworks session"));
+    return Object.freeze({ settings: payload.settings ?? null, editable: payload.editable === true,
+      browserSession: sessionPayload.session ?? { state: "UNAVAILABLE" as const, checkedAt: null } });
   }, [errorText]);
 
   const applySettings = useCallback((payload: Awaited<ReturnType<typeof fetchSettings>>) => {
@@ -32,6 +39,7 @@ export function SteamSettings() {
     setEditable(payload.editable);
     setBuilderUsername(payload.settings?.builderUsername ?? "");
     setBuildToken(payload.settings?.buildToken ?? "");
+    setBrowserSession(payload.browserSession);
   }, []);
 
   useEffect(() => {
@@ -67,6 +75,20 @@ export function SteamSettings() {
     }
   }
 
+  async function updateBrowserSession(method: "GET" | "POST" | "DELETE") {
+    setSaving(true); setNotice("");
+    try {
+      const response = await fetch("/api/settings/steam/browser-session", { method });
+      const payload = await response.json() as { session?: typeof browserSession; message?: string };
+      if (!response.ok || !payload.session) throw new Error(errorText(payload.message, "Steamworks 会话操作失败", "Steamworks session action failed"));
+      setBrowserSession(payload.session);
+      setNotice(payload.session.state === "CONNECTED"
+        ? text("Steamworks 会话已连接", "Steamworks session connected")
+        : text("Steamworks 会话已清除", "Steamworks session cleared"));
+    } catch (error) { setNotice(error instanceof Error ? error.message : String(error)); }
+    finally { setSaving(false); }
+  }
+
   if (loading) return <div className="settings-loading">{text("加载 Steam 配置...", "Loading Steam settings...")}</div>;
   return (
     <section className="settings-card settings-section" aria-label={text("Steam 构建凭证", "Workspace Steam credential")}>
@@ -87,6 +109,13 @@ export function SteamSettings() {
         {editable ? <button className="button button-primary" disabled={saving || !builderUsername || !buildToken} type="submit">{saving ? text("保存中...", "SAVING...") : text("保存 Steam 配置", "SAVE STEAM SETTINGS")}</button> : null}
         {notice ? <p className="agent-config-notice" role="status">{notice}</p> : null}
       </form>
+      <div className="steam-browser-session-controls">
+        <span><b>{text("Steamworks 受管浏览器", "MANAGED STEAMWORKS BROWSER")}</b><small>{browserSession.state}</small></span>
+        <button className="button button-secondary" disabled={saving || browserSession.state === "UNAVAILABLE"} onClick={() => void updateBrowserSession("POST")} type="button">{text("连接 Steamworks", "CONNECT STEAMWORKS")}</button>
+        <button className="button button-secondary" disabled={saving || browserSession.state === "UNAVAILABLE"} onClick={() => void updateBrowserSession("GET")} type="button">{text("验证会话", "VERIFY SESSION")}</button>
+        <button className="button button-secondary" disabled={saving || ["UNAVAILABLE", "DISCONNECTED"].includes(browserSession.state)} onClick={() => void updateBrowserSession("DELETE")} type="button">{text("清除会话", "CLEAR SESSION")}</button>
+        <small>{text("首次连接会打开独立 Chromium，请在其中完成登录与 Steam Guard。Cookie、密码和页面 HTML 不会进入 DeviLudo Core。", "The first connection opens an isolated Chromium window for sign-in and Steam Guard. Cookies, passwords, and page HTML never enter DeviLudo Core.")}</small>
+      </div>
     </section>
   );
 }

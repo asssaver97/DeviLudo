@@ -5,13 +5,14 @@ export const ROLE_TO_CANONICAL_TOOLS = Object.freeze({
   UI_DESIGN: Object.freeze(["context.read", "source.list", "source.read", "evidence.read", "project_document.update", "e2e_goals.update", "conversation.reply", "handoff.create"]),
   DEVELOPMENT: Object.freeze(["context.read", "source.list", "source.read", "evidence.read", "source.checkpoint", "assets.plan", "assets.cleanup", "build.request", "conversation.reply", "handoff.create"]),
   TEST: Object.freeze(["context.read", "source.list", "source.read", "test_plan.replace", "test_plan.revise_timeout", "e2e.start", "e2e.observe", "evidence.read", "test.verdict", "conversation.reply", "handoff.create"]),
+  PUBLISHING: Object.freeze(["context.read", "source.list", "source.read", "evidence.read", "steam.settings.read", "steam.delivery_draft.replace"]),
 });
 
 export function nativeToolName(canonicalName) {
-  if (typeof canonicalName !== "string" || !/^[a-z][a-z0-9_]*\.[a-z][a-z0-9_]*$/.test(canonicalName)) {
+  if (typeof canonicalName !== "string" || !/^[a-z][a-z0-9_]*(?:\.[a-z][a-z0-9_]*)+$/.test(canonicalName)) {
     throw new Error("Canonical project Runtime tool name is invalid");
   }
-  return canonicalName.replace(".", "_");
+  return canonicalName.replaceAll(".", "_");
 }
 
 export function canonicalToolName(role, nativeName) {
@@ -94,6 +95,10 @@ export function toolInputSchema(canonicalName) {
       }),
     });
   }
+  if (canonicalName === "steam.settings.read") {
+    return Object.freeze({ type: "object", additionalProperties: false });
+  }
+  if (canonicalName === "steam.delivery_draft.replace") return steamDeliveryDraftSchema();
   if (canonicalName === "source.checkpoint") return sourceCheckpointInputSchema();
   if (canonicalName === "assets.plan") return assetPlanInputSchema();
   if (canonicalName === "test_plan.replace") return testPlanReplaceInputSchema();
@@ -151,6 +156,38 @@ export function toolInputSchema(canonicalName) {
         }),
       }),
     }),
+  });
+}
+
+function steamDeliveryDraftSchema() {
+  const localized = {
+    type: "object", additionalProperties: false,
+    required: ["language", "shortDescription", "about"],
+    properties: {
+      language: { type: "string", pattern: "^[a-z][a-z0-9-]{1,31}$" },
+      shortDescription: { type: "string", minLength: 1, maxLength: 300 },
+      about: { type: "string", minLength: 1, maxLength: 20000 },
+    },
+  };
+  return Object.freeze({
+    type: "object", additionalProperties: false, required: ["draft"],
+    properties: { draft: {
+      type: "object", additionalProperties: false,
+      required: ["schemaVersion", "localizations", "tags", "categories", "languages", "systemRequirements", "installDirectory", "launchOptions", "depots", "artwork", "screenshots"],
+      properties: {
+        schemaVersion: { const: "deviludo.steam-delivery-draft.v1" },
+        localizations: { type: "array", minItems: 1, maxItems: 30, items: localized },
+        tags: { type: "array", minItems: 1, maxItems: 20, uniqueItems: true, items: { type: "string", minLength: 1, maxLength: 64 } },
+        categories: { type: "array", maxItems: 32, uniqueItems: true, items: { type: "string", minLength: 1, maxLength: 64 } },
+        languages: { type: "array", minItems: 1, maxItems: 30, items: { type: "object", additionalProperties: false, required: ["language", "interface", "audio", "subtitles"], properties: { language: { type: "string", pattern: "^[a-z][a-z0-9-]{1,31}$" }, interface: { type: "boolean" }, audio: { type: "boolean" }, subtitles: { type: "boolean" } } } },
+        systemRequirements: { type: "array", minItems: 1, maxItems: 3, items: { type: "object", additionalProperties: false, required: ["platform", "minimum"], properties: { platform: { enum: ["linux", "windows", "macos"] }, minimum: { type: "string", minLength: 1, maxLength: 2000 }, recommended: { type: "string", maxLength: 2000 } } } },
+        installDirectory: { type: "string", pattern: "^[A-Za-z0-9._ -]{1,128}$" },
+        launchOptions: { type: "array", minItems: 1, maxItems: 12, items: { type: "object", additionalProperties: false, required: ["platform", "executable"], properties: { platform: { enum: ["linux", "windows", "macos"] }, executable: { type: "string", minLength: 1, maxLength: 500 }, arguments: { type: "string", maxLength: 500 }, description: { type: "string", maxLength: 200 } } } },
+        depots: { type: "array", minItems: 1, maxItems: 3, items: { type: "object", additionalProperties: false, required: ["platform", "name", "architecture"], properties: { platform: { enum: ["linux", "windows", "macos"] }, name: { type: "string", minLength: 1, maxLength: 128 }, architecture: { enum: ["x86_64", "arm64", "universal"] } } } },
+        artwork: { type: "object", additionalProperties: false, required: ["landscapePrompt", "portraitPrompt"], properties: { landscapePrompt: { type: "string", minLength: 20, maxLength: 4000 }, portraitPrompt: { type: "string", minLength: 20, maxLength: 4000 } } },
+        screenshots: { type: "array", minItems: 5, maxItems: 5, uniqueItems: true, items: { type: "object", additionalProperties: false, required: ["checkpointId"], properties: { checkpointId: { type: "string", minLength: 1, maxLength: 500 }, caption: { type: "string", maxLength: 300 } } } },
+      },
+    } },
   });
 }
 

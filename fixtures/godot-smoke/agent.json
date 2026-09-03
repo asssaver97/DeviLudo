@@ -8,27 +8,27 @@
       "goal": "Choose the Aurora route, fly the ship through three embers, survive the hazards, and reach the result screen.",
       "requirementIds": ["req-feature-001-1c21aed4", "req-feature-002-7e78804f", "req-feature-003-94a2b1b3", "req-feature-004-d7d2f7ba", "req-feature-005-5cfc2dae"],
       "allowedActions": ["KEYBOARD", "POINTER"],
-      "successAssertions": [{"source":"PROGRESS","key":"loop","operator":"CHANGED"}, {"source":"STATE","key":"screen_mode","operator":"EQUALS","value":"RESULT"}],
+      "successAssertions": [{"source":"PROGRESS","key":"embers","operator":"CHANGED"}, {"source":"STATE","key":"loop_complete","operator":"EQUALS","value":true}, {"source":"STATE","key":"screen_mode","operator":"EQUALS","value":"RESULT"}],
       "failureAssertions": [{"source":"STATE","key":"failed","operator":"EQUALS","value":true}],
       "rolloutTimeoutMs": 240000,
       "maxDecisions": 20,
       "seedStrategy": "STABLE_PROJECT_PLATFORM"
     },
     "requirements": [
-      {"requirementId":"req-feature-001-1c21aed4","description":"从初始菜单选择路线","source":"CORE_LOOP","verificationClass":"PLAYER_INTERACTION"},
-      {"requirementId":"req-feature-002-7e78804f","description":"进入标记为 PLAYING 的会话状态","source":"CORE_LOOP","verificationClass":"PLAYER_INTERACTION"},
-      {"requirementId":"req-feature-003-94a2b1b3","description":"暂停或恢复会话","source":"CORE_LOOP","verificationClass":"PLAYER_INTERACTION"},
-      {"requirementId":"req-feature-004-d7d2f7ba","description":"触发完成循环","source":"CORE_LOOP","verificationClass":"PLAYER_INTERACTION"},
-      {"requirementId":"req-feature-005-5cfc2dae","description":"显示核心循环完成结果","source":"CORE_LOOP","verificationClass":"PLAYER_INTERACTION"},
-      {"requirementId":"req-acceptance-001-9e54b648","description":"启动时进入非活动会话的菜单状态，并允许玩家主动选择路线","source":"ACCEPTANCE","verificationClass":"PLAYER_INTERACTION"},
-      {"requirementId":"req-acceptance-002-b23a8637","description":"选择路线后会话进入 PLAYING 状态且完成按钮可用","source":"ACCEPTANCE","verificationClass":"PLAYER_INTERACTION"},
-      {"requirementId":"req-acceptance-003-a0d747d0","description":"暂停时状态计时不增长，恢复后可继续","source":"ACCEPTANCE","verificationClass":"PLAYER_INTERACTION"},
-      {"requirementId":"req-acceptance-004-c7590cf4","description":"同一余烬不能重复收集，合法的新余烬可以加入状态","source":"ACCEPTANCE","verificationClass":"PLAYER_INTERACTION"},
-      {"requirementId":"req-acceptance-005-38766245","description":"非负伤害降低船体值且船体保持在 0 至 100","source":"ACCEPTANCE","verificationClass":"PLAYER_INTERACTION"},
-      {"requirementId":"req-acceptance-006-9d24c8cf","description":"收集至少 3 个余烬、船体大于 0 且用时不超过 1200 秒时满足胜利条件","source":"ACCEPTANCE","verificationClass":"PLAYER_INTERACTION"},
-      {"requirementId":"req-acceptance-007-5cc80575","description":"状态快照恢复后应保留余烬、船体、用时、暂停和语言字段","source":"ACCEPTANCE","verificationClass":"PLAYER_INTERACTION"},
-      {"requirementId":"req-acceptance-008-9d169034","description":"完成循环后显示结果层并将循环进度标记为完成","source":"ACCEPTANCE","verificationClass":"PLAYER_INTERACTION"},
-      {"requirementId":"req-acceptance-009-914dcf29","description":"界面布局应在项目配置的 640×360 视口内完整可见和可操作","source":"ACCEPTANCE","verificationClass":"PLAYER_INTERACTION"}
+      {"requirementId":"req-feature-001-1c21aed4","description":"Choose a route from the initial menu","source":"CORE_LOOP","verificationClass":"PLAYER_INTERACTION"},
+      {"requirementId":"req-feature-002-7e78804f","description":"Enter a session marked PLAYING","source":"CORE_LOOP","verificationClass":"PLAYER_INTERACTION"},
+      {"requirementId":"req-feature-003-94a2b1b3","description":"Pause or resume the session","source":"CORE_LOOP","verificationClass":"PLAYER_INTERACTION"},
+      {"requirementId":"req-feature-004-d7d2f7ba","description":"Trigger the completed loop","source":"CORE_LOOP","verificationClass":"PLAYER_INTERACTION"},
+      {"requirementId":"req-feature-005-5cfc2dae","description":"Display the completed core-loop result","source":"CORE_LOOP","verificationClass":"PLAYER_INTERACTION"},
+      {"requirementId":"req-acceptance-001-9e54b648","description":"Start at an inactive menu and allow the player to choose a route","source":"ACCEPTANCE","verificationClass":"PLAYER_INTERACTION"},
+      {"requirementId":"req-acceptance-002-b23a8637","description":"Enable completion after the selected route enters PLAYING","source":"ACCEPTANCE","verificationClass":"PLAYER_INTERACTION"},
+      {"requirementId":"req-acceptance-003-a0d747d0","description":"Freeze elapsed time while paused and continue after resume","source":"ACCEPTANCE","verificationClass":"PLAYER_INTERACTION"},
+      {"requirementId":"req-acceptance-004-c7590cf4","description":"Reject duplicate embers and accept a new valid ember","source":"ACCEPTANCE","verificationClass":"PLAYER_INTERACTION"},
+      {"requirementId":"req-acceptance-005-38766245","description":"Apply non-negative damage while keeping hull between zero and one hundred","source":"ACCEPTANCE","verificationClass":"PLAYER_INTERACTION"},
+      {"requirementId":"req-acceptance-006-9d24c8cf","description":"Win with at least three embers, positive hull, and no more than twelve hundred seconds elapsed","source":"ACCEPTANCE","verificationClass":"PLAYER_INTERACTION"},
+      {"requirementId":"req-acceptance-007-5cc80575","description":"Restore embers, hull, time, pause, and language fields from a state snapshot","source":"ACCEPTANCE","verificationClass":"PLAYER_INTERACTION"},
+      {"requirementId":"req-acceptance-008-9d169034","description":"Show the result layer and mark loop progress complete","source":"ACCEPTANCE","verificationClass":"PLAYER_INTERACTION"},
+      {"requirementId":"req-acceptance-009-914dcf29","description":"Keep the interface visible and operable within the configured 640 by 360 viewport","source":"ACCEPTANCE","verificationClass":"PLAYER_INTERACTION"}
     ],
     "features": [
       {
@@ -71,7 +71,7 @@
           {"type":"key_hold","key":"KEY_D","duration_ms":850,"stepId":"victory-middle","intent":"PRIMARY_ACTION","coversRequirementIds":["req-acceptance-006-9d24c8cf"],"postconditions":[{"source":"PROGRESS","key":"embers","operator":"EQUALS","value":2}],"delay_ms":100},
           {"type":"key_hold","key":"KEY_W","duration_ms":500,"stepId":"victory-align-east","intent":"NAVIGATION","coversRequirementIds":["req-acceptance-006-9d24c8cf"],"postconditions":[{"source":"STATE","key":"screen_mode","operator":"EQUALS","value":"PLAYING"}],"delay_ms":100},
           {"type":"key_hold","key":"KEY_D","duration_ms":1050,"stepId":"victory-east","intent":"COMPLETE_LOOP","coversRequirementIds":["req-feature-004-d7d2f7ba","req-feature-005-5cfc2dae","req-acceptance-006-9d24c8cf","req-acceptance-008-9d169034"],"postconditions":[{"source":"PROGRESS","key":"embers","operator":"EQUALS","value":3},{"source":"STATE","key":"screen_mode","operator":"EQUALS","value":"RESULT"},{"source":"STATE","key":"loop_complete","operator":"EQUALS","value":true}],"delay_ms":100},
-          {"type":"checkpoint","id":"core-loop-complete","role":"COMPLETION","visualMode":"DYNAMIC","changeTargetId":"result-message","expectedOutput":"DEVILUDO_E2E_CHECKPOINT:core-loop-complete","assertions":[{"source":"PROGRESS","key":"loop","operator":"GREATER_THAN","value":0},{"source":"STATE","key":"blocking_layer_count","operator":"EQUALS","value":1}],"delay_ms":400}
+          {"type":"checkpoint","id":"core-loop-complete","role":"COMPLETION","visualMode":"DYNAMIC","changeTargetId":"result-message","expectedOutput":"DEVILUDO_E2E_CHECKPOINT:core-loop-complete","assertions":[{"source":"STATE","key":"loop_complete","operator":"EQUALS","value":true},{"source":"STATE","key":"blocking_layer_count","operator":"EQUALS","value":1}],"delay_ms":400}
         ]}
       },
       {

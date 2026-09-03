@@ -6,6 +6,7 @@ import { CoreObjectStore } from "./object-store";
 import { ProjectSourceStore } from "./project-sources";
 import type { CoreRepository } from "./repository";
 import type { ProjectRuntimeLifecycle } from "./project-runtime-lifecycle";
+import { runSteamPreparationOnce } from "./steam-preparation";
 
 export async function runScheduler(
   repository: CoreRepository,
@@ -24,6 +25,10 @@ export async function runScheduler(
   }
   const projectSources = new ProjectSourceStore(config.projectsRoot);
   const assetGeneration = objectStore ? assetGenerationDependencies(repository, objectStore) : null;
+  const steamPreparation = objectStore && config.steamPreparationEnabled ? Object.freeze({
+    repository, objectStore, secrets: createAgentSecretStore(), projectsRoot: config.projectsRoot,
+    bridgeUrl: config.localSteamworksBridgeUrl, bridgeToken: config.localSteamworksBridgeToken,
+  }) : null;
   if (!assetGeneration) {
     console.log(JSON.stringify({
       level: "info",
@@ -65,6 +70,9 @@ export async function runScheduler(
         : null;
       if (assets) nextAssetSweepAt = Date.now() + config.assetGenerationPollMilliseconds;
       const assetWorkflowsAdvanced = await repository.assets.advanceReadyWorkflows();
+      const steamPreparationResult = steamPreparation
+        ? await runSteamPreparationOnce(steamPreparation, signal)
+        : null;
       console.log(JSON.stringify({
         level: "info",
         event: "scheduler_tick",
@@ -84,6 +92,7 @@ export async function runScheduler(
           assetsFailed: assets.failed,
         } : {}),
         assetWorkflowsAdvanced,
+        ...(steamPreparationResult ? { steamPreparation: steamPreparationResult } : {}),
         elapsedMilliseconds: Date.now() - startedAt,
       }));
     } catch (error) {

@@ -49,6 +49,7 @@ const localRuntimeServices = Object.freeze([
   "provider-proxy",
   "steam-proxy",
   "local-project-bridge-proxy",
+  "local-steamworks-bridge-proxy",
   "sandbox-executord",
   "core-api",
   "core-scheduler",
@@ -70,6 +71,7 @@ console.log("\nStarting the DeviLudo local environment\n");
 const webPort = process.env.DEVILUDO_WEB_HOST_PORT?.trim() || "3100";
 const corePort = process.env.DEVILUDO_CORE_HOST_PORT?.trim() || "8080";
 const gitImportPort = process.env.DEVILUDO_LOCAL_GIT_IMPORT_PORT?.trim() || "3199";
+const steamworksBridgePort = process.env.DEVILUDO_STEAMWORKS_BRIDGE_PORT?.trim() || "8792";
 const artifactPort = process.env.DEVILUDO_MINIO_HOST_PORT?.trim() || "39000";
 if (!/^\d+$/.test(webPort) || Number(webPort) < 1 || Number(webPort) > 65535) {
   throw new Error("DEVILUDO_WEB_HOST_PORT must be a valid TCP port");
@@ -86,6 +88,10 @@ if (!/^\d+$/.test(gitImportPort) || Number(gitImportPort) < 1 || Number(gitImpor
 }
 if (!/^\d+$/.test(artifactPort) || Number(artifactPort) < 1 || Number(artifactPort) > 65535) {
   throw new Error("DEVILUDO_MINIO_HOST_PORT must be a valid TCP port");
+}
+if (!/^\d+$/.test(steamworksBridgePort) || Number(steamworksBridgePort) < 1 || Number(steamworksBridgePort) > 65535
+  || [webPort, corePort, gitImportPort, artifactPort].includes(steamworksBridgePort)) {
+  throw new Error("DEVILUDO_STEAMWORKS_BRIDGE_PORT must be a valid unused TCP port");
 }
 if ([webPort, corePort, gitImportPort].includes(artifactPort)) {
   throw new Error("Local Web, Core, project bridge, and artifact ports must be distinct");
@@ -104,6 +110,18 @@ await writeFile(
   `${JSON.stringify(remoteE2eConfiguration, null, 2)}\n`,
   { mode: 0o600 },
 );
+const previousSteamworksConfiguration = await readLocalSteamworksBridgeConfiguration();
+const steamworksConfiguration = {
+  port: Number(steamworksBridgePort),
+  internalToken: previousSteamworksConfiguration?.internalToken ?? randomBytes(32).toString("base64url"),
+};
+const steamworksConfigurationFile = new URL("../.deviludo/local/steamworks-bridge.json", import.meta.url);
+await writeFile(
+  steamworksConfigurationFile,
+  `${JSON.stringify(steamworksConfiguration, null, 2)}\n`,
+  { mode: 0o600 },
+);
+await chmod(steamworksConfigurationFile, 0o600);
 const previousGitImportConfiguration = await readLocalProjectBridgeConfiguration();
 const gitImportConfiguration = {
   port: Number(gitImportPort),
@@ -190,6 +208,10 @@ const baseEnvironment = {
   DEVILUDO_LOCAL_PROJECT_BRIDGE_HOST_URL: `http://host.docker.internal:${gitImportPort}`,
   DEVILUDO_LOCAL_PROJECT_BRIDGE_TOKEN: gitImportConfiguration.internalToken,
   DEVILUDO_LOCAL_DIRECTORY_BINDINGS: "1",
+  DEVILUDO_STEAM_PREPARATION_ENABLED: "1",
+  DEVILUDO_STEAMWORKS_BRIDGE_INTERNAL_URL: "http://local-steamworks-bridge-proxy:8792",
+  DEVILUDO_STEAMWORKS_BRIDGE_HOST_URL: `http://host.docker.internal:${steamworksBridgePort}`,
+  DEVILUDO_STEAMWORKS_BRIDGE_TOKEN: steamworksConfiguration.internalToken,
   DEVILUDO_PROVIDER_UPSTREAM_PROXY: providerUpstreamProxy,
   DEVILUDO_NPM_REGISTRY: npmRegistry,
   DEVILUDO_CODEX_ACCOUNT_DEFAULT_MODEL: codexAccountDefaultModel ?? "",
@@ -346,6 +368,18 @@ const { migrationRan, initialized } = await runStartupStage("Verify the database
   startupProgress(bootstrap.reused ? "Local node registration is unchanged; skipping bootstrap" : "Local nodes and runtimes registered");
   return { migrationRan: applied, initialized: bootstrap };
 });
+// Bring up the host bridge before the scheduler. A persisted preparation may be
+// immediately claimable after Core starts, and must not fail in the short window
+// where only the container-side proxy is listening.
+const steamworksBridgePid = await runStartupStage("Start the managed Steamworks browser bridge", async () => {
+  await executeVisible("npx", ["playwright", "install", "chromium"], { cwd: root, env: baseEnvironment });
+  const { runningLocalSteamworksBridgePid, startLocalSteamworksBridge, stopLocalSteamworksBridge } = await import("./local-steamworks-bridge-daemon.mjs");
+  const previousBridgePid = await runningLocalSteamworksBridgePid();
+  // Reload the versioned page adapter and exact token on every local stack start;
+  // the isolated Chromium profile remains on disk, so this does not discard login.
+  if (previousBridgePid) await stopLocalSteamworksBridge();
+  return startLocalSteamworksBridge(steamworksConfiguration);
+});
 await runStartupStage("Start Web, Core, and local dependencies", () => executeVisible("docker", [
   "compose",
   "-f", "infra/docker-compose.yml",
@@ -429,6 +463,7 @@ console.log(JSON.stringify({
   ciMode,
   webUrl: `http://127.0.0.1:${webPort}`,
   gitImportPid,
+  steamworksBridgePid,
   macE2ePid: e2ePid,
   remoteE2e: remoteE2eHost ? {
     coreUrl: remoteE2eConfiguration.coreUrl,
@@ -1340,10 +1375,23 @@ async function readLocalProjectBridgeConfiguration() {
     const value = JSON.parse(await readFile(new URL("../.deviludo/local/git-import.json", import.meta.url), "utf8"));
     if (value && typeof value === "object" && !Array.isArray(value)
       && typeof value.internalToken === "string"
+      && /^[A-Za-z0-9_-]{40,200}$/.test(value.internalToken)
+      && Number.isSafeInteger(value.port) && value.port > 0 && value.port <= 65535) {
+      return Object.freeze({ internalToken: value.internalToken, port: value.port });
+    }
+  } catch { /* first start or an obsolete local bridge configuration */ }
+  return null;
+}
+
+async function readLocalSteamworksBridgeConfiguration() {
+  try {
+    const value = JSON.parse(await readFile(new URL("../.deviludo/local/steamworks-bridge.json", import.meta.url), "utf8"));
+    if (value && typeof value === "object" && !Array.isArray(value)
+      && typeof value.internalToken === "string"
       && /^[A-Za-z0-9_-]{40,200}$/.test(value.internalToken)) {
       return Object.freeze({ internalToken: value.internalToken });
     }
-  } catch { /* first start or an obsolete local bridge configuration */ }
+  } catch { /* first start */ }
   return null;
 }
 

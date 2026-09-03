@@ -74,6 +74,81 @@ export class ProjectRuntimeRepository {
     return value;
   }
 
+  async readPublishingSteamSettings(workspaceId: string, projectId: string, turnId: string) {
+    return this.database.withWorkspace(workspaceId, async client => {
+      const result = await client.query(
+        `SELECT workflow.target_platforms::text[] AS target_platforms,
+                settings.app_id IS NOT NULL AS app_configured,
+                settings.depot_linux IS NOT NULL AS linux_configured,
+                settings.depot_windows IS NOT NULL AS windows_configured,
+                settings.depot_macos IS NOT NULL AS macos_configured,
+                settings.test_branch, preparation.source_revision::text,
+                preparation.draft_revision::text
+           FROM deviludo.agent_turns turn_row
+           JOIN deviludo.jobs job
+             ON job.workspace_id = turn_row.workspace_id
+            AND turn_row.output_summary = 'workflow-job:' || job.id::text
+           JOIN deviludo.workflow_instances workflow
+             ON workflow.workspace_id = job.workspace_id AND workflow.id = job.workflow_id
+           JOIN deviludo.project_steam_settings settings
+             ON settings.workspace_id = workflow.workspace_id AND settings.project_id = workflow.project_id
+           JOIN deviludo.steam_delivery_preparations preparation
+             ON preparation.workspace_id = workflow.workspace_id AND preparation.workflow_id = workflow.id
+          WHERE turn_row.workspace_id = $1::uuid AND turn_row.project_id = $2::uuid
+            AND turn_row.id = $3::uuid AND turn_row.role = 'PUBLISHING'
+            AND preparation.state = 'DRAFTING'`,
+        [workspaceId, projectId, turnId],
+      );
+      const row = result.rows[0];
+      if (!row) throw new Error("No active Steam preparation is authorized for this turn");
+      const configured = Object.freeze({
+        linux: row.linux_configured === true,
+        windows: row.windows_configured === true,
+        macos: row.macos_configured === true,
+      });
+      return Object.freeze({
+        appConfigured: row.app_configured === true,
+        targetPlatforms: Object.freeze(row.target_platforms ?? []),
+        depotConfigured: configured,
+        testBranch: String(row.test_branch),
+        sourceRevision: Number(row.source_revision),
+        currentDraftRevision: Number(row.draft_revision),
+      });
+    });
+  }
+
+  async replaceSteamDeliveryDraft(input: Readonly<{
+    workspaceId: string;
+    projectId: string;
+    turnId: string;
+    draft: Readonly<Record<string, unknown>>;
+  }>) {
+    return this.database.withWorkspace(input.workspaceId, async client => {
+      const result = await client.query(
+        `UPDATE deviludo.steam_delivery_preparations preparation
+            SET draft = $4::jsonb, draft_revision = draft_revision + 1,
+                publishing_turn_id = $3::uuid, updated_at = clock_timestamp()
+           FROM deviludo.agent_turns turn_row
+           JOIN deviludo.jobs job
+             ON job.workspace_id = turn_row.workspace_id
+            AND turn_row.output_summary = 'workflow-job:' || job.id::text
+          WHERE preparation.workspace_id = $1::uuid
+            AND preparation.project_id = $2::uuid
+            AND preparation.state = 'DRAFTING'
+            AND turn_row.workspace_id = preparation.workspace_id
+            AND turn_row.project_id = preparation.project_id
+            AND turn_row.id = $3::uuid
+            AND turn_row.role = 'PUBLISHING'
+            AND job.workflow_id = preparation.workflow_id
+          RETURNING preparation.workflow_id::text, preparation.draft_revision::text`,
+        [input.workspaceId, input.projectId, input.turnId, JSON.stringify(input.draft)],
+      );
+      if (!result.rows[0]) throw new Error("Steam delivery draft write was not authorized");
+      return Object.freeze({ accepted: true, workflowId: result.rows[0].workflow_id,
+        draftRevision: Number(result.rows[0].draft_revision) });
+    });
+  }
+
   async recordSourceRevision(input: Readonly<{
     workspaceId: string;
     projectId: string;

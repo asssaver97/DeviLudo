@@ -11,6 +11,7 @@ export const WORKFLOW_STATES = [
   "TEST_PLANNING",
   "TESTING",
   "RELEASE_APPROVAL_PENDING",
+  "STEAM_PREPARING",
   "STEAM_PUBLISHING",
   "SUCCEEDED",
   "BLOCKED",
@@ -35,14 +36,15 @@ export type WorkflowEvent =
   | Readonly<{ kind: "ASSETS_READY"; predecessorJobId: string }>
   | Readonly<{ kind: "ASSET_RERUN_REQUESTED" }>
   | Readonly<{ kind: "RELEASE_APPROVED"; approvalId: string }>
+  | Readonly<{ kind: "STEAM_PREPARATION_SAVED"; preparationId: string }>
   | Readonly<{ kind: "RELEASE_SKIPPED" }>
   | Readonly<{ kind: "CANCEL_REQUESTED" }>
   | Readonly<{
       kind: "JOB_SUCCEEDED";
       jobId: string;
       jobKind: JobKind;
-      agentRole?: "DESIGN" | "UI_DESIGN" | "DEVELOPMENT" | "TEST";
-      purpose?: "DESIGN" | "UI_DESIGN" | "DEVELOPMENT" | "TEST_PLAN" | "TEST_VERDICT";
+      agentRole?: "DESIGN" | "UI_DESIGN" | "DEVELOPMENT" | "TEST" | "PUBLISHING";
+      purpose?: "DESIGN" | "UI_DESIGN" | "DEVELOPMENT" | "TEST_PLAN" | "TEST_VERDICT" | "PUBLISHING";
       verdict?: "PASS" | "FAIL" | "BLOCKED" | "REPLAN";
       targetOperatingSystem: ServerOperatingSystem | null;
       /** Agent completion waits here only when this run has auto-generated art. */
@@ -95,8 +97,8 @@ export type EnqueueCommand = Readonly<{
   requiredCapabilities: readonly string[];
   exclusive: boolean;
   idempotencyKey: string;
-  agentRole: "DESIGN" | "UI_DESIGN" | "DEVELOPMENT" | "TEST" | null;
-  purpose: "DESIGN" | "UI_DESIGN" | "DEVELOPMENT" | "TEST_PLAN" | "TEST_VERDICT" | null;
+  agentRole: "DESIGN" | "UI_DESIGN" | "DEVELOPMENT" | "TEST" | "PUBLISHING" | null;
+  purpose: "DESIGN" | "UI_DESIGN" | "DEVELOPMENT" | "TEST_PLAN" | "TEST_VERDICT" | "PUBLISHING" | null;
 }>;
 
 export type WorkflowTransition = Readonly<{
@@ -150,9 +152,13 @@ export function transitionWorkflow(snapshot: WorkflowSnapshot, event: WorkflowEv
   }
   if (event.kind === "RELEASE_APPROVED" && snapshot.state === "RELEASE_APPROVAL_PENDING") {
     return result(
-      { ...snapshot, state: "STEAM_PUBLISHING" },
-      [command(snapshot, "STEAM_PUBLISH", null, `publish:approved:${event.approvalId}`)],
+      { ...snapshot, state: "STEAM_PREPARING" },
+      [command(snapshot, "AGENT_TURN", null, `publishing:approved:${event.approvalId}`, "PUBLISHING", "PUBLISHING")],
     );
+  }
+  if (event.kind === "STEAM_PREPARATION_SAVED" && snapshot.state === "STEAM_PREPARING") {
+    return result({ ...snapshot, state: "STEAM_PUBLISHING" },
+      [command(snapshot, "STEAM_PUBLISH", null, `publish:after-preparation:${event.preparationId}`)]);
   }
   if (event.kind !== "JOB_SUCCEEDED") throw new Error(`Event ${event.kind} is invalid for ${snapshot.state}`);
 
@@ -223,6 +229,9 @@ export function transitionWorkflow(snapshot: WorkflowSnapshot, event: WorkflowEv
   }
   if (snapshot.state === "STEAM_PUBLISHING" && event.jobKind === "STEAM_PUBLISH") {
     return result({ ...snapshot, state: "SUCCEEDED" }, []);
+  }
+  if (snapshot.state === "STEAM_PREPARING" && event.jobKind === "AGENT_TURN" && event.agentRole === "PUBLISHING") {
+    return result(snapshot, []);
   }
   throw new Error(`Job ${event.jobKind} is invalid for ${snapshot.state}`);
 }

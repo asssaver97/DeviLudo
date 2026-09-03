@@ -108,14 +108,15 @@ if (request.mode === "COMPACT") {
     ? { verdict: "REPLAN", handoff: null, reason: "The frozen plan references an unpublished Probe field." }
     : failed
     ? { verdict: "FAIL", handoff: { toRole: "DEVELOPMENT", summary: "Repair the failed platform evidence and rebuild." } }
-    : { verdict: "PASS", handoff: null };
+    : { verdict: "PASS", handoff: null, uiReview: fixtureUiReview() };
   await callTool("test.verdict", structured);
   content = JSON.stringify(structured);
 } else if (request.role === "TEST") {
   const goals = normalizeGoals(context?.e2e?.goals, context?.requirements);
   const assets = Array.isArray(context?.assetPlan) ? context.assetPlan : [];
+  const sourceManifest = await sourceBackedTestManifest(goals);
   const plan = {
-    testManifest: testManifest(goals),
+    testManifest: sourceManifest ?? testManifest(goals),
     assetPlacementPlan: assetPlacementPlan(assets),
   };
   const stored = await callTool("test_plan.replace", { plan });
@@ -242,6 +243,34 @@ function fixtureUiSpecification() {
       checkpoint("COMPLETION", "complete-control", "Show the completed loop and its next action."),
     ],
     assets: [],
+  };
+}
+
+function fixtureUiReview() {
+  return {
+    checkpoints: fixtureUiSpecification().checkpoints.map(checkpoint => ({
+      role: checkpoint.role,
+      checkpointId: `fixture-${checkpoint.role.toLowerCase()}`,
+      screenshotDescription: `The ${checkpoint.role.toLowerCase()} screenshot shows the complete authored game surface and its current primary action.`,
+      silhouetteMatches: true,
+      focalPointVisible: true,
+      primaryActionVisible: true,
+      negativeSpaceCompliant: true,
+      thumbnailReadMatches: true,
+      stressCaseHandled: true,
+      visualAnchorsVisible: true,
+      mostlyBlankUndecoratedPanelPresent: false,
+      acceptanceCriteria: checkpoint.acceptanceCriteria.map(criterion => ({
+        criterion,
+        status: "PASS",
+        evidence: "The fixture screenshot visibly satisfies this approved criterion.",
+      })),
+      forbiddenFallbacks: checkpoint.forbiddenFallbacks.map(fallback => ({
+        fallback,
+        present: false,
+        evidence: "The fixture screenshot does not contain this forbidden fallback.",
+      })),
+    })),
   };
 }
 
@@ -392,6 +421,66 @@ function testManifest(goals) {
       ] },
     }],
   };
+}
+
+async function sourceBackedTestManifest(goals) {
+  try {
+    const source = await callTool("source.read", { path: "agent.json" });
+    const parsed = JSON.parse(String(source?.content ?? ""));
+    const manifest = structuredClone(parsed?.testManifest);
+    if (!manifest || typeof manifest !== "object" || !Array.isArray(manifest.features)) return null;
+    const requirements = goals.map(goal => ({
+      requirementId: goal.id,
+      description: goal.description,
+      source: goal.source,
+      verificationClass: "PLAYER_INTERACTION",
+    }));
+    const requirementIds = requirements.map(item => item.requirementId);
+    manifest.requirements = requirements;
+    if (manifest.adaptivePlayer && typeof manifest.adaptivePlayer === "object") {
+      manifest.adaptivePlayer.requirementIds = requirementIds;
+    }
+    for (const feature of manifest.features) {
+      if (!feature || typeof feature !== "object") continue;
+      feature.requirementIds = requirementIds;
+      feature.coreJourney = feature.id === "play-aurora-loop";
+      const events = feature.interactionScript?.events;
+      if (!Array.isArray(events)) continue;
+      if (feature.coreJourney) {
+        const featureAction = events.find(event => event?.stepId === "collect-west-ember");
+        if (featureAction) featureAction.intent = "FEATURE_ACTION";
+        const completionIndex = events.findIndex(event => event?.type === "checkpoint" && event?.role === "COMPLETION");
+        if (completionIndex >= 0) events.splice(completionIndex, 0, {
+          type: "key_hold",
+          key: "KEY_A",
+          duration_ms: 50,
+          delay_ms: 50,
+          stepId: "fixture-complete-loop",
+          intent: "COMPLETE_LOOP",
+          coversRequirementIds: requirementIds,
+          postconditions: [{ source: "PROGRESS", key: "ship_x", operator: "CHANGED" }],
+        });
+      }
+      for (const event of events) {
+        if (!event || typeof event !== "object") continue;
+        if (Array.isArray(event.coversRequirementIds)) event.coversRequirementIds = requirementIds;
+        if (["checkpoint", "wait"].includes(String(event.type))) continue;
+        const postconditions = Array.isArray(event.postconditions) ? event.postconditions : [];
+        if (postconditions.some(item => item?.operator === "CHANGED")) continue;
+        const verticalMove = event.type === "key_hold" && ["KEY_W", "KEY_S"].includes(String(event.key));
+        const horizontalMove = event.type === "key_hold" && ["KEY_A", "KEY_D"].includes(String(event.key));
+        const changed = verticalMove
+          ? { source: "PROGRESS", key: "ship_y", operator: "CHANGED" }
+          : horizontalMove
+            ? { source: "PROGRESS", key: "ship_x", operator: "CHANGED" }
+            : { source: "STATE", key: "screen_mode", operator: "CHANGED" };
+        event.postconditions = [changed, ...postconditions];
+      }
+    }
+    return manifest;
+  } catch {
+    return null;
+  }
 }
 
 function assetPlacementPlan(assets) {

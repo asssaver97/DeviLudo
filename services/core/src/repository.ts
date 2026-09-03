@@ -20,6 +20,7 @@ import {
   type ProjectDiscoveryReport,
   type ProjectSourceRevision,
   type ProjectSteamSettings,
+  type SteamDeliveryPreparation,
   type SteamRelease,
   type WorkspaceSteamSettings,
   type WorkspaceSummary,
@@ -264,7 +265,7 @@ export class CoreRepository {
         `SELECT release.id::text, release.project_id::text, release.workflow_id::text,
                 workflow.iteration_number, release.version, release.release_number::text,
                 release.channel::text, release.target_branch, release.state::text,
-                release.steam_build_id, release.failure_message, release.created_at::text,
+                release.steam_build_id, release.failure_message, release.failure_stage, release.created_at::text,
                 release.uploaded_at::text, release.live_at::text
            FROM deviludo.steam_releases release
            JOIN deviludo.workflow_instances workflow
@@ -277,6 +278,82 @@ export class CoreRepository {
     });
   }
 
+  async readSteamPreparation(workspaceId: string, projectId: string, workflowId: string): Promise<SteamDeliveryPreparation | null> {
+    return this.database.withWorkspace(workspaceId, async client => {
+      const result = await client.query(
+        `SELECT preparation.workflow_id::text, preparation.project_id::text, preparation.release_id::text,
+                preparation.state, preparation.source_revision::text, preparation.draft_revision::text,
+                preparation.draft, preparation.save_receipt, preparation.failure_code,
+                preparation.failure_message, preparation.created_at::text, preparation.updated_at::text,
+                preparation.saved_at::text, release.app_id::text, release.depot_linux::text,
+                release.depot_windows::text, release.depot_macos::text
+           FROM deviludo.steam_delivery_preparations preparation
+           JOIN deviludo.steam_releases release
+             ON release.workspace_id = preparation.workspace_id AND release.id = preparation.release_id
+          WHERE preparation.workspace_id = $1::uuid AND preparation.project_id = $2::uuid
+            AND preparation.workflow_id = $3::uuid`,
+        [workspaceId, projectId, workflowId],
+      );
+      if (!result.rows[0]) return null;
+      const row = result.rows[0];
+      const assetRows = await client.query(
+        `SELECT id::text, asset_key, kind, width, height, sha256, size_bytes::text
+           FROM deviludo.steam_store_assets
+          WHERE workspace_id = $1::uuid AND workflow_id = $2::uuid ORDER BY asset_key`,
+        [workspaceId, workflowId],
+      );
+      const draft = row.draft && typeof row.draft === "object" ? row.draft as Record<string, unknown> : null;
+      const localizations = Array.isArray(draft?.localizations) ? draft.localizations as Record<string, unknown>[] : [];
+      return Object.freeze({
+        workflowId: row.workflow_id, projectId: row.project_id, releaseId: row.release_id,
+        state: row.state, sourceRevision: Number(row.source_revision), draftRevision: Number(row.draft_revision),
+        draft, generatedLanguages: Object.freeze(localizations.map(item => String(item.language ?? "")).filter(Boolean)),
+        validatedIds: Object.freeze({ appId: row.app_id, depots: Object.freeze(Object.fromEntries([
+          ["linux", row.depot_linux], ["windows", row.depot_windows], ["macos", row.depot_macos],
+        ].filter((entry): entry is [string, string] => typeof entry[1] === "string"))) }),
+        browserSession: Object.freeze({ state: "UNAVAILABLE" as const, checkedAt: null }),
+        assets: Object.freeze(assetRows.rows.map(asset => Object.freeze({
+          id: asset.id, key: asset.asset_key, kind: asset.kind, width: Number(asset.width), height: Number(asset.height),
+          sha256: asset.sha256, sizeBytes: Number(asset.size_bytes),
+        }))),
+        receipt: row.save_receipt ?? null, failureCode: row.failure_code ?? null,
+        failureMessage: row.failure_message ?? null, createdAt: row.created_at, updatedAt: row.updated_at,
+        savedAt: row.saved_at ?? null,
+      });
+    });
+  }
+
+  async retrySteamPreparation(input: Readonly<{
+    workspaceId: string; projectId: string; workflowId: string; idempotencyKey: string; requestedByActorId: string;
+  }>): Promise<boolean> {
+    return this.database.withWorkspace(input.workspaceId, async client => {
+      const owned = await client.query(
+        `SELECT 1 FROM deviludo.steam_delivery_preparations
+          WHERE project_id = $1::uuid AND workflow_id = $2::uuid`,
+        [input.projectId, input.workflowId],
+      );
+      if (!owned.rows[0]) throw new Error("Steam preparation does not belong to this project");
+      const result = await client.query(
+        `SELECT deviludo.retry_steam_preparation($1::uuid, $2, $3::uuid) AS accepted`,
+        [input.workflowId, input.idempotencyKey, input.requestedByActorId],
+      );
+      return result.rows[0]?.accepted === true;
+    });
+  }
+
+  async readSteamPreparationAssetObjects(workspaceId: string, projectId: string, workflowId: string) {
+    return this.database.withWorkspace(workspaceId, async client => {
+      const result = await client.query(
+        `SELECT asset_key, bucket, object_key, sha256, size_bytes::text
+           FROM deviludo.steam_store_assets
+          WHERE workspace_id = $1::uuid AND project_id = $2::uuid AND workflow_id = $3::uuid`,
+        [workspaceId, projectId, workflowId],
+      );
+      return Object.freeze(result.rows.map(row => Object.freeze({ key: row.asset_key, bucket: row.bucket,
+        objectKey: row.object_key, sha256: row.sha256, sizeBytes: Number(row.size_bytes) })));
+    });
+  }
+
   async createSteamRelease(input: Readonly<{
     workspaceId: string;
     projectId: string;
@@ -284,6 +361,7 @@ export class CoreRepository {
     version: string;
     channel: "TEST" | "DEFAULT";
     requestedByActorId: string;
+    automatedPreparation?: boolean;
   }>): Promise<Readonly<{ release: SteamRelease; accepted: boolean }>> {
     return this.database.withWorkspace(input.workspaceId, async client => {
       await client.query(
@@ -387,7 +465,8 @@ export class CoreRepository {
       const accepted = await client.query<{ accepted: boolean }>(
         `SELECT deviludo.start_steam_release($1::uuid, $2::uuid, $3, $4::jsonb) AS accepted`,
         [input.workflowId, releaseId, `release-approved:${releaseId}`,
-          JSON.stringify({ requestedByActorId: input.requestedByActorId })],
+          JSON.stringify({ requestedByActorId: input.requestedByActorId,
+            automatedPreparation: input.automatedPreparation !== false })],
       );
       const release = await client.query<SteamReleaseRow>(steamReleaseSelectSql("release.id = $3::uuid"),
         [input.workspaceId, input.projectId, releaseId]);
@@ -1882,6 +1961,100 @@ export class CoreRepository {
    */
   get assets(): AssetManifestStore {
     return new AssetManifestStore(this.database);
+  }
+
+  async claimSteamPreparation(leaseSeconds = 600): Promise<SteamPreparationLease | null> {
+    const result = await this.database.pool.query(
+      `SELECT workspace_id::text, workflow_id::text, project_id::text, release_id::text,
+              lease_token::text, preparation_state, draft_revision::text,
+              source_revision::text, e2e_revision, draft, project_name,
+              source_relative_path, target_platforms::text[], app_id::text, depot_linux::text, depot_windows::text, depot_macos::text
+         FROM deviludo.claim_steam_preparation($1)`, [leaseSeconds],
+    );
+    const row = result.rows[0];
+    return row ? Object.freeze({
+      workspaceId: row.workspace_id, workflowId: row.workflow_id, projectId: row.project_id,
+      releaseId: row.release_id, leaseToken: row.lease_token, state: row.preparation_state,
+      draftRevision: Number(row.draft_revision), sourceRevision: Number(row.source_revision),
+      e2eRevision: row.e2e_revision, draft: row.draft, projectName: row.project_name,
+      sourceRelativePath: row.source_relative_path,
+      targetPlatforms: Object.freeze(row.target_platforms), appId: row.app_id,
+      depots: Object.freeze(Object.fromEntries(
+        [["linux", row.depot_linux], ["windows", row.depot_windows], ["macos", row.depot_macos]]
+          .filter((entry): entry is [string, string] => typeof entry[1] === "string"),
+      )),
+    }) : null;
+  }
+
+  async replaceSteamStoreAssets(lease: SteamPreparationLease, assets: readonly SteamStoreAssetRecord[]): Promise<void> {
+    await this.database.withWorkspace(lease.workspaceId, async client => {
+      const owned = await client.query(
+        `SELECT 1 FROM deviludo.steam_delivery_preparations
+          WHERE workspace_id = $1::uuid AND workflow_id = $2::uuid
+            AND lease_token = $3::uuid AND lease_expires_at > clock_timestamp() FOR UPDATE`,
+        [lease.workspaceId, lease.workflowId, lease.leaseToken],
+      );
+      if (!owned.rows[0]) throw new Error("Steam preparation lease expired");
+      await client.query(`DELETE FROM deviludo.steam_store_assets WHERE workspace_id = $1::uuid AND workflow_id = $2::uuid`,
+        [lease.workspaceId, lease.workflowId]);
+      for (const asset of assets) {
+        await client.query(
+          `INSERT INTO deviludo.steam_store_assets(
+             workspace_id, project_id, workflow_id, asset_key, kind, source_kind,
+             width, height, bucket, object_key, sha256, size_bytes
+           ) VALUES ($1::uuid, $2::uuid, $3::uuid, $4, $5, $6, $7, $8, $9, $10, $11, $12)`,
+          [lease.workspaceId, lease.projectId, lease.workflowId, asset.key, asset.kind, asset.sourceKind,
+            asset.width, asset.height, asset.bucket, asset.objectKey, asset.sha256, asset.sizeBytes],
+        );
+      }
+    });
+  }
+
+  async readSteamStoreAssetsForLease(lease: SteamPreparationLease): Promise<readonly SteamStoreAssetRecord[]> {
+    const result = await this.database.withWorkspace(lease.workspaceId, client => client.query(
+      `SELECT asset_key, kind, source_kind, width, height, bucket, object_key, sha256, size_bytes::text
+         FROM deviludo.steam_store_assets asset
+        WHERE asset.workspace_id = $1::uuid AND asset.workflow_id = $2::uuid
+          AND EXISTS (
+            SELECT 1 FROM deviludo.steam_delivery_preparations preparation
+             WHERE preparation.workspace_id = asset.workspace_id
+               AND preparation.workflow_id = asset.workflow_id
+               AND preparation.state = 'SYNCING'
+               AND preparation.lease_token = $3::uuid
+               AND preparation.lease_expires_at > clock_timestamp()
+          )
+        ORDER BY asset_key`,
+      [lease.workspaceId, lease.workflowId, lease.leaseToken],
+    ));
+    return Object.freeze(result.rows.map(row => Object.freeze({
+      key: row.asset_key, kind: row.kind, sourceKind: row.source_kind,
+      width: Number(row.width), height: Number(row.height), bucket: row.bucket,
+      objectKey: row.object_key, sha256: row.sha256, sizeBytes: Number(row.size_bytes),
+    })));
+  }
+
+  async markSteamPreparationSyncing(lease: SteamPreparationLease): Promise<boolean> {
+    const result = await this.database.pool.query(
+      `SELECT deviludo.mark_steam_preparation_syncing($1::uuid, $2::uuid, $3::uuid) AS changed`,
+      [lease.workspaceId, lease.workflowId, lease.leaseToken],
+    );
+    return result.rows[0]?.changed === true;
+  }
+
+  async completeSteamPreparation(lease: SteamPreparationLease, receipt: Readonly<Record<string, unknown>>): Promise<boolean> {
+    const result = await this.database.pool.query(
+      `SELECT deviludo.complete_steam_preparation($1::uuid, $2::uuid, $3::uuid, $4::jsonb) AS completed`,
+      [lease.workspaceId, lease.workflowId, lease.leaseToken, JSON.stringify(receipt)],
+    );
+    return result.rows[0]?.completed === true;
+  }
+
+  async failSteamPreparation(lease: SteamPreparationLease, code: string, message: string, loginRequired = false): Promise<boolean> {
+    const result = await this.database.pool.query(
+      `SELECT deviludo.fail_steam_preparation($1::uuid, $2::uuid, $3::uuid, $4, $5, $6) AS failed`,
+      [lease.workspaceId, lease.workflowId, lease.leaseToken, code, message, loginRequired],
+    );
+    return result.rows[0]?.failed === true;
   }
 
   async readProjectArtifact(workspaceId: string, projectId: string, artifactId: string): Promise<ArtifactRecord | null> {
@@ -4351,10 +4524,41 @@ type SteamReleaseRow = {
   state: SteamRelease["state"];
   steam_build_id: string | null;
   failure_message: string | null;
+  failure_stage: "STEAM_PREPARATION" | "STEAM_PUBLISH" | null;
   created_at: string;
   uploaded_at: string | null;
   live_at: string | null;
 };
+
+export type SteamPreparationLease = Readonly<{
+  workspaceId: string;
+  workflowId: string;
+  projectId: string;
+  releaseId: string;
+  leaseToken: string;
+  state: "GENERATING_ASSETS" | "SYNCING";
+  draftRevision: number;
+  sourceRevision: number;
+  e2eRevision: Readonly<Record<string, unknown>>;
+  draft: Readonly<Record<string, unknown>>;
+  projectName: string;
+  sourceRelativePath: string;
+  targetPlatforms: readonly ServerOperatingSystem[];
+  appId: string;
+  depots: Readonly<Record<string, string>>;
+}>;
+
+export type SteamStoreAssetRecord = Readonly<{
+  key: string;
+  kind: "STORE" | "LIBRARY" | "SCREENSHOT";
+  sourceKind: "GENERATED" | "E2E";
+  width: number;
+  height: number;
+  bucket: string;
+  objectKey: string;
+  sha256: string;
+  sizeBytes: number;
+}>;
 
 type CreationReceiptRow = {
   idempotency_key: string;
@@ -4638,7 +4842,7 @@ function productJobFromRow(job: ProductJobRow): ProductJob {
 
 function productJobAgentRole(role: string | null): ProductJob["agentRole"] {
   return role === "INTENT" || role === "ANALYSIS" || role === "DESIGN"
-    || role === "UI_DESIGN" || role === "DEVELOPMENT" || role === "TEST" ? role : null;
+    || role === "UI_DESIGN" || role === "DEVELOPMENT" || role === "TEST" || role === "PUBLISHING" ? role : null;
 }
 
 function productEventFromRow(event: ProductEventRow): ProductEvent {
@@ -5030,7 +5234,7 @@ function steamReleaseSelectSql(where: string, forUpdate = false): string {
   return `SELECT release.id::text, release.project_id::text, release.workflow_id::text,
                  workflow.iteration_number, release.version, release.release_number::text,
                  release.channel::text, release.target_branch, release.state::text,
-                 release.steam_build_id, release.failure_message, release.created_at::text,
+                 release.steam_build_id, release.failure_message, release.failure_stage, release.created_at::text,
                  release.uploaded_at::text, release.live_at::text
             FROM deviludo.steam_releases release
             JOIN deviludo.workflow_instances workflow
@@ -5052,6 +5256,7 @@ function steamReleaseFromRow(row: SteamReleaseRow): SteamRelease {
     state: row.state,
     steamBuildId: row.steam_build_id,
     failureMessage: row.failure_message,
+    failureStage: row.failure_stage,
     createdAt: row.created_at,
     uploadedAt: row.uploaded_at,
     liveAt: row.live_at,

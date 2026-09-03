@@ -2,6 +2,7 @@ import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { stopLocalE2e } from "./local-e2e-daemon.mjs";
 import { stopLocalGitImport } from "./local-git-import-daemon.mjs";
+import { stopLocalSteamworksBridge } from "./local-steamworks-bridge-daemon.mjs";
 import { cleanupLocalTartOrphans } from "./local-tart-orphans.mjs";
 
 const execute = promisify(execFile);
@@ -16,6 +17,7 @@ if (process.argv.includes("--volumes")) composeArguments.push("--volumes");
 const shutdownResults = await Promise.allSettled([
   runShutdownStage("Stop the macOS E2E service", stopLocalE2e),
   runShutdownStage("Stop the local project bridge", stopLocalGitImport),
+  runShutdownStage("Stop the managed Steamworks browser bridge", stopLocalSteamworksBridge),
   runShutdownStage("Stop and remove local containers", async () => {
     const result = await execute("docker", composeArguments, {
       cwd: root,

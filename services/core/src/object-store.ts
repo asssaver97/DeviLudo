@@ -122,6 +122,41 @@ export class CoreObjectStore {
     return Object.freeze({ bucket: this.bucket, key, sha256, sizeBytes: input.content.length });
   }
 
+  async putSteamStoreAsset(input: Readonly<{
+    workspaceId: string;
+    projectId: string;
+    workflowId: string;
+    assetKey: string;
+    content: Buffer;
+  }>) {
+    if (![input.workspaceId, input.projectId, input.workflowId].every(value => UUID.test(value))
+      || !/^[a-z0-9][a-z0-9._-]{1,79}$/.test(input.assetKey)
+      || input.content.length < 1 || input.content.length > 20 * 1024 * 1024) {
+      throw new Error("Steam store asset boundary is invalid");
+    }
+    const sha256 = `sha256:${createHash("sha256").update(input.content).digest("hex")}`;
+    const key = `workspaces/${input.workspaceId}/projects/${input.projectId}/steam-store/${input.workflowId}/${input.assetKey}-${sha256.slice(7, 23)}.png`;
+    await this.client.send(new PutObjectCommand({
+      Bucket: this.bucket, Key: key, Body: input.content, ContentType: "image/png", Metadata: { sha256 },
+    }));
+    return Object.freeze({ bucket: this.bucket, key, sha256, sizeBytes: input.content.length });
+  }
+
+  async authorizeSteamStoreAsset(input: Readonly<{
+    workspaceId: string; projectId: string; bucket: string; key: string; sha256: string; sizeBytes: number;
+  }>) {
+    const prefix = `workspaces/${input.workspaceId}/projects/${input.projectId}/steam-store/`;
+    if (input.bucket !== this.bucket || !input.key.startsWith(prefix)
+      || !/^sha256:[0-9a-f]{64}$/.test(input.sha256)
+      || !Number.isSafeInteger(input.sizeBytes) || input.sizeBytes < 1 || input.sizeBytes > 20 * 1024 * 1024) {
+      throw new Error("Steam store asset authorization boundary is invalid");
+    }
+    return Object.freeze({
+      url: await getSignedUrl(this.publicClient, new GetObjectCommand({ Bucket: input.bucket, Key: input.key }), { expiresIn: 120 }),
+      sha256: input.sha256, sizeBytes: input.sizeBytes, expiresAt: new Date(Date.now() + 120_000).toISOString(),
+    });
+  }
+
   async putConversationAttachment(input: Readonly<{
     workspaceId: string;
     projectId: string;

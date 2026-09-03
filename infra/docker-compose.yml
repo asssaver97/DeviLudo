@@ -39,6 +39,9 @@ x-core: &core
     DEVILUDO_LOCAL_DIRECTORY_BINDINGS: ${DEVILUDO_LOCAL_DIRECTORY_BINDINGS:-0}
     DEVILUDO_LOCAL_PROJECT_BRIDGE_INTERNAL_URL: ${DEVILUDO_LOCAL_PROJECT_BRIDGE_INTERNAL_URL:-}
     DEVILUDO_LOCAL_PROJECT_BRIDGE_TOKEN: ${DEVILUDO_LOCAL_PROJECT_BRIDGE_TOKEN:-}
+    DEVILUDO_STEAM_PREPARATION_ENABLED: ${DEVILUDO_STEAM_PREPARATION_ENABLED:-0}
+    DEVILUDO_STEAMWORKS_BRIDGE_INTERNAL_URL: ${DEVILUDO_STEAMWORKS_BRIDGE_INTERNAL_URL:-}
+    DEVILUDO_STEAMWORKS_BRIDGE_TOKEN: ${DEVILUDO_STEAMWORKS_BRIDGE_TOKEN:-}
     OTEL_EXPORTER_OTLP_ENDPOINT: http://otel-collector:4318
   depends_on:
     postgres:
@@ -331,6 +334,32 @@ services:
       - local-host
     healthcheck:
       test: ["CMD", "wget", "-qO-", "http://127.0.0.1:${DEVILUDO_LOCAL_GIT_IMPORT_PORT:-3199}/health"]
+      interval: 10s
+      start_interval: 500ms
+      start_period: 30s
+      timeout: 3s
+      retries: 6
+
+  local-steamworks-bridge-proxy:
+    image: deviludo-core:local
+    restart: unless-stopped
+    user: "1001:1001"
+    read_only: true
+    cap_drop: ["ALL"]
+    security_opt: ["no-new-privileges:true"]
+    environment:
+      NODE_ENV: development
+      PORT: "8792"
+      DEVILUDO_STEAMWORKS_BRIDGE_HOST_URL: ${DEVILUDO_STEAMWORKS_BRIDGE_HOST_URL:-http://host.docker.internal:8792}
+      DEVILUDO_STEAMWORKS_BRIDGE_TOKEN: ${DEVILUDO_STEAMWORKS_BRIDGE_TOKEN:-disabled-local-steamworks-bridge-token-000000000000000000000000000000}
+    command: ["node", "scripts/local-steamworks-bridge-proxy.mjs"]
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    networks:
+      - data
+      - local-host
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:8792/health"]
       interval: 10s
       start_interval: 500ms
       start_period: 30s

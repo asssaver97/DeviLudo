@@ -116,10 +116,11 @@ test("Docker dependency downloads are cached and health checks probe quickly onl
   assert.match(dockerignore, /^!scripts\/migrate-postgres\.mjs$/m);
   assert.match(dockerignore, /^!scripts\/local-database-smoke\.mjs$/m);
   assert.match(dockerignore, /^!scripts\/local-project-bridge-proxy\.mjs$/m);
+  assert.match(dockerignore, /^!scripts\/local-steamworks-bridge-proxy\.mjs$/m);
   assert.doesNotMatch(dockerignore, /^!scripts\/local-up\.mjs$/m);
-  assert.equal((compose.match(/start_interval: 500ms/g) ?? []).length, 5);
-  assert.equal((compose.match(/start_period: 30s/g) ?? []).length, 5);
-  assert.equal((compose.match(/interval: 10s/g) ?? []).length, 5);
+  assert.equal((compose.match(/start_interval: 500ms/g) ?? []).length, 6);
+  assert.equal((compose.match(/start_period: 30s/g) ?? []).length, 6);
+  assert.equal((compose.match(/interval: 10s/g) ?? []).length, 6);
 });
 
 test("a fingerprint that cannot be computed never satisfies a gate", async () => {

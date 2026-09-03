@@ -38,5 +38,6 @@ scripts/**
 !scripts/bootstrap-vault.mjs
 !scripts/bootstrap-object-store.mjs
 !scripts/local-project-bridge-proxy.mjs
+!scripts/local-steamworks-bridge-proxy.mjs
 !scripts/local-project-bridge-fixture.mjs
 !scripts/e2e-evidence.mjs

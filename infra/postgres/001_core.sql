@@ -41,7 +41,7 @@ CREATE TYPE deviludo.server_node_state AS ENUM (
 );
 CREATE TYPE deviludo.workflow_state AS ENUM (
   'DRAFT', 'ANALYZING', 'DESIGNING', 'UI_DESIGNING', 'DEVELOPING', 'BUILDING', 'TEST_PLANNING',
-  'TESTING', 'RELEASE_APPROVAL_PENDING', 'STEAM_PUBLISHING',
+  'TESTING', 'RELEASE_APPROVAL_PENDING', 'STEAM_PREPARING', 'STEAM_PUBLISHING',
   'SUCCEEDED', 'BLOCKED', 'STOPPED', 'FAILED', 'CANCELLED'
 );
 CREATE TYPE deviludo.job_kind AS ENUM (
@@ -54,7 +54,7 @@ CREATE TYPE deviludo.operation_state AS ENUM (
   'REGISTERED', 'IN_PROGRESS', 'RECEIPTED', 'RECONCILIATION_REQUIRED', 'VOID'
 );
 CREATE TYPE deviludo.agent_runtime AS ENUM ('CLAUDE_CODE', 'CODEX_CLI');
-CREATE TYPE deviludo.agent_role AS ENUM ('INTENT', 'ANALYSIS', 'DESIGN', 'UI_DESIGN', 'DEVELOPMENT', 'TEST');
+CREATE TYPE deviludo.agent_role AS ENUM ('INTENT', 'ANALYSIS', 'DESIGN', 'UI_DESIGN', 'DEVELOPMENT', 'TEST', 'PUBLISHING');
 CREATE TYPE deviludo.agent_container_state AS ENUM (
   'CREATING', 'RUNNING', 'PAUSING', 'PAUSED', 'COMPACTING', 'DESTROYED', 'STOPPED', 'FAILED'
 );
@@ -68,7 +68,7 @@ CREATE TYPE deviludo.artifact_kind AS ENUM (
 );
 CREATE TYPE deviludo.steam_release_channel AS ENUM ('TEST', 'DEFAULT');
 CREATE TYPE deviludo.steam_release_state AS ENUM (
-  'UPLOADING', 'FAILED', 'LIVE_TEST', 'AWAITING_DEFAULT_PROMOTION', 'LIVE_DEFAULT'
+  'PREPARING', 'UPLOADING', 'FAILED', 'LIVE_TEST', 'AWAITING_DEFAULT_PROMOTION', 'LIVE_DEFAULT'
 );
 
 -- This is a destructive compatibility baseline, not an incremental migration
@@ -583,7 +583,7 @@ CREATE TABLE deviludo.steam_releases (
   release_number bigint NOT NULL CHECK (release_number > 0),
   channel deviludo.steam_release_channel NOT NULL,
   target_branch text NOT NULL CHECK (target_branch ~ '^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$'),
-  state deviludo.steam_release_state NOT NULL DEFAULT 'UPLOADING',
+  state deviludo.steam_release_state NOT NULL DEFAULT 'PREPARING',
   app_id bigint NOT NULL CHECK (app_id > 0),
   depot_linux bigint,
   depot_windows bigint,
@@ -595,6 +595,7 @@ CREATE TABLE deviludo.steam_releases (
   build_digests jsonb NOT NULL CHECK (jsonb_typeof(build_digests) = 'object'),
   steam_build_id text,
   failure_message text,
+  failure_stage text CHECK (failure_stage IS NULL OR failure_stage IN ('STEAM_PREPARATION', 'STEAM_PUBLISH')),
   requested_by_actor_id uuid NOT NULL,
   uploaded_at timestamptz,
   live_at timestamptz,
@@ -607,6 +608,59 @@ CREATE TABLE deviludo.steam_releases (
   FOREIGN KEY (workspace_id, project_id) REFERENCES deviludo.projects(workspace_id, id),
   FOREIGN KEY (workspace_id, workflow_id) REFERENCES deviludo.workflow_instances(workspace_id, id),
   CHECK ((channel = 'DEFAULT' AND target_branch = 'default') OR (channel = 'TEST' AND target_branch <> 'default'))
+);
+
+CREATE TABLE deviludo.steam_delivery_preparations (
+  workspace_id uuid NOT NULL,
+  workflow_id uuid NOT NULL,
+  project_id uuid NOT NULL,
+  release_id uuid NOT NULL,
+  state text NOT NULL DEFAULT 'PENDING'
+    CHECK (state IN ('PENDING', 'DRAFTING', 'GENERATING_ASSETS', 'SYNCING', 'SAVED', 'FAILED', 'LOGIN_REQUIRED')),
+  source_revision bigint NOT NULL CHECK (source_revision > 0),
+  e2e_revision jsonb NOT NULL CHECK (jsonb_typeof(e2e_revision) = 'object'),
+  draft_revision bigint NOT NULL DEFAULT 0 CHECK (draft_revision >= 0),
+  draft jsonb CHECK (draft IS NULL OR jsonb_typeof(draft) = 'object'),
+  publishing_turn_id uuid,
+  failure_code text CHECK (failure_code IS NULL OR failure_code ~ '^[A-Z][A-Z0-9_]{1,63}$'),
+  failure_message text,
+  save_receipt jsonb CHECK (save_receipt IS NULL OR jsonb_typeof(save_receipt) = 'object'),
+  lease_token uuid,
+  lease_expires_at timestamptz,
+  attempt integer NOT NULL DEFAULT 0 CHECK (attempt BETWEEN 0 AND 20),
+  saved_at timestamptz,
+  created_at timestamptz NOT NULL DEFAULT clock_timestamp(),
+  updated_at timestamptz NOT NULL DEFAULT clock_timestamp(),
+  PRIMARY KEY (workspace_id, workflow_id),
+  UNIQUE (workspace_id, release_id),
+  FOREIGN KEY (workspace_id, project_id) REFERENCES deviludo.projects(workspace_id, id) ON DELETE CASCADE,
+  FOREIGN KEY (workspace_id, workflow_id) REFERENCES deviludo.workflow_instances(workspace_id, id) ON DELETE CASCADE,
+  FOREIGN KEY (workspace_id, release_id) REFERENCES deviludo.steam_releases(workspace_id, id) ON DELETE CASCADE
+);
+CREATE INDEX steam_delivery_preparations_claim
+  ON deviludo.steam_delivery_preparations(state, updated_at)
+  WHERE state IN ('GENERATING_ASSETS', 'SYNCING');
+
+CREATE TABLE deviludo.steam_store_assets (
+  workspace_id uuid NOT NULL,
+  id uuid NOT NULL DEFAULT gen_random_uuid(),
+  project_id uuid NOT NULL,
+  workflow_id uuid NOT NULL,
+  asset_key text NOT NULL CHECK (asset_key ~ '^[a-z0-9][a-z0-9._-]{1,79}$'),
+  kind text NOT NULL CHECK (kind IN ('STORE', 'LIBRARY', 'SCREENSHOT')),
+  source_kind text NOT NULL CHECK (source_kind IN ('GENERATED', 'E2E')),
+  width integer NOT NULL CHECK (width BETWEEN 1 AND 8192),
+  height integer NOT NULL CHECK (height BETWEEN 1 AND 8192),
+  bucket text NOT NULL CHECK (length(bucket) BETWEEN 3 AND 255),
+  object_key text NOT NULL,
+  sha256 text NOT NULL CHECK (sha256 ~ '^sha256:[0-9a-f]{64}$'),
+  size_bytes bigint NOT NULL CHECK (size_bytes > 0),
+  created_at timestamptz NOT NULL DEFAULT clock_timestamp(),
+  PRIMARY KEY (workspace_id, id),
+  UNIQUE (workspace_id, workflow_id, asset_key),
+  FOREIGN KEY (workspace_id, project_id) REFERENCES deviludo.projects(workspace_id, id) ON DELETE CASCADE,
+  FOREIGN KEY (workspace_id, workflow_id) REFERENCES deviludo.steam_delivery_preparations(workspace_id, workflow_id) ON DELETE CASCADE,
+  CHECK (object_key LIKE 'workspaces/' || workspace_id::text || '/projects/' || project_id::text || '/steam-store/%')
 );
 
 CREATE TABLE deviludo.workflow_events (
@@ -1699,7 +1753,7 @@ BEGIN
     'project_documents', 'project_document_revisions',
     'project_conversations', 'conversation_messages',
     'agent_installations', 'workflow_instances', 'implementation_change_requests',
-    'workflow_e2e_goal_revisions', 'steam_releases', 'workflow_events',
+    'workflow_e2e_goal_revisions', 'steam_releases', 'steam_delivery_preparations', 'steam_store_assets', 'workflow_events',
     'jobs', 'external_signals', 'job_progress_events',
     'operation_receipts', 'workspace_claim_fairness',
     'artifacts', 'artifact_inputs', 'pending_object_uploads', 'object_cleanup_queue',
@@ -1766,9 +1820,9 @@ BEGIN
   role := coalesce(job.payload->>'role', 'DEVELOPMENT');
   purpose := coalesce(job.payload->>'purpose', CASE role
     WHEN 'DESIGN' THEN 'DESIGN' WHEN 'UI_DESIGN' THEN 'UI_DESIGN'
-    WHEN 'TEST' THEN 'TEST_PLAN' ELSE 'DEVELOPMENT' END);
-  IF role NOT IN ('DESIGN', 'UI_DESIGN', 'DEVELOPMENT', 'TEST')
-    OR purpose NOT IN ('DESIGN', 'UI_DESIGN', 'DEVELOPMENT', 'TEST_PLAN', 'TEST_VERDICT')
+    WHEN 'TEST' THEN 'TEST_PLAN' WHEN 'PUBLISHING' THEN 'PUBLISHING' ELSE 'DEVELOPMENT' END);
+  IF role NOT IN ('DESIGN', 'UI_DESIGN', 'DEVELOPMENT', 'TEST', 'PUBLISHING')
+    OR purpose NOT IN ('DESIGN', 'UI_DESIGN', 'DEVELOPMENT', 'TEST_PLAN', 'TEST_VERDICT', 'PUBLISHING')
     OR jsonb_typeof(p_output) <> 'object' THEN
     RAISE EXCEPTION 'invalid persistent Agent turn completion';
   END IF;
@@ -1799,7 +1853,18 @@ BEGIN
     'agent-turn-succeeded:' || job.id::text)
   ON CONFLICT (workspace_id, workflow_id, idempotency_key) DO NOTHING;
 
-  IF role = 'DESIGN' THEN
+  IF role = 'PUBLISHING' THEN
+    UPDATE deviludo.steam_delivery_preparations
+       SET state = 'GENERATING_ASSETS', failure_code = NULL, failure_message = NULL,
+           updated_at = clock_timestamp()
+     WHERE workspace_id = job.workspace_id AND workflow_id = job.workflow_id
+       AND project_id = job.project_id AND state = 'DRAFTING'
+       AND draft IS NOT NULL AND draft_revision > 0
+       AND publishing_turn_id = (p_output->>'turnId')::uuid;
+    IF NOT FOUND THEN
+      RAISE EXCEPTION 'Publishing Agent did not persist a complete Steam delivery draft';
+    END IF;
+  ELSIF role = 'DESIGN' THEN
     UPDATE deviludo.workflow_instances SET state = 'UI_DESIGNING', version = version + 1,
       updated_at = clock_timestamp() WHERE workspace_id = job.workspace_id AND id = job.workflow_id;
     PERFORM deviludo.enqueue_job(job.workspace_id, job.workflow_id, job.project_id, 'AGENT_TURN', NULL,
@@ -3174,6 +3239,8 @@ DECLARE
   repair_build_job_id uuid;
   repair_build_summary text;
   repair_build_updated_at timestamptz;
+  preparation_source_revision bigint;
+  preparation_e2e_revision jsonb;
 BEGIN
   -- The routing below is a chain of guarded branches, so a kind this version does
   -- not know falls through it: the signal row inserts, the function returns true,
@@ -3263,7 +3330,7 @@ BEGIN
       SELECT 1 FROM deviludo.steam_releases release
        WHERE release.workspace_id = workflow.workspace_id
          AND release.workflow_id = workflow.id
-         AND release.state = 'FAILED'
+         AND release.state = 'FAILED' AND release.failure_stage = 'STEAM_PUBLISH'
     ) THEN
       RAISE EXCEPTION 'Steam upload can only be retried for the failed release in this iteration';
     END IF;
@@ -3276,7 +3343,7 @@ BEGIN
      WHERE release.workspace_id = workflow.workspace_id
        AND release.workflow_id = workflow.id
        AND release.id = (p_payload->>'releaseId')::uuid
-       AND release.state = 'UPLOADING'
+       AND release.state = 'PREPARING'
      FOR UPDATE;
     IF steam_release.id IS NULL THEN RAISE EXCEPTION 'Steam release approval is invalid'; END IF;
   END IF;
@@ -3477,41 +3544,84 @@ BEGIN
         ) ELSE jsonb_build_object('targetPlatforms', workflow.target_platforms) END
       );
       IF rerun_stage = 'STEAM_PUBLISH' THEN
-        UPDATE deviludo.steam_releases SET state = 'UPLOADING', failure_message = NULL,
+        UPDATE deviludo.steam_releases SET state = 'UPLOADING', failure_message = NULL, failure_stage = NULL,
           updated_at = clock_timestamp()
          WHERE workspace_id = workflow.workspace_id AND workflow_id = workflow.id;
       END IF;
     END IF;
   ELSIF p_signal_kind = 'RELEASE_APPROVED' THEN
+    IF coalesce((p_payload->>'automatedPreparation')::boolean, true) = false THEN
+      UPDATE deviludo.workflow_instances SET state = 'STEAM_PUBLISHING', version = version + 1,
+          updated_at = clock_timestamp()
+       WHERE workspace_id = workflow.workspace_id AND id = workflow.id AND state = 'RELEASE_APPROVAL_PENDING';
+      UPDATE deviludo.steam_releases SET state = 'UPLOADING', updated_at = clock_timestamp()
+       WHERE workspace_id = workflow.workspace_id AND id = steam_release.id;
+      PERFORM deviludo.enqueue_job(
+        workflow.workspace_id, workflow.id, workflow.project_id, 'STEAM_PUBLISH', NULL,
+        workflow.id::text || ':publish:manual-preparation:' || inserted_id::text,
+        jsonb_build_object('targetPlatforms', workflow.target_platforms,
+          'steamRelease', jsonb_build_object(
+            'releaseId', steam_release.id, 'version', steam_release.version,
+            'releaseNumber', steam_release.release_number, 'channel', steam_release.channel,
+            'targetBranch', steam_release.target_branch, 'appId', steam_release.app_id,
+            'depots', jsonb_build_object('linux', steam_release.depot_linux, 'windows', steam_release.depot_windows, 'macos', steam_release.depot_macos),
+            'builderUsername', steam_release.builder_username, 'credentialRef', steam_release.credential_secret_ref)));
+    ELSE
+    SELECT * INTO agent_settings FROM deviludo.instance_agent_settings WHERE singleton = true;
+    IF agent_settings.singleton IS NULL THEN
+      RAISE EXCEPTION 'Agent configuration is required before preparing Steam delivery';
+    END IF;
+    SELECT source.revision INTO preparation_source_revision
+      FROM deviludo.project_source_revisions source
+     WHERE source.workspace_id = workflow.workspace_id AND source.project_id = workflow.project_id
+     ORDER BY source.revision DESC LIMIT 1;
+    SELECT jsonb_object_agg(evidence.target_platform::text, jsonb_build_object(
+             'artifactId', evidence.id, 'sha256', evidence.sha256,
+             'sourceRevision', preparation_source_revision
+           ))
+      INTO preparation_e2e_revision
+      FROM deviludo.artifacts evidence
+      JOIN deviludo.jobs e2e_job
+        ON e2e_job.workspace_id = evidence.workspace_id AND e2e_job.id = evidence.producing_job_id
+     WHERE evidence.workspace_id = workflow.workspace_id
+       AND evidence.workflow_id = workflow.id
+       AND evidence.kind = 'E2E_REPORT'
+       AND evidence.metadata #>> '{e2eEvidence,result}' = 'PASSED'
+       AND e2e_job.state = 'SUCCEEDED'
+       AND (e2e_job.payload->>'sourceRevision')::bigint = preparation_source_revision
+       AND evidence.target_platform = ANY(workflow.target_platforms);
+    IF preparation_source_revision IS NULL OR preparation_e2e_revision IS NULL
+       OR NOT (SELECT bool_and(preparation_e2e_revision ? platform::text)
+                 FROM unnest(workflow.target_platforms) platform) THEN
+      RAISE EXCEPTION 'Latest passing E2E evidence is required before preparing Steam delivery';
+    END IF;
+    INSERT INTO deviludo.steam_delivery_preparations(
+      workspace_id, workflow_id, project_id, release_id, state, source_revision, e2e_revision
+    ) VALUES (
+      workflow.workspace_id, workflow.id, workflow.project_id, steam_release.id,
+      'DRAFTING', preparation_source_revision, preparation_e2e_revision
+    );
     UPDATE deviludo.workflow_instances
-       SET state = 'STEAM_PUBLISHING', version = version + 1,
+       SET state = 'STEAM_PREPARING', version = version + 1,
            updated_at = clock_timestamp()
      WHERE workspace_id = workflow.workspace_id AND id = workflow.id
        AND state = 'RELEASE_APPROVAL_PENDING';
     PERFORM deviludo.enqueue_job(
-      workflow.workspace_id, workflow.id, workflow.project_id, 'STEAM_PUBLISH', NULL,
-      workflow.id::text || ':publish:approved:' || inserted_id::text,
+      workflow.workspace_id, workflow.id, workflow.project_id, 'AGENT_TURN', NULL,
+      workflow.id::text || ':publishing:approved:' || inserted_id::text,
       jsonb_build_object(
-        'targetPlatforms', workflow.target_platforms,
+        'role', 'PUBLISHING', 'purpose', 'PUBLISHING',
         'approvalSignalId', inserted_id,
-        'approvedByActorId', p_payload->>'requestedByActorId',
-        'steamRelease', jsonb_build_object(
-          'releaseId', steam_release.id,
-          'version', steam_release.version,
-          'releaseNumber', steam_release.release_number,
-          'channel', steam_release.channel,
-          'targetBranch', steam_release.target_branch,
-          'appId', steam_release.app_id,
-          'depots', jsonb_build_object(
-            'linux', steam_release.depot_linux,
-            'windows', steam_release.depot_windows,
-            'macos', steam_release.depot_macos
-          ),
-          'builderUsername', steam_release.builder_username,
-          'credentialRef', steam_release.credential_secret_ref
+        'agentConfiguration', jsonb_build_object(
+          'runtime', agent_settings.agent_runtime::text,
+          'baseUrl', agent_settings.base_url,
+          'model', agent_settings.primary_model,
+          'credentialRef', agent_settings.credential_secret_ref,
+          'revision', agent_settings.revision
         )
       )
     );
+    END IF;
   ELSIF p_signal_kind = 'RELEASE_SKIPPED' THEN
     UPDATE deviludo.workflow_instances
        SET state = 'SUCCEEDED', version = version + 1, updated_at = clock_timestamp()
@@ -3628,6 +3738,222 @@ AS $$
     p_workflow_id, 'STAGE_RERUN_REQUESTED', p_idempotency_key,
     p_payload || jsonb_build_object('stage', 'STEAM_PUBLISH')
   )
+$$;
+
+CREATE OR REPLACE FUNCTION deviludo.claim_steam_preparation(p_lease_seconds integer DEFAULT 600)
+RETURNS TABLE (
+  workspace_id uuid, workflow_id uuid, project_id uuid, release_id uuid,
+  lease_token uuid, preparation_state text, draft_revision bigint,
+  source_revision bigint, e2e_revision jsonb, draft jsonb,
+  project_name text, source_relative_path text, target_platforms deviludo.server_os[], app_id bigint,
+  depot_linux bigint, depot_windows bigint, depot_macos bigint
+)
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = pg_catalog, deviludo
+SET row_security = off
+AS $$
+DECLARE candidate deviludo.steam_delivery_preparations%ROWTYPE; token uuid;
+BEGIN
+  IF p_lease_seconds NOT BETWEEN 60 AND 1800 THEN RAISE EXCEPTION 'invalid Steam preparation lease'; END IF;
+  UPDATE deviludo.steam_delivery_preparations
+     SET lease_token = NULL, lease_expires_at = NULL
+   WHERE lease_token IS NOT NULL AND lease_expires_at <= clock_timestamp()
+     AND state IN ('GENERATING_ASSETS', 'SYNCING');
+  SELECT * INTO candidate FROM deviludo.steam_delivery_preparations preparation
+   WHERE preparation.state IN ('GENERATING_ASSETS', 'SYNCING') AND preparation.draft IS NOT NULL
+     AND preparation.lease_token IS NULL
+     AND preparation.attempt < 20
+     AND EXISTS (
+       SELECT 1 FROM deviludo.workflow_instances workflow
+        WHERE workflow.workspace_id = preparation.workspace_id
+          AND workflow.id = preparation.workflow_id AND workflow.state = 'STEAM_PREPARING'
+     )
+     AND EXISTS (
+       SELECT 1 FROM deviludo.steam_releases release
+        WHERE release.workspace_id = preparation.workspace_id
+          AND release.id = preparation.release_id AND release.state = 'PREPARING'
+     )
+   ORDER BY CASE preparation.state WHEN 'SYNCING' THEN 0 ELSE 1 END,
+            preparation.updated_at, preparation.workflow_id
+   FOR UPDATE SKIP LOCKED LIMIT 1;
+  IF candidate.workflow_id IS NULL THEN RETURN; END IF;
+  token := gen_random_uuid();
+  UPDATE deviludo.steam_delivery_preparations preparation
+     SET lease_token = token, lease_expires_at = clock_timestamp() + make_interval(secs => p_lease_seconds),
+         attempt = attempt + 1, updated_at = clock_timestamp()
+   WHERE preparation.workspace_id = candidate.workspace_id AND preparation.workflow_id = candidate.workflow_id;
+  RETURN QUERY
+  SELECT candidate.workspace_id, candidate.workflow_id, candidate.project_id, candidate.release_id,
+         token, candidate.state, candidate.draft_revision,
+         candidate.source_revision, candidate.e2e_revision, candidate.draft,
+         project.name, source.relative_path, workflow.target_platforms, release.app_id,
+         release.depot_linux, release.depot_windows, release.depot_macos
+    FROM deviludo.projects project
+    JOIN deviludo.workflow_instances workflow
+      ON workflow.workspace_id = project.workspace_id AND workflow.project_id = project.id
+    JOIN deviludo.steam_releases release
+      ON release.workspace_id = workflow.workspace_id AND release.workflow_id = workflow.id
+    JOIN deviludo.project_source_revisions source
+      ON source.workspace_id = candidate.workspace_id AND source.project_id = candidate.project_id
+     AND source.revision = candidate.source_revision
+   WHERE project.workspace_id = candidate.workspace_id AND project.id = candidate.project_id
+     AND workflow.id = candidate.workflow_id;
+END
+$$;
+ALTER FUNCTION deviludo.claim_steam_preparation(integer) OWNER TO deviludo_claim_executor;
+REVOKE ALL ON FUNCTION deviludo.claim_steam_preparation(integer) FROM PUBLIC;
+
+CREATE OR REPLACE FUNCTION deviludo.mark_steam_preparation_syncing(
+  p_workspace_id uuid, p_workflow_id uuid, p_lease_token uuid
+) RETURNS boolean
+LANGUAGE plpgsql SECURITY DEFINER
+SET search_path = pg_catalog, deviludo SET row_security = off
+AS $$
+DECLARE changed integer;
+BEGIN
+  UPDATE deviludo.steam_delivery_preparations preparation
+     SET state = 'SYNCING', updated_at = clock_timestamp()
+   WHERE preparation.workspace_id = p_workspace_id AND preparation.workflow_id = p_workflow_id
+     AND preparation.state = 'GENERATING_ASSETS' AND preparation.lease_token = p_lease_token
+     AND preparation.lease_expires_at > clock_timestamp()
+     AND EXISTS (
+       SELECT 1 FROM deviludo.workflow_instances workflow
+        WHERE workflow.workspace_id = preparation.workspace_id
+          AND workflow.id = preparation.workflow_id AND workflow.state = 'STEAM_PREPARING'
+     )
+     AND EXISTS (
+       SELECT 1 FROM deviludo.steam_releases release
+        WHERE release.workspace_id = preparation.workspace_id
+          AND release.id = preparation.release_id AND release.state = 'PREPARING'
+     );
+  GET DIAGNOSTICS changed = ROW_COUNT; RETURN changed = 1;
+END
+$$;
+ALTER FUNCTION deviludo.mark_steam_preparation_syncing(uuid, uuid, uuid) OWNER TO deviludo_claim_executor;
+REVOKE ALL ON FUNCTION deviludo.mark_steam_preparation_syncing(uuid, uuid, uuid) FROM PUBLIC;
+
+CREATE OR REPLACE FUNCTION deviludo.complete_steam_preparation(
+  p_workspace_id uuid, p_workflow_id uuid, p_lease_token uuid, p_receipt jsonb
+) RETURNS boolean
+LANGUAGE plpgsql SECURITY DEFINER
+SET search_path = pg_catalog, deviludo SET row_security = off
+AS $$
+DECLARE preparation deviludo.steam_delivery_preparations%ROWTYPE; release deviludo.steam_releases%ROWTYPE;
+  changed integer;
+BEGIN
+  IF jsonb_typeof(p_receipt) <> 'object' OR coalesce(p_receipt->>'action', '') <> 'SAVE' THEN
+    RAISE EXCEPTION 'Steamworks receipt must prove a Save action';
+  END IF;
+  SELECT * INTO preparation FROM deviludo.steam_delivery_preparations
+   WHERE workspace_id = p_workspace_id AND workflow_id = p_workflow_id
+     AND state = 'SYNCING' AND lease_token = p_lease_token AND lease_expires_at > clock_timestamp()
+   FOR UPDATE;
+  IF preparation.workflow_id IS NULL THEN RETURN false; END IF;
+  SELECT * INTO release FROM deviludo.steam_releases
+   WHERE workspace_id = p_workspace_id AND id = preparation.release_id AND state = 'PREPARING' FOR UPDATE;
+  IF release.id IS NULL THEN RETURN false; END IF;
+  UPDATE deviludo.workflow_instances SET state = 'STEAM_PUBLISHING', version = version + 1,
+      updated_at = clock_timestamp()
+   WHERE workspace_id = p_workspace_id AND id = p_workflow_id AND state = 'STEAM_PREPARING';
+  GET DIAGNOSTICS changed = ROW_COUNT;
+  IF changed <> 1 THEN RETURN false; END IF;
+  UPDATE deviludo.steam_delivery_preparations
+     SET state = 'SAVED', save_receipt = p_receipt, saved_at = clock_timestamp(),
+         failure_code = NULL, failure_message = NULL, lease_token = NULL, lease_expires_at = NULL,
+         updated_at = clock_timestamp()
+   WHERE workspace_id = p_workspace_id AND workflow_id = p_workflow_id;
+  UPDATE deviludo.steam_releases SET state = 'UPLOADING', failure_stage = NULL,
+      failure_message = NULL, updated_at = clock_timestamp()
+   WHERE workspace_id = p_workspace_id AND id = release.id;
+  PERFORM deviludo.enqueue_job(
+    p_workspace_id, p_workflow_id, preparation.project_id, 'STEAM_PUBLISH', NULL,
+    p_workflow_id::text || ':publish:after-preparation:' || preparation.draft_revision::text,
+    jsonb_build_object(
+      'targetPlatforms', (SELECT target_platforms FROM deviludo.workflow_instances WHERE workspace_id = p_workspace_id AND id = p_workflow_id),
+      'steamRelease', jsonb_build_object(
+        'releaseId', release.id, 'version', release.version, 'releaseNumber', release.release_number,
+        'channel', release.channel, 'targetBranch', release.target_branch, 'appId', release.app_id,
+        'depots', jsonb_build_object('linux', release.depot_linux, 'windows', release.depot_windows, 'macos', release.depot_macos),
+        'builderUsername', release.builder_username, 'credentialRef', release.credential_secret_ref
+      )
+    )
+  );
+  RETURN true;
+END
+$$;
+ALTER FUNCTION deviludo.complete_steam_preparation(uuid, uuid, uuid, jsonb) OWNER TO deviludo_claim_executor;
+REVOKE ALL ON FUNCTION deviludo.complete_steam_preparation(uuid, uuid, uuid, jsonb) FROM PUBLIC;
+
+CREATE OR REPLACE FUNCTION deviludo.fail_steam_preparation(
+  p_workspace_id uuid, p_workflow_id uuid, p_lease_token uuid,
+  p_code text, p_message text, p_login_required boolean DEFAULT false
+) RETURNS boolean
+LANGUAGE plpgsql SECURITY DEFINER
+SET search_path = pg_catalog, deviludo SET row_security = off
+AS $$
+DECLARE changed integer;
+BEGIN
+  UPDATE deviludo.steam_delivery_preparations
+     SET state = CASE WHEN p_login_required THEN 'LOGIN_REQUIRED' ELSE 'FAILED' END,
+         failure_code = left(upper(p_code), 64), failure_message = left(p_message, 2000),
+         lease_token = NULL, lease_expires_at = NULL, updated_at = clock_timestamp()
+   WHERE workspace_id = p_workspace_id AND workflow_id = p_workflow_id AND lease_token = p_lease_token;
+  GET DIAGNOSTICS changed = ROW_COUNT;
+  IF changed <> 1 THEN RETURN false; END IF;
+  UPDATE deviludo.steam_releases release SET state = 'FAILED', failure_stage = 'STEAM_PREPARATION',
+      failure_message = left(p_message, 2000), updated_at = clock_timestamp()
+   WHERE release.workspace_id = p_workspace_id AND release.workflow_id = p_workflow_id;
+  UPDATE deviludo.workflow_instances SET state = CASE WHEN p_login_required THEN 'BLOCKED'::deviludo.workflow_state ELSE 'FAILED'::deviludo.workflow_state END,
+      version = version + 1, updated_at = clock_timestamp()
+   WHERE workspace_id = p_workspace_id AND id = p_workflow_id AND state = 'STEAM_PREPARING';
+  RETURN true;
+END
+$$;
+ALTER FUNCTION deviludo.fail_steam_preparation(uuid, uuid, uuid, text, text, boolean) OWNER TO deviludo_claim_executor;
+REVOKE ALL ON FUNCTION deviludo.fail_steam_preparation(uuid, uuid, uuid, text, text, boolean) FROM PUBLIC;
+
+CREATE OR REPLACE FUNCTION deviludo.retry_steam_preparation(
+  p_workflow_id uuid, p_idempotency_key text, p_requested_by_actor_id uuid
+) RETURNS boolean
+LANGUAGE plpgsql SECURITY INVOKER SET search_path = pg_catalog, deviludo
+AS $$
+DECLARE preparation deviludo.steam_delivery_preparations%ROWTYPE;
+  settings deviludo.instance_agent_settings%ROWTYPE; inserted_event_id bigint;
+BEGIN
+  SELECT * INTO preparation FROM deviludo.steam_delivery_preparations
+   WHERE workflow_id = p_workflow_id AND state IN ('FAILED', 'LOGIN_REQUIRED') FOR UPDATE;
+  IF preparation.workflow_id IS NULL THEN RAISE EXCEPTION 'Steam preparation is not retryable'; END IF;
+  SELECT * INTO settings FROM deviludo.instance_agent_settings WHERE singleton = true;
+  IF settings.singleton IS NULL THEN RAISE EXCEPTION 'Agent configuration is required'; END IF;
+  INSERT INTO deviludo.workflow_events(workspace_id, workflow_id, event_kind, event_data, idempotency_key)
+  VALUES (preparation.workspace_id, p_workflow_id, 'STEAM_PREPARATION_RETRY_REQUESTED',
+    jsonb_build_object('requestedByActorId', p_requested_by_actor_id), p_idempotency_key)
+  ON CONFLICT (workspace_id, workflow_id, idempotency_key) DO NOTHING RETURNING event_id INTO inserted_event_id;
+  IF inserted_event_id IS NULL THEN RETURN false; END IF;
+  DELETE FROM deviludo.steam_store_assets
+   WHERE workspace_id = preparation.workspace_id AND workflow_id = preparation.workflow_id;
+  UPDATE deviludo.steam_delivery_preparations SET state = 'DRAFTING', draft = NULL,
+      publishing_turn_id = NULL, failure_code = NULL, failure_message = NULL,
+      save_receipt = NULL, saved_at = NULL, lease_token = NULL, lease_expires_at = NULL,
+      attempt = 0, updated_at = clock_timestamp()
+   WHERE workspace_id = preparation.workspace_id AND workflow_id = preparation.workflow_id;
+  UPDATE deviludo.steam_releases SET state = 'PREPARING', failure_stage = NULL,
+      failure_message = NULL, updated_at = clock_timestamp()
+   WHERE workspace_id = preparation.workspace_id AND id = preparation.release_id;
+  UPDATE deviludo.workflow_instances SET state = 'STEAM_PREPARING', version = version + 1,
+      updated_at = clock_timestamp()
+   WHERE workspace_id = preparation.workspace_id AND id = preparation.workflow_id;
+  PERFORM deviludo.enqueue_job(
+    preparation.workspace_id, preparation.workflow_id, preparation.project_id, 'AGENT_TURN', NULL,
+    preparation.workflow_id::text || ':publishing:retry:' || inserted_event_id::text,
+    jsonb_build_object('role', 'PUBLISHING', 'purpose', 'PUBLISHING', 'manualRerun', true,
+      'agentConfiguration', jsonb_build_object(
+        'runtime', settings.agent_runtime::text, 'baseUrl', settings.base_url,
+        'model', settings.primary_model, 'credentialRef', settings.credential_secret_ref,
+        'revision', settings.revision))) ;
+  RETURN true;
+END
 $$;
 
 CREATE OR REPLACE FUNCTION deviludo.complete_job(
@@ -3823,7 +4149,7 @@ BEGIN
            steam_build_id = nullif(p_receipt->>'steamBuildId', ''),
            uploaded_at = clock_timestamp(),
            live_at = CASE WHEN channel = 'TEST' THEN clock_timestamp() ELSE NULL END,
-           failure_message = NULL, updated_at = clock_timestamp()
+           failure_message = NULL, failure_stage = NULL, updated_at = clock_timestamp()
      WHERE workspace_id = job.workspace_id
        AND id = (job.payload #>> '{steamRelease,releaseId}')::uuid;
     UPDATE deviludo.workflow_instances SET state = 'SUCCEEDED', version = version + 1,
@@ -3907,12 +4233,28 @@ BEGIN
       'AGENT_TURN', NULL, job.workflow_id::text || ':development:build-handoff:' || job.id::text,
       jsonb_build_object('role', 'DEVELOPMENT', 'purpose', 'DEVELOPMENT',
         'buildFailureJobId', job.id, 'buildFailureSummary', left(p_reason, 1800)));
+  ELSIF job.kind = 'AGENT_TURN' AND job.payload->>'role' = 'PUBLISHING'
+      AND (configuration_failure OR attempts_exhausted) THEN
+    UPDATE deviludo.steam_delivery_preparations
+       SET state = 'FAILED',
+           failure_code = CASE WHEN configuration_failure THEN 'AGENT_RUNTIME_UNAVAILABLE' ELSE 'PUBLISHING_FAILED' END,
+           failure_message = left(recorded_reason, 2000), updated_at = clock_timestamp()
+     WHERE workspace_id = job.workspace_id AND workflow_id = job.workflow_id
+       AND state = 'DRAFTING';
+    UPDATE deviludo.steam_releases SET state = 'FAILED', failure_stage = 'STEAM_PREPARATION',
+        failure_message = left(recorded_reason, 2000), updated_at = clock_timestamp()
+     WHERE workspace_id = job.workspace_id AND workflow_id = job.workflow_id
+       AND state = 'PREPARING';
+    UPDATE deviludo.workflow_instances SET state = 'FAILED', version = version + 1,
+        updated_at = clock_timestamp()
+     WHERE workspace_id = workflow.workspace_id AND id = workflow.id
+       AND state = 'STEAM_PREPARING';
   ELSIF configuration_failure THEN
     UPDATE deviludo.workflow_instances SET state = 'BLOCKED', version = version + 1,
       updated_at = clock_timestamp()
      WHERE workspace_id = workflow.workspace_id AND id = workflow.id;
   ELSIF job.kind = 'STEAM_PUBLISH' THEN
-    UPDATE deviludo.steam_releases SET state = 'FAILED',
+    UPDATE deviludo.steam_releases SET state = 'FAILED', failure_stage = 'STEAM_PUBLISH',
       failure_message = left(p_reason, 2000), updated_at = clock_timestamp()
      WHERE workspace_id = job.workspace_id
        AND id = (job.payload #>> '{steamRelease,releaseId}')::uuid;
@@ -4411,6 +4753,7 @@ GRANT UPDATE ON deviludo.project_conversations TO deviludo_conversation_writer;
 GRANT SELECT, INSERT, UPDATE, DELETE ON
   deviludo.workspaces, deviludo.workspace_steam_settings,
   deviludo.projects, deviludo.project_steam_settings, deviludo.steam_releases,
+  deviludo.steam_delivery_preparations, deviludo.steam_store_assets,
   deviludo.project_source_revisions, deviludo.project_documents,
   deviludo.project_document_revisions, deviludo.project_conversations,
   deviludo.conversation_messages, deviludo.agent_installations,
@@ -4461,6 +4804,7 @@ GRANT SELECT, INSERT, UPDATE ON
 GRANT SELECT ON deviludo.e2e_regression_traces
   TO deviludo_scheduler, deviludo_sandbox, deviludo_claim_executor;
 GRANT SELECT, UPDATE ON deviludo.steam_releases TO deviludo_scheduler;
+GRANT SELECT, INSERT, UPDATE, DELETE ON deviludo.steam_delivery_preparations, deviludo.steam_store_assets TO deviludo_scheduler;
 -- The asset generator resolves the configured provider and credential ref through
 -- an ordinary pooled read before calling out, so the scheduler reads this row
 -- directly rather than through a definer function.
@@ -4479,6 +4823,7 @@ GRANT SELECT, INSERT, UPDATE ON
   deviludo.test_plans_v2, deviludo.platform_test_runs, deviludo.test_evidence
   TO deviludo_sandbox;
 GRANT SELECT, UPDATE ON deviludo.steam_releases TO deviludo_sandbox;
+GRANT SELECT, INSERT, UPDATE ON deviludo.steam_delivery_preparations TO deviludo_sandbox;
 -- complete_job runs with the caller's privileges and persistent Agent turns are
 -- completed by the sandbox role. Re-planning a manifest drops the asset keys the
 -- Agent no longer asks for, so that role needs DELETE on the items themselves —
@@ -4511,6 +4856,12 @@ GRANT EXECUTE ON FUNCTION deviludo.start_steam_release(uuid, uuid, text, jsonb),
   deviludo.retry_steam_release(uuid, text, jsonb),
   deviludo.request_stage_rerun(uuid, text, jsonb)
   TO deviludo_api;
+GRANT EXECUTE ON FUNCTION deviludo.retry_steam_preparation(uuid, text, uuid) TO deviludo_api;
+GRANT EXECUTE ON FUNCTION deviludo.claim_steam_preparation(integer),
+  deviludo.mark_steam_preparation_syncing(uuid, uuid, uuid),
+  deviludo.complete_steam_preparation(uuid, uuid, uuid, jsonb),
+  deviludo.fail_steam_preparation(uuid, uuid, uuid, text, text, boolean)
+  TO deviludo_scheduler;
 GRANT EXECUTE ON FUNCTION deviludo.complete_job(uuid, uuid, bigint, bigint, jsonb, jsonb, text, text, text)
   TO deviludo_api, deviludo_sandbox;
 GRANT EXECUTE ON FUNCTION deviludo.complete_agent_turn_job(uuid, uuid, uuid, bigint, jsonb)

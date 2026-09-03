@@ -28,6 +28,7 @@ const roleSkillSlugs = Object.freeze({
   UI_DESIGN: "ui-design",
   DEVELOPMENT: "development",
   TEST: "test",
+  PUBLISHING: "publishing",
 });
 const roleSkillSlug = roleSkillSlugs[request.role];
 const installedSkillSlugs = Object.freeze([...new Set(Object.values(roleSkillSlugs))]);
@@ -54,7 +55,7 @@ const skillInstructions = await readFile(skillFile, "utf8");
 const contextPath = process.env.DEVILUDO_PROJECT_CONTEXT_FILE ?? "/workspace/context/project-context.json.zst";
 const sourceDirectory = process.env.DEVILUDO_PROJECT_SOURCE_DIR ?? "/workspace/project";
 const writable = request.role === "DEVELOPMENT" && request.mode === "PRIMARY";
-const liveWebSearch = request.role === "DESIGN" || request.role === "UI_DESIGN";
+const liveWebSearch = request.role === "DESIGN" || request.role === "UI_DESIGN" || request.role === "PUBLISHING";
 const prompt = [
   `Use the installed, signed ${skillName} Skill for this turn. Its instructions are mandatory.`,
   `The verified Skill instructions are embedded below so this externally sandboxed Runtime does not need a shell merely to read them:\n\n${skillInstructions}`,

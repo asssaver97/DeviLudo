@@ -1895,8 +1895,8 @@ test("conversation persistence does not reject replies when the workflow advance
   assert.doesNotMatch(repository, /PROJECT_STATE_CHANGED|expectedWorkflowState/);
 });
 
-test("all six signed role Skills exist and define the intended boundary", async () => {
-  for (const role of ["intent", "analysis", "design", "ui-design", "development", "test"]) {
+test("all seven signed role Skills exist and define the intended boundary", async () => {
+  for (const role of ["intent", "analysis", "design", "ui-design", "development", "test", "publishing"]) {
     const skill = await readFile(new URL(`../services/project-runtime/skills/${role}/SKILL.md`, import.meta.url), "utf8");
     assert.match(skill, /^---\nname: deviludo-/);
     assert.match(skill, /\n# /);
