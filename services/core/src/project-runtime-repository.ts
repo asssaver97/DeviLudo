@@ -663,10 +663,10 @@ export class ProjectRuntimeRepository {
       );
       if (!workflow.rows[0]) throw new Error("UI Design workflow does not exist");
       const selected = await client.query<{ revision: string; goals: readonly E2eGoal[] }>(
-        `SELECT revision::text, goals
-           FROM deviludo.workflow_e2e_goal_revisions
-          WHERE workspace_id = $1::uuid AND workflow_id = $2::uuid
-          ORDER BY revision DESC LIMIT 1 FOR UPDATE`,
+        `SELECT goal_revision.revision::text, goal_revision.goals
+           FROM deviludo.workflow_e2e_goal_revisions goal_revision
+          WHERE goal_revision.workspace_id = $1::uuid AND goal_revision.workflow_id = $2::uuid
+          ORDER BY goal_revision.revision DESC LIMIT 1 FOR UPDATE`,
         [input.workspaceId, input.workflowId],
       );
       const currentRevision = Number(selected.rows[0]?.revision ?? 0);

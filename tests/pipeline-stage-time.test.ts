@@ -1,6 +1,8 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import {
+  aggregateJobState,
+  currentAttemptPipelineJobs,
   currentPipelineJobs,
   pipelineJobsForStage,
   pipelineEventFinishedAt,
@@ -37,6 +39,27 @@ test("a pipeline stage has no finish time while any platform is still active", (
     job("SUCCEEDED", "2026-08-16T01:00:00.000Z", "linux"),
     job("RUNNING", "2026-08-16T01:02:03.000Z", "macos"),
   ]), null);
+});
+
+test("an active rerun replaces the previous failed stage presentation", () => {
+  const previousVerdict = {
+    ...job("FAILED", "2026-08-16T01:02:03.000Z"),
+    id: "previous-test-verdict",
+    kind: "AGENT_TURN",
+    agentRole: "TEST" as const,
+    createdAt: "2026-08-16T01:00:00.000Z",
+  };
+  const currentPlatformRun = {
+    ...job("RUNNING", "2026-08-16T01:04:00.000Z", "macos"),
+    id: "current-macos-run",
+    createdAt: "2026-08-16T01:03:00.000Z",
+  };
+
+  const current = currentAttemptPipelineJobs([previousVerdict, currentPlatformRun]);
+  assert.deepEqual(current.map(item => item.id), ["current-macos-run"]);
+  assert.equal(aggregateJobState(["FAILED", "RUNNING"]), "RUNNING");
+  assert.equal(aggregateJobState(["FAILED", "QUEUED"]), "QUEUED");
+  assert.equal(aggregateJobState(current.map(item => item.state)), "RUNNING");
 });
 
 test("failed and cancelled terminal stages retain their finish time", () => {

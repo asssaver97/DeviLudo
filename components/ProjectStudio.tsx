@@ -1159,7 +1159,9 @@ export function ProjectStudio({ projectId }: { projectId: string }) {
               ) : null}
             </li>
             {PIPELINE.map(([kind, chineseLabel, englishLabel]) => {
-              const jobs = latestPipelineJobs(currentPipelineJobs(pipelineJobsForStage(kind, viewedJobs)));
+              const latestJobs = latestPipelineJobs(currentPipelineJobs(pipelineJobsForStage(kind, viewedJobs)));
+              const stageIsActive = ACTIVE_PIPELINE_STAGE[viewedWorkflowState] === kind;
+              const jobs = stageIsActive ? currentAttemptPipelineJobs(latestJobs) : latestJobs;
               const inProfile = profileStages.has(kind);
               const state = aggregateJobState(jobs.map(job => job.state));
               const waitingForPredecessor = inProfile && pipelineStageWaitsForPredecessor(kind, viewedWorkflowState);
@@ -1588,12 +1590,12 @@ function conciseChangeExplanation(summary: string): string {
   return firstClause.length <= 120 ? firstClause : `${firstClause.slice(0, 119).trimEnd()}…`;
 }
 
-function aggregateJobState(states: readonly string[]): string {
+export function aggregateJobState(states: readonly string[]): string {
   if (!states.length) return "PENDING";
-  if (states.some(state => state === "FAILED")) return "FAILED";
   if (states.some(state => state === "RUNNING")) return "RUNNING";
-  if (states.every(state => state === "SUCCEEDED")) return "SUCCEEDED";
   if (states.some(state => state === "QUEUED" || state === "RETRY")) return "QUEUED";
+  if (states.some(state => state === "FAILED")) return "FAILED";
+  if (states.every(state => state === "SUCCEEDED")) return "SUCCEEDED";
   return states[0];
 }
 
@@ -1713,6 +1715,25 @@ function latestPipelineJobs(jobs: ProductProjectDetail["jobs"]): ProductProjectD
     if (!current || Date.parse(current.createdAt) <= Date.parse(job.createdAt)) latest.set(key, job);
   }
   return Object.freeze([...latest.values()]);
+}
+
+/**
+ * A stage rerun can reuse an existing Test plan. Until the new platform jobs
+ * finish, the previous Test verdict is still the newest CORE job for that
+ * stage. Drop terminal records that finished before the current attempt began
+ * so a successful rerun click immediately reads as active instead of retaining
+ * the superseded failure.
+ */
+export function currentAttemptPipelineJobs(
+  jobs: ProductProjectDetail["jobs"],
+): ProductProjectDetail["jobs"] {
+  const activeJobs = jobs.filter(job => ["QUEUED", "RUNNING", "RETRY"].includes(job.state));
+  if (!activeJobs.length) return jobs;
+  const attemptStartedAt = Math.min(...activeJobs.map(job => Date.parse(job.createdAt)));
+  return Object.freeze(jobs.filter(job => (
+    ["QUEUED", "RUNNING", "RETRY"].includes(job.state)
+    || Date.parse(job.updatedAt) >= attemptStartedAt
+  )));
 }
 
 /** Superseded attempts stay in job history, but they are not the current run. */

@@ -1124,8 +1124,10 @@ export class CoreRepository {
       if (sourceRevision.rowCount !== 1) throw new Error("Imported source revision changed during analysis");
 
       const latestGoal = await client.query<{ revision: string }>(
-        `SELECT revision::text FROM deviludo.workflow_e2e_goal_revisions
-          WHERE workflow_id = $1::uuid ORDER BY revision DESC LIMIT 1 FOR UPDATE`,
+        `SELECT goal_revision.revision::text
+           FROM deviludo.workflow_e2e_goal_revisions goal_revision
+          WHERE goal_revision.workflow_id = $1::uuid
+          ORDER BY goal_revision.revision DESC LIMIT 1 FOR UPDATE`,
         [input.workflowId],
       );
       const e2eGoalRevision = Number(latestGoal.rows[0]?.revision ?? 0) + 1;
@@ -1655,10 +1657,10 @@ export class CoreRepository {
           [projectId],
         ),
         client.query<E2eGoalRevisionRow>(
-          `SELECT revision::text, goals, goals_digest
-             FROM deviludo.workflow_e2e_goal_revisions
-            WHERE workflow_id = $1::uuid
-            ORDER BY revision DESC
+          `SELECT goal_revision.revision::text, goal_revision.goals, goal_revision.goals_digest
+             FROM deviludo.workflow_e2e_goal_revisions goal_revision
+            WHERE goal_revision.workflow_id = $1::uuid
+            ORDER BY goal_revision.revision DESC
             LIMIT 1`,
           [row.workflow_id],
         ),
@@ -1769,10 +1771,10 @@ export class CoreRepository {
       );
       const previousState = current.state_data ?? {};
       const inheritedGoalRevision = await client.query<E2eGoalRevisionRow>(
-        `SELECT revision::text, goals, goals_digest
-           FROM deviludo.workflow_e2e_goal_revisions
-          WHERE workflow_id = $1::uuid
-          ORDER BY revision DESC
+        `SELECT goal_revision.revision::text, goal_revision.goals, goal_revision.goals_digest
+           FROM deviludo.workflow_e2e_goal_revisions goal_revision
+          WHERE goal_revision.workflow_id = $1::uuid
+          ORDER BY goal_revision.revision DESC
           LIMIT 1`,
         [input.baseWorkflowId],
       );
@@ -2909,9 +2911,10 @@ export class CoreRepository {
         productSpecificationFromState(current.state_data), document,
       );
       const currentGoals = await client.query<E2eGoalRevisionRow>(
-        `SELECT revision::text, goals, goals_digest
-           FROM deviludo.workflow_e2e_goal_revisions
-          WHERE workflow_id = $1::uuid ORDER BY revision DESC LIMIT 1 FOR UPDATE`,
+        `SELECT goal_revision.revision::text, goal_revision.goals, goal_revision.goals_digest
+           FROM deviludo.workflow_e2e_goal_revisions goal_revision
+          WHERE goal_revision.workflow_id = $1::uuid
+          ORDER BY goal_revision.revision DESC LIMIT 1 FOR UPDATE`,
         [current.id],
       );
       const goals = mergeE2eGoals(
@@ -2925,8 +2928,10 @@ export class CoreRepository {
       );
       const newIteration = current.state === "STEAM_PUBLISHING" || hasRelease.rowCount === 1;
       const latestSource = newIteration ? await client.query<{ revision: string }>(
-        `SELECT revision::text FROM deviludo.project_source_revisions
-          WHERE project_id = $1::uuid ORDER BY revision DESC LIMIT 1`,
+        `SELECT source_revision.revision::text
+           FROM deviludo.project_source_revisions source_revision
+          WHERE source_revision.project_id = $1::uuid
+          ORDER BY source_revision.revision DESC LIMIT 1`,
         [input.projectId],
       ) : null;
       const targetWorkflowId = newIteration ? randomUUID() : current.id;

@@ -601,6 +601,18 @@ test("messages during Agent generation are intent-routed and confirmed changes s
       FROM deviludo.workflow_instances WHERE id = '${project.workflowId}'::uuid
   `)).toEqual([{ stop_reason: "CONVERSATION_CHANGE", resume_state: "DEVELOPING" }]);
 
+  // Exercise the first two-digit revision boundary. An unqualified ORDER BY
+  // resolves to the selected revision::text alias and incorrectly ranks 9 over 10.
+  await stack.executeSql(`
+    INSERT INTO deviludo.workflow_e2e_goal_revisions(
+      workspace_id, workflow_id, revision, goals, goals_digest
+    )
+    SELECT base.workspace_id, base.workflow_id, generated.revision, base.goals, base.goals_digest
+      FROM deviludo.workflow_e2e_goal_revisions base
+      CROSS JOIN generate_series(2, 10) AS generated(revision)
+     WHERE base.workflow_id = '${project.workflowId}'::uuid AND base.revision = 1;
+  `);
+
   const confirmKey = `confirm:${randomUUID()}`;
   const decisionUrl = `/api/projects/${project.id}/change-requests/${proposedBody.changeRequest.id}/decision`;
   const confirmed = await stack.web(
@@ -620,7 +632,7 @@ test("messages during Agent generation are intent-routed and confirmed changes s
     SELECT event_kind FROM deviludo.job_progress_events
      WHERE job_id = '${jobId}'::uuid AND event_kind = 'SUPERSEDED'
   `)).toEqual([{ event_kind: "SUPERSEDED" }]);
-  expect((await stack.readProject(project.id)).e2eGoalRevision).toBe(2);
+  expect((await stack.readProject(project.id)).e2eGoalRevision).toBe(11);
   expect((await stack.readProject(project.id)).jobs.filter(job => (
     job.kind === "AGENT_TURN" && job.id !== jobId
   ))).toHaveLength(1);
