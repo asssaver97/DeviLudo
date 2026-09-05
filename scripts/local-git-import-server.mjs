@@ -19,6 +19,7 @@ import { promisify } from "node:util";
 import sourceArchive from "../lib/product/source-archive.ts";
 import projectImport from "../services/core/src/project-import.ts";
 import { commitVerifiedGitDirectory } from "./local-git-commit.mjs";
+import { synchronizeLocalArtifactCache } from "./local-artifact-cache.mjs";
 import { extractAndValidateEvidenceBundle } from "./e2e-evidence.mjs";
 
 const { normalizeGitBranchName, normalizeGitHubRepositoryUrl } = projectImport;
@@ -88,6 +89,7 @@ const server = createServer(async (request, response) => {
       "/directory/git/status",
       "/directory/git/branch",
       "/directory/file/open",
+      "/artifact/cache/synchronize",
       "/artifact/open",
       "/artifact/reveal",
     ].includes(request.url ?? "")) {
@@ -113,6 +115,10 @@ const server = createServer(async (request, response) => {
       }
       if (request.url === "/directory/file/open") {
         sendJson(response, 200, await openBoundProjectFile(body), cors);
+        return;
+      }
+      if (request.url === "/artifact/cache/synchronize") {
+        sendJson(response, 200, await synchronizeOpenedArtifactCache(body), cors);
         return;
       }
       if (request.url === "/artifact/open" || request.url === "/artifact/reveal") {
@@ -292,6 +298,7 @@ async function accessLocalArtifact(body, action) {
     throw failure("ARTIFACT_OPEN_UNAVAILABLE", "本地制品直接打开目前仅支持 macOS");
   }
   const artifactId = typeof body.artifactId === "string" ? body.artifactId : "";
+  const projectId = typeof body.projectId === "string" ? body.projectId : "";
   const kind = typeof body.kind === "string" ? body.kind : "";
   const targetPlatform = typeof body.targetPlatform === "string" ? body.targetPlatform : "";
   const filename = typeof body.filename === "string" ? body.filename : "";
@@ -303,7 +310,7 @@ async function accessLocalArtifact(body, action) {
   try { sourceUrl = new URL(typeof body.url === "string" ? body.url : ""); }
   catch { throw failure("INVALID_ARTIFACT_OPEN_REQUEST", "制品打开地址无效"); }
   const buildArtifact = BUILD_ARTIFACT_KINDS.has(kind);
-  if (!UUID.test(artifactId) || !ARTIFACT_KINDS.has(kind)
+  if (!UUID.test(projectId) || !UUID.test(artifactId) || !ARTIFACT_KINDS.has(kind)
     || (buildArtifact && !["linux", "windows", "macos"].includes(targetPlatform))
     || (!buildArtifact && targetPlatform !== "" && !["linux", "windows", "macos"].includes(targetPlatform))
     || !/^[A-Za-z0-9._-]{1,180}$/.test(filename)
@@ -317,7 +324,7 @@ async function accessLocalArtifact(body, action) {
   const destination = join(openedArtifactsRoot, artifactId);
   const metadataPath = join(destination, "artifact.json");
   const cached = await readFile(metadataPath, "utf8").then(JSON.parse).catch(() => null);
-  if (cached?.sha256 === expectedSha256 && cached?.kind === kind
+  if (cached?.projectId === projectId && cached?.sha256 === expectedSha256 && cached?.kind === kind
     && cached?.targetPlatform === targetPlatform && cached?.filename === filename) {
     try { return await presentLocalArtifact(destination, kind, targetPlatform, filename, locale, theme, action); }
     catch { await rm(destination, { recursive: true, force: true }); }
@@ -367,7 +374,7 @@ async function accessLocalArtifact(body, action) {
     } else if (kind === "E2E_REPORT" && filename.toLowerCase().endsWith(".zip")) {
       await extractAndValidateEvidenceBundle(artifactFile, join(staging, "e2e-report"), 1024 * 1024 * 1024);
     }
-    await writeFile(join(staging, "artifact.json"), `${JSON.stringify({ sha256: expectedSha256, kind, targetPlatform, filename })}\n`, { mode: 0o600 });
+    await writeFile(join(staging, "artifact.json"), `${JSON.stringify({ projectId, sha256: expectedSha256, kind, targetPlatform, filename })}\n`, { mode: 0o600 });
     await rm(destination, { recursive: true, force: true });
     await rename(staging, destination);
     return presentLocalArtifact(destination, kind, targetPlatform, filename, locale, theme, action);
@@ -388,6 +395,16 @@ async function accessLocalArtifact(body, action) {
       action === "REVEAL" ? "制品已获取，但无法在 Finder 中打开" : "制品已获取，但无法在本机打开",
     );
   }
+}
+
+async function synchronizeOpenedArtifactCache(body) {
+  const projectId = typeof body.projectId === "string" ? body.projectId : "";
+  const artifactIds = Array.isArray(body.artifactIds) ? body.artifactIds : null;
+  if (!UUID.test(projectId) || !artifactIds || artifactIds.length > 64
+    || artifactIds.some(artifactId => typeof artifactId !== "string" || !UUID.test(artifactId))) {
+    throw failure("INVALID_ARTIFACT_CACHE_REQUEST", "本地制品缓存同步请求无效");
+  }
+  return synchronizeLocalArtifactCache(openedArtifactsRoot, projectId, artifactIds);
 }
 
 async function openBoundProjectFile(body) {
@@ -802,6 +819,7 @@ function importFailure(error) {
     INVALID_SOURCE_STREAM: 400,
     INVALID_GIT_COMMIT_REQUEST: 400,
     INVALID_ARTIFACT_OPEN_REQUEST: 400,
+    INVALID_ARTIFACT_CACHE_REQUEST: 400,
     DIRECTORY_SELECTION_CANCELLED: 409,
     GIT_BRANCH_EXISTS: 409,
     GITHUB_TARGET_EXISTS: 409,

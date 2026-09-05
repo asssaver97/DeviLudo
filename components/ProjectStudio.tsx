@@ -152,6 +152,7 @@ export function ProjectStudio({ projectId }: { projectId: string }) {
   const conversationSelectionRevision = useRef(0);
   const deliveryPipelineRef = useRef<HTMLElement | null>(null);
   const [artifactAccess, setArtifactAccess] = useState<ArtifactAccess | null>(null);
+  const artifactCacheSignature = useRef("");
   const agentProgressCursor = useRef(0);
   const [deleting, setDeleting] = useState(false);
   const [confirmingDelete, setConfirmingDelete] = useState(false);
@@ -253,7 +254,18 @@ export function ProjectStudio({ projectId }: { projectId: string }) {
       return payload.artifacts;
     }, { force });
     setArtifacts(values);
-  }, [errorText, projectId]);
+    if (!managed) {
+      const artifactIds = latestArtifactsByKindAndPlatform(values).map(artifact => artifact.id).sort();
+      const signature = artifactIds.join(":");
+      if (artifactCacheSignature.current !== signature) {
+        artifactCacheSignature.current = signature;
+        void synchronizeLocalArtifactCache(projectId, artifactIds, text).catch(reason => {
+          artifactCacheSignature.current = "";
+          console.error(reason);
+        });
+      }
+    }
+  }, [errorText, managed, projectId, text]);
 
   const loadRuntime = useCallback(async () => {
     const [runtimeResponse, planResponse] = await Promise.all([
@@ -826,6 +838,9 @@ export function ProjectStudio({ projectId }: { projectId: string }) {
         const payload = await response.json().catch(() => ({})) as { message?: string };
         throw new Error(errorText(payload.message, `项目删除失败 (${response.status})`, `Unable to delete project (${response.status})`));
       }
+      if (!managed) {
+        await synchronizeLocalArtifactCache(projectId, [], text).catch(reason => console.error(reason));
+      }
       removeCached(clientCacheKeys.project(projectId));
       removeCached(clientCacheKeys.conversations(projectId));
       removeCached(clientCacheKeys.artifacts(projectId));
@@ -866,6 +881,7 @@ export function ProjectStudio({ projectId }: { projectId: string }) {
           method: "POST",
           headers: { "content-type": "application/json" },
           body: JSON.stringify({
+            projectId,
             artifactId: artifact.id,
             kind: artifact.kind,
             targetPlatform: artifact.targetPlatform,
@@ -1554,6 +1570,23 @@ async function localProjectBridgeUrl(text: (chinese: string, english: string) =>
     ));
   }
   return configuration.url;
+}
+
+async function synchronizeLocalArtifactCache(
+  projectId: string,
+  artifactIds: readonly string[],
+  text: (chinese: string, english: string) => string,
+): Promise<void> {
+  const bridgeUrl = await localProjectBridgeUrl(text);
+  const response = await fetch(`${bridgeUrl}/artifact/cache/synchronize`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ projectId, artifactIds }),
+  });
+  if (!response.ok) {
+    const payload = await response.json().catch(() => ({})) as { message?: string };
+    throw new Error(payload.message ?? text("本地制品缓存清理失败", "Unable to clean the local artifact cache"));
+  }
 }
 
 class LocalGitError extends Error {

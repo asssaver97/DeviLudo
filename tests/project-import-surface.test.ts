@@ -35,6 +35,9 @@ test("project linking is reachable from Home and separates local and GitHub sour
   assert.match(bridge, /"\/directory\/git\/status"/);
   assert.match(bridge, /"\/directory\/git\/branch"/);
   assert.match(bridge, /"\/artifact\/reveal"/);
+  assert.match(bridge, /"\/artifact\/cache\/synchronize"/);
+  assert.match(studio, /synchronizeLocalArtifactCache\(projectId, artifactIds, text\)/);
+  assert.match(studio, /body: JSON\.stringify\(\{ projectId, artifactIds \}\)/);
   assert.match(bridge, /execute\("\/usr\/bin\/open", \["-R", target\]/);
   assert.match(bridge, /"switch", "-c", branchName/);
   assert.match(dashboard, /"\/api\/projects\/bind\/local-directory"/);
