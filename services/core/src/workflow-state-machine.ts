@@ -5,6 +5,8 @@ export const WORKFLOW_STATES = [
   "DRAFT",
   "ANALYZING",
   "DESIGNING",
+  "DESIGN_AUDITING",
+  "DESIGN_INPUT_REQUIRED",
   "UI_DESIGNING",
   "DEVELOPING",
   "BUILDING",
@@ -43,9 +45,9 @@ export type WorkflowEvent =
       kind: "JOB_SUCCEEDED";
       jobId: string;
       jobKind: JobKind;
-      agentRole?: "DESIGN" | "UI_DESIGN" | "DEVELOPMENT" | "TEST" | "PUBLISHING";
-      purpose?: "DESIGN" | "UI_DESIGN" | "DEVELOPMENT" | "TEST_PLAN" | "TEST_VERDICT" | "PUBLISHING";
-      verdict?: "PASS" | "FAIL" | "BLOCKED" | "REPLAN";
+      agentRole?: "DESIGN" | "PLAYABILITY_AUDIT" | "DIFFICULTY_AUDIT" | "FUN_AUDIT" | "COHERENCE_AUDIT" | "UI_DESIGN" | "DEVELOPMENT" | "TEST" | "PUBLISHING";
+      purpose?: "DESIGN" | "DESIGN_REVISION" | "DESIGN_AUDIT" | "UI_DESIGN" | "DEVELOPMENT" | "TEST_PLAN" | "TEST_VERDICT" | "PUBLISHING";
+      verdict?: "PASS" | "FAIL" | "BLOCKED" | "REPLAN" | "REVISE" | "PLAYER_INPUT_REQUIRED";
       targetOperatingSystem: ServerOperatingSystem | null;
       /** Agent completion waits here only when this run has auto-generated art. */
       waitForAssets?: boolean;
@@ -97,8 +99,8 @@ export type EnqueueCommand = Readonly<{
   requiredCapabilities: readonly string[];
   exclusive: boolean;
   idempotencyKey: string;
-  agentRole: "DESIGN" | "UI_DESIGN" | "DEVELOPMENT" | "TEST" | "PUBLISHING" | null;
-  purpose: "DESIGN" | "UI_DESIGN" | "DEVELOPMENT" | "TEST_PLAN" | "TEST_VERDICT" | "PUBLISHING" | null;
+  agentRole: "DESIGN" | "PLAYABILITY_AUDIT" | "DIFFICULTY_AUDIT" | "FUN_AUDIT" | "COHERENCE_AUDIT" | "UI_DESIGN" | "DEVELOPMENT" | "TEST" | "PUBLISHING" | null;
+  purpose: "DESIGN" | "DESIGN_REVISION" | "DESIGN_AUDIT" | "UI_DESIGN" | "DEVELOPMENT" | "TEST_PLAN" | "TEST_VERDICT" | "PUBLISHING" | null;
 }>;
 
 export type WorkflowTransition = Readonly<{
@@ -163,10 +165,29 @@ export function transitionWorkflow(snapshot: WorkflowSnapshot, event: WorkflowEv
   if (event.kind !== "JOB_SUCCEEDED") throw new Error(`Event ${event.kind} is invalid for ${snapshot.state}`);
 
   if (snapshot.state === "DESIGNING" && event.jobKind === "AGENT_TURN" && event.agentRole === "DESIGN") {
+    if (event.verdict === "PLAYER_INPUT_REQUIRED") return result({ ...snapshot, state: "DESIGN_INPUT_REQUIRED" }, []);
     return result(
-      { ...snapshot, state: "UI_DESIGNING" },
-      [command(snapshot, "AGENT_TURN", null, `ui-design:after:${event.jobId}`, "UI_DESIGN", "UI_DESIGN")],
+      { ...snapshot, state: "DESIGN_AUDITING" },
+      [command(snapshot, "AGENT_TURN", null, `playability-audit:after:${event.jobId}`, "PLAYABILITY_AUDIT", "DESIGN_AUDIT")],
     );
+  }
+  if (snapshot.state === "DESIGN_AUDITING" && event.jobKind === "AGENT_TURN") {
+    if (event.agentRole === "PLAYABILITY_AUDIT") return result(snapshot,
+      [command(snapshot, "AGENT_TURN", null, `difficulty-audit:after:${event.jobId}`, "DIFFICULTY_AUDIT", "DESIGN_AUDIT")]);
+    if (event.agentRole === "DIFFICULTY_AUDIT") return result(snapshot,
+      [command(snapshot, "AGENT_TURN", null, `fun-audit:after:${event.jobId}`, "FUN_AUDIT", "DESIGN_AUDIT")]);
+    if (event.agentRole === "FUN_AUDIT") return result(snapshot,
+      [command(snapshot, "AGENT_TURN", null, `coherence-audit:after:${event.jobId}`, "COHERENCE_AUDIT", "DESIGN_AUDIT")]);
+    if (event.agentRole === "COHERENCE_AUDIT") {
+      if (event.verdict !== "PASS") return result(
+        { ...snapshot, state: "DESIGNING" },
+        [command(snapshot, "AGENT_TURN", null, `design-revision:after:${event.jobId}`, "DESIGN", "DESIGN_REVISION")],
+      );
+      return result(
+        { ...snapshot, state: "UI_DESIGNING" },
+        [command(snapshot, "AGENT_TURN", null, `ui-design:after:${event.jobId}`, "UI_DESIGN", "UI_DESIGN")],
+      );
+    }
   }
   if (snapshot.state === "UI_DESIGNING" && event.jobKind === "AGENT_TURN" && event.agentRole === "UI_DESIGN") {
     return result(

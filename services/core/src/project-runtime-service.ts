@@ -2,7 +2,13 @@ import { lstat, mkdir, mkdtemp, readFile, readdir, rm, writeFile } from "node:fs
 import { createHash, randomUUID } from "node:crypto";
 import { join, relative, resolve, sep } from "node:path";
 import sharp from "sharp";
-import { PROJECT_RUNTIME_ROLES, type E2eGoal, type ProjectRuntimeRole } from "@/lib/product/contracts";
+import {
+  GAME_DESIGN_AUDIT_ROLES,
+  PROJECT_RUNTIME_ROLES,
+  type E2eGoal,
+  type GameDesignAuditRole,
+  type ProjectRuntimeRole,
+} from "@/lib/product/contracts";
 import { parseProjectDocumentContent, type ProjectDocumentContent } from "@/lib/product/project-document";
 import {
   PROJECT_RUNTIME_SCHEMA,
@@ -17,6 +23,7 @@ import { resolveAgentModel } from "./agent-settings";
 import { normalizeImportedProjectAnalysisReport } from "./project-import";
 import {
   createProjectContext,
+  type NarrativeSourceContract,
   ProjectContextStore,
   type ProjectContext,
   type StoredProjectContext,
@@ -36,6 +43,10 @@ const ROLE_TO_MODEL = Object.freeze({
   INTENT: "intent",
   ANALYSIS: "analysis",
   DESIGN: "design",
+  PLAYABILITY_AUDIT: "design",
+  DIFFICULTY_AUDIT: "design",
+  FUN_AUDIT: "design",
+  COHERENCE_AUDIT: "design",
   UI_DESIGN: "uiDesign",
   DEVELOPMENT: "development",
   TEST: "test",
@@ -45,7 +56,11 @@ const ROLE_TO_MODEL = Object.freeze({
 const ROLE_TOOLS = Object.freeze({
   INTENT: new Set(["context.read", "conversation.reply", "workflow.intent_decision", "workflow.stop", "workflow.continue"]),
   ANALYSIS: new Set(["context.read", "source.list", "source.read", "diagnostics.run", "context.update_analysis", "conversation.reply"]),
-  DESIGN: new Set(["context.read", "requirements.update", "project_document.update", "e2e_goals.update", "conversation.reply", "handoff.create"]),
+  DESIGN: new Set(["context.read", "game_design.replace", "conversation.reply"]),
+  PLAYABILITY_AUDIT: new Set(["context.read", "design_audit.submit", "conversation.reply"]),
+  DIFFICULTY_AUDIT: new Set(["context.read", "design_audit.submit", "conversation.reply"]),
+  FUN_AUDIT: new Set(["context.read", "design_audit.submit", "conversation.reply"]),
+  COHERENCE_AUDIT: new Set(["context.read", "design_audit.submit", "conversation.reply"]),
   UI_DESIGN: new Set(["context.read", "source.list", "source.read", "evidence.read", "project_document.update", "e2e_goals.update", "conversation.reply", "handoff.create"]),
   DEVELOPMENT: new Set(["context.read", "source.list", "source.read", "evidence.read", "source.checkpoint", "assets.plan", "assets.cleanup", "build.request", "conversation.reply", "handoff.create"]),
   TEST: new Set(["context.read", "source.list", "source.read", "test_plan.replace", "test_plan.revise_timeout", "e2e.start", "e2e.observe", "evidence.read", "test.verdict", "conversation.reply", "handoff.create"]),
@@ -64,8 +79,9 @@ const LIFECYCLE_RETRY_LIMIT = 900;
 export const AGENT_EVIDENCE_ARCHIVE_MAX_BYTES = 512 * 1024 * 1024;
 const AGENT_EVIDENCE_IMAGE_MAX_BYTES = 3 * 1024 * 1024;
 const AGENT_EVIDENCE_ROLES = Object.freeze(["START", "READY", "ACTION", "PROGRESS", "COMPLETION"] as const);
-const AGENT_EVIDENCE_IMAGE_LIMIT = 64;
+const AGENT_EVIDENCE_IMAGE_LIMIT = 256;
 const AGENT_EVIDENCE_PAGE_LIMIT = 6;
+const MAX_ACTIVE_E2E_GOALS = 128;
 
 type ProjectArtifactReader = Readonly<{
   readProjectArtifact(input: Readonly<{
@@ -210,6 +226,10 @@ export class ProjectRuntimeService {
       metadata = latestMetadata;
       context = latestRegistered.context;
     }
+    if (input.mode === "PRIMARY" && ["UI_DESIGN", "DEVELOPMENT", "TEST"].includes(input.role)
+      && context.gameDesign.status !== "APPROVED") {
+      throw new Error(`${input.role} Agent cannot run before the game-design audit gate passes`);
+    }
     const runtimeImage = await this.repository.runtimeImage(input.settings.agentRuntime);
     const ensured = await this.backend.ensure({
       schemaVersion: PROJECT_RUNTIME_SCHEMA,
@@ -283,8 +303,17 @@ export class ProjectRuntimeService {
       }
       if (input.role === "DESIGN" && input.mode === "PRIMARY") {
         const durable = await this.readContext(input.workspaceId, input.projectId);
-        if (!runtimeTurnHandoff(durable, result.turnId, "DESIGN", "UI_DESIGN")) {
-          throw new Error("Design Agent completed without creating a UI_DESIGN handoff");
+        const awaitingPlayer = result.structured.status === "PLAYER_INPUT_REQUIRED"
+          && durable.gameDesign.status === "PLAYER_INPUT_REQUIRED";
+        if (!awaitingPlayer && (durable.gameDesign.generatedByTurnId !== result.turnId
+          || durable.gameDesign.status !== "AUDITING")) {
+          throw new Error("Design Agent completed without replacing the authoritative game-design document");
+        }
+      }
+      if (GAME_DESIGN_AUDIT_ROLES.includes(input.role as GameDesignAuditRole) && input.mode === "PRIMARY") {
+        const durable = await this.readContext(input.workspaceId, input.projectId);
+        if (!durable.gameDesign.audits.some(audit => audit.turnId === result.turnId && audit.role === input.role)) {
+          throw new Error(`${input.role} Agent completed without submitting its current design audit`);
         }
       }
       if (input.role === "UI_DESIGN" && input.mode === "PRIMARY") {
@@ -667,6 +696,19 @@ export class ProjectRuntimeService {
       return this.confirmApprovedField(input.workspaceId, input.projectId,
         "projectDocument", document);
     }
+    if (input.name === "game_design.replace") {
+      if (input.role !== "DESIGN") throw new Error("Only the Design Agent may replace the game-design document");
+      return this.replaceGameDesign(input.workspaceId, input.projectId, input.turnId, input.arguments);
+    }
+    if (input.name === "design_audit.submit") {
+      if (!GAME_DESIGN_AUDIT_ROLES.includes(input.role as GameDesignAuditRole)) {
+        throw new Error("Only a game-design audit Agent may submit an audit");
+      }
+      return this.submitGameDesignAudit(
+        input.workspaceId, input.projectId, input.turnId,
+        input.role as GameDesignAuditRole, input.arguments,
+      );
+    }
     if (input.name === "e2e_goals.update") {
       const goals = normalizeRuntimeE2eGoals(input.arguments.goals);
       if (input.role === "UI_DESIGN") {
@@ -949,7 +991,8 @@ export class ProjectRuntimeService {
     if (uiSpecification) assertRequiredUiAssets(uiSpecification, context.assetPlan);
     const revision = (context.source?.revision ?? 0) + 1;
     const directory = join(resolve(this.projectsRoot), "workspaces", workspaceId, "projects", projectId, "runtime", "worktree");
-    const narrativeScenes = requiredNarrativeSceneAssetKeys(context);
+    const narrativeScenes = requiredNarrativeSceneKeys(context);
+    let narrativeContract: NarrativeSourceContract | null = null;
     const checkpointAssetPlanDigest = stableDigest(context.assetPlan);
     if (narrativeScenes.length > 0) {
       const narrativeSourceDigest = await narrativeProofSourceDigest(directory, narrativeProof);
@@ -959,7 +1002,7 @@ export class ProjectRuntimeService {
         );
       }
       try {
-        await validateNarrativeDeliveryProof(directory, narrativeScenes, narrativeProof);
+        narrativeContract = await validateNarrativeDeliveryProof(directory, narrativeScenes, narrativeProof);
       } catch (error) {
         if (isNarrativeSourceQualityRejection(error)) {
           this.rejectedNarrativeSourceDigests.set(turnId, narrativeSourceDigest);
@@ -968,13 +1011,18 @@ export class ProjectRuntimeService {
       }
       this.rejectedNarrativeSourceDigests.delete(turnId);
     }
-    await this.requireProbePublisher(directory);
+    const probePublishers = await this.requireProbePublisher(directory);
+    if (narrativeContract && [narrativeContract.progress.sceneKey, narrativeContract.progress.exchangeKey]
+      .some(key => probePublishers.every(source => !source.includes(key)))) {
+      throw new Error("Narrative progress keys declared by source.checkpoint are not published by the current E2E Probe");
+    }
     // ProjectSourceStore validates every path and rejects links while publishing.
     const stored = await this.sources.publishDirectory({ workspaceId, projectId, revision, directory });
     await this.repository.recordSourceRevision({ workspaceId, projectId, revision,
       relativePath: stored.relativePath, digest: stored.digest, fileCount: stored.fileCount, totalBytes: stored.totalBytes });
     await this.mutateContext(workspaceId, projectId, current => updateProjectContext(current, {
-      source: Object.freeze({ revision, sha256: stored.digest, relativePath: stored.relativePath }),
+      source: Object.freeze({ revision, sha256: stored.digest, relativePath: stored.relativePath,
+        narrative: narrativeContract }),
       e2e: Object.freeze({ ...current.e2e, planRevision: null, plan: null }),
       testSummary: null,
       workflow: Object.freeze({
@@ -1160,6 +1208,136 @@ export class ProjectRuntimeService {
     return Object.freeze({ accepted: true, contextRevision: current.revision });
   }
 
+  private async replaceGameDesign(
+    workspaceId: string,
+    projectId: string,
+    turnId: string,
+    value: Readonly<Record<string, unknown>>,
+  ): Promise<Readonly<Record<string, unknown>>> {
+    const current = await this.readContext(workspaceId, projectId);
+    const markdown = normalizeGameDesignMarkdown(value.markdown, current.language);
+    const document = parseProjectDocumentContent(value.document);
+    const goals = normalizeRuntimeE2eGoals(value.goals);
+    if (current.gameDesign.status === "REVISION_REQUIRED"
+      && current.gameDesign.markdown === markdown
+      && sameJson(current.projectDocument, document)) {
+      throw new Error("Design Agent must resolve audit findings instead of resubmitting the unchanged design");
+    }
+    const workflowId = String(current.workflow.id ?? "");
+    if (!/^[0-9a-f-]{36}$/i.test(workflowId)) throw new Error("Game-design workflow id is invalid");
+    const persistedDocument = await this.repository.updateUiDesignDocument({
+      workspaceId,
+      projectId,
+      expectedRevision: Number(current.workflow.documentRevision ?? 0),
+      document,
+      responseLanguage: current.language,
+    });
+    const persistedGoals = sameJson(goals, current.e2e.goals)
+      ? Object.freeze({ revision: current.e2e.goalRevision })
+      : await this.repository.replaceUiDesignGoals({
+          workspaceId,
+          projectId,
+          workflowId,
+          expectedRevision: current.e2e.goalRevision,
+          goals,
+        });
+    const updated = await this.mutateContext(workspaceId, projectId, context => {
+      return updateProjectContext(context, {
+        projectDocument: document,
+        gameDesign: Object.freeze({
+          revision: context.gameDesign.revision + 1,
+          markdown,
+          sha256: `sha256:${createHash("sha256").update(markdown).digest("hex")}`,
+          status: "AUDITING",
+          auditRound: context.gameDesign.auditRound + 1,
+          generatedByTurnId: turnId,
+          audits: Object.freeze([]),
+        }),
+        e2e: Object.freeze({ ...context.e2e, goalRevision: persistedGoals.revision, goals }),
+        requirements: Object.freeze([
+          ...context.requirements.filter(requirement => requirement.source !== "CORE_LOOP"
+            && requirement.source !== "ACCEPTANCE"),
+          ...goals.map(goal => Object.freeze({ id: goal.id, text: goal.description, source: goal.source })),
+        ]),
+        workflow: Object.freeze({
+          ...context.workflow,
+          documentRevision: persistedDocument.revision,
+          goalRevision: persistedGoals.revision,
+          gameDesignRevision: context.gameDesign.revision + 1,
+        }),
+      });
+    });
+    return Object.freeze({
+      accepted: true,
+      contextRevision: updated.revision,
+      designRevision: updated.gameDesign.revision,
+      auditRound: updated.gameDesign.auditRound,
+      sha256: updated.gameDesign.sha256,
+    });
+  }
+
+  private async submitGameDesignAudit(
+    workspaceId: string,
+    projectId: string,
+    turnId: string,
+    role: GameDesignAuditRole,
+    value: Readonly<Record<string, unknown>>,
+  ): Promise<Readonly<Record<string, unknown>>> {
+    const designRevision = Number(value.designRevision);
+    const verdict = String(value.verdict ?? "");
+    const summary = boundedText(value.summary, 8_000, "Design audit summary");
+    const findings = boundedTextArray(value.findings, 24, 2_000, "Design audit findings");
+    const playerQuestions = boundedTextArray(value.playerQuestions, 4, 1_000, "Design audit player questions");
+    if (!["PASS", "REVISE", "PLAYER_INPUT_REQUIRED"].includes(verdict)) {
+      throw new Error("Design audit verdict is invalid");
+    }
+    if (verdict === "PASS" && (findings.length > 0 || playerQuestions.length > 0)) {
+      throw new Error("A passing design audit cannot retain unresolved findings or player questions");
+    }
+    if (verdict === "REVISE" && findings.length === 0) {
+      throw new Error("A revision verdict requires at least one actionable finding");
+    }
+    if (verdict === "PLAYER_INPUT_REQUIRED" && playerQuestions.length === 0) {
+      throw new Error("A player-input verdict requires at least one concrete question");
+    }
+    const updated = await this.mutateContext(workspaceId, projectId, current => {
+      const completedRetry = role === "COHERENCE_AUDIT"
+        && ["APPROVED", "REVISION_REQUIRED", "PLAYER_INPUT_REQUIRED"].includes(current.gameDesign.status)
+        && GAME_DESIGN_AUDIT_ROLES.every(auditRole => current.gameDesign.audits.some(audit => audit.role === auditRole));
+      if ((!completedRetry && current.gameDesign.status !== "AUDITING")
+        || current.gameDesign.revision !== designRevision) {
+        throw new Error("Design audit does not match the current auditable document revision");
+      }
+      const audits = Object.freeze([
+        ...current.gameDesign.audits.filter(audit => audit.role !== role),
+        Object.freeze({
+          role,
+          designRevision,
+          verdict: verdict as "PASS" | "REVISE" | "PLAYER_INPUT_REQUIRED",
+          summary,
+          findings,
+          playerQuestions,
+          turnId,
+          completedAt: new Date().toISOString(),
+        }),
+      ]);
+      const complete = GAME_DESIGN_AUDIT_ROLES.every(auditRole => audits.some(audit => audit.role === auditRole));
+      const status = !complete ? "AUDITING"
+        : audits.some(audit => audit.verdict === "PLAYER_INPUT_REQUIRED") ? "PLAYER_INPUT_REQUIRED"
+        : audits.some(audit => audit.verdict === "REVISE") ? "REVISION_REQUIRED"
+        : "APPROVED";
+      return updateProjectContext(current, {
+        gameDesign: Object.freeze({ ...current.gameDesign, status, audits }),
+      });
+    });
+    return Object.freeze({
+      accepted: true,
+      contextRevision: updated.revision,
+      designRevision,
+      status: updated.gameDesign.status,
+    });
+  }
+
   private async updateUiDesignDocument(
     workspaceId: string,
     projectId: string,
@@ -1193,6 +1371,7 @@ export class ProjectRuntimeService {
     goals: readonly E2eGoal[],
   ): Promise<Readonly<Record<string, unknown>>> {
     const current = await this.readContext(workspaceId, projectId);
+    assertNarrativeGoalScope(current, goals);
     const workflowId = String(current.workflow.id ?? "");
     if (!/^[0-9a-f-]{36}$/i.test(workflowId)) throw new Error("UI Design workflow id is invalid");
     const persisted = await this.repository.replaceUiDesignGoals({
@@ -1795,6 +1974,11 @@ function arrayOfObjects(value: unknown): readonly Readonly<Record<string, unknow
 
 function normalizeRuntimeE2eGoals(value: unknown): readonly E2eGoal[] {
   const goals = arrayOfObjects(value);
+  if (goals.length > MAX_ACTIVE_E2E_GOALS) {
+    throw new Error(
+      `UI Design Agent returned ${goals.length} active E2E goals; consolidate overlapping obligations and keep at most ${MAX_ACTIVE_E2E_GOALS}`,
+    );
+  }
   const ids = new Set<string>();
   return Object.freeze(goals.map(goal => {
     const id = typeof goal.id === "string" ? goal.id : "";
@@ -1815,6 +1999,60 @@ function arrayOfStrings(value: unknown): readonly string[] {
     throw new Error("Tool argument must be a bounded string array");
   }
   return Object.freeze(value);
+}
+
+function boundedText(value: unknown, maximum: number, label: string): string {
+  if (typeof value !== "string") throw new Error(`${label} must be text`);
+  const text = value.trim();
+  if (!text || text.length > maximum) throw new Error(`${label} is invalid`);
+  return text;
+}
+
+function boundedTextArray(value: unknown, maximumItems: number, maximumLength: number, label: string): readonly string[] {
+  if (!Array.isArray(value) || value.length > maximumItems) throw new Error(`${label} are invalid`);
+  return Object.freeze(value.map(item => boundedText(item, maximumLength, label)));
+}
+
+function normalizeGameDesignMarkdown(value: unknown, language: "en" | "zh"): string {
+  const markdown = boundedText(value, 64_000, "Game-design Markdown").replaceAll("\r\n", "\n");
+  if (markdown.length < 1_200) throw new Error("Game-design Markdown is too shallow to audit");
+  const requiredHeadings = language === "zh" ? [
+    "# 游戏设计",
+    "## 愿景",
+    "## 设计支柱",
+    "## 玩家体验",
+    "## 核心循环",
+    "## 规则与操作",
+    "## 系统与经济",
+    "## 成长与难度",
+    "## 内容与叙事",
+    "## 引导、反馈与无障碍",
+    "## 平衡风险与可调参数",
+    "## 范围与非目标",
+    "## 试玩假设",
+    "## E2E 验收",
+  ] : [
+    "# Game Design",
+    "## Vision",
+    "## Design Pillars",
+    "## Player Experience",
+    "## Core Loop",
+    "## Rules and Controls",
+    "## Systems and Economy",
+    "## Progression and Difficulty",
+    "## Content and Narrative",
+    "## Onboarding, Feedback and Accessibility",
+    "## Balance Risks and Tunables",
+    "## Scope and Non-Goals",
+    "## Playtest Hypotheses",
+    "## E2E Acceptance",
+  ];
+  for (const heading of requiredHeadings) {
+    if (!markdown.split("\n").some(line => line.trim() === heading)) {
+      throw new Error(`Game-design Markdown is missing required section: ${heading}`);
+    }
+  }
+  return `${markdown.trim()}\n`;
 }
 
 function normalizeAssetPlan(value: readonly Readonly<Record<string, unknown>>[]): readonly Readonly<Record<string, unknown>>[] {
@@ -2004,32 +2242,84 @@ const NARRATIVE_EXCHANGE_ANCHOR_FIELDS = Object.freeze(["prompt", "choices"] as 
 const NARRATIVE_CHOICE_ANCHOR_FIELDS = Object.freeze(["action", "response"] as const);
 
 /**
- * A numbered scene-art contract means UI Design expects authored narrative
- * scenes rather than interchangeable level decoration. Development must prove
- * that every one of those scenes has its own implemented beats before Core
- * publishes a source revision.
+ * Narrative delivery is a gameplay contract, not an art-file naming
+ * convention. Derive the exact scene inventory from the approved gameplay
+ * document so missing or differently named art cannot disable story checks.
  */
-export function requiredNarrativeSceneAssetKeys(
-  context: Pick<ProjectContext, "assetPlan">,
+export function requiredNarrativeSceneKeys(
+  context: Pick<ProjectContext, "projectDocument">,
 ): readonly string[] {
-  const candidates = context.assetPlan.flatMap(asset => {
-    const key = String(asset.key ?? "");
-    const match = /^scene-(\d{2,3})(?:-|$)/.exec(key);
-    return match ? [{ key, order: Number(match[1]) }] : [];
+  const gameplay = typeof context.projectDocument.gameplay === "string"
+    ? context.projectDocument.gameplay : "";
+  const categories = Array.isArray(context.projectDocument.categories)
+    ? context.projectDocument.categories.map(value => String(value).toLocaleLowerCase("und")) : [];
+  const narrative = categories.some(category => /narrative|story|adventure|campaign|剧情|叙事|故事|冒险/.test(category))
+    || /narrative|story-driven|campaign|chapter-based|剧情|叙事|故事|章节/.test(gameplay.toLocaleLowerCase("und"));
+  const counts = narrativeSceneCounts(gameplay);
+  if (!narrative && counts.length === 0) return Object.freeze([]);
+  if (counts.length === 0) {
+    throw new Error("Narrative gameplay must declare one exact authored scene count in projectDocument.gameplay");
+  }
+  const unique = [...new Set(counts)];
+  if (unique.length !== 1) {
+    throw new Error(`Narrative gameplay contains conflicting scene counts: ${unique.join(", ")}`);
+  }
+  const count = unique[0]!;
+  if (count < 2 || count > 80) throw new Error("Narrative gameplay scene count must be from 2 through 80");
+  const width = Math.max(2, String(count).length);
+  return Object.freeze(Array.from({ length: count }, (_, index) => `scene-${String(index + 1).padStart(width, "0")}`));
+}
+
+function narrativeSceneCounts(value: string): readonly number[] {
+  const counts: number[] = [];
+  for (const match of value.matchAll(/\b(\d{1,3})\s*(?:authored\s+|named\s+|playable\s+)?(?:narrative\s+)?scenes?\b/giu)) {
+    counts.push(Number(match[1]));
+  }
+  for (const match of value.matchAll(/(?<!第)(\d{1,3})\s*个?\s*(?:具名|完整|可玩|叙事)?\s*(?:场景|场|幕)(?!景?[编号])/gu)) {
+    counts.push(Number(match[1]));
+  }
+  for (const match of value.matchAll(/(?<!第)([零〇一二两三四五六七八九十百]{1,6})\s*(?:个?\s*)?(?:具名|完整|可玩|叙事)?\s*(?:场景|场|幕)(?!景?[编号])/gu)) {
+    const parsed = chineseInteger(match[1]!);
+    if (parsed !== null) counts.push(parsed);
+  }
+  return Object.freeze(counts.filter(count => Number.isSafeInteger(count)));
+}
+
+function chineseInteger(value: string): number | null {
+  const digits: Readonly<Record<string, number>> = Object.freeze({
+    零: 0, 〇: 0, 一: 1, 二: 2, 两: 2, 三: 3, 四: 4, 五: 5, 六: 6, 七: 7, 八: 8, 九: 9,
   });
-  if (candidates.length < 2) return Object.freeze([]);
-  candidates.sort((left, right) => left.order - right.order || left.key.localeCompare(right.key));
-  const seenOrders = new Set<number>();
-  for (const candidate of candidates) {
-    if (candidate.order < 1 || seenOrders.has(candidate.order)) {
-      throw new Error("Numbered narrative scene assets must use unique positive scene numbers");
+  let total = 0;
+  let current = 0;
+  for (const character of value) {
+    if (character === "百") {
+      total += (current || 1) * 100;
+      current = 0;
+    } else if (character === "十") {
+      total += (current || 1) * 10;
+      current = 0;
+    } else if (digits[character] !== undefined) {
+      current = digits[character]!;
+    } else {
+      return null;
     }
-    seenOrders.add(candidate.order);
   }
-  for (let order = 1; order <= candidates[candidates.length - 1]!.order; order += 1) {
-    if (!seenOrders.has(order)) throw new Error("Numbered narrative scene assets must form one contiguous sequence");
+  return total + current;
+}
+
+export function assertNarrativeGoalScope(
+  context: Pick<ProjectContext, "projectDocument">,
+  goals: readonly E2eGoal[],
+): void {
+  const required = requiredNarrativeSceneKeys(context);
+  if (required.length === 0) return;
+  const conflicting = goals.flatMap(goal => narrativeSceneCounts(goal.description))
+    .filter(count => count !== required.length);
+  if (conflicting.length > 0) {
+    throw new Error(
+      `E2E goals contain a stale narrative scope (${[...new Set(conflicting)].join(", ")} scenes); the approved gameplay requires ${required.length}. Retire or replace the conflicting goals instead of accumulating them.`,
+    );
   }
-  return Object.freeze(candidates.map(candidate => candidate.key));
 }
 
 export function hasCurrentTurnSourceCheckpoint(
@@ -2046,11 +2336,23 @@ export async function validateNarrativeDeliveryProof(
   sourceRoot: string,
   requiredSceneKeys: readonly string[],
   value: unknown,
-): Promise<void> {
+): Promise<NarrativeSourceContract> {
   const proof = boundedObject(value, MAX_SOURCE_CHECKPOINT_TOOL_ARGUMENT_BYTES);
-  assertOnlyKeys(proof, ["opening", "scenes"], "Narrative delivery proof");
+  assertOnlyKeys(proof, ["opening", "progress", "scenes"], "Narrative delivery proof");
   const opening = boundedObject(proof.opening);
   assertOnlyKeys(opening, ["sourcePath", "anchors"], "Narrative opening proof");
+  const progress = boundedObject(proof.progress);
+  assertOnlyKeys(progress, ["sceneKey", "exchangeKey", "sceneBase", "exchangeBase"], "Narrative progress proof");
+  const sceneKey = String(progress.sceneKey ?? "");
+  const exchangeKey = String(progress.exchangeKey ?? "");
+  const sceneBase = Number(progress.sceneBase);
+  const exchangeBase = Number(progress.exchangeBase);
+  if (!/^[A-Za-z0-9][A-Za-z0-9_.-]{0,199}$/.test(sceneKey)
+    || !/^[A-Za-z0-9][A-Za-z0-9_.-]{0,199}$/.test(exchangeKey)
+    || sceneKey === exchangeKey
+    || ![0, 1].includes(sceneBase) || ![0, 1].includes(exchangeBase)) {
+    throw new Error("Narrative progress proof requires distinct published scene/exchange keys and zero- or one-based indexes");
+  }
   const scenes = arrayOfObjects(proof.scenes);
   if (scenes.length !== requiredSceneKeys.length) {
     throw new Error(`Narrative delivery proof must cover all ${requiredSceneKeys.length} authored scenes exactly`);
@@ -2104,11 +2406,13 @@ export async function validateNarrativeDeliveryProof(
 
   const expectedKeys = new Set(requiredSceneKeys);
   const seenKeys = new Set<string>();
-  for (const candidate of scenes) {
+  const verifiedScenes: { id: string; exchangeCount: number }[] = [];
+  for (const [sceneIndex, candidate] of scenes.entries()) {
     assertOnlyKeys(candidate, ["id", "title", "sourcePath", "anchors"], "Narrative scene proof");
     const id = String(candidate.id ?? "");
     const title = typeof candidate.title === "string" ? normalizeNarrativeAnchor(candidate.title) : "";
-    if (!expectedKeys.has(id) || seenKeys.has(id) || !title || title.length > 200) {
+    if (!expectedKeys.has(id) || id !== requiredSceneKeys[sceneIndex]
+      || seenKeys.has(id) || !title || title.length > 200) {
       throw new Error("Narrative delivery proof has a missing, duplicate, or unexpected scene");
     }
     seenKeys.add(id);
@@ -2125,6 +2429,7 @@ export async function validateNarrativeDeliveryProof(
     if (exchanges.length < 3 || exchanges.length > 12) {
       throw new Error(`Narrative scene ${id} requires at least three authored exchanges`);
     }
+    verifiedScenes.push({ id, exchangeCount: exchanges.length });
     for (let exchangeIndex = 0; exchangeIndex < exchanges.length; exchangeIndex += 1) {
       const exchange = exchanges[exchangeIndex]!;
       assertOnlyKeys(exchange, NARRATIVE_EXCHANGE_ANCHOR_FIELDS,
@@ -2182,6 +2487,10 @@ export async function validateNarrativeDeliveryProof(
   if (requiredSceneKeys.some(key => !seenKeys.has(key))) {
     throw new Error("Narrative delivery proof does not cover every required scene");
   }
+  return Object.freeze({
+    scenes: Object.freeze(verifiedScenes.map(scene => Object.freeze(scene))),
+    progress: Object.freeze({ sceneKey, exchangeKey, sceneBase, exchangeBase }),
+  });
 }
 
 async function narrativeProofSourceDigest(sourceRoot: string, value: unknown): Promise<string> {
@@ -2708,12 +3017,22 @@ function freezeTestPlan(value: Readonly<Record<string, unknown>>, context: Proje
   if (goalIds.some(id => !manifestRequirementIds.has(id))) {
     throw new Error("The Test Agent plan does not cover every current E2E goal ID");
   }
+  const requiredNarrativeScenes = requiredNarrativeSceneKeys(context);
+  const narrativeContract = context.source?.narrative ?? null;
+  if (requiredNarrativeScenes.length > 0 && (!narrativeContract
+    || !sameJson(narrativeContract.scenes.map(scene => scene.id), requiredNarrativeScenes))) {
+    throw new Error("The current source revision has no narrative delivery contract matching the approved gameplay scope");
+  }
   const missingNarrativeCheckpoints = missingNarrativeExchangeCheckpoints(
     manifest,
-    requiredNarrativeSceneAssetKeys(context),
+    narrativeContract,
   );
   if (missingNarrativeCheckpoints.length > 0) {
     throw new Error(`The Test Agent plan must capture every authored narrative exchange before choosing: ${missingNarrativeCheckpoints.join(", ")}`);
+  }
+  const missingCausalityProofs = missingNarrativeCausalityProofs(manifest, context.e2e.goals);
+  if (missingCausalityProofs.length > 0) {
+    throw new Error(`The Test Agent plan must prove early decisions cause distinct later observable states on two fresh paths: ${missingCausalityProofs.join(", ")}`);
   }
   const placement = boundedObject(value.assetPlacementPlan);
   const visualAssetPlan = context.assetPlan.filter(asset => String(asset.assetType ?? "").toLowerCase() !== "music");
@@ -2783,9 +3102,9 @@ function freezeTestPlan(value: Readonly<Record<string, unknown>>, context: Proje
  */
 export function missingNarrativeExchangeCheckpoints(
   manifest: Readonly<Record<string, unknown>>,
-  requiredSceneKeys: readonly string[],
+  contract: NarrativeSourceContract | null,
 ): readonly string[] {
-  if (requiredSceneKeys.length < 2) return Object.freeze([]);
+  if (!contract || contract.scenes.length < 2) return Object.freeze([]);
   const observed = new Set<string>();
   const features = Array.isArray(manifest.features) ? manifest.features : [];
   for (const featureValue of features) {
@@ -2806,20 +3125,102 @@ export function missingNarrativeExchangeCheckpoints(
         const assertion = assertionValue as Readonly<Record<string, unknown>>;
         if (assertion.source !== "PROGRESS" || assertion.operator !== "EQUALS"
           || typeof assertion.value !== "number" || !Number.isInteger(assertion.value)) continue;
-        if (assertion.key === "scene_number") sceneNumber = assertion.value;
-        if (assertion.key === "scene_beat") sceneBeat = assertion.value;
+        if (assertion.key === contract.progress.sceneKey) sceneNumber = assertion.value;
+        if (assertion.key === contract.progress.exchangeKey) sceneBeat = assertion.value;
       }
       if (sceneNumber !== null && sceneBeat !== null) observed.add(`${sceneNumber}:${sceneBeat}`);
     }
   }
   const missing: string[] = [];
-  for (let sceneNumber = 1; sceneNumber <= requiredSceneKeys.length; sceneNumber += 1) {
-    for (let sceneBeat = 0; sceneBeat < 3; sceneBeat += 1) {
+  for (const [sceneIndex, scene] of contract.scenes.entries()) {
+    const sceneNumber = contract.progress.sceneBase + sceneIndex;
+    for (let exchangeIndex = 0; exchangeIndex < scene.exchangeCount; exchangeIndex += 1) {
+      const sceneBeat = contract.progress.exchangeBase + exchangeIndex;
       const key = `${sceneNumber}:${sceneBeat}`;
-      if (!observed.has(key)) missing.push(`scene ${sceneNumber} beat ${sceneBeat + 1}`);
+      if (!observed.has(key)) missing.push(`${scene.id} exchange ${exchangeIndex + 1}`);
     }
   }
   return Object.freeze(missing);
+}
+
+const NARRATIVE_CAUSAL_GOAL = /(?:(?:early|prior|previous).{0,80}(?:choice|decision).{0,80}(?:later|subsequent|ending|callback|change|persist)|(?:早期|此前|先前).{0,80}(?:选择|决定).{0,80}(?:后续|后来|跨章|结局|回调|影响|改变|保留))/iu;
+const NARRATIVE_CAUSAL_STATE_KEY = /choice|decision|branch|relationship|affinity|trust|knowledge|promise|commit|consequence|callback|ending|route|memory|flag|选择|关系|信任|承诺|结局|分支|记忆|后果/iu;
+
+/**
+ * A requirement label on a click is not causal evidence. A narrative callback
+ * is proven only when two clean player paths make different choices and later
+ * assert different values for the same published narrative-state field.
+ */
+export function missingNarrativeCausalityProofs(
+  manifest: Readonly<Record<string, unknown>>,
+  goals: readonly Readonly<Record<string, unknown>>[],
+): readonly string[] {
+  const causalGoals = goals.filter(goal => NARRATIVE_CAUSAL_GOAL.test(String(goal.description ?? "")));
+  if (causalGoals.length === 0) return Object.freeze([]);
+  const features = Array.isArray(manifest.features) ? manifest.features : [];
+  const missing: string[] = [];
+  for (const goal of causalGoals) {
+    const goalId = String(goal.id ?? "");
+    const observations = new Map<string, { value: unknown; featureId: string; actionId: string }[]>();
+    for (const featureValue of features) {
+      if (!featureValue || typeof featureValue !== "object" || Array.isArray(featureValue)) continue;
+      const feature = featureValue as Readonly<Record<string, unknown>>;
+      if (feature.verificationMethod !== "interactive"
+        || (feature.launchProfile as Readonly<Record<string, unknown>> | undefined)?.type !== "FRESH") continue;
+      const events = ((feature.interactionScript as Readonly<Record<string, unknown>> | undefined)?.events);
+      if (!Array.isArray(events)) continue;
+      for (let actionIndex = 0; actionIndex < events.length; actionIndex += 1) {
+        const actionValue = events[actionIndex];
+        if (!actionValue || typeof actionValue !== "object" || Array.isArray(actionValue)) continue;
+        const action = actionValue as Readonly<Record<string, unknown>>;
+        if (!Array.isArray(action.coversRequirementIds) || !action.coversRequirementIds.includes(goalId)
+          || !Array.isArray(action.postconditions)) continue;
+        const changedKeys = new Set(action.postconditions.flatMap(assertionValue => {
+          if (!assertionValue || typeof assertionValue !== "object" || Array.isArray(assertionValue)) return [];
+          const assertion = assertionValue as Readonly<Record<string, unknown>>;
+          const key = String(assertion.key ?? "");
+          return ["STATE", "PROGRESS"].includes(String(assertion.source))
+            && assertion.operator === "CHANGED" && NARRATIVE_CAUSAL_STATE_KEY.test(key)
+            ? [`${String(assertion.source)}:${key}`] : [];
+        }));
+        if (changedKeys.size === 0) continue;
+        const laterEvents = events.slice(actionIndex + 1);
+        if (laterEvents.filter(event => event && typeof event === "object"
+          && !Array.isArray(event) && "stepId" in event).length < 2) continue;
+        for (const laterValue of laterEvents) {
+          if (!laterValue || typeof laterValue !== "object" || Array.isArray(laterValue)) continue;
+          const later = laterValue as Readonly<Record<string, unknown>>;
+          if (later.type !== "checkpoint" || !Array.isArray(later.assertions)) continue;
+          for (const assertionValue of later.assertions) {
+            if (!assertionValue || typeof assertionValue !== "object" || Array.isArray(assertionValue)) continue;
+            const assertion = assertionValue as Readonly<Record<string, unknown>>;
+            const key = `${String(assertion.source)}:${String(assertion.key ?? "")}`;
+            if (!changedKeys.has(key) || assertion.operator !== "EQUALS" || assertion.value === undefined) continue;
+            const entries = observations.get(key) ?? [];
+            entries.push({
+              value: assertion.value,
+              featureId: String(feature.id ?? ""),
+              actionId: narrativeActionIdentifier(action),
+            });
+            observations.set(key, entries);
+          }
+        }
+      }
+    }
+    const proven = [...observations.values()].some(entries => entries.some((left, index) => entries.some((right, rightIndex) => (
+      rightIndex > index && left.featureId !== right.featureId && left.actionId !== right.actionId
+      && JSON.stringify(left.value) !== JSON.stringify(right.value)
+    ))));
+    if (!proven) missing.push(goalId);
+  }
+  return Object.freeze(missing);
+}
+
+function narrativeActionIdentifier(action: Readonly<Record<string, unknown>>): string {
+  for (const key of ["targetId", "key", "button", "axis", "trigger", "fromTargetId", "toTargetId"]) {
+    if (action[key] !== undefined) return `${String(action.type)}:${key}:${String(action[key])}`;
+  }
+  return `${String(action.type)}:${String(action.stepId ?? "")}`;
 }
 
 function stableDigest(value: unknown): string {

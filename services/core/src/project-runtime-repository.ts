@@ -890,7 +890,7 @@ export class ProjectRuntimeRepository {
         await client.query(
           `UPDATE deviludo.workflow_instances
               SET state = CASE
-                    WHEN state_data->>'resumeState' IN ('ANALYZING','DESIGNING','UI_DESIGNING','DEVELOPING','BUILDING','TEST_PLANNING','TESTING')
+                    WHEN state_data->>'resumeState' IN ('ANALYZING','DESIGNING','DESIGN_AUDITING','DESIGN_INPUT_REQUIRED','UI_DESIGNING','DEVELOPING','BUILDING','TEST_PLANNING','TESTING')
                       THEN (state_data->>'resumeState')::deviludo.workflow_state
                     ELSE 'DEVELOPING'::deviludo.workflow_state END,
                   state_data = state_data - 'resumeState' - 'stopReason', version = version + 1,
@@ -906,6 +906,12 @@ export class ProjectRuntimeRepository {
               `SELECT deviludo.enqueue_job($1::uuid, $2::uuid, $3::uuid, 'AGENT_TURN', NULL, $4, $5::jsonb)`,
               [workspaceId, workflow.id, projectId, `${workflow.id}:resume:design:${resumedAt}`,
                 JSON.stringify({ role: "DESIGN", purpose: "DESIGN", resumed: true })],
+            );
+          } else if (resume === "DESIGN_AUDITING") {
+            await client.query(
+              `SELECT deviludo.enqueue_job($1::uuid, $2::uuid, $3::uuid, 'AGENT_TURN', NULL, $4, $5::jsonb)`,
+              [workspaceId, workflow.id, projectId, `${workflow.id}:resume:playability-audit:${resumedAt}`,
+                JSON.stringify({ role: "PLAYABILITY_AUDIT", purpose: "DESIGN_AUDIT", resumed: true })],
             );
           } else if (resume === "UI_DESIGNING") {
             await client.query(

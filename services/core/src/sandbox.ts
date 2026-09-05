@@ -12,7 +12,11 @@ import {
   runtimeTurnHandoff,
   type ProjectRuntimeService,
 } from "./project-runtime-service";
-import type { ProjectRuntimeRole } from "@/lib/product/contracts";
+import {
+  GAME_DESIGN_AUDIT_ROLES,
+  type GameDesignAuditRole,
+  type ProjectRuntimeRole,
+} from "@/lib/product/contracts";
 import { resolveAgentModel } from "./agent-settings";
 
 export type SandboxMode = "MICROVM" | "RESTRICTED_CONTAINER";
@@ -226,11 +230,13 @@ export async function runSandbox(
             await repository.appendJobProgress(job, "AGENT_OUTPUT", runtimeResult.content);
           }
           const context = await projectRuntime.readContext(job.workspaceId, job.projectId);
-          const designHandoff = role === "DESIGN"
-            ? runtimeTurnHandoff(context, runtimeResult.turnId, "DESIGN", "UI_DESIGN")
-            : null;
-          if (role === "DESIGN" && !designHandoff) {
-            throw new Error("Design Agent completed without creating a UI_DESIGN handoff");
+          const designHandoff = null;
+          const designAwaitingPlayer = role === "DESIGN"
+            && runtimeResult.structured.status === "PLAYER_INPUT_REQUIRED"
+            && context.gameDesign.status === "PLAYER_INPUT_REQUIRED";
+          if (role === "DESIGN" && !designAwaitingPlayer
+            && context.gameDesign.generatedByTurnId !== runtimeResult.turnId) {
+            throw new Error("Design Agent completed without replacing the authoritative game-design document");
           }
           const uiDesignHandoff = role === "UI_DESIGN"
             ? runtimeTurnHandoff(context, runtimeResult.turnId, "UI_DESIGN", "DEVELOPMENT")
@@ -272,7 +278,25 @@ export async function runSandbox(
           const configurationReplan = role === "TEST" && job.payload.purpose === "TEST_VERDICT"
             && testRuns.some(run => run && typeof run === "object"
               && (run as Record<string, unknown>).failureClass === "CONFIGURATION");
-          const structured: Readonly<Record<string, unknown>> = hasCurrentTestPlan
+          const audit = GAME_DESIGN_AUDIT_ROLES.includes(role as GameDesignAuditRole)
+            ? context.gameDesign.audits.find(candidate => candidate.turnId === runtimeResult.turnId && candidate.role === role)
+            : null;
+          if (GAME_DESIGN_AUDIT_ROLES.includes(role as GameDesignAuditRole) && !audit) {
+            throw new Error(`${role} Agent completed without a durable current-revision audit`);
+          }
+          const structured: Readonly<Record<string, unknown>> = audit
+            ? Object.freeze({
+                verdict: role === "COHERENCE_AUDIT"
+                  ? context.gameDesign.status === "APPROVED" ? "PASS"
+                    : context.gameDesign.status === "PLAYER_INPUT_REQUIRED" ? "PLAYER_INPUT_REQUIRED" : "REVISE"
+                  : audit.verdict,
+                designRevision: audit.designRevision,
+                status: context.gameDesign.status,
+                summary: audit.summary,
+                findings: audit.findings,
+                playerQuestions: audit.playerQuestions,
+              })
+            : hasCurrentTestPlan
             ? Object.freeze({
                 planId: latestTestPlan.id,
                 planRevision: latestTestPlan.planRevision,
@@ -293,6 +317,22 @@ export async function runSandbox(
                 reason: "The frozen plan references Probe fields that the tested source does not publish.",
               })
             : runtimeResult.structured;
+          if (role === "COHERENCE_AUDIT" && context.gameDesign.status === "APPROVED") {
+            const designObject = await objectStore.putGameDesignDocument({
+              workspaceId: job.workspaceId,
+              projectId: job.projectId,
+              workflowId: job.workflowId,
+              revision: context.gameDesign.revision,
+              markdown: context.gameDesign.markdown,
+            });
+            await repository.registerGameDesignArtifact({
+              workspaceId: job.workspaceId,
+              projectId: job.projectId,
+              workflowId: job.workflowId,
+              revision: context.gameDesign.revision,
+              object: designObject,
+            });
+          }
           const completed = await repository.completePersistentAgentTurn(job, Object.freeze({
             turnId: runtimeResult.turnId,
             sessionId: runtimeResult.sessionId,
@@ -307,9 +347,13 @@ export async function runSandbox(
             handoff: designHandoff ?? uiDesignHandoff ?? sourceContractHandoff ?? structured.handoff ?? null,
             responseLanguage,
             agentRuntime: settings.agentRuntime,
+            designRevision: context.gameDesign.revision || null,
+            gameDesignStatus: context.gameDesign.status,
             model: role === "PUBLISHING" ? settings.primaryModel : resolveAgentModel(
               settings.primaryModel, settings.modelOverrides,
-              role === "UI_DESIGN" ? "uiDesign" : role.toLowerCase() as "design" | "development" | "test",
+              role === "UI_DESIGN" ? "uiDesign"
+                : GAME_DESIGN_AUDIT_ROLES.includes(role as GameDesignAuditRole) ? "design"
+                : role.toLowerCase() as "design" | "development" | "test",
             ),
             settingsRevision: settings.revision,
           }));
@@ -423,7 +467,7 @@ export async function runSandbox(
 
 function runtimeJobRole(payload: Readonly<Record<string, unknown>>): ProjectRuntimeRole {
   const role = payload.role ?? "DEVELOPMENT";
-  if (!["DESIGN", "UI_DESIGN", "DEVELOPMENT", "TEST", "PUBLISHING"].includes(String(role))) {
+  if (!["DESIGN", "PLAYABILITY_AUDIT", "DIFFICULTY_AUDIT", "FUN_AUDIT", "COHERENCE_AUDIT", "UI_DESIGN", "DEVELOPMENT", "TEST", "PUBLISHING"].includes(String(role))) {
     throw new Error("AGENT_TURN job role is invalid");
   }
   return role as ProjectRuntimeRole;
@@ -445,9 +489,12 @@ function runtimeJobPrompt(job: JobProtocolV4, role: ProjectRuntimeRole): string 
   }
   if (role === "DESIGN") {
     return [
-      `Apply the approved gameplay requirement revision and create a complete UI_DESIGN handoff. Purpose: ${purpose}.`,
-      handoff ? `Approved design brief: ${JSON.stringify(handoff).slice(0, 40_000)}` : "",
+      `Create or coherently revise the authoritative Markdown game-design document, its structured project document projection, and its complete E2E goals. Purpose: ${purpose}.`,
+      handoff ? `Approved design brief or audit findings: ${JSON.stringify(handoff).slice(0, 40_000)}` : "",
     ].filter(Boolean).join("\n");
+  }
+  if (GAME_DESIGN_AUDIT_ROLES.includes(role as GameDesignAuditRole)) {
+    return `Independently audit the exact current game-design revision as ${role}. Submit one evidence-based verdict through design_audit_submit. Do not edit the design or source.`;
   }
   if (role === "UI_DESIGN") {
     return [

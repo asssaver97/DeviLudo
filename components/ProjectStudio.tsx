@@ -19,7 +19,7 @@ import type {
   ProductConversationSummary,
   ProductProjectDetail,
   ProductProjectSummary,
-  ProjectAgentRole,
+  ProjectRuntimeRole,
   ProductWorkflowIterationDetail,
   ProductWorkflowIterationSummary,
 } from "@/lib/product/contracts";
@@ -66,6 +66,8 @@ const PIPELINE = [
 ] as const;
 const ACTIVE_PIPELINE_STAGE: Readonly<Record<string, (typeof PIPELINE)[number][0]>> = Object.freeze({
   DESIGNING: "GAME_DESIGN",
+  DESIGN_AUDITING: "GAME_DESIGN",
+  DESIGN_INPUT_REQUIRED: "GAME_DESIGN",
   UI_DESIGNING: "UI_DESIGN",
   DEVELOPING: "AGENT_TURN",
   BUILDING: "BUILD",
@@ -1787,7 +1789,13 @@ export function pipelineJobsForStage(
   jobs: ProductProjectDetail["jobs"],
 ): ProductProjectDetail["jobs"] {
   if (stage === "GAME_DESIGN") {
-    return Object.freeze(jobs.filter(job => job.kind === "AGENT_TURN" && job.agentRole === "DESIGN"));
+    return Object.freeze(jobs.filter(job => job.kind === "AGENT_TURN" && [
+      "DESIGN",
+      "PLAYABILITY_AUDIT",
+      "DIFFICULTY_AUDIT",
+      "FUN_AUDIT",
+      "COHERENCE_AUDIT",
+    ].includes(job.agentRole ?? "")));
   }
   if (stage === "UI_DESIGN") {
     return Object.freeze(jobs.filter(job => job.kind === "AGENT_TURN" && job.agentRole === "UI_DESIGN"));
@@ -1995,6 +2003,7 @@ function artifactLabel(
 ): string {
   const labels: Record<ArtifactRecord["kind"], readonly [string, string]> = {
     SPECIFICATION: ["需求快照", "REQUIREMENTS SNAPSHOT"],
+    GAME_DESIGN: ["游戏设计文档", "GAME DESIGN DOCUMENT"],
     PROJECT_DOCUMENT: ["项目说明", "PROJECT DOCUMENT"],
     BUILD: ["游戏构建", "GAME BUILD"],
     E2E_REPORT: ["E2E 报告", "E2E REPORT"],
@@ -2084,7 +2093,8 @@ function formatConversationTime(value: string, locale: string, text: (chinese: s
 function workflowLabel(state: string, text: (chinese: string, english: string) => string): string {
   const labels: Record<string, readonly [string, string]> = {
     DRAFT: ["需求讨论中", "Requirements discussion"], ANALYZING: ["项目分析中", "Analyzing project"],
-    DESIGNING: ["游戏设计中", "Designing game"], UI_DESIGNING: ["UI 设计中", "Designing UI"], DEVELOPING: ["游戏生成中", "Developing game"],
+    DESIGNING: ["游戏设计中", "Designing game"], DESIGN_AUDITING: ["游戏设计审计中", "Auditing game design"],
+    DESIGN_INPUT_REQUIRED: ["等待设计决策", "Awaiting design decision"], UI_DESIGNING: ["UI 设计中", "Designing UI"], DEVELOPING: ["游戏生成中", "Developing game"],
     BUILDING: ["制品构建中", "Building artifacts"], TEST_PLANNING: ["测试规划中", "Planning tests"],
     TESTING: ["跨平台测试中", "Cross-platform testing"], RELEASE_APPROVAL_PENDING: ["等待发布批准", "Awaiting release approval"],
     STEAM_PUBLISHING: ["Steam 发布中", "Publishing to Steam"], SUCCEEDED: ["交付完成", "Delivered"],
@@ -2107,15 +2117,17 @@ function runtimeStateLabel(state: string, text: (chinese: string, english: strin
 }
 
 function workflowNeedsPolling(state: string): boolean {
-  return ["ANALYZING", "DESIGNING", "UI_DESIGNING", "DEVELOPING", "BUILDING", "TEST_PLANNING", "TESTING", "STEAM_PUBLISHING"].includes(state);
+  return ["ANALYZING", "DESIGNING", "DESIGN_AUDITING", "UI_DESIGNING", "DEVELOPING", "BUILDING", "TEST_PLANNING", "TESTING", "STEAM_PUBLISHING"].includes(state);
 }
 
 function progressAgentRole(
   job: ProductProjectDetail["jobs"][number] | null,
   workflowState: string | undefined,
-): ProjectAgentRole | "ANALYSIS" {
-  if (job?.agentRole === "ANALYSIS" || job?.agentRole === "DESIGN" || job?.agentRole === "UI_DESIGN"
-    || job?.agentRole === "DEVELOPMENT" || job?.agentRole === "TEST") {
+): ProjectRuntimeRole {
+  if (job?.agentRole === "ANALYSIS" || job?.agentRole === "DESIGN"
+    || job?.agentRole === "PLAYABILITY_AUDIT" || job?.agentRole === "DIFFICULTY_AUDIT"
+    || job?.agentRole === "FUN_AUDIT" || job?.agentRole === "COHERENCE_AUDIT"
+    || job?.agentRole === "UI_DESIGN" || job?.agentRole === "DEVELOPMENT" || job?.agentRole === "TEST") {
     return job.agentRole;
   }
   if (workflowState === "ANALYZING") return "ANALYSIS";

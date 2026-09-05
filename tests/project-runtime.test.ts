@@ -35,6 +35,7 @@ import {
 import {
   AGENT_EVIDENCE_ARCHIVE_MAX_BYTES,
   agentEvidenceTemporaryRoot,
+  assertNarrativeGoalScope,
   bundledCjkFontValidationError,
   containsSensitiveToolArgument,
   evidenceRunsForVisualRead,
@@ -42,13 +43,14 @@ import {
   hasCurrentTurnSourceCheckpoint,
   latestEvidenceReport,
   latestUiSpecification,
+  missingNarrativeCausalityProofs,
   missingNarrativeExchangeCheckpoints,
   normalizeUiSpecification,
   normalizeUiTestReview,
   projectRuntimeContextView,
   projectRuntimeToolArgumentLimit,
   reviseTestPlanTimeout,
-  requiredNarrativeSceneAssetKeys,
+  requiredNarrativeSceneKeys,
   requiredUiAssetProblems,
   retryProjectRuntimeLifecycle,
   runtimeTurnHandoff,
@@ -401,7 +403,7 @@ test("Intent routes role boundaries while unfinished design replies preserve the
   assert.doesNotMatch(intentTurn, /conversationAgentContent|attachments: command\.runtimeImages/);
   assert.match(api, /const intentDecision = projectRuntimeNewGameIntent\(command\.content\)/);
   assert.doesNotMatch(api, /project\.workflowState === "DRAFT" && !pending[\s\S]*projectRuntimeContinuationIntent/);
-  assert.match(api, /const continuedIntent = projectRuntimeContinuationIntent\([\s\S]*existingConversation/);
+  assert.match(api, /const continuedIntent = project\.workflowState === "DESIGN_INPUT_REQUIRED"[\s\S]*projectRuntimeContinuationIntent\([\s\S]*existingConversation/);
   assert.match(intentSkill, /semantic router at ambiguous conversation entry points and role boundaries/);
   assert.match(intentSkill, /assigns new-game creation directly to Design/);
   assert.match(intentSkill, /preserves an unfinished Design or UI Design conversation without invoking you/);
@@ -1055,7 +1057,7 @@ test("Agent visual evidence includes every passed authored ACTION checkpoint", (
 });
 
 test("Agent visual evidence pages make later checkpoints reachable within the six-image MCP envelope", () => {
-  const checkpoints = visualEvidenceCheckpoints(Array.from({ length: 14 }, (_, index) => ({
+  const checkpoints = visualEvidenceCheckpoints(Array.from({ length: 80 }, (_, index) => ({
     checkpointId: `scene-${String(index + 1).padStart(2, "0")}`,
     role: "ACTION",
     status: "PASSED",
@@ -1084,6 +1086,11 @@ test("Agent visual evidence pages make later checkpoints reachable within the si
       .map(item => item.contentIndex),
     [12],
   );
+  assert.deepEqual(
+    selectVisualEvidenceCheckpoints(checkpoints, { imageOffset: 72, imageLimit: 6 })
+      .map(item => item.contentIndex),
+    [73, 74, 75, 76, 77, 78],
+  );
 });
 
 test("UI Design persistence tools expose exact input contracts", () => {
@@ -1091,7 +1098,10 @@ test("UI Design persistence tools expose exact input contracts", () => {
     required: readonly string[];
     additionalProperties: boolean;
   };
-  const goals = toolInputSchema("e2e_goals.update") as { required: readonly string[] };
+  const goals = toolInputSchema("e2e_goals.update") as {
+    required: readonly string[];
+    properties: { goals: { maxItems: number } };
+  };
   const handoff = toolInputSchema("handoff.create") as {
     required: readonly string[];
     properties: { uiSpecification: { required: readonly string[]; properties: Record<string, Record<string, unknown>> } };
@@ -1099,6 +1109,7 @@ test("UI Design persistence tools expose exact input contracts", () => {
   assert.deepEqual(document.required, ["document"]);
   assert.equal(document.additionalProperties, false);
   assert.deepEqual(goals.required, ["goals"]);
+  assert.equal(goals.properties.goals.maxItems, 128);
   assert.deepEqual(handoff.required, ["toRole", "summary"]);
   assert.deepEqual(handoff.properties.uiSpecification.required, [
     "schema", "visualThesis", "referenceCanvas", "checkpoints", "assets",
@@ -1357,7 +1368,9 @@ test("source.checkpoint advertises exact authored narrative proof fields", () =>
     required: readonly string[];
     properties: Record<string, Record<string, unknown>>;
   };
-  assert.deepEqual(proof.required, ["opening", "scenes"]);
+  assert.deepEqual(proof.required, ["opening", "progress", "scenes"]);
+  assert.deepEqual((proof.properties.progress as { required: readonly string[] }).required,
+    ["sceneKey", "exchangeKey", "sceneBase", "exchangeBase"]);
   const scenes = proof.properties.scenes as { items: { properties: Record<string, Record<string, unknown>> } };
   const anchors = scenes.items.properties.anchors as {
     required: readonly string[];
@@ -1406,12 +1419,29 @@ test("controlled builds require the source checkpoint created by the current Dev
   assert.equal(hasCurrentTurnSourceCheckpoint({ ...current, source: null }, "turn-current"), false);
 });
 
-test("numbered scene art requires unique source-backed narrative beats before checkpoint", async () => {
-  assert.deepEqual(requiredNarrativeSceneAssetKeys({ assetPlan: [
-    { key: "ui-title" },
-    { key: "scene-02-old-message" },
-    { key: "scene-01-private-dinner" },
-  ] }), ["scene-01-private-dinner", "scene-02-old-message"]);
+test("approved narrative scope requires source-backed narrative beats regardless of asset names", async () => {
+  assert.deepEqual(requiredNarrativeSceneKeys({ projectDocument: {
+    categories: ["narrative"],
+    gameplay: "A complete campaign with 2 authored scenes.",
+  } }), ["scene-01", "scene-02"]);
+  assert.deepEqual(requiredNarrativeSceneKeys({ projectDocument: {
+    categories: ["剧情"],
+    gameplay: "完整交付六章十八场故事。",
+  } }).length, 18);
+  assert.throws(() => requiredNarrativeSceneKeys({ projectDocument: {
+    categories: ["narrative"],
+    gameplay: "The old scope has 18 scenes, while the new scope has 24 scenes.",
+  } }), /conflicting scene counts/);
+  const narrativeContext = { projectDocument: {
+    categories: ["narrative"],
+    gameplay: "Deliver one complete campaign containing 24 authored scenes.",
+  } };
+  assert.doesNotThrow(() => assertNarrativeGoalScope(narrativeContext, [{
+    id: "complete-story", description: "Traverse all 24 scenes to an earned ending.", source: "CORE_LOOP",
+  }]));
+  assert.throws(() => assertNarrativeGoalScope(narrativeContext, [{
+    id: "stale-story", description: "Traverse all 18 scenes to an earned ending.", source: "CORE_LOOP",
+  }]), /stale narrative scope/);
 
   const root = await mkdtemp(join(tmpdir(), "deviludo-narrative-proof-"));
   try {
@@ -1474,19 +1504,24 @@ test("numbered scene art requires unique source-backed narrative beats before ch
     ].join("\n"));
     const proof = {
       opening: { sourcePath: "story.gd", anchors: opening },
+      progress: { sceneKey: "scene_index", exchangeKey: "exchange_index", sceneBase: 0, exchangeBase: 0 },
       scenes: [
-        { id: "scene-01-private-dinner", title: "Private dinner", sourcePath: "story.gd", anchors: first },
-        { id: "scene-02-old-message", title: "Old message", sourcePath: "story.gd", anchors: second },
+        { id: "scene-01", title: "Private dinner", sourcePath: "story.gd", anchors: first },
+        { id: "scene-02", title: "Old message", sourcePath: "story.gd", anchors: second },
       ],
     };
-    await assert.doesNotReject(validateNarrativeDeliveryProof(
+    const contract = await validateNarrativeDeliveryProof(
       root,
-      ["scene-01-private-dinner", "scene-02-old-message"],
+      ["scene-01", "scene-02"],
       proof,
-    ));
+    );
+    assert.deepEqual(contract, {
+      scenes: [{ id: "scene-01", exchangeCount: 3 }, { id: "scene-02", exchangeCount: 3 }],
+      progress: proof.progress,
+    });
     await assert.rejects(validateNarrativeDeliveryProof(
       root,
-      ["scene-01-private-dinner", "scene-02-old-message"],
+      ["scene-01", "scene-02"],
       {
         ...proof,
         scenes: [
@@ -1497,7 +1532,7 @@ test("numbered scene art requires unique source-backed narrative beats before ch
     ), /unique authored text/);
     await assert.rejects(validateNarrativeDeliveryProof(
       root,
-      ["scene-01-private-dinner", "scene-02-old-message"],
+      ["scene-01", "scene-02"],
       {
         ...proof,
         scenes: [
@@ -1508,7 +1543,7 @@ test("numbered scene art requires unique source-backed narrative beats before ch
     ), /not present/);
     await assert.rejects(validateNarrativeDeliveryProof(
       root,
-      ["scene-01-private-dinner", "scene-02-old-message"],
+      ["scene-01", "scene-02"],
       {
         ...proof,
         scenes: [
@@ -1519,7 +1554,7 @@ test("numbered scene art requires unique source-backed narrative beats before ch
     ), /at least three authored exchanges/);
     await assert.rejects(validateNarrativeDeliveryProof(
       root,
-      ["scene-01-private-dinner", "scene-02-old-message"],
+      ["scene-01", "scene-02"],
       {
         ...proof,
         scenes: [
@@ -1555,7 +1590,7 @@ test("numbered scene art requires unique source-backed narrative beats before ch
     ].join("\n"));
     await assert.rejects(validateNarrativeDeliveryProof(
       root,
-      ["scene-01-private-dinner", "scene-02-old-message"],
+      ["scene-01", "scene-02"],
       boilerplateProof,
     ), /not repeated numbered boilerplate/);
     const repeatedPhraseProof = {
@@ -1581,7 +1616,7 @@ test("numbered scene art requires unique source-backed narrative beats before ch
     ].join("\n"));
     await assert.rejects(validateNarrativeDeliveryProof(
       root,
-      ["scene-01-private-dinner", "scene-02-old-message"],
+      ["scene-01", "scene-02"],
       repeatedPhraseProof,
     ), /repeats a boilerplate phrase/);
     const promptWrapperProof = {
@@ -1607,7 +1642,7 @@ test("numbered scene art requires unique source-backed narrative beats before ch
     ].join("\n"));
     await assert.rejects(validateNarrativeDeliveryProof(
       root,
-      ["scene-01-private-dinner", "scene-02-old-message"],
+      ["scene-01", "scene-02"],
       promptWrapperProof,
     ), /repeats a boilerplate phrase/);
     const nearDuplicateProof = structuredClone(proof);
@@ -1619,7 +1654,7 @@ test("numbered scene art requires unique source-backed narrative beats before ch
     ].join("\n"));
     await assert.rejects(validateNarrativeDeliveryProof(
       root,
-      ["scene-01-private-dinner", "scene-02-old-message"],
+      ["scene-01", "scene-02"],
       nearDuplicateProof,
     ), /near-duplicates another choice/);
   } finally {
@@ -1628,12 +1663,19 @@ test("numbered scene art requires unique source-backed narrative beats before ch
 });
 
 test("narrative Test plans must capture every declared scene exchange", () => {
+  const contract = {
+    scenes: [
+      { id: "scene-01", exchangeCount: 3 },
+      { id: "scene-02", exchangeCount: 3 },
+    ],
+    progress: { sceneKey: "scene_index", exchangeKey: "exchange_index", sceneBase: 1, exchangeBase: 0 },
+  } as const;
   const checkpoint = (sceneNumber: number, sceneBeat: number) => ({
     type: "checkpoint",
     role: sceneNumber === 2 && sceneBeat === 2 ? "COMPLETION" : "ACTION",
     assertions: [
-      { source: "PROGRESS", key: "scene_number", operator: "EQUALS", value: sceneNumber },
-      { source: "PROGRESS", key: "scene_beat", operator: "EQUALS", value: sceneBeat },
+      { source: "PROGRESS", key: "scene_index", operator: "EQUALS", value: sceneNumber },
+      { source: "PROGRESS", key: "exchange_index", operator: "EQUALS", value: sceneBeat },
     ],
   });
   const complete = {
@@ -1644,13 +1686,44 @@ test("narrative Test plans must capture every declared scene exchange", () => {
   };
   assert.deepEqual(missingNarrativeExchangeCheckpoints(
     complete,
-    ["scene-01-opening", "scene-02-ending"],
+    contract,
   ), []);
   assert.deepEqual(missingNarrativeExchangeCheckpoints({
     features: [{ interactionScript: { events: [
       checkpoint(1, 0), checkpoint(1, 1), checkpoint(2, 0), checkpoint(2, 2),
     ] } }],
-  }, ["scene-01-opening", "scene-02-ending"]), ["scene 1 beat 3", "scene 2 beat 2"]);
+  }, contract), ["scene-01 exchange 3", "scene-02 exchange 2"]);
+});
+
+test("narrative causality requires two fresh paths with distinct later state", () => {
+  const goal = { id: "early-choice-callback", description: "An early decision visibly changes a later scene." };
+  const path = (id: string, targetId: string, laterValue: string) => ({
+    id,
+    verificationMethod: "interactive",
+    launchProfile: { type: "FRESH" },
+    interactionScript: { events: [
+      {
+        type: "click", stepId: `${id}-choice`, targetId,
+        coversRequirementIds: [goal.id],
+        postconditions: [{ source: "STATE", key: "relationship_choice", operator: "CHANGED" }],
+      },
+      { type: "click", stepId: `${id}-continue-1`, targetId: "continue", coversRequirementIds: [], postconditions: [] },
+      { type: "click", stepId: `${id}-continue-2`, targetId: "continue", coversRequirementIds: [], postconditions: [] },
+      {
+        type: "checkpoint", assertions: [
+          { source: "STATE", key: "relationship_choice", operator: "EQUALS", value: laterValue },
+        ],
+      },
+    ] },
+  });
+  const first = path("keep-promise", "keep-promise", "kept");
+  const second = path("break-promise", "break-promise", "broken");
+  assert.deepEqual(missingNarrativeCausalityProofs({ features: [first] }, [goal]), [goal.id]);
+  assert.deepEqual(missingNarrativeCausalityProofs({ features: [first, second] }, [goal]), []);
+  assert.deepEqual(missingNarrativeCausalityProofs({ features: [
+    first,
+    path("repeat-promise", "break-promise", "kept"),
+  ] }, [goal]), [goal.id]);
 });
 
 test("Test plans cannot freeze Probe references absent from the current publisher source", () => {
@@ -1895,21 +1968,39 @@ test("conversation persistence does not reject replies when the workflow advance
   assert.doesNotMatch(repository, /PROJECT_STATE_CHANGED|expectedWorkflowState/);
 });
 
-test("all seven signed role Skills exist and define the intended boundary", async () => {
-  for (const role of ["intent", "analysis", "design", "ui-design", "development", "test", "publishing"]) {
+test("all signed role Skills exist and define the intended boundary", async () => {
+  for (const role of [
+    "intent",
+    "analysis",
+    "design",
+    "playability-audit",
+    "difficulty-audit",
+    "fun-audit",
+    "coherence-audit",
+    "ui-design",
+    "development",
+    "test",
+    "publishing",
+  ]) {
     const skill = await readFile(new URL(`../services/project-runtime/skills/${role}/SKILL.md`, import.meta.url), "utf8");
     assert.match(skill, /^---\nname: deviludo-/);
     assert.match(skill, /\n# /);
     assert.match(skill, /MCP|tool/i);
   }
   const designSkill = await readFile(new URL("../services/project-runtime/skills/design/SKILL.md", import.meta.url), "utf8");
-  assert.match(designSkill, /readyForUiDesign/);
+  assert.match(designSkill, /game_design_replace/);
+  assert.match(designSkill, /READY_FOR_AUDIT/);
   assert.match(designSkill, /UI_DESIGN handoff/);
   assert.match(designSkill, /Do not design screen layouts/);
   assert.match(designSkill, /Narrative and Content Completeness/);
   assert.match(designSkill, /proof slice[\s\S]*shippable content scope/);
   assert.match(designSkill, /no completion state may be reached through a demo, debug, cheat, skip-to-ending/);
   assert.doesNotMatch(designSkill, /toRole":"DEVELOPMENT/);
+  for (const role of ["playability", "difficulty", "fun", "coherence"]) {
+    const auditSkill = await readFile(new URL(`../services/project-runtime/skills/${role}-audit/SKILL.md`, import.meta.url), "utf8");
+    assert.match(auditSkill, /design_audit_submit/);
+    assert.match(auditSkill, /PLAYER_INPUT_REQUIRED/);
+  }
   const uiDesignSkill = await readFile(new URL("../services/project-runtime/skills/ui-design/SKILL.md", import.meta.url), "utf8");
   assert.match(uiDesignSkill, /stable lowercase-hyphen control IDs/);
   assert.match(uiDesignSkill, /subject-grounded aesthetic thesis/);

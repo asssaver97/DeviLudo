@@ -34,6 +34,7 @@ const MAX_REQUEST_BYTES = 16 * 1024;
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const ARTIFACT_KINDS = new Set([
   "SPECIFICATION",
+  "GAME_DESIGN",
   "PROJECT_DOCUMENT",
   "BUILD",
   "E2E_REPORT",

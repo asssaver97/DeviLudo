@@ -11,13 +11,14 @@ test("fresh baseline exposes only the persistent multi-Agent workflow contract",
     "AGENT_TURN", "BUILD", "E2E_PLATFORM_RUN", "STEAM_PUBLISH",
   ]);
   assert.deepEqual(enumValues(sql, "agent_role"), [
-    "INTENT", "ANALYSIS", "DESIGN", "UI_DESIGN", "DEVELOPMENT", "TEST", "PUBLISHING",
+    "INTENT", "ANALYSIS", "DESIGN", "PLAYABILITY_AUDIT", "DIFFICULTY_AUDIT",
+    "FUN_AUDIT", "COHERENCE_AUDIT", "UI_DESIGN", "DEVELOPMENT", "TEST", "PUBLISHING",
   ]);
   assert.deepEqual(enumValues(sql, "agent_container_state"), [
     "CREATING", "RUNNING", "PAUSING", "PAUSED", "COMPACTING", "DESTROYED", "STOPPED", "FAILED",
   ]);
   assert.deepEqual(enumValues(sql, "workflow_state"), [
-    "DRAFT", "ANALYZING", "DESIGNING", "UI_DESIGNING", "DEVELOPING", "BUILDING", "TEST_PLANNING",
+    "DRAFT", "ANALYZING", "DESIGNING", "DESIGN_AUDITING", "DESIGN_INPUT_REQUIRED", "UI_DESIGNING", "DEVELOPING", "BUILDING", "TEST_PLANNING",
     "TESTING", "RELEASE_APPROVAL_PENDING", "STEAM_PREPARING", "STEAM_PUBLISHING",
     "SUCCEEDED", "BLOCKED", "STOPPED", "FAILED", "CANCELLED",
   ]);
@@ -25,7 +26,7 @@ test("fresh baseline exposes only the persistent multi-Agent workflow contract",
   assert.doesNotMatch(sql, /superseded[\s\S]{0,400}state <> 'CANCELLED'/i);
 });
 
-test("the new durable model stores contexts, seven sessions, turns, handoffs, plans and evidence", async () => {
+test("the new durable model stores contexts, eleven role sessions, turns, handoffs, plans and evidence", async () => {
   const sql = await readFile(sqlUrl, "utf8");
   for (const table of [
     "project_contexts", "agent_containers", "agent_sessions", "agent_turns",
@@ -87,15 +88,20 @@ test("Runtime lifecycle claims exactly five-minute idle and thirty-minute paused
   assert.match(claim, /p_paused_seconds integer DEFAULT 1800/);
 });
 
-test("Agent completion advances Design, UI Design, Development and Test through one persistent path", async () => {
+test("Agent completion advances Design, four audits, UI Design, Development and Test through one persistent path", async () => {
   const sql = await readFile(sqlUrl, "utf8");
   const complete = functionSource(sql, "complete_agent_turn_job");
   assert.match(complete, /role text;/);
   assert.match(complete, /purpose text;/);
   assert.match(complete, /role = 'DESIGN'/);
-  assert.match(complete, /jsonb_typeof\(p_output->'handoff'\) IS DISTINCT FROM 'object'/);
-  assert.match(complete, /handoff,toRole.*IS DISTINCT FROM 'UI_DESIGN'/);
-  assert.match(complete, /Design Agent did not create a complete UI_DESIGN handoff/);
+  assert.match(complete, /gameDesignStatus.*AUDITING.*PLAYER_INPUT_REQUIRED/);
+  assert.match(complete, /state = 'DESIGN_AUDITING'/);
+  assert.match(complete, /'role', 'PLAYABILITY_AUDIT', 'purpose', 'DESIGN_AUDIT'/);
+  assert.match(complete, /role = 'PLAYABILITY_AUDIT'[\s\S]*'role', 'DIFFICULTY_AUDIT'/);
+  assert.match(complete, /role = 'DIFFICULTY_AUDIT'[\s\S]*'role', 'FUN_AUDIT'/);
+  assert.match(complete, /role = 'FUN_AUDIT'[\s\S]*'role', 'COHERENCE_AUDIT'/);
+  assert.match(complete, /role = 'COHERENCE_AUDIT'[\s\S]*verdict = 'PASS'[\s\S]*state = 'UI_DESIGNING'/);
+  assert.match(complete, /design-revision:after-audit/);
   assert.match(complete, /role = 'UI_DESIGN'/);
   assert.match(complete, /UI Design Agent did not create a complete DEVELOPMENT handoff/);
   assert.match(complete, /role = 'DEVELOPMENT'/);
@@ -142,10 +148,21 @@ test("workflow cancellation releases the persistent Agent turn before rerun", as
   assert.match(signal, /turn_row\.output_summary = 'workflow-job:' \|\| job\.id::text/);
 });
 
-test("completed UI Design, Development and Test Agent turns publish durable player-facing messages", async () => {
+test("completed Design, audit, UI Design, Development and Test Agent turns publish durable player-facing messages", async () => {
   const sql = await readFile(sqlUrl, "utf8");
   const publish = functionSource(sql, "publish_development_agent_message");
-  assert.match(publish, /IN \('UI_DESIGN', 'DEVELOPMENT', 'TEST'\)/);
+  for (const role of [
+    "DESIGN",
+    "PLAYABILITY_AUDIT",
+    "DIFFICULTY_AUDIT",
+    "FUN_AUDIT",
+    "COHERENCE_AUDIT",
+    "UI_DESIGN",
+    "DEVELOPMENT",
+    "TEST",
+  ]) {
+    assert.match(publish, new RegExp(`'${role}'`));
+  }
   assert.match(publish, /turn_output->>'role' IS DISTINCT FROM agent_role/);
   assert.match(publish, /'agentRole', agent_role/);
   assert.match(publish, /WHEN 'TEST' THEN 'DeviLudo Test Agent'/);
@@ -326,6 +343,30 @@ test("managed artifact retention records lifecycle state and queues only disposa
   assert.match(sql,/job\.state IN \('QUEUED', 'RUNNING', 'RETRY'\)/);
   assert.match(sql,/INSERT INTO deviludo\.object_cleanup_queue[\s\S]*artifact retention expired/);
   assert.match(sql,/complete_object_cleanup[\s\S]*SET state = 'DELETED'/);
+});
+
+test("source revision garbage collection preserves every live reachability root", async () => {
+  const [sql, scheduler, sources] = await Promise.all([
+    readFile(sqlUrl, "utf8"),
+    readFile(new URL("../services/core/src/scheduler.ts", import.meta.url), "utf8"),
+    readFile(new URL("../services/core/src/project-sources.ts", import.meta.url), "utf8"),
+  ]);
+  assert.match(sql, /CREATE TABLE deviludo\.source_revision_cleanup_queue/);
+  assert.match(sql, /source_revision_cleanup_queue[\s\S]*completed_at timestamptz/);
+  const enqueue = functionSource(sql, "enqueue_unreachable_source_revisions");
+  assert.match(enqueue, /source\.revision < \([\s\S]*max\(current_source\.revision\)/);
+  assert.match(enqueue, /job\.state IN \('QUEUED', 'RUNNING', 'RETRY'\)[\s\S]*sourceRevision/);
+  assert.match(enqueue, /turn_record\.state IN \('QUEUED', 'RUNNING'\)/);
+  assert.match(enqueue, /run\.state IN \('QUEUED', 'RUNNING'\)/);
+  assert.match(enqueue, /ORDER BY plan\.source_revision DESC, plan\.plan_revision DESC/);
+  assert.match(enqueue, /event\.acknowledged_at IS NULL/);
+  assert.match(enqueue, /steam_delivery_preparations/);
+  const claim = functionSource(sql, "claim_source_revision_cleanup");
+  assert.match(claim, /queue\.started_at IS NOT NULL[\s\S]*OR \(/);
+  assert.match(sql, /complete_source_revision_cleanup[\s\S]*completed_at = clock_timestamp\(\)/);
+  assert.match(scheduler, /enqueueUnreachableSourceRevisions\(300, 25\)/);
+  assert.match(scheduler, /deleteObsoleteRevision\(request\)/);
+  assert.match(sources, /Current source revision cannot be garbage-collected/);
 });
 
 test("authorized uploads are durably reconciled after terminal jobs", async () => {

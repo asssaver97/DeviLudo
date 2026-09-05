@@ -602,7 +602,7 @@ type ConversationDisplayAgentRole = ProjectRuntimeRole;
 function messageAgentRole(message: ProductConversationMessage): ConversationDisplayAgentRole {
   const role = message.metadata.agentRole;
   if (role === "ANALYSIS" || message.metadata.source === "PROJECT_IMPORT_AGENT") return "ANALYSIS";
-  return role === "UI_DESIGN" || role === "DEVELOPMENT" || role === "TEST" || role === "DESIGN" ? role : "DESIGN";
+  return PROJECT_RUNTIME_ROLES.includes(role as ProjectRuntimeRole) ? role as ProjectRuntimeRole : "DESIGN";
 }
 
 function agentIdentity(
@@ -620,6 +620,30 @@ function agentIdentity(
     name: text("DeviLudo 分析 Agent", "DeviLudo Analysis Agent"),
     shortName: text("分析", "ANALYSIS"),
     responsibility: text("源码与现状分析", "Source analysis"),
+  });
+  if (role === "PLAYABILITY_AUDIT") return Object.freeze({
+    avatar: "PL",
+    name: text("DeviLudo 可玩性审计 Agent", "DeviLudo Playability Audit Agent"),
+    shortName: text("可玩性", "PLAYABILITY"),
+    responsibility: text("操作、反馈与闭环", "Controls and loop"),
+  });
+  if (role === "DIFFICULTY_AUDIT") return Object.freeze({
+    avatar: "DF",
+    name: text("DeviLudo 难度审计 Agent", "DeviLudo Difficulty Audit Agent"),
+    shortName: text("难度", "DIFFICULTY"),
+    responsibility: text("曲线、公平与平衡", "Curve and balance"),
+  });
+  if (role === "FUN_AUDIT") return Object.freeze({
+    avatar: "FN",
+    name: text("DeviLudo 有趣性审计 Agent", "DeviLudo Fun Audit Agent"),
+    shortName: text("有趣性", "FUN"),
+    responsibility: text("决策、张力与变化", "Agency and tension"),
+  });
+  if (role === "COHERENCE_AUDIT") return Object.freeze({
+    avatar: "CO",
+    name: text("DeviLudo 一致性审计 Agent", "DeviLudo Coherence Audit Agent"),
+    shortName: text("一致性", "COHERENCE"),
+    responsibility: text("规则、范围与验收", "Rules and scope"),
   });
   if (role === "DEVELOPMENT") return Object.freeze({
     avatar: "DV",

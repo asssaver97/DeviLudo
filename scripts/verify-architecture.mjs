@@ -107,7 +107,19 @@ for (const runner of ["services/sandbox-executor/task-runner.mjs", "services/san
     violations.push(`${runner}: controlled disposable tasks cannot execute Agent turns`);
   }
 }
-for (const role of ["intent", "analysis", "design", "development", "test"]) {
+for (const role of [
+  "intent",
+  "analysis",
+  "design",
+  "playability-audit",
+  "difficulty-audit",
+  "fun-audit",
+  "coherence-audit",
+  "ui-design",
+  "development",
+  "test",
+  "publishing",
+]) {
   const skill = `services/project-runtime/skills/${role}/SKILL.md`;
   if (!sourceFiles.includes(skill)) violations.push(`${skill}: signed built-in role Skill is required`);
 }

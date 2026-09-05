@@ -32,7 +32,7 @@ export type ArtifactRecord = Readonly<{
   workspaceId: string;
   projectId: string;
   workflowId: string;
-  kind: "SPECIFICATION" | "PROJECT_DOCUMENT" | "BUILD" | "E2E_REPORT" | "E2E_REGRESSION" | "SIGNED_BUILD" | "PUBLISH_RECEIPT" | "CLEAN_INSTALL_REPORT";
+  kind: "SPECIFICATION" | "GAME_DESIGN" | "PROJECT_DOCUMENT" | "BUILD" | "E2E_REPORT" | "E2E_REGRESSION" | "SIGNED_BUILD" | "PUBLISH_RECEIPT" | "CLEAN_INSTALL_REPORT";
   targetPlatform: "linux" | "windows" | "macos" | null;
   object: ObjectReference;
   e2eEvidence?: Readonly<{
@@ -89,6 +89,14 @@ export type AgentRuntimeAvailability = Readonly<{
 export const PROJECT_AGENT_ROLES = ["DESIGN", "UI_DESIGN", "DEVELOPMENT", "TEST"] as const;
 export type ProjectAgentRole = typeof PROJECT_AGENT_ROLES[number];
 
+export const GAME_DESIGN_AUDIT_ROLES = [
+  "PLAYABILITY_AUDIT",
+  "DIFFICULTY_AUDIT",
+  "FUN_AUDIT",
+  "COHERENCE_AUDIT",
+] as const;
+export type GameDesignAuditRole = typeof GAME_DESIGN_AUDIT_ROLES[number];
+
 const LEGACY_MANUAL_CONVERSATION_REPLY_LABELS = new Set([
   "自己输入意见",
   "Enter my own answer",
@@ -137,7 +145,16 @@ function conversationReplyOption(value: unknown): ConversationReplyOption | null
  * the project group chat. Intent is a transient router and Analysis owns the
  * import report; neither is presented as a permanent chat participant.
  */
-export const PROJECT_RUNTIME_ROLES = ["INTENT", "ANALYSIS", ...PROJECT_AGENT_ROLES, "PUBLISHING"] as const;
+export const PROJECT_RUNTIME_ROLES = [
+  "INTENT",
+  "ANALYSIS",
+  "DESIGN",
+  ...GAME_DESIGN_AUDIT_ROLES,
+  "UI_DESIGN",
+  "DEVELOPMENT",
+  "TEST",
+  "PUBLISHING",
+] as const;
 export type ProjectRuntimeRole = typeof PROJECT_RUNTIME_ROLES[number];
 
 export const PROJECT_RUNTIME_STATES = ["CREATING", "RUNNING", "PAUSING", "PAUSED", "COMPACTING", "DESTROYED", "STOPPED", "FAILED"] as const;
@@ -514,6 +531,8 @@ export const WORKFLOW_LABELS: Readonly<Record<string, string>> = Object.freeze({
   DRAFT: "需求讨论中",
   ANALYZING: "项目分析中",
   DESIGNING: "游戏设计中",
+  DESIGN_AUDITING: "游戏设计审计中",
+  DESIGN_INPUT_REQUIRED: "等待设计决策",
   UI_DESIGNING: "UI 设计中",
   DEVELOPING: "游戏生成中",
   BUILDING: "制品构建中",

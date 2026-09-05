@@ -201,3 +201,36 @@ test("an unregistered filesystem revision can be reclaimed without losing the la
     await rm(root, { recursive: true, force: true });
   }
 });
+
+test("reachability cleanup deletes only an obsolete source revision and never CURRENT", async () => {
+  const root = await mkdtemp(join(tmpdir(), "deviludo-source-reachability-"));
+  try {
+    const store = new ProjectSourceStore(root);
+    const obsolete = await store.publishFiles({
+      workspaceId,
+      projectId,
+      revision: 1,
+      files: [{ path: "project.godot", bytes: Buffer.from("obsolete") }],
+    });
+    const current = await store.publishFiles({
+      workspaceId,
+      projectId,
+      revision: 2,
+      files: [{ path: "project.godot", bytes: Buffer.from("current") }],
+    });
+
+    assert.equal(await store.deleteObsoleteRevision({
+      workspaceId, projectId, revision: obsolete.revision, relativePath: obsolete.relativePath,
+    }), true);
+    assert.equal(await store.deleteObsoleteRevision({
+      workspaceId, projectId, revision: obsolete.revision, relativePath: obsolete.relativePath,
+    }), false);
+    await assert.rejects(store.archive(obsolete.relativePath), /ENOENT/);
+    assert.equal((await store.archive(current.relativePath)).digest, current.digest);
+    await assert.rejects(store.deleteObsoleteRevision({
+      workspaceId, projectId, revision: current.revision, relativePath: current.relativePath,
+    }), /Current source revision cannot be garbage-collected/);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});

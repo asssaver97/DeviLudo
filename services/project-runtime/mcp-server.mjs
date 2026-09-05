@@ -93,6 +93,12 @@ function toolDescription(name) {
       ? "Persist the complete current project document after UI Design. Preserve introduction, gameplay, categories, and features exactly; replace uiDesign with the complete approved implementation-facing UI specification."
       : "Confirm the exact approved project document snapshot. Pass it in the required document object; do not use projectDocument, projectDocumentPatch, content, or expectedRevision fields.";
   }
+  if (name === "game_design.replace") {
+    return "Replace the authoritative Markdown game-design document, synchronized project document, and complete E2E goal snapshot in one Design turn. This starts a fresh audit round.";
+  }
+  if (name === "design_audit.submit") {
+    return "Submit this audit Agent's verdict for the exact current game-design revision. Findings must be concrete, prioritized, and actionable; PASS requires no unresolved material issue.";
+  }
   if (name === "e2e_goals.update") {
     return role === "UI_DESIGN"
       ? "Persist the complete E2E goal snapshot after UI Design. Preserve gameplay coverage and add or refine only observable interface and visual acceptance goals justified by the UI specification."

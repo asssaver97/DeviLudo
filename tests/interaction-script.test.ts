@@ -2,6 +2,7 @@ import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import {
   MAX_INTERACTION_EVENTS,
+  MAX_REQUIREMENTS_PER_ACTION,
   interactionHasUserAction,
   validateInteractionScript,
 } from "../lib/product/interaction-script.js";
@@ -40,6 +41,11 @@ describe("current InteractionScript validation", () => {
     const action = script.events[1] as Record<string, unknown>;
     assert.equal(validateInteractionScript({ ...script, events: [{ ...action, postconditions: [] }] }), false);
     assert.equal(validateInteractionScript({ ...script, events: [action, action] }), false);
+    assert.equal(validateInteractionScript({
+      events: [{ ...action, coversRequirementIds: Array.from(
+        { length: MAX_REQUIREMENTS_PER_ACTION + 1 }, (_, index) => `req-${index}`,
+      ) }],
+    }), false);
   });
 
   it("validates semantic control IDs, supported inputs and bounded values", () => {

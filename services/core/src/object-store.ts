@@ -95,6 +95,30 @@ export class CoreObjectStore {
     return Object.freeze({ bucket: this.bucket, key, sha256, sizeBytes: content.length });
   }
 
+  async putGameDesignDocument(input: Readonly<{
+    workspaceId: string;
+    projectId: string;
+    workflowId: string;
+    revision: number;
+    markdown: string;
+  }>) {
+    if (!Number.isSafeInteger(input.revision) || input.revision < 1
+      || input.markdown.length < 1 || input.markdown.length > 64_000) {
+      throw new Error("Game-design document boundary is invalid");
+    }
+    const content = Buffer.from(input.markdown, "utf8");
+    const sha256 = `sha256:${createHash("sha256").update(content).digest("hex")}`;
+    const key = `workspaces/${input.workspaceId}/projects/${input.projectId}/game-design/${input.workflowId}/r${input.revision}-${sha256.slice(7, 23)}/game-design.md`;
+    await this.client.send(new PutObjectCommand({
+      Bucket: this.bucket,
+      Key: key,
+      Body: content,
+      ContentType: "text/markdown; charset=utf-8",
+      Metadata: { sha256, revision: String(input.revision) },
+    }));
+    return Object.freeze({ bucket: this.bucket, key, sha256, sizeBytes: content.length });
+  }
+
   /**
    * Store a user-supplied game asset. Assets live under the project prefix so
    * they are removed with `deleteProjectObjects`, and the digest is computed

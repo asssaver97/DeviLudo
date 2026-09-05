@@ -42,6 +42,7 @@ async function runDatabaseSmoke(url) {
       "job_progress_events", "implementation_change_requests", "workflow_e2e_goal_revisions",
       "operation_receipts",
       "workspace_claim_fairness", "artifacts", "artifact_inputs", "pending_object_uploads", "object_cleanup_queue",
+      "source_revision_cleanup_queue",
       "project_cleanup_requests", "host_admission_events",
       "e2e_policy_locks", "e2e_policy_decisions", "e2e_regression_traces", "executor_receipts",
       "project_creation_receipts",
@@ -94,11 +95,11 @@ async function runDatabaseSmoke(url) {
     const artifactOwner = artifactOwnerResult.rows[0]?.owner;
     const expectedDefiners = [
       "acknowledge_host_source_events", "advance_asset_workflows", "claim_agent_container_lifecycle", "claim_asset_generation", "claim_host_admission_event", "claim_job",
-      "claim_local_git_commit", "claim_object_cleanup", "claim_paused_agent_container_for_pressure", "claim_project_cleanup", "claim_project_import_analysis", "cleanup_expired_executor_state",
-      "complete_agent_container_lifecycle", "complete_asset_generation", "complete_host_admission_event", "complete_local_git_commit", "complete_object_cleanup", "complete_project_cleanup",
-      "enqueue_expired_artifacts", "enqueue_host_source_event",
-      "fail_agent_container_lifecycle", "fail_asset_generation", "fail_host_admission_event", "fail_local_git_commit", "fail_object_cleanup", "fail_project_cleanup",
-      "publish_development_agent_message", "pull_host_source_events", "reconcile_expired_uploads", "reconcile_host_admission_events", "recover_expired_jobs",
+      "claim_local_git_commit", "claim_object_cleanup", "claim_paused_agent_container_for_pressure", "claim_project_cleanup", "claim_project_import_analysis", "claim_source_revision_cleanup", "claim_steam_preparation", "cleanup_expired_executor_state",
+      "complete_agent_container_lifecycle", "complete_asset_generation", "complete_host_admission_event", "complete_local_git_commit", "complete_object_cleanup", "complete_project_cleanup", "complete_source_revision_cleanup", "complete_steam_preparation",
+      "enqueue_expired_artifacts", "enqueue_host_source_event", "enqueue_unreachable_source_revisions",
+      "fail_agent_container_lifecycle", "fail_asset_generation", "fail_host_admission_event", "fail_local_git_commit", "fail_object_cleanup", "fail_project_cleanup", "fail_source_revision_cleanup", "fail_steam_preparation",
+      "mark_steam_preparation_syncing", "publish_development_agent_message", "pull_host_source_events", "reconcile_expired_uploads", "reconcile_host_admission_events", "recover_expired_jobs",
       "retain_latest_e2e_report",
     ];
     if (JSON.stringify(definers.rows.map(row => row.proname)) !== JSON.stringify(expectedDefiners)
@@ -128,6 +129,10 @@ async function runDatabaseSmoke(url) {
     await assertFunctionPrivilege(owner, "deviludo_api", "deviludo.claim_object_cleanup(integer)", false);
     await assertFunctionPrivilege(owner, "deviludo_scheduler", "deviludo.enqueue_expired_artifacts(integer,integer)", true);
     await assertFunctionPrivilege(owner, "deviludo_api", "deviludo.enqueue_expired_artifacts(integer,integer)", false);
+    await assertFunctionPrivilege(owner, "deviludo_scheduler", "deviludo.enqueue_unreachable_source_revisions(integer,integer)", true);
+    await assertFunctionPrivilege(owner, "deviludo_api", "deviludo.enqueue_unreachable_source_revisions(integer,integer)", false);
+    await assertFunctionPrivilege(owner, "deviludo_scheduler", "deviludo.claim_source_revision_cleanup(integer)", true);
+    await assertFunctionPrivilege(owner, "deviludo_api", "deviludo.claim_source_revision_cleanup(integer)", false);
     await assertFunctionPrivilege(owner, "deviludo_scheduler", "deviludo.reconcile_expired_uploads(integer)", true);
     await assertFunctionPrivilege(owner, "deviludo_api", "deviludo.reconcile_expired_uploads(integer)", false);
     await assertFunctionPrivilege(owner, "deviludo_scheduler", "deviludo.reconcile_host_admission_events()", true);
@@ -223,6 +228,46 @@ async function runDatabaseSmoke(url) {
         [workspaceIds[0], projectIds[0], relativePath, digest, workflowIds[0], actorId],
       );
     });
+    const currentDigest = `sha256:${"b".repeat(64)}`;
+    const currentRelativePath = `workspaces/${workspaceIds[0]}/projects/${projectIds[0]}/revisions/r000000000002-${currentDigest.slice(7, 23)}`;
+    await owner.query(
+      `UPDATE deviludo.project_source_revisions
+         SET created_at = clock_timestamp() - interval '10 minutes'
+       WHERE workspace_id = $1::uuid AND project_id = $2::uuid AND revision = 1`,
+      [workspaceIds[0], projectIds[0]],
+    );
+    await owner.query(
+      `INSERT INTO deviludo.project_source_revisions(
+         workspace_id, project_id, revision, relative_path, content_digest, file_count, total_bytes,
+         workflow_id, actor_id
+       ) VALUES ($1::uuid, $2::uuid, 2, $3, $4, 1, 128, $5::uuid, $6::uuid)`,
+      [workspaceIds[0], projectIds[0], currentRelativePath, currentDigest, workflowIds[0], actorId],
+    );
+    const sourceCleanupEnqueued = await scheduler.query(
+      "SELECT deviludo.enqueue_unreachable_source_revisions(60, 25) AS enqueued",
+    );
+    if (sourceCleanupEnqueued.rows[0]?.enqueued !== 1) {
+      throw new Error("Exactly one unreachable non-current source revision was not queued");
+    }
+    const sourceCleanupClaim = await scheduler.query(`
+      SELECT "workspaceId"::text, "projectId"::text, revision::text,
+             "relativePath", "leaseToken"::text
+        FROM deviludo.claim_source_revision_cleanup(60)
+    `);
+    if (sourceCleanupClaim.rows[0]?.workspaceId !== workspaceIds[0]
+      || sourceCleanupClaim.rows[0]?.projectId !== projectIds[0]
+      || sourceCleanupClaim.rows[0]?.revision !== "1"
+      || sourceCleanupClaim.rows[0]?.relativePath !== relativePath) {
+      throw new Error("The unreachable source revision cleanup lease is invalid");
+    }
+    const sourceCleanupSettled = await scheduler.query(`
+      SELECT deviludo.complete_source_revision_cleanup(
+        $1::uuid, $2::uuid, 1, $3::uuid
+      ) AS completed
+    `, [workspaceIds[0], projectIds[0], sourceCleanupClaim.rows[0].leaseToken]);
+    if (sourceCleanupSettled.rows[0]?.completed !== true) {
+      throw new Error("Source revision cleanup lease was not settled");
+    }
 
     const gitRequestId = randomUUID();
     const bindingId = randomUUID();
@@ -822,6 +867,7 @@ async function expectRlsRejection(operation) {
 async function cleanup(owner, workspaceIds) {
   for (const table of [
     "executor_receipts", "artifact_inputs", "artifacts", "operation_receipts", "external_signals",
+    "source_revision_cleanup_queue",
     "steam_releases",
     "asset_items", "asset_manifests",
     "workflow_e2e_goal_revisions", "implementation_change_requests",

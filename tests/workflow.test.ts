@@ -18,6 +18,9 @@ test("the workflow runs Design, UI Design, Development, Build, Test plan, every 
   assert.deepEqual(transition.enqueue.map(job => [job.agentRole, job.purpose]), [["DESIGN", "DESIGN"]]);
 
   transition = transitionWorkflow(transition.snapshot, agentSuccess("design-1", "DESIGN", "DESIGN"));
+  assert.equal(transition.snapshot.state, "DESIGN_AUDITING");
+  assert.deepEqual(transition.enqueue.map(job => [job.agentRole, job.purpose]), [["PLAYABILITY_AUDIT", "DESIGN_AUDIT"]]);
+  transition = completeDesignAudits(transition);
   assert.equal(transition.snapshot.state, "UI_DESIGNING");
   assert.deepEqual(transition.enqueue.map(job => [job.agentRole, job.purpose]), [["UI_DESIGN", "UI_DESIGN"]]);
 
@@ -83,6 +86,7 @@ test("a Test plan configuration verdict replans without invoking Development", (
     { kind: "SPEC_APPROVED" },
   );
   transition = transitionWorkflow(transition.snapshot, agentSuccess("design", "DESIGN", "DESIGN"));
+  transition = completeDesignAudits(transition);
   transition = transitionWorkflow(transition.snapshot, agentSuccess("ui-design", "UI_DESIGN", "UI_DESIGN"));
   transition = transitionWorkflow(transition.snapshot, agentSuccess("development", "DEVELOPMENT", "DEVELOPMENT"));
   transition = transitionWorkflow(transition.snapshot, jobSuccess("build", "BUILD"));
@@ -104,6 +108,7 @@ test("a Test planning source-contract failure returns directly to Development", 
     { kind: "SPEC_APPROVED" },
   );
   transition = transitionWorkflow(transition.snapshot, agentSuccess("design", "DESIGN", "DESIGN"));
+  transition = completeDesignAudits(transition);
   transition = transitionWorkflow(transition.snapshot, agentSuccess("ui-design", "UI_DESIGN", "UI_DESIGN"));
   transition = transitionWorkflow(transition.snapshot, agentSuccess("development", "DEVELOPMENT", "DEVELOPMENT"));
   transition = transitionWorkflow(transition.snapshot, jobSuccess("build", "BUILD"));
@@ -150,6 +155,8 @@ test("rerunning Game Design restarts the complete Agent chain", () => {
   assert.deepEqual(transition.enqueue.map(job => [job.agentRole, job.purpose]), [["DESIGN", "DESIGN"]]);
 
   transition = transitionWorkflow(transition.snapshot, agentSuccess("design-rerun", "DESIGN", "DESIGN"));
+  assert.equal(transition.snapshot.state, "DESIGN_AUDITING");
+  transition = completeDesignAudits(transition);
   assert.equal(transition.snapshot.state, "UI_DESIGNING");
   assert.deepEqual(transition.enqueue.map(job => [job.agentRole, job.purpose]), [["UI_DESIGN", "UI_DESIGN"]]);
 });
@@ -248,6 +255,7 @@ test("cancellation is terminal and enqueues no work", () => {
 function reachReleasePending(initial: WorkflowSnapshot): WorkflowSnapshot {
   let transition = transitionWorkflow(initial, { kind: "SPEC_APPROVED" });
   transition = transitionWorkflow(transition.snapshot, agentSuccess("design", "DESIGN", "DESIGN"));
+  transition = completeDesignAudits(transition);
   transition = transitionWorkflow(transition.snapshot, agentSuccess("ui-design", "UI_DESIGN", "UI_DESIGN"));
   transition = transitionWorkflow(transition.snapshot, agentSuccess("development", "DEVELOPMENT", "DEVELOPMENT"));
   transition = transitionWorkflow(transition.snapshot, jobSuccess("build", "BUILD"));
@@ -264,8 +272,8 @@ function reachReleasePending(initial: WorkflowSnapshot): WorkflowSnapshot {
 
 function agentSuccess(
   jobId: string,
-  agentRole: "DESIGN" | "UI_DESIGN" | "DEVELOPMENT" | "TEST",
-  purpose: "DESIGN" | "UI_DESIGN" | "DEVELOPMENT" | "TEST_PLAN" | "TEST_VERDICT",
+  agentRole: "DESIGN" | "PLAYABILITY_AUDIT" | "DIFFICULTY_AUDIT" | "FUN_AUDIT" | "COHERENCE_AUDIT" | "UI_DESIGN" | "DEVELOPMENT" | "TEST",
+  purpose: "DESIGN" | "DESIGN_REVISION" | "DESIGN_AUDIT" | "UI_DESIGN" | "DEVELOPMENT" | "TEST_PLAN" | "TEST_VERDICT",
 ) {
   return {
     kind: "JOB_SUCCEEDED" as const,
@@ -276,6 +284,31 @@ function agentSuccess(
     targetOperatingSystem: null,
   };
 }
+
+function completeDesignAudits(transition: ReturnType<typeof transitionWorkflow>) {
+  let current = transitionWorkflow(transition.snapshot, agentSuccess("playability-audit", "PLAYABILITY_AUDIT", "DESIGN_AUDIT"));
+  current = transitionWorkflow(current.snapshot, agentSuccess("difficulty-audit", "DIFFICULTY_AUDIT", "DESIGN_AUDIT"));
+  current = transitionWorkflow(current.snapshot, agentSuccess("fun-audit", "FUN_AUDIT", "DESIGN_AUDIT"));
+  return transitionWorkflow(current.snapshot, {
+    ...agentSuccess("coherence-audit", "COHERENCE_AUDIT", "DESIGN_AUDIT"), verdict: "PASS" as const,
+  });
+}
+
+test("a failed design audit returns every finding to Design before UI Design", () => {
+  let transition = transitionWorkflow(
+    initialWorkflowSnapshot(workflowId, workspaceId, projectId),
+    { kind: "SPEC_APPROVED" },
+  );
+  transition = transitionWorkflow(transition.snapshot, agentSuccess("design", "DESIGN", "DESIGN"));
+  transition = transitionWorkflow(transition.snapshot, agentSuccess("playability", "PLAYABILITY_AUDIT", "DESIGN_AUDIT"));
+  transition = transitionWorkflow(transition.snapshot, agentSuccess("difficulty", "DIFFICULTY_AUDIT", "DESIGN_AUDIT"));
+  transition = transitionWorkflow(transition.snapshot, agentSuccess("fun", "FUN_AUDIT", "DESIGN_AUDIT"));
+  transition = transitionWorkflow(transition.snapshot, {
+    ...agentSuccess("coherence", "COHERENCE_AUDIT", "DESIGN_AUDIT"), verdict: "REVISE" as const,
+  });
+  assert.equal(transition.snapshot.state, "DESIGNING");
+  assert.deepEqual(transition.enqueue.map(job => [job.agentRole, job.purpose]), [["DESIGN", "DESIGN_REVISION"]]);
+});
 
 function jobSuccess(jobId: string, jobKind: "BUILD" | "STEAM_PUBLISH") {
   return { kind: "JOB_SUCCEEDED" as const, jobId, jobKind, targetOperatingSystem: null };

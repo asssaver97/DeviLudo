@@ -25,6 +25,10 @@ const roleSkillSlugs = Object.freeze({
   INTENT: "intent",
   ANALYSIS: "analysis",
   DESIGN: "design",
+  PLAYABILITY_AUDIT: "playability-audit",
+  DIFFICULTY_AUDIT: "difficulty-audit",
+  FUN_AUDIT: "fun-audit",
+  COHERENCE_AUDIT: "coherence-audit",
   UI_DESIGN: "ui-design",
   DEVELOPMENT: "development",
   TEST: "test",
@@ -124,6 +128,7 @@ if (request.runtime === "CLAUDE_CODE") {
     previous ? "--resume" : "--session-id", nativeSessionId,
   ];
   if (request.role === "INTENT") args.push("--config", "model_reasoning_effort=low");
+  if (request.role === "DESIGN") args.push("--config", "model_reasoning_effort=high");
   if (request.mode === "READ_ONLY_BRANCH" && previous) args.push("--fork-session");
   args.push(prompt);
   command = "claude";
@@ -171,6 +176,7 @@ if (request.runtime === "CLAUDE_CODE") {
   if (!official) args.push("--config", `model_providers.${provider}.env_key=DEVILUDO_CODEX_PROVIDER_API_KEY`);
   if (request.model !== "account-default") args.push("-m", request.model);
   if (request.role === "INTENT") args.push("--config", "model_reasoning_effort=low");
+  if (request.role === "DESIGN") args.push("--config", "model_reasoning_effort=high");
   for (const attachmentPath of request.attachmentPaths) args.push("-i", attachmentPath);
   args.push("-C", writable ? sourceDirectory : "/opt/deviludo/readonly-workspace");
   // Every turn gets an isolated CODEX_HOME copy. A read-only branch can resume
@@ -319,7 +325,7 @@ async function readJson(path) {
 
 function validateRequest(value) {
   if (!value || value.schemaVersion !== "deviludo.project-runtime.v2"
-    || !["INTENT", "ANALYSIS", "DESIGN", "UI_DESIGN", "DEVELOPMENT", "TEST"].includes(value.role)
+    || !["INTENT", "ANALYSIS", "DESIGN", "PLAYABILITY_AUDIT", "DIFFICULTY_AUDIT", "FUN_AUDIT", "COHERENCE_AUDIT", "UI_DESIGN", "DEVELOPMENT", "TEST", "PUBLISHING"].includes(value.role)
     || !["PRIMARY", "READ_ONLY_BRANCH", "COMPACT"].includes(value.mode)
     || !["CLAUDE_CODE", "CODEX_CLI"].includes(value.runtime)
     || !/^[0-9a-f-]{36}$/i.test(value.turnId)

@@ -1,7 +1,11 @@
 export const ROLE_TO_CANONICAL_TOOLS = Object.freeze({
   INTENT: Object.freeze(["context.read", "conversation.reply", "workflow.intent_decision", "workflow.stop", "workflow.continue"]),
   ANALYSIS: Object.freeze(["context.read", "source.list", "source.read", "diagnostics.run", "context.update_analysis", "conversation.reply"]),
-  DESIGN: Object.freeze(["context.read", "requirements.update", "project_document.update", "e2e_goals.update", "conversation.reply", "handoff.create"]),
+  DESIGN: Object.freeze(["context.read", "game_design.replace", "conversation.reply"]),
+  PLAYABILITY_AUDIT: Object.freeze(["context.read", "design_audit.submit", "conversation.reply"]),
+  DIFFICULTY_AUDIT: Object.freeze(["context.read", "design_audit.submit", "conversation.reply"]),
+  FUN_AUDIT: Object.freeze(["context.read", "design_audit.submit", "conversation.reply"]),
+  COHERENCE_AUDIT: Object.freeze(["context.read", "design_audit.submit", "conversation.reply"]),
   UI_DESIGN: Object.freeze(["context.read", "source.list", "source.read", "evidence.read", "project_document.update", "e2e_goals.update", "conversation.reply", "handoff.create"]),
   DEVELOPMENT: Object.freeze(["context.read", "source.list", "source.read", "evidence.read", "source.checkpoint", "assets.plan", "assets.cleanup", "build.request", "conversation.reply", "handoff.create"]),
   TEST: Object.freeze(["context.read", "source.list", "source.read", "test_plan.replace", "test_plan.revise_timeout", "e2e.start", "e2e.observe", "evidence.read", "test.verdict", "conversation.reply", "handoff.create"]),
@@ -36,6 +40,41 @@ export function toolInputSchema(canonicalName) {
       }),
     });
   }
+  if (canonicalName === "game_design.replace") {
+    return Object.freeze({
+      type: "object",
+      additionalProperties: false,
+      required: Object.freeze(["markdown", "document", "goals"]),
+      properties: Object.freeze({
+        markdown: Object.freeze({ type: "string", minLength: 1200, maxLength: 64000 }),
+        document: Object.freeze({ type: "object", additionalProperties: true }),
+        goals: Object.freeze({
+          type: "array", minItems: 1, maxItems: 128,
+          items: Object.freeze({ type: "object", additionalProperties: true }),
+        }),
+      }),
+    });
+  }
+  if (canonicalName === "design_audit.submit") {
+    return Object.freeze({
+      type: "object",
+      additionalProperties: false,
+      required: Object.freeze(["designRevision", "verdict", "summary", "findings", "playerQuestions"]),
+      properties: Object.freeze({
+        designRevision: Object.freeze({ type: "integer", minimum: 1 }),
+        verdict: Object.freeze({ enum: Object.freeze(["PASS", "REVISE", "PLAYER_INPUT_REQUIRED"]) }),
+        summary: Object.freeze({ type: "string", minLength: 1, maxLength: 8000 }),
+        findings: Object.freeze({
+          type: "array", maxItems: 24,
+          items: Object.freeze({ type: "string", minLength: 1, maxLength: 2000 }),
+        }),
+        playerQuestions: Object.freeze({
+          type: "array", maxItems: 4,
+          items: Object.freeze({ type: "string", minLength: 1, maxLength: 1000 }),
+        }),
+      }),
+    });
+  }
   if (canonicalName === "e2e_goals.update") {
     return Object.freeze({
       type: "object",
@@ -44,7 +83,7 @@ export function toolInputSchema(canonicalName) {
       properties: Object.freeze({
         goals: Object.freeze({
           type: "array",
-          maxItems: 1_000,
+          maxItems: 128,
           items: Object.freeze({ type: "object", additionalProperties: true }),
         }),
       }),
@@ -80,17 +119,17 @@ export function toolInputSchema(canonicalName) {
       additionalProperties: false,
       properties: Object.freeze({
         runId: { type: "string", minLength: 1, maxLength: 100 },
-        imageOffset: { type: "integer", minimum: 0, maximum: 63, description: "Zero-based checkpoint image offset." },
+        imageOffset: { type: "integer", minimum: 0, maximum: 255, description: "Zero-based checkpoint image offset." },
         imageLimit: { type: "integer", minimum: 1, maximum: 6, description: "Native images returned in this page." },
         contentIndices: {
           type: "array",
           minItems: 1,
           maxItems: 6,
           uniqueItems: true,
-          items: { type: "integer", minimum: 1, maximum: 64 },
+          items: { type: "integer", minimum: 1, maximum: 256 },
         },
-        startContentIndex: { type: "integer", minimum: 1, maximum: 64 },
-        endContentIndex: { type: "integer", minimum: 1, maximum: 64 },
+        startContentIndex: { type: "integer", minimum: 1, maximum: 256 },
+        endContentIndex: { type: "integer", minimum: 1, maximum: 256 },
         checkpointId: { type: "string", minLength: 1, maxLength: 500 },
       }),
     });
@@ -200,7 +239,7 @@ function sourceCheckpointInputSchema() {
       narrativeProof: {
         type: "object",
         additionalProperties: false,
-        required: ["opening", "scenes"],
+        required: ["opening", "progress", "scenes"],
         properties: {
           opening: {
             type: "object",
@@ -211,16 +250,27 @@ function sourceCheckpointInputSchema() {
               anchors: { type: "array", minItems: 4, maxItems: 24, items: anchor },
             },
           },
+          progress: {
+            type: "object",
+            additionalProperties: false,
+            required: ["sceneKey", "exchangeKey", "sceneBase", "exchangeBase"],
+            properties: {
+              sceneKey: { type: "string", pattern: "^[A-Za-z0-9][A-Za-z0-9_.-]{0,199}$" },
+              exchangeKey: { type: "string", pattern: "^[A-Za-z0-9][A-Za-z0-9_.-]{0,199}$" },
+              sceneBase: { enum: [0, 1] },
+              exchangeBase: { enum: [0, 1] },
+            },
+          },
           scenes: {
             type: "array",
             minItems: 2,
-            maxItems: 200,
+            maxItems: 80,
             items: {
               type: "object",
               additionalProperties: false,
               required: ["id", "title", "sourcePath", "anchors"],
               properties: {
-                id: { type: "string", pattern: "^scene-[0-9]{2,3}[a-z0-9-]*$" },
+                id: { type: "string", pattern: "^scene-[0-9]{2,3}$" },
                 title: { type: "string", minLength: 1, maxLength: 200 },
                 sourcePath: { type: "string", minLength: 1, maxLength: 1_000 },
                 anchors: {
@@ -486,14 +536,14 @@ function testPlanReplaceInputSchema() {
   };
   const interactionEvent = {
     type: "object",
-    description: "Action events require unique stepId, intent, coversRequirementIds and non-empty postconditions. Except for START_SESSION, every action requires a CHANGED postcondition for the exact Probe value changed by that input. Checkpoints require id, role, assertions and visualMode. DYNAMIC ACTION/PROGRESS/COMPLETION checkpoints also require changeTargetId.",
+    description: "Action events require unique stepId, intent, at most 8 directly evidenced coversRequirementIds, and non-empty postconditions. Except for START_SESSION, every action requires a CHANGED postcondition for the exact Probe value changed by that input. Checkpoints require id, role, assertions and visualMode. DYNAMIC ACTION/PROGRESS/COMPLETION checkpoints also require changeTargetId.",
     additionalProperties: true,
     required: ["type"],
     properties: {
       type: { enum: ["key_tap", "key_hold", "click", "double_click", "drag", "scroll", "text_input", "gamepad_button_tap", "gamepad_button_hold", "gamepad_axis", "gamepad_trigger", "gamepad_release_all", "wait", "checkpoint"] },
       stepId: stableId,
       intent: { enum: ["START_SESSION", "NAVIGATION", "PRIMARY_ACTION", "FEATURE_ACTION", "COMPLETE_LOOP"] },
-      coversRequirementIds: { type: "array", items: stableId, uniqueItems: true },
+      coversRequirementIds: { type: "array", maxItems: 8, items: stableId, uniqueItems: true },
       postconditions: { type: "array", minItems: 1, maxItems: 32, items: assertion },
       id: stableId,
       role: { enum: ["START", "READY", "ACTION", "PROGRESS", "COMPLETION"] },

@@ -146,6 +146,14 @@ describe("test-manifest", () => {
       ...manifest,
       features: [{ ...manifest.features[0], verificationMethod: "CORE_JOURNEY" }],
     }) ?? "", /verificationMethod must be one of: unit, interactive, visual, manual/);
+    const core = manifest.features[0]!;
+    const events = core.interactionScript!.events.map(event => event.type === "click" && event.stepId === "activate-primary-control"
+      ? { ...event, coversRequirementIds: Array.from({ length: 9 }, (_, index) => `req-${index}`) }
+      : event);
+    assert.match(testManifestValidationError({
+      ...manifest,
+      features: [{ ...core, interactionScript: { events } }, ...manifest.features.slice(1)],
+    }) ?? "", /covers more than 8 requirements/);
     assert.match(testManifestValidationError({
       ...manifest,
       adaptivePlayer: {

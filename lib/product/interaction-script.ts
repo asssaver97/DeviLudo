@@ -6,6 +6,7 @@ export const GAME_CLIENT_HEIGHT = 720 as const;
 // checkpoints at every authored scene/asset state. This remains bounded well
 // below the independent plan-size and 90-minute execution limits.
 export const MAX_INTERACTION_EVENTS = 512 as const;
+export const MAX_REQUIREMENTS_PER_ACTION = 8 as const;
 
 export const CHECKPOINT_ROLES = ["START", "READY", "ACTION", "PROGRESS", "COMPLETION"] as const;
 export type CheckpointRole = typeof CHECKPOINT_ROLES[number];
@@ -255,7 +256,7 @@ function validateActionMetadata(event: Record<string, unknown>, stepIds: Set<str
   if (!isStableId(event.stepId) || stepIds.has(String(event.stepId))
     || !ACTION_INTENTS.includes(event.intent as ActionIntent)
     || !Array.isArray(event.coversRequirementIds)
-    || event.coversRequirementIds.length > 500
+    || event.coversRequirementIds.length > MAX_REQUIREMENTS_PER_ACTION
     || event.coversRequirementIds.some(id => !isStableId(id))
     || new Set(event.coversRequirementIds).size !== event.coversRequirementIds.length
     || !Array.isArray(event.postconditions) || event.postconditions.length < 1 || event.postconditions.length > 32

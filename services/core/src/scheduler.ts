@@ -38,6 +38,7 @@ export async function runScheduler(
   }
   // Swept on the first tick, then on its own slower cadence.
   let nextAssetSweepAt = 0;
+  let nextSourceRevisionSweepAt = 0;
   while (!signal.aborted) {
     const startedAt = Date.now();
     try {
@@ -55,6 +56,12 @@ export async function runScheduler(
         ? await repository.enqueueExpiredArtifacts(config.artifactRetentionDays)
         : 0;
       const objectCleanup = objectStore ? await runObjectCleanup(repository, objectStore) : null;
+      const shouldSweepSourceRevisions = Date.now() >= nextSourceRevisionSweepAt;
+      const sourceRevisionsEnqueued = shouldSweepSourceRevisions
+        ? await repository.enqueueUnreachableSourceRevisions(300, 25)
+        : 0;
+      if (shouldSweepSourceRevisions) nextSourceRevisionSweepAt = Date.now() + 60_000;
+      const sourceRevisionCleanup = await runSourceRevisionCleanup(repository, projectSources);
       const projectCleanup = await runProjectCleanup(repository, objectStore, projectSources);
       const hostAdmissionEventsCreated = hostServices?.mode === "managed"
         ? await repository.reconcileHostAdmissionEvents()
@@ -81,8 +88,10 @@ export async function runScheduler(
         expiredAuthRecordsRemoved,
         expiredUploadsEnqueued,
         expiredArtifactsEnqueued,
+        sourceRevisionsEnqueued,
         ...(localGitCommit ? { localGitCommit } : {}),
         ...(objectCleanup ? { objectCleanup } : {}),
+        ...(sourceRevisionCleanup ? { sourceRevisionCleanup } : {}),
         ...(projectCleanup ? { projectCleanup } : {}),
         hostAdmissionEventsCreated,
         ...(hostAdmission ? { hostAdmission } : {}),
@@ -228,6 +237,33 @@ async function runObjectCleanup(repository: CoreRepository, objectStore: CoreObj
     const message = error instanceof Error ? error.message : String(error);
     await repository.failObjectCleanup(request, message).catch(() => undefined);
     return Object.freeze({ objectKey: request.objectKey, outcome: "FAILED", attempt: request.attempt, error: message });
+  }
+}
+
+async function runSourceRevisionCleanup(repository: CoreRepository, projectSources: ProjectSourceStore) {
+  const request = await repository.claimSourceRevisionCleanup(120);
+  if (!request) return null;
+  try {
+    await projectSources.deleteObsoleteRevision(request);
+    if (!await repository.completeSourceRevisionCleanup(request)) {
+      throw new Error("Source revision cleanup completion lease was rejected");
+    }
+    return Object.freeze({
+      projectId: request.projectId,
+      revision: request.revision,
+      outcome: "DELETED",
+      attempt: request.attempt,
+    });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    await repository.failSourceRevisionCleanup(request, message).catch(() => undefined);
+    return Object.freeze({
+      projectId: request.projectId,
+      revision: request.revision,
+      outcome: "FAILED",
+      attempt: request.attempt,
+      error: message,
+    });
   }
 }
 

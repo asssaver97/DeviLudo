@@ -2064,7 +2064,8 @@ textarea {
 
 .product-delivery-material-branch {
   display: grid;
-  grid-template-columns: repeat(7, minmax(0, 1fr));
+  gap: 12px;
+  grid-template-columns: minmax(420px, 1.4fr) repeat(2, minmax(250px, .8fr));
   margin-top: 18px;
   min-width: 1080px;
   padding-top: 32px;
@@ -2118,7 +2119,7 @@ textarea {
 
 .product-delivery-material-group {
   border: 2px dashed #40536a;
-  grid-column: 4 / 6;
+  grid-column: 2;
   margin: 0;
   min-width: 0;
   padding: 17px 8px 16px;
@@ -2127,7 +2128,7 @@ textarea {
 
 .product-delivery-steam-group {
   border: 2px dashed #40536a;
-  grid-column: 6 / 8;
+  grid-column: 3;
   margin: 0;
   min-width: 0;
   padding: 17px 8px 16px;
@@ -2137,10 +2138,10 @@ textarea {
 .product-delivery-artifacts-dock {
   align-self: start;
   border: 2px solid #34445b;
-  grid-column: 1 / 4;
-  margin: 0 18px 0 0;
+  grid-column: 1;
+  margin: 0;
   min-width: 0;
-  padding: 20px 16px 16px;
+  padding: 12px;
 }
 
 .product-delivery-material-group > legend,
@@ -2520,8 +2521,8 @@ textarea {
 
 .product-delivery-artifact-grid {
   display: grid;
-  gap: 10px;
-  grid-template-columns: repeat(auto-fit, minmax(min(220px, 100%), 1fr));
+  gap: 7px;
+  grid-template-columns: repeat(auto-fit, minmax(min(210px, 100%), 1fr));
 }
 
 .product-delivery-artifact-card {
@@ -2529,9 +2530,9 @@ textarea {
   border: 1px solid #34445b;
   color: var(--ink);
   display: grid;
-  gap: 11px;
-  min-height: 96px;
-  padding: 13px;
+  gap: 7px;
+  min-height: 0;
+  padding: 8px;
 }
 
 .product-delivery-artifact-summary {
@@ -2560,7 +2561,7 @@ textarea {
 
 .product-delivery-artifact-actions {
   display: grid;
-  gap: 8px;
+  gap: 6px;
   grid-template-columns: minmax(72px, .7fr) minmax(128px, 1.3fr);
 }
 
@@ -2574,8 +2575,8 @@ textarea {
   color: #aebed2;
   cursor: pointer;
   font: 800 9px/1.2 var(--font-geist-mono), monospace;
-  min-height: 34px;
-  padding: 7px 10px;
+  min-height: 28px;
+  padding: 5px 8px;
 }
 
 .product-delivery-artifact-actions .product-delivery-artifact-open {

@@ -3,6 +3,7 @@ import {
   interactionActionEvents,
   interactionCheckpointCount,
   interactionHasUserAction,
+  MAX_REQUIREMENTS_PER_ACTION,
   validateCoreJourneyLifecycle,
   validateInteractionScript,
   type CheckpointRole,
@@ -16,7 +17,7 @@ export const TEST_MANIFEST_SCHEMA = "deviludo.test-manifest" as const;
 export const MAX_TEST_REQUIREMENTS = 500 as const;
 export const MAX_TEST_FEATURES = 500 as const;
 export const MAX_INTERACTIVE_JOURNEYS = 32 as const;
-export const MAX_SCREENSHOT_CHECKPOINTS = 64 as const;
+export const MAX_SCREENSHOT_CHECKPOINTS = 256 as const;
 export const MAX_JOURNEY_TIMEOUT_MS = 900_000 as const;
 export const MIN_JOURNEY_EVENT_BUDGET_MS = 1_500 as const;
 export const MIN_PLATFORM_E2E_TIMEOUT_MS = 30 * 60_000;
@@ -258,6 +259,10 @@ export function testManifestValidationError(value: unknown): string | null {
       if (interactiveFields.length) {
         return `features[${index}] interactive verification is missing: ${interactiveFields.join(", ")}`;
       }
+      const overloadedAction = firstActionExceedingRequirementLimit(item.interactionScript);
+      if (overloadedAction) {
+        return `features[${index}] action ${overloadedAction} covers more than ${MAX_REQUIREMENTS_PER_ACTION} requirements; split the proof into the distinct player inputs and observations that actually satisfy them`;
+      }
       const actionWithoutTransitionOracle = firstActionWithoutTransitionOracle(item.interactionScript);
       if (actionWithoutTransitionOracle) {
         return `features[${index}] action ${actionWithoutTransitionOracle} must include a CHANGED postcondition for the exact STATE, PROGRESS, CONTROL, or SCENE value changed by that input`;
@@ -394,6 +399,19 @@ export function testManifestValidationError(value: unknown): string | null {
   if (adaptiveBudgetError) return adaptiveBudgetError;
   if (!validateTestManifest(value)) {
     return "manifest semantics are invalid: provide one FRESH core-loop journey ordered START -> START_SESSION -> READY -> PRIMARY_ACTION -> PROGRESS -> COMPLETE_LOOP -> COMPLETION; every action needs unique stepId, intent, coversRequirementIds, and postconditions; cover every player requirement with real actions and every requirement with a non-manual feature";
+  }
+  return null;
+}
+
+function firstActionExceedingRequirementLimit(value: unknown): string | null {
+  if (!value || typeof value !== "object" || !Array.isArray((value as { events?: unknown }).events)) return null;
+  for (const candidate of (value as { events: unknown[] }).events) {
+    if (!candidate || typeof candidate !== "object" || Array.isArray(candidate)) continue;
+    const event = candidate as Record<string, unknown>;
+    if (Array.isArray(event.coversRequirementIds)
+      && event.coversRequirementIds.length > MAX_REQUIREMENTS_PER_ACTION) {
+      return typeof event.stepId === "string" ? event.stepId : "<missing-step-id>";
+    }
   }
   return null;
 }

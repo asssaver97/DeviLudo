@@ -31,28 +31,35 @@ if (request.mode === "COMPACT") {
   await callTool("context.update_analysis", { analysis: structured });
   content = JSON.stringify(structured);
 } else if (request.role === "DESIGN") {
-  const goals = Array.isArray(context?.e2e?.goals) ? context.e2e.goals : [];
-  await callTool("requirements.update", {
-    requirements: context?.requirements?.length
-      ? context.requirements
-      : [{ id: "initial-concept", text: "Deliver the approved playable game loop." }],
+  const goals = Array.isArray(context?.e2e?.goals) && context.e2e.goals.length
+    ? context.e2e.goals
+    : [{ id: "complete-core-loop", description: "A player can start, act, progress, and complete the core loop.", source: "CORE_LOOP" }];
+  const document = Object.keys(context?.projectDocument ?? {}).length
+    ? context.projectDocument
+    : {
+        introduction: "A playable game generated from the approved requirements.",
+        gameplay: "Start a session, make consequential choices, recover from failure, and complete the core loop.",
+        uiDesign: "",
+        categories: ["gameplay"],
+        features: ["real input", "complete loop"],
+      };
+  const replaced = await callTool("game_design.replace", {
+    markdown: fixtureGameDesignMarkdown(document.gameplay, context?.language === "zh" ? "zh" : "en"),
+    document,
+    goals,
   });
-  await callTool("project_document.update", {
-    document: Object.keys(context?.projectDocument ?? {}).length
-      ? context.projectDocument
-      : {
-          introduction: "A playable game generated from the approved requirements.",
-          gameplay: "Start a session, perform the primary action, and complete the core loop.",
-          categories: ["gameplay"],
-          features: ["real input", "complete loop"],
-        },
+  structured = { status: "READY_FOR_AUDIT", designRevision: replaced.designRevision };
+  content = JSON.stringify(structured);
+} else if (["PLAYABILITY_AUDIT", "DIFFICULTY_AUDIT", "FUN_AUDIT", "COHERENCE_AUDIT"].includes(request.role)) {
+  const designRevision = Number(context?.gameDesign?.revision ?? 0);
+  await callTool("design_audit.submit", {
+    designRevision,
+    verdict: "PASS",
+    summary: `${request.role} fixture audit passed revision ${designRevision}.`,
+    findings: [],
+    playerQuestions: [],
   });
-  await callTool("e2e_goals.update", { goals });
-  await callTool("handoff.create", {
-    toRole: "UI_DESIGN",
-    summary: "Turn the complete approved gameplay and E2E goal snapshot into an implementation-ready UI specification.",
-  });
-  structured = { handoff: { toRole: "UI_DESIGN", goalCount: goals.length } };
+  structured = { verdict: "PASS", designRevision };
   content = JSON.stringify(structured);
 } else if (request.role === "UI_DESIGN") {
   const goals = Array.isArray(context?.e2e?.goals) ? context.e2e.goals : [];
@@ -201,6 +208,43 @@ function classifyIntent(prompt) {
     true,
     "Update the implementation according to the player's request.",
   );
+}
+
+function fixtureGameDesignMarkdown(gameplay, language) {
+  const detail = String(gameplay ?? "Start, make a meaningful decision, receive feedback, progress, recover, and complete the game.");
+  const sections = language === "zh" ? [
+    ["# 游戏设计", "夹具游戏"],
+    ["## 愿景", `交付完整、清晰且可玩的体验。${detail}`],
+    ["## 设计支柱", "每条规则都服务于玩家能动性、即时反馈、连贯成长与可恢复失败。"],
+    ["## 玩家体验", "玩家通过行动学习，理解可见后果，并通过观察与规划提升表现。"],
+    ["## 核心循环", "开始一局、读取状态、选择行动、获得即时后果、调整策略并抵达明确终点。"],
+    ["## 规则与操作", "一个开始操作进入游戏；每个可用操作只改变一次源码状态；失败后提供清晰恢复操作。"],
+    ["## 系统与经济", "有界资源迫使玩家在即时安全和未来机会之间取舍，来源与消耗始终可读。"],
+    ["## 成长与难度", "先教授单一决策，再叠加压力和变化，最后以掌握度挑战收束；关键数值均可调。"],
+    ["## 内容与叙事", "开场建立情境，每个段落因果相接，选择留下可见后果，结局回应最初命题。"],
+    ["## 引导、反馈与无障碍", "在实际操作中说明可用行动；键鼠和手柄路径均保留清晰焦点与非纯颜色反馈。"],
+    ["## 平衡风险与可调参数", "审查绝对安全策略、操作刷取、资源囤积、滚雪球、空窗期、失败代价与节奏阈值。"],
+    ["## 范围与非目标", "完整交付已批准循环，不使用调试捷径、占位结局、无关副系统或强制重复劳动。"],
+    ["## 试玩假设", "玩家应在第一分钟识别有意义取舍，并在看到反馈后改变策略；测试证据可以否定这些假设。"],
+    ["## E2E 验收", "全新真实输入旅程能够开始游戏、推进源码状态、覆盖失败恢复，并在没有绕过控件时完成目标。"],
+  ] : [
+    ["# Game Design", "Fixture Game"],
+    ["## Vision", `Deliver a complete and readable player experience. ${detail}`],
+    ["## Design Pillars", "Agency, immediate feedback, coherent progression, and respectful recovery guide every rule."],
+    ["## Player Experience", "The player learns by acting, understands consequences, and can improve through observation and planning."],
+    ["## Core Loop", "Start a run, inspect state, choose an action, receive an immediate consequence, adapt, and reach a clear completion state."],
+    ["## Rules and Controls", "One start action enters play. Every enabled action changes source-backed state exactly once. Failure exposes a recovery action."],
+    ["## Systems and Economy", "A bounded resource creates tradeoffs between immediate safety and future opportunity; sources and sinks remain legible."],
+    ["## Progression and Difficulty", "Teach one decision, combine it with pressure, introduce a twist, and finish with a mastery check. Values remain tunable."],
+    ["## Content and Narrative", "The opening establishes context, each beat causes the next, choices leave visible consequences, and completion resolves the premise."],
+    ["## Onboarding, Feedback and Accessibility", "Prompts explain available actions through play; keyboard, pointer, and gamepad paths retain visible focus and non-color feedback."],
+    ["## Balance Risks and Tunables", "Audit dominant safe play, action spam, resource hoarding, runaway advantage, dead time, failure cost, and pacing thresholds."],
+    ["## Scope and Non-Goals", "Deliver the complete approved loop without debug shortcuts, placeholder endings, unrelated secondary systems, or compulsory grind."],
+    ["## Playtest Hypotheses", "Players should identify a meaningful tradeoff in the first minute and change strategy after feedback; evidence may falsify either hypothesis."],
+    ["## E2E Acceptance", "A fresh native-input journey starts play, advances source-backed progress, exercises failure/recovery, and earns completion without bypass controls."],
+  ];
+  const repetitions = language === "zh" ? 5 : 3;
+  return `${sections.map(([heading, body]) => `${heading}\n\n${Array.from({ length: repetitions }, () => body).join(" ")}`).join("\n\n")}\n`;
 }
 
 function decision(intent, targetRole, explicitExecution, actionable, summary) {
@@ -553,7 +597,7 @@ async function readStdin() {
 
 function validateRequest(value) {
   if (!value || value.schemaVersion !== "deviludo.project-runtime.v2"
-    || !["INTENT", "ANALYSIS", "DESIGN", "UI_DESIGN", "DEVELOPMENT", "TEST"].includes(value.role)
+    || !["INTENT", "ANALYSIS", "DESIGN", "PLAYABILITY_AUDIT", "DIFFICULTY_AUDIT", "FUN_AUDIT", "COHERENCE_AUDIT", "UI_DESIGN", "DEVELOPMENT", "TEST", "PUBLISHING"].includes(value.role)
     || !["PRIMARY", "READ_ONLY_BRANCH", "COMPACT"].includes(value.mode)
     || !["CLAUDE_CODE", "CODEX_CLI"].includes(value.runtime)
     || !/^[0-9a-f-]{36}$/i.test(value.turnId)) {

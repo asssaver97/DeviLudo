@@ -8,7 +8,9 @@ import {
   type ProjectRuntimeToolSummary,
 } from "@/lib/product/project-runtime";
 import {
+  GAME_DESIGN_AUDIT_ROLES,
   PROJECT_RUNTIME_ROLES,
+  type GameDesignAuditRole,
   type ProjectRuntimeRole,
 } from "@/lib/product/contracts";
 
@@ -31,6 +33,46 @@ export type ProjectRoleContext = Readonly<{
   updatedAt: string | null;
 }>;
 
+export type NarrativeSourceContract = Readonly<{
+  scenes: readonly Readonly<{ id: string; exchangeCount: number }>[];
+  progress: Readonly<{
+    sceneKey: string;
+    exchangeKey: string;
+    sceneBase: number;
+    exchangeBase: number;
+  }>;
+}>;
+
+export type ProjectSourceContext = Readonly<{
+  revision: number;
+  sha256: string;
+  relativePath: string;
+  narrative?: NarrativeSourceContract | null;
+}>;
+
+export type GameDesignAuditVerdict = "PASS" | "REVISE" | "PLAYER_INPUT_REQUIRED";
+
+export type GameDesignAudit = Readonly<{
+  role: GameDesignAuditRole;
+  designRevision: number;
+  verdict: GameDesignAuditVerdict;
+  summary: string;
+  findings: readonly string[];
+  playerQuestions: readonly string[];
+  turnId: string;
+  completedAt: string;
+}>;
+
+export type GameDesignContext = Readonly<{
+  revision: number;
+  markdown: string;
+  sha256: string | null;
+  status: "DRAFT" | "AUDITING" | "REVISION_REQUIRED" | "PLAYER_INPUT_REQUIRED" | "APPROVED";
+  auditRound: number;
+  generatedByTurnId: string | null;
+  audits: readonly GameDesignAudit[];
+}>;
+
 export type ProjectContext = Readonly<{
   schemaVersion: typeof PROJECT_CONTEXT_SCHEMA;
   workspaceId: string;
@@ -39,7 +81,8 @@ export type ProjectContext = Readonly<{
   language: "en" | "zh";
   requirements: readonly Readonly<Record<string, unknown>>[];
   projectDocument: Readonly<Record<string, unknown>>;
-  source: Readonly<{ revision: number; sha256: string; relativePath: string }> | null;
+  gameDesign: GameDesignContext;
+  source: ProjectSourceContext | null;
   assetPlan: readonly Readonly<Record<string, unknown>>[];
   e2e: Readonly<{
     goalRevision: number;
@@ -83,6 +126,7 @@ export function createProjectContext(input: Readonly<{
     language: input.language ?? "en",
     requirements: input.concept ? [Object.freeze({ id: "initial-concept", text: input.concept })] : [],
     projectDocument: Object.freeze({}),
+    gameDesign: emptyGameDesign(),
     source: null,
     assetPlan: [],
     e2e: Object.freeze({ goalRevision: 0, goals: [], planRevision: null, plan: null }),
@@ -182,13 +226,14 @@ async function ensureSharedContextTree(root: string, workspaceId: string, projec
 }
 
 function freezeContext(value: ProjectContext): ProjectContext {
-  const normalized = normalizeRoleContexts(value);
+  const normalized = normalizeContext(value);
   if (!normalized || typeof normalized !== "object" || normalized.schemaVersion !== PROJECT_CONTEXT_SCHEMA
     || !UUID.test(normalized.workspaceId) || !UUID.test(normalized.projectId)
     || !Number.isSafeInteger(normalized.revision) || normalized.revision < 1
     || !["en", "zh"].includes(normalized.language)
     || !normalized.roles || typeof normalized.roles !== "object"
     || PROJECT_RUNTIME_ROLES.some(role => !normalized.roles[role])
+    || !validGameDesign(normalized.gameDesign)
     || !Number.isFinite(Date.parse(normalized.updatedAt))) {
     throw new Error("Project context is invalid");
   }
@@ -199,16 +244,49 @@ function freezeContext(value: ProjectContext): ProjectContext {
   return deepFreeze(structuredClone(normalized));
 }
 
-function normalizeRoleContexts(value: ProjectContext): ProjectContext {
+function normalizeContext(value: ProjectContext): ProjectContext {
   if (!value || typeof value !== "object" || !value.roles || typeof value.roles !== "object") return value;
-  if (PROJECT_RUNTIME_ROLES.every(role => value.roles[role])) return value;
+  const rolesComplete = PROJECT_RUNTIME_ROLES.every(role => value.roles[role]);
+  if (rolesComplete && value.gameDesign) return value;
   return {
     ...value,
+    gameDesign: value.gameDesign ?? emptyGameDesign(),
     roles: Object.freeze(Object.fromEntries(PROJECT_RUNTIME_ROLES.map(role => [
       role,
       value.roles[role] ?? EMPTY_ROLE_CONTEXT,
     ]))) as Readonly<Record<ProjectRuntimeRole, ProjectRoleContext>>,
   };
+}
+
+function emptyGameDesign(): GameDesignContext {
+  return Object.freeze({
+    revision: 0,
+    markdown: "",
+    sha256: null,
+    status: "DRAFT",
+    auditRound: 0,
+    generatedByTurnId: null,
+    audits: Object.freeze([]),
+  });
+}
+
+function validGameDesign(value: GameDesignContext): boolean {
+  if (!value || !Number.isSafeInteger(value.revision) || value.revision < 0
+    || !Number.isSafeInteger(value.auditRound) || value.auditRound < 0
+    || !["DRAFT", "AUDITING", "REVISION_REQUIRED", "PLAYER_INPUT_REQUIRED", "APPROVED"].includes(value.status)
+    || typeof value.markdown !== "string" || value.markdown.length > 64_000
+    || (value.sha256 !== null && !SHA256.test(value.sha256))
+    || (value.generatedByTurnId !== null && !UUID.test(value.generatedByTurnId))
+    || !Array.isArray(value.audits) || value.audits.length > GAME_DESIGN_AUDIT_ROLES.length) return false;
+  return value.audits.every(audit => GAME_DESIGN_AUDIT_ROLES.includes(audit.role)
+    && audit.designRevision === value.revision
+    && ["PASS", "REVISE", "PLAYER_INPUT_REQUIRED"].includes(audit.verdict)
+    && typeof audit.summary === "string" && audit.summary.length > 0 && audit.summary.length <= 8_000
+    && Array.isArray(audit.findings) && audit.findings.length <= 24
+    && audit.findings.every((item: unknown) => typeof item === "string" && item.length > 0 && item.length <= 2_000)
+    && Array.isArray(audit.playerQuestions) && audit.playerQuestions.length <= 4
+    && audit.playerQuestions.every((item: unknown) => typeof item === "string" && item.length > 0 && item.length <= 1_000)
+    && UUID.test(audit.turnId) && Number.isFinite(Date.parse(audit.completedAt)));
 }
 
 function rejectSensitiveData(value: unknown, key = "root", depth = 0): void {

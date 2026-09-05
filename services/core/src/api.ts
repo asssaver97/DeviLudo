@@ -242,7 +242,7 @@ export async function runApi(
     const role = body.role;
     if (!UUID.test(String(body.workspaceId)) || !UUID.test(String(body.projectId))
       || !UUID.test(String(body.turnId))
-      || !["INTENT", "ANALYSIS", "DESIGN", "UI_DESIGN", "DEVELOPMENT", "TEST"].includes(String(role))
+      || !["INTENT", "ANALYSIS", "DESIGN", "PLAYABILITY_AUDIT", "DIFFICULTY_AUDIT", "FUN_AUDIT", "COHERENCE_AUDIT", "UI_DESIGN", "DEVELOPMENT", "TEST", "PUBLISHING"].includes(String(role))
       || typeof body.name !== "string" || !/^[a-z][a-z0-9_.]{2,100}$/.test(body.name)
       || !body.arguments || typeof body.arguments !== "object" || Array.isArray(body.arguments)
       || !/^[A-Za-z0-9_-]{32,512}$/.test(token)) {
@@ -2670,10 +2670,18 @@ async function processConversationMessage(input: Readonly<{
   });
   input.onStage?.("RESPONDING");
   const pending = project.pendingImplementationChange;
-  const continuedIntent = projectRuntimeContinuationIntent(
-    existingConversation?.messages ?? Object.freeze([]),
-    command.content,
-  );
+  const continuedIntent = project.workflowState === "DESIGN_INPUT_REQUIRED"
+    ? Object.freeze({
+        intent: "CHANGE_REQUEST" as const,
+        explicitExecution: true,
+        actionable: true,
+        targetRole: "DESIGN" as const,
+        summary: "Apply the player's answer to the blocked game-design decision.",
+      })
+    : projectRuntimeContinuationIntent(
+        existingConversation?.messages ?? Object.freeze([]),
+        command.content,
+      );
   let intentDecision: ConversationIntentDecision;
   if (continuedIntent) {
     intentDecision = continuedIntent;
@@ -2862,7 +2870,7 @@ async function processConversationMessage(input: Readonly<{
   if (intentDecision.intent === "CHANGE_REQUEST" && intentDecision.actionable) {
     const latestProject = await repository.readProject(workspace.id, projectId) ?? project;
     if ([
-      "ANALYZING", "DESIGNING", "UI_DESIGNING", "DEVELOPING",
+      "ANALYZING", "DESIGNING", "DESIGN_AUDITING", "UI_DESIGNING", "DEVELOPING",
       "BUILDING", "TEST_PLANNING", "TESTING",
     ].includes(latestProject.workflowState)) {
       await input.projectRuntime.pauseWorkflowForConversationChange(workspace.id, projectId);

@@ -40,7 +40,7 @@ CREATE TYPE deviludo.server_node_state AS ENUM (
   'PROVISIONING', 'ACTIVE', 'DRAINING', 'DISABLED', 'REIMAGING'
 );
 CREATE TYPE deviludo.workflow_state AS ENUM (
-  'DRAFT', 'ANALYZING', 'DESIGNING', 'UI_DESIGNING', 'DEVELOPING', 'BUILDING', 'TEST_PLANNING',
+  'DRAFT', 'ANALYZING', 'DESIGNING', 'DESIGN_AUDITING', 'DESIGN_INPUT_REQUIRED', 'UI_DESIGNING', 'DEVELOPING', 'BUILDING', 'TEST_PLANNING',
   'TESTING', 'RELEASE_APPROVAL_PENDING', 'STEAM_PREPARING', 'STEAM_PUBLISHING',
   'SUCCEEDED', 'BLOCKED', 'STOPPED', 'FAILED', 'CANCELLED'
 );
@@ -54,7 +54,10 @@ CREATE TYPE deviludo.operation_state AS ENUM (
   'REGISTERED', 'IN_PROGRESS', 'RECEIPTED', 'RECONCILIATION_REQUIRED', 'VOID'
 );
 CREATE TYPE deviludo.agent_runtime AS ENUM ('CLAUDE_CODE', 'CODEX_CLI');
-CREATE TYPE deviludo.agent_role AS ENUM ('INTENT', 'ANALYSIS', 'DESIGN', 'UI_DESIGN', 'DEVELOPMENT', 'TEST', 'PUBLISHING');
+CREATE TYPE deviludo.agent_role AS ENUM (
+  'INTENT', 'ANALYSIS', 'DESIGN', 'PLAYABILITY_AUDIT', 'DIFFICULTY_AUDIT',
+  'FUN_AUDIT', 'COHERENCE_AUDIT', 'UI_DESIGN', 'DEVELOPMENT', 'TEST', 'PUBLISHING'
+);
 CREATE TYPE deviludo.agent_container_state AS ENUM (
   'CREATING', 'RUNNING', 'PAUSING', 'PAUSED', 'COMPACTING', 'DESTROYED', 'STOPPED', 'FAILED'
 );
@@ -63,7 +66,7 @@ CREATE TYPE deviludo.agent_turn_mode AS ENUM ('PRIMARY', 'READ_ONLY_BRANCH', 'CO
 CREATE TYPE deviludo.agent_lifecycle_action AS ENUM ('PAUSE', 'DESTROY');
 CREATE TYPE deviludo.workflow_profile AS ENUM ('VALIDATE', 'RELEASE');
 CREATE TYPE deviludo.artifact_kind AS ENUM (
-  'SPECIFICATION', 'PROJECT_DOCUMENT', 'BUILD', 'E2E_REPORT', 'E2E_REGRESSION', 'SIGNED_BUILD',
+  'SPECIFICATION', 'GAME_DESIGN', 'PROJECT_DOCUMENT', 'BUILD', 'E2E_REPORT', 'E2E_REGRESSION', 'SIGNED_BUILD',
   'PUBLISH_RECEIPT', 'CLEAN_INSTALL_REPORT'
 );
 CREATE TYPE deviludo.steam_release_channel AS ENUM ('TEST', 'DEFAULT');
@@ -889,6 +892,37 @@ CREATE TABLE deviludo.object_cleanup_queue (
   FOREIGN KEY (workspace_id) REFERENCES deviludo.workspaces(id) ON DELETE CASCADE,
   CHECK ((lease_token IS NULL) = (lease_expires_at IS NULL))
 );
+
+-- Source snapshots live on the project data volume rather than in object
+-- storage. Keep a durable ledger after deletion so an old database revision is
+-- never re-enqueued, while retaining its digest and audit references.
+CREATE TABLE deviludo.source_revision_cleanup_queue (
+  workspace_id uuid NOT NULL,
+  project_id uuid NOT NULL,
+  revision bigint NOT NULL CHECK (revision > 0),
+  relative_path text NOT NULL CHECK (
+    relative_path LIKE 'workspaces/' || workspace_id::text || '/projects/' || project_id::text
+      || '/revisions/r' || lpad(revision::text, 12, '0') || '-%'
+  ),
+  reason text NOT NULL DEFAULT 'unreachable source revision'
+    CHECK (length(reason) BETWEEN 1 AND 200),
+  attempts integer NOT NULL DEFAULT 0 CHECK (attempts BETWEEN 0 AND 10),
+  available_at timestamptz NOT NULL DEFAULT clock_timestamp(),
+  started_at timestamptz,
+  lease_token uuid,
+  lease_expires_at timestamptz,
+  last_error text,
+  completed_at timestamptz,
+  created_at timestamptz NOT NULL DEFAULT clock_timestamp(),
+  PRIMARY KEY (workspace_id, project_id, revision),
+  FOREIGN KEY (workspace_id, project_id)
+    REFERENCES deviludo.projects(workspace_id, id) ON DELETE CASCADE,
+  CHECK ((lease_token IS NULL) = (lease_expires_at IS NULL)),
+  CHECK (completed_at IS NULL OR (lease_token IS NULL AND lease_expires_at IS NULL))
+);
+CREATE INDEX source_revision_cleanup_claim
+  ON deviludo.source_revision_cleanup_queue(available_at, created_at)
+  WHERE completed_at IS NULL AND attempts < 10;
 
 CREATE TABLE deviludo.project_cleanup_requests (
   workspace_id uuid NOT NULL REFERENCES deviludo.workspaces(id) ON DELETE CASCADE,
@@ -1757,6 +1791,7 @@ BEGIN
     'jobs', 'external_signals', 'job_progress_events',
     'operation_receipts', 'workspace_claim_fairness',
     'artifacts', 'artifact_inputs', 'pending_object_uploads', 'object_cleanup_queue',
+    'source_revision_cleanup_queue',
     'project_cleanup_requests', 'host_admission_events', 'e2e_policy_locks', 'e2e_policy_decisions',
     'e2e_regression_traces', 'executor_receipts', 'project_creation_receipts',
     'asset_manifests', 'asset_items',
@@ -1820,20 +1855,22 @@ BEGIN
   role := coalesce(job.payload->>'role', 'DEVELOPMENT');
   purpose := coalesce(job.payload->>'purpose', CASE role
     WHEN 'DESIGN' THEN 'DESIGN' WHEN 'UI_DESIGN' THEN 'UI_DESIGN'
+    WHEN 'PLAYABILITY_AUDIT' THEN 'DESIGN_AUDIT' WHEN 'DIFFICULTY_AUDIT' THEN 'DESIGN_AUDIT'
+    WHEN 'FUN_AUDIT' THEN 'DESIGN_AUDIT' WHEN 'COHERENCE_AUDIT' THEN 'DESIGN_AUDIT'
     WHEN 'TEST' THEN 'TEST_PLAN' WHEN 'PUBLISHING' THEN 'PUBLISHING' ELSE 'DEVELOPMENT' END);
-  IF role NOT IN ('DESIGN', 'UI_DESIGN', 'DEVELOPMENT', 'TEST', 'PUBLISHING')
-    OR purpose NOT IN ('DESIGN', 'UI_DESIGN', 'DEVELOPMENT', 'TEST_PLAN', 'TEST_VERDICT', 'PUBLISHING')
+  IF role NOT IN ('DESIGN', 'PLAYABILITY_AUDIT', 'DIFFICULTY_AUDIT', 'FUN_AUDIT', 'COHERENCE_AUDIT', 'UI_DESIGN', 'DEVELOPMENT', 'TEST', 'PUBLISHING')
+    OR purpose NOT IN ('DESIGN', 'DESIGN_REVISION', 'DESIGN_AUDIT', 'UI_DESIGN', 'DEVELOPMENT', 'TEST_PLAN', 'TEST_VERDICT', 'PUBLISHING')
     OR jsonb_typeof(p_output) <> 'object' THEN
     RAISE EXCEPTION 'invalid persistent Agent turn completion';
   END IF;
   SELECT * INTO workflow FROM deviludo.workflow_instances
    WHERE workspace_id = job.workspace_id AND id = job.workflow_id FOR UPDATE;
-  IF role = 'DESIGN' AND (
-    jsonb_typeof(p_output->'handoff') IS DISTINCT FROM 'object'
-    OR p_output #>> '{handoff,toRole}' IS DISTINCT FROM 'UI_DESIGN'
-    OR length(btrim(coalesce(p_output #>> '{handoff,summary}', ''))) = 0
-  ) THEN
-    RAISE EXCEPTION 'Design Agent did not create a complete UI_DESIGN handoff';
+  IF role = 'DESIGN' AND coalesce(p_output->>'gameDesignStatus', '') NOT IN ('AUDITING', 'PLAYER_INPUT_REQUIRED') THEN
+    RAISE EXCEPTION 'Design Agent did not persist an auditable game-design document or a player question';
+  END IF;
+  IF role IN ('PLAYABILITY_AUDIT', 'DIFFICULTY_AUDIT', 'FUN_AUDIT', 'COHERENCE_AUDIT')
+    AND upper(coalesce(p_output->>'verdict', '')) NOT IN ('PASS', 'REVISE', 'PLAYER_INPUT_REQUIRED') THEN
+    RAISE EXCEPTION 'Game-design audit Agent did not submit a valid verdict';
   END IF;
   IF role = 'UI_DESIGN' AND (
     jsonb_typeof(p_output->'handoff') IS DISTINCT FROM 'object'
@@ -1865,12 +1902,50 @@ BEGIN
       RAISE EXCEPTION 'Publishing Agent did not persist a complete Steam delivery draft';
     END IF;
   ELSIF role = 'DESIGN' THEN
-    UPDATE deviludo.workflow_instances SET state = 'UI_DESIGNING', version = version + 1,
-      updated_at = clock_timestamp() WHERE workspace_id = job.workspace_id AND id = job.workflow_id;
+    IF p_output->>'gameDesignStatus' = 'PLAYER_INPUT_REQUIRED' THEN
+      UPDATE deviludo.workflow_instances SET state = 'DESIGN_INPUT_REQUIRED', version = version + 1,
+        updated_at = clock_timestamp() WHERE workspace_id = job.workspace_id AND id = job.workflow_id;
+    ELSE
+      UPDATE deviludo.workflow_instances SET state = 'DESIGN_AUDITING', version = version + 1,
+        state_data = state_data || jsonb_build_object('gameDesignRevision', p_output->'designRevision'),
+        updated_at = clock_timestamp() WHERE workspace_id = job.workspace_id AND id = job.workflow_id;
+      PERFORM deviludo.enqueue_job(job.workspace_id, job.workflow_id, job.project_id, 'AGENT_TURN', NULL,
+        job.workflow_id::text || ':playability-audit:design:' || coalesce(p_output->>'designRevision', '0'),
+        jsonb_build_object('role', 'PLAYABILITY_AUDIT', 'purpose', 'DESIGN_AUDIT',
+          'designRevision', p_output->'designRevision'));
+    END IF;
+  ELSIF role = 'PLAYABILITY_AUDIT' THEN
     PERFORM deviludo.enqueue_job(job.workspace_id, job.workflow_id, job.project_id, 'AGENT_TURN', NULL,
-      job.workflow_id::text || ':ui-design:after:' || job.id::text,
-      jsonb_build_object('role', 'UI_DESIGN', 'purpose', 'UI_DESIGN',
-        'designHandoff', p_output->'handoff'));
+      job.workflow_id::text || ':difficulty-audit:after:' || job.id::text,
+      jsonb_build_object('role', 'DIFFICULTY_AUDIT', 'purpose', 'DESIGN_AUDIT',
+        'designRevision', p_output->'designRevision'));
+  ELSIF role = 'DIFFICULTY_AUDIT' THEN
+    PERFORM deviludo.enqueue_job(job.workspace_id, job.workflow_id, job.project_id, 'AGENT_TURN', NULL,
+      job.workflow_id::text || ':fun-audit:after:' || job.id::text,
+      jsonb_build_object('role', 'FUN_AUDIT', 'purpose', 'DESIGN_AUDIT',
+        'designRevision', p_output->'designRevision'));
+  ELSIF role = 'FUN_AUDIT' THEN
+    PERFORM deviludo.enqueue_job(job.workspace_id, job.workflow_id, job.project_id, 'AGENT_TURN', NULL,
+      job.workflow_id::text || ':coherence-audit:after:' || job.id::text,
+      jsonb_build_object('role', 'COHERENCE_AUDIT', 'purpose', 'DESIGN_AUDIT',
+        'designRevision', p_output->'designRevision'));
+  ELSIF role = 'COHERENCE_AUDIT' THEN
+    verdict := upper(coalesce(p_output->>'verdict', 'REVISE'));
+    IF verdict = 'PASS' THEN
+      UPDATE deviludo.workflow_instances SET state = 'UI_DESIGNING', version = version + 1,
+        updated_at = clock_timestamp() WHERE workspace_id = job.workspace_id AND id = job.workflow_id;
+      PERFORM deviludo.enqueue_job(job.workspace_id, job.workflow_id, job.project_id, 'AGENT_TURN', NULL,
+        job.workflow_id::text || ':ui-design:after-audit:' || job.id::text,
+        jsonb_build_object('role', 'UI_DESIGN', 'purpose', 'UI_DESIGN',
+          'designRevision', p_output->'designRevision'));
+    ELSE
+      UPDATE deviludo.workflow_instances SET state = 'DESIGNING', version = version + 1,
+        updated_at = clock_timestamp() WHERE workspace_id = job.workspace_id AND id = job.workflow_id;
+      PERFORM deviludo.enqueue_job(job.workspace_id, job.workflow_id, job.project_id, 'AGENT_TURN', NULL,
+        job.workflow_id::text || ':design-revision:after-audit:' || job.id::text,
+        jsonb_build_object('role', 'DESIGN', 'purpose', 'DESIGN_REVISION',
+          'designRevision', p_output->'designRevision', 'auditStatus', p_output->>'gameDesignStatus'));
+    END IF;
   ELSIF role = 'UI_DESIGN' THEN
     UPDATE deviludo.workflow_instances SET state = 'DEVELOPING', version = version + 1,
       updated_at = clock_timestamp() WHERE workspace_id = job.workspace_id AND id = job.workflow_id;
@@ -2034,7 +2109,10 @@ BEGIN
     FROM deviludo.jobs candidate
    WHERE candidate.workspace_id = p_workspace_id AND candidate.id = p_job_id
      AND candidate.kind = 'AGENT_TURN' AND candidate.state = 'SUCCEEDED'
-     AND coalesce(candidate.payload->>'role', 'DEVELOPMENT') IN ('UI_DESIGN', 'DEVELOPMENT', 'TEST');
+     AND coalesce(candidate.payload->>'role', 'DEVELOPMENT') IN (
+       'DESIGN', 'PLAYABILITY_AUDIT', 'DIFFICULTY_AUDIT', 'FUN_AUDIT',
+       'COHERENCE_AUDIT', 'UI_DESIGN', 'DEVELOPMENT', 'TEST'
+     );
   turn_output := job.receipt->'agentTurn';
   agent_role := coalesce(job.payload->>'role', 'DEVELOPMENT');
   IF job.id IS NULL OR jsonb_typeof(turn_output) <> 'object'
@@ -2074,8 +2152,20 @@ BEGIN
       job.project_id,
       'PROJECT_FEEDBACK',
       CASE WHEN response_language = 'zh'
-        THEN project_name || CASE agent_role WHEN 'TEST' THEN ' · 测试' WHEN 'UI_DESIGN' THEN ' · UI 设计' ELSE ' · 游戏生成' END
-        ELSE project_name || CASE agent_role WHEN 'TEST' THEN ' · Testing' WHEN 'UI_DESIGN' THEN ' · UI design' ELSE ' · Game generation' END
+        THEN project_name || CASE agent_role
+          WHEN 'DESIGN' THEN ' · 游戏设计'
+          WHEN 'PLAYABILITY_AUDIT' THEN ' · 可玩性审计'
+          WHEN 'DIFFICULTY_AUDIT' THEN ' · 难度审计'
+          WHEN 'FUN_AUDIT' THEN ' · 有趣性审计'
+          WHEN 'COHERENCE_AUDIT' THEN ' · 一致性审计'
+          WHEN 'TEST' THEN ' · 测试' WHEN 'UI_DESIGN' THEN ' · UI 设计' ELSE ' · 游戏生成' END
+        ELSE project_name || CASE agent_role
+          WHEN 'DESIGN' THEN ' · Game design'
+          WHEN 'PLAYABILITY_AUDIT' THEN ' · Playability audit'
+          WHEN 'DIFFICULTY_AUDIT' THEN ' · Difficulty audit'
+          WHEN 'FUN_AUDIT' THEN ' · Fun audit'
+          WHEN 'COHERENCE_AUDIT' THEN ' · Coherence audit'
+          WHEN 'TEST' THEN ' · Testing' WHEN 'UI_DESIGN' THEN ' · UI design' ELSE ' · Game generation' END
       END
     );
   END IF;
@@ -2088,6 +2178,11 @@ BEGIN
            'source', 'WORKFLOW_AGENT',
            'agentRole', agent_role,
            'agentName', CASE agent_role
+             WHEN 'DESIGN' THEN 'DeviLudo Design Agent'
+             WHEN 'PLAYABILITY_AUDIT' THEN 'DeviLudo Playability Audit Agent'
+             WHEN 'DIFFICULTY_AUDIT' THEN 'DeviLudo Difficulty Audit Agent'
+             WHEN 'FUN_AUDIT' THEN 'DeviLudo Fun Audit Agent'
+             WHEN 'COHERENCE_AUDIT' THEN 'DeviLudo Coherence Audit Agent'
              WHEN 'TEST' THEN 'DeviLudo Test Agent'
              WHEN 'UI_DESIGN' THEN 'DeviLudo UI Design Agent'
              ELSE 'DeviLudo Development Agent'
@@ -4502,6 +4597,224 @@ END
 $$;
 ALTER FUNCTION deviludo.fail_object_cleanup(uuid, text, text, uuid, text) OWNER TO deviludo_claim_executor;
 
+CREATE OR REPLACE FUNCTION deviludo.enqueue_unreachable_source_revisions(
+  p_min_age_seconds integer, p_limit integer
+)
+RETURNS integer
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = pg_catalog, deviludo
+SET row_security = off
+AS $$
+DECLARE enqueued integer;
+BEGIN
+  IF p_min_age_seconds NOT BETWEEN 60 AND 604800 OR p_limit NOT BETWEEN 1 AND 500 THEN
+    RAISE EXCEPTION 'invalid source revision cleanup sweep';
+  END IF;
+  WITH candidate AS (
+    SELECT source.workspace_id, source.project_id, source.revision, source.relative_path
+      FROM deviludo.project_source_revisions source
+     WHERE source.created_at < clock_timestamp() - make_interval(secs => p_min_age_seconds)
+       -- The highest registered revision is the canonical CURRENT source.
+       AND source.revision < (
+         SELECT max(current_source.revision)
+           FROM deviludo.project_source_revisions current_source
+          WHERE current_source.workspace_id = source.workspace_id
+            AND current_source.project_id = source.project_id
+       )
+       AND NOT EXISTS (
+         SELECT 1 FROM deviludo.source_revision_cleanup_queue queued
+          WHERE queued.workspace_id = source.workspace_id
+            AND queued.project_id = source.project_id AND queued.revision = source.revision
+       )
+       -- Active work may still read an older frozen source revision.
+       AND NOT EXISTS (
+         SELECT 1 FROM deviludo.jobs job
+          WHERE job.workspace_id = source.workspace_id AND job.project_id = source.project_id
+            AND job.state IN ('QUEUED', 'RUNNING', 'RETRY')
+            AND job.payload->>'sourceRevision' = source.revision::text
+       )
+       AND NOT EXISTS (
+         SELECT 1 FROM deviludo.agent_turns turn_record
+          WHERE turn_record.workspace_id = source.workspace_id AND turn_record.project_id = source.project_id
+            AND turn_record.state IN ('QUEUED', 'RUNNING')
+            AND turn_record.source_revision = source.revision
+       )
+       AND NOT EXISTS (
+         SELECT 1 FROM deviludo.platform_test_runs run
+          WHERE run.workspace_id = source.workspace_id AND run.project_id = source.project_id
+            AND run.state IN ('QUEUED', 'RUNNING') AND run.source_revision = source.revision
+       )
+       -- Preserve the current complete test plan as a reproducible working root.
+       AND source.revision IS DISTINCT FROM (
+         SELECT plan.source_revision
+           FROM deviludo.test_plans_v2 plan
+          WHERE plan.workspace_id = source.workspace_id AND plan.project_id = source.project_id
+          ORDER BY plan.source_revision DESC, plan.plan_revision DESC
+          LIMIT 1
+       )
+       -- A pending host commit and every Steam delivery remain recoverable.
+       AND NOT EXISTS (
+         SELECT 1 FROM deviludo.host_source_events event
+          WHERE event.workspace_id = source.workspace_id AND event.project_id = source.project_id
+            AND event.source_revision = source.revision AND event.acknowledged_at IS NULL
+       )
+       AND NOT EXISTS (
+         SELECT 1 FROM deviludo.steam_delivery_preparations preparation
+          WHERE preparation.workspace_id = source.workspace_id AND preparation.project_id = source.project_id
+            AND preparation.source_revision = source.revision
+     )
+     ORDER BY source.created_at, source.workspace_id, source.project_id, source.revision
+     LIMIT p_limit
+  )
+  INSERT INTO deviludo.source_revision_cleanup_queue(
+    workspace_id, project_id, revision, relative_path
+  )
+  SELECT workspace_id, project_id, revision, relative_path FROM candidate
+  ON CONFLICT (workspace_id, project_id, revision) DO NOTHING;
+  GET DIAGNOSTICS enqueued = ROW_COUNT;
+  RETURN enqueued;
+END
+$$;
+ALTER FUNCTION deviludo.enqueue_unreachable_source_revisions(integer, integer) OWNER TO deviludo_claim_executor;
+
+CREATE OR REPLACE FUNCTION deviludo.claim_source_revision_cleanup(p_lease_seconds integer)
+RETURNS TABLE (
+  "workspaceId" uuid,
+  "projectId" uuid,
+  revision bigint,
+  "relativePath" text,
+  "leaseToken" uuid,
+  attempt integer
+)
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = pg_catalog, deviludo
+SET row_security = off
+AS $$
+BEGIN
+  IF p_lease_seconds NOT BETWEEN 30 AND 600 THEN
+    RAISE EXCEPTION 'invalid source revision cleanup lease';
+  END IF;
+  RETURN QUERY
+  WITH candidate AS (
+    SELECT queue.workspace_id, queue.project_id, queue.revision
+      FROM deviludo.source_revision_cleanup_queue queue
+      JOIN deviludo.project_source_revisions source
+        ON source.workspace_id = queue.workspace_id AND source.project_id = queue.project_id
+       AND source.revision = queue.revision AND source.relative_path = queue.relative_path
+     WHERE queue.completed_at IS NULL AND queue.attempts < 10
+       AND queue.available_at <= clock_timestamp()
+       AND (queue.lease_token IS NULL OR queue.lease_expires_at <= clock_timestamp())
+       AND (
+         queue.started_at IS NOT NULL
+         OR (
+           source.revision < (
+             SELECT max(current_source.revision)
+               FROM deviludo.project_source_revisions current_source
+              WHERE current_source.workspace_id = source.workspace_id
+                AND current_source.project_id = source.project_id
+           )
+           AND NOT EXISTS (
+             SELECT 1 FROM deviludo.jobs job
+              WHERE job.workspace_id = source.workspace_id AND job.project_id = source.project_id
+                AND job.state IN ('QUEUED', 'RUNNING', 'RETRY')
+                AND job.payload->>'sourceRevision' = source.revision::text
+           )
+           AND NOT EXISTS (
+             SELECT 1 FROM deviludo.agent_turns turn_record
+              WHERE turn_record.workspace_id = source.workspace_id AND turn_record.project_id = source.project_id
+                AND turn_record.state IN ('QUEUED', 'RUNNING')
+                AND turn_record.source_revision = source.revision
+           )
+           AND NOT EXISTS (
+             SELECT 1 FROM deviludo.platform_test_runs run
+              WHERE run.workspace_id = source.workspace_id AND run.project_id = source.project_id
+                AND run.state IN ('QUEUED', 'RUNNING') AND run.source_revision = source.revision
+           )
+           AND source.revision IS DISTINCT FROM (
+             SELECT plan.source_revision
+               FROM deviludo.test_plans_v2 plan
+              WHERE plan.workspace_id = source.workspace_id AND plan.project_id = source.project_id
+              ORDER BY plan.source_revision DESC, plan.plan_revision DESC LIMIT 1
+           )
+           AND NOT EXISTS (
+             SELECT 1 FROM deviludo.host_source_events event
+              WHERE event.workspace_id = source.workspace_id AND event.project_id = source.project_id
+                AND event.source_revision = source.revision AND event.acknowledged_at IS NULL
+           )
+           AND NOT EXISTS (
+             SELECT 1 FROM deviludo.steam_delivery_preparations preparation
+              WHERE preparation.workspace_id = source.workspace_id AND preparation.project_id = source.project_id
+                AND preparation.source_revision = source.revision
+           )
+         )
+       )
+     ORDER BY queue.available_at, queue.created_at
+     FOR UPDATE OF queue SKIP LOCKED
+     LIMIT 1
+  )
+  UPDATE deviludo.source_revision_cleanup_queue queue
+     SET attempts = queue.attempts + 1,
+         started_at = coalesce(queue.started_at, clock_timestamp()),
+         lease_token = gen_random_uuid(),
+         lease_expires_at = clock_timestamp() + make_interval(secs => p_lease_seconds),
+         last_error = NULL
+    FROM candidate
+   WHERE queue.workspace_id = candidate.workspace_id AND queue.project_id = candidate.project_id
+     AND queue.revision = candidate.revision
+  RETURNING queue.workspace_id, queue.project_id, queue.revision, queue.relative_path,
+            queue.lease_token, queue.attempts;
+END
+$$;
+ALTER FUNCTION deviludo.claim_source_revision_cleanup(integer) OWNER TO deviludo_claim_executor;
+
+CREATE OR REPLACE FUNCTION deviludo.complete_source_revision_cleanup(
+  p_workspace_id uuid, p_project_id uuid, p_revision bigint, p_lease_token uuid
+)
+RETURNS boolean
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = pg_catalog, deviludo
+SET row_security = off
+AS $$
+DECLARE updated integer;
+BEGIN
+  UPDATE deviludo.source_revision_cleanup_queue
+     SET completed_at = clock_timestamp(), lease_token = NULL, lease_expires_at = NULL,
+         last_error = NULL
+   WHERE workspace_id = p_workspace_id AND project_id = p_project_id AND revision = p_revision
+     AND completed_at IS NULL AND lease_token = p_lease_token
+     AND lease_expires_at > clock_timestamp();
+  GET DIAGNOSTICS updated = ROW_COUNT;
+  RETURN updated = 1;
+END
+$$;
+ALTER FUNCTION deviludo.complete_source_revision_cleanup(uuid, uuid, bigint, uuid) OWNER TO deviludo_claim_executor;
+
+CREATE OR REPLACE FUNCTION deviludo.fail_source_revision_cleanup(
+  p_workspace_id uuid, p_project_id uuid, p_revision bigint, p_lease_token uuid, p_error text
+)
+RETURNS boolean
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = pg_catalog, deviludo
+SET row_security = off
+AS $$
+DECLARE updated integer;
+BEGIN
+  UPDATE deviludo.source_revision_cleanup_queue
+     SET lease_token = NULL, lease_expires_at = NULL,
+         available_at = clock_timestamp() + make_interval(secs => least(3600, 15 * power(2, attempts)::integer)),
+         last_error = left(p_error, 2000)
+   WHERE workspace_id = p_workspace_id AND project_id = p_project_id AND revision = p_revision
+     AND completed_at IS NULL AND lease_token = p_lease_token;
+  GET DIAGNOSTICS updated = ROW_COUNT;
+  RETURN updated = 1;
+END
+$$;
+ALTER FUNCTION deviludo.fail_source_revision_cleanup(uuid, uuid, bigint, uuid, text) OWNER TO deviludo_claim_executor;
+
 CREATE OR REPLACE FUNCTION deviludo.claim_project_cleanup(p_lease_seconds integer)
 RETURNS TABLE ("workspaceId" uuid, "projectId" uuid, "leaseToken" uuid, attempt integer)
 LANGUAGE plpgsql
@@ -4803,6 +5116,8 @@ GRANT SELECT, INSERT, UPDATE ON
   TO deviludo_scheduler;
 GRANT SELECT ON deviludo.e2e_regression_traces
   TO deviludo_scheduler, deviludo_sandbox, deviludo_claim_executor;
+GRANT SELECT ON deviludo.test_plans_v2, deviludo.platform_test_runs,
+  deviludo.steam_delivery_preparations TO deviludo_claim_executor;
 GRANT SELECT, UPDATE ON deviludo.steam_releases TO deviludo_scheduler;
 GRANT SELECT, INSERT, UPDATE, DELETE ON deviludo.steam_delivery_preparations, deviludo.steam_store_assets TO deviludo_scheduler;
 -- The asset generator resolves the configured provider and credential ref through
@@ -4891,6 +5206,11 @@ GRANT EXECUTE ON FUNCTION deviludo.claim_object_cleanup(integer),
   deviludo.reconcile_expired_uploads(integer),
   deviludo.enqueue_expired_artifacts(integer, integer)
   TO deviludo_scheduler;
+GRANT EXECUTE ON FUNCTION deviludo.enqueue_unreachable_source_revisions(integer, integer),
+  deviludo.claim_source_revision_cleanup(integer),
+  deviludo.complete_source_revision_cleanup(uuid, uuid, bigint, uuid),
+  deviludo.fail_source_revision_cleanup(uuid, uuid, bigint, uuid, text)
+  TO deviludo_scheduler;
 GRANT EXECUTE ON FUNCTION deviludo.claim_project_cleanup(integer),
   deviludo.complete_project_cleanup(uuid, uuid, uuid),
   deviludo.fail_project_cleanup(uuid, uuid, uuid, text)
@@ -4926,6 +5246,7 @@ GRANT UPDATE ON deviludo.steam_releases TO deviludo_claim_executor;
 -- owner of those SECURITY DEFINER functions.
 GRANT SELECT, UPDATE ON deviludo.asset_items TO deviludo_claim_executor;
 GRANT SELECT, INSERT, UPDATE, DELETE ON deviludo.object_cleanup_queue TO deviludo_claim_executor;
+GRANT SELECT, INSERT, UPDATE, DELETE ON deviludo.source_revision_cleanup_queue TO deviludo_claim_executor;
 GRANT SELECT, INSERT, UPDATE, DELETE ON deviludo.pending_object_uploads TO deviludo_claim_executor;
 GRANT INSERT ON deviludo.project_cleanup_requests TO deviludo_api;
 GRANT SELECT, INSERT, UPDATE, DELETE ON deviludo.project_cleanup_requests TO deviludo_claim_executor;

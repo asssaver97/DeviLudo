@@ -2400,7 +2400,7 @@ export class CoreRepository {
         [job.workspaceId, job.jobId, job.lease.token, job.lease.fencingToken, JSON.stringify(output)],
       );
       if (result.rows[0]?.completed !== true) return false;
-      if (output.role !== "UI_DESIGN" && output.role !== "DEVELOPMENT" && output.role !== "TEST") return true;
+      if (!["DESIGN", "PLAYABILITY_AUDIT", "DIFFICULTY_AUDIT", "FUN_AUDIT", "COHERENCE_AUDIT", "UI_DESIGN", "DEVELOPMENT", "TEST"].includes(String(output.role))) return true;
 
       const responseLanguage = output.responseLanguage === "zh" ? "zh" : "en";
       await client.query(
@@ -3704,6 +3704,52 @@ export class CoreRepository {
     return result.rows[0]?.failed === true;
   }
 
+  async enqueueUnreachableSourceRevisions(minimumAgeSeconds = 300, limit = 25): Promise<number> {
+    if (!Number.isSafeInteger(minimumAgeSeconds) || minimumAgeSeconds < 60 || minimumAgeSeconds > 604_800
+      || !Number.isSafeInteger(limit) || limit < 1 || limit > 500) {
+      throw new Error("Source revision cleanup sweep is invalid");
+    }
+    const result = await this.database.pool.query<{ enqueued: number }>(
+      "SELECT deviludo.enqueue_unreachable_source_revisions($1::integer, $2::integer) AS enqueued",
+      [minimumAgeSeconds, limit],
+    );
+    return result.rows[0]?.enqueued ?? 0;
+  }
+
+  async claimSourceRevisionCleanup(leaseSeconds: number): Promise<PendingSourceRevisionCleanup | null> {
+    if (!Number.isSafeInteger(leaseSeconds) || leaseSeconds < 30 || leaseSeconds > 600) {
+      throw new Error("Source revision cleanup lease is invalid");
+    }
+    const result = await this.database.pool.query<PendingSourceRevisionCleanupRow>(
+      `SELECT "workspaceId"::text, "projectId"::text, revision::text,
+              "relativePath", "leaseToken"::text, attempt
+         FROM deviludo.claim_source_revision_cleanup($1::integer)`,
+      [leaseSeconds],
+    );
+    const row = result.rows[0];
+    return row ? Object.freeze({ ...row, revision: Number(row.revision) }) : null;
+  }
+
+  async completeSourceRevisionCleanup(input: PendingSourceRevisionCleanup): Promise<boolean> {
+    const result = await this.database.pool.query<{ completed: boolean }>(
+      `SELECT deviludo.complete_source_revision_cleanup(
+         $1::uuid, $2::uuid, $3::bigint, $4::uuid
+       ) AS completed`,
+      [input.workspaceId, input.projectId, input.revision, input.leaseToken],
+    );
+    return result.rows[0]?.completed === true;
+  }
+
+  async failSourceRevisionCleanup(input: PendingSourceRevisionCleanup, error: string): Promise<boolean> {
+    const result = await this.database.pool.query<{ failed: boolean }>(
+      `SELECT deviludo.fail_source_revision_cleanup(
+         $1::uuid, $2::uuid, $3::bigint, $4::uuid, $5::text
+       ) AS failed`,
+      [input.workspaceId, input.projectId, input.revision, input.leaseToken, error.slice(0, 2_000)],
+    );
+    return result.rows[0]?.failed === true;
+  }
+
   async claimProjectCleanup(leaseSeconds: number): Promise<PendingProjectCleanup | null> {
     if (!Number.isSafeInteger(leaseSeconds) || leaseSeconds < 30 || leaseSeconds > 600) throw new Error("Project cleanup lease is invalid");
     const result = await this.database.pool.query<PendingProjectCleanupRow>(
@@ -3874,6 +3920,26 @@ export class CoreRepository {
          ) VALUES ($1::uuid, $2::uuid, $3::uuid, 'SPECIFICATION', $4, $5, $6, $7::bigint)
          ON CONFLICT (workspace_id, workflow_id, object_key, sha256) DO NOTHING`,
         [input.workspaceId, input.projectId, input.workflowId, input.object.bucket, input.object.key, input.object.sha256, input.object.sizeBytes],
+      );
+    });
+  }
+
+  async registerGameDesignArtifact(input: Readonly<{
+    workspaceId: string;
+    projectId: string;
+    workflowId: string;
+    revision: number;
+    object: Readonly<{ bucket: string; key: string; sha256: string; sizeBytes: number }>;
+  }>): Promise<void> {
+    await this.database.withWorkspace(input.workspaceId, async client => {
+      await client.query(
+        `INSERT INTO deviludo.artifacts(
+           workspace_id, project_id, workflow_id, kind, bucket, object_key, sha256, size_bytes, metadata
+         ) VALUES ($1::uuid, $2::uuid, $3::uuid, 'GAME_DESIGN', $4, $5, $6, $7::bigint,
+                   jsonb_build_object('designRevision', $8::bigint, 'approved', true))
+         ON CONFLICT (workspace_id, workflow_id, object_key, sha256) DO NOTHING`,
+        [input.workspaceId, input.projectId, input.workflowId, input.object.bucket, input.object.key,
+          input.object.sha256, input.object.sizeBytes, input.revision],
       );
     });
   }
@@ -4140,6 +4206,17 @@ type PendingObjectCleanupRow = {
 };
 
 export type PendingObjectCleanup = Readonly<PendingObjectCleanupRow>;
+type PendingSourceRevisionCleanupRow = {
+  workspaceId: string;
+  projectId: string;
+  revision: string;
+  relativePath: string;
+  leaseToken: string;
+  attempt: number;
+};
+export type PendingSourceRevisionCleanup = Readonly<Omit<PendingSourceRevisionCleanupRow, "revision"> & {
+  revision: number;
+}>;
 type PendingProjectCleanupRow = {
   workspaceId: string;
   projectId: string;
@@ -4847,6 +4924,8 @@ function productJobFromRow(job: ProductJobRow): ProductJob {
 
 function productJobAgentRole(role: string | null): ProductJob["agentRole"] {
   return role === "INTENT" || role === "ANALYSIS" || role === "DESIGN"
+    || role === "PLAYABILITY_AUDIT" || role === "DIFFICULTY_AUDIT"
+    || role === "FUN_AUDIT" || role === "COHERENCE_AUDIT"
     || role === "UI_DESIGN" || role === "DEVELOPMENT" || role === "TEST" || role === "PUBLISHING" ? role : null;
 }
 
@@ -4881,6 +4960,23 @@ function workflowAgentConversationContent(
   const structured = objectValue(output.structured);
   const authored = typeof structured.content === "string" ? structured.content.trim() : "";
   if (authored) return authored.slice(0, 4_000);
+  if (output.role === "DESIGN") {
+    const revision = Number(output.designRevision ?? structured.designRevision);
+    return responseLanguage === "zh"
+      ? `游戏设计文档${Number.isSafeInteger(revision) && revision > 0 ? `第 ${revision} 版` : ""}已完成，正在交给四个独立审计 Agent 复核。只有全部通过后才会进入 UI 设计。`
+      : `Game-design document${Number.isSafeInteger(revision) && revision > 0 ? ` revision ${revision}` : ""} is complete and is now being reviewed by four independent audit Agents. UI Design cannot start until every audit passes.`;
+  }
+  if (["PLAYABILITY_AUDIT", "DIFFICULTY_AUDIT", "FUN_AUDIT", "COHERENCE_AUDIT"].includes(String(output.role))) {
+    const verdict = String(output.verdict ?? structured.verdict ?? "REVISE").toUpperCase();
+    const summary = typeof structured.summary === "string" ? structured.summary.trim() : "";
+    const label = responseLanguage === "zh"
+      ? ({ PLAYABILITY_AUDIT: "可玩性", DIFFICULTY_AUDIT: "难度", FUN_AUDIT: "有趣性", COHERENCE_AUDIT: "一致性" } as Record<string, string>)[String(output.role)]
+      : ({ PLAYABILITY_AUDIT: "Playability", DIFFICULTY_AUDIT: "Difficulty", FUN_AUDIT: "Fun", COHERENCE_AUDIT: "Coherence" } as Record<string, string>)[String(output.role)];
+    const conclusion = responseLanguage === "zh"
+      ? `${label}审计：${verdict === "PASS" ? "通过" : verdict === "PLAYER_INPUT_REQUIRED" ? "需要玩家决定" : "需要修订"}。`
+      : `${label} audit: ${verdict === "PASS" ? "PASS" : verdict === "PLAYER_INPUT_REQUIRED" ? "PLAYER INPUT REQUIRED" : "REVISION REQUIRED"}.`;
+    return `${conclusion}${summary ? `\n\n${summary}` : ""}`.slice(0, 4_000);
+  }
   if (output.role === "TEST") {
     return workflowTestConversationContent(output, structured, responseLanguage);
   }

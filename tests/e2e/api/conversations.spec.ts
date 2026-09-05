@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { test, expect } from "../fixtures/stack";
+import type { ArtifactRecord } from "../../../lib/product/contracts";
 
 type Conversation = Readonly<{
   id: string;
@@ -474,6 +475,57 @@ test("an explicit source fix routes only to Development and starts the workflow 
   expect(body.changeRequest.state).toBe("APPLIED");
   expect(body.workflowAction).toBe("AGENT_RERUN_STARTED");
   expect((await stack.readProject(project.id)).jobs.filter(job => job.kind === "AGENT_TURN")).toHaveLength(1);
+});
+
+test("formal game design is audited by every specialist before UI Design and remains openable as Markdown", async ({ stack }) => {
+  test.setTimeout(75_000);
+  await stack.configureAgent();
+  const project = await stack.createProject({
+    name: "设计审计闭环",
+    concept: "A compact strategy game with meaningful choices, recovery, progression, and a conclusive ending.",
+  });
+  const started = await stack.web("/api/conversations/messages", {
+    method: "POST",
+    data: { projectId: project.id, content: "按照当前需求开始开发。" },
+  });
+  expect(started.status()).toBe(201);
+  const conversationId = ((await started.json()) as { conversation: Conversation }).conversation.id;
+
+  let currentArtifacts: readonly ArtifactRecord[] = [];
+  await expect.poll(async () => {
+    const response = await stack.web(`/api/projects/${project.id}/artifacts`);
+    currentArtifacts = (await response.json() as { artifacts: readonly ArtifactRecord[] }).artifacts;
+    return currentArtifacts.some(artifact => artifact.kind === "GAME_DESIGN");
+  }, { timeout: 60_000 }).toBe(true);
+  const designArtifact = currentArtifacts.find(artifact => artifact.kind === "GAME_DESIGN");
+  expect(designArtifact).toBeDefined();
+
+  await expect.poll(async () => {
+    const response = await stack.web(`/api/conversations/${conversationId}`);
+    const conversation = (await response.json() as { conversation: Conversation }).conversation;
+    return conversation.messages
+      .filter(message => message.metadata.source === "WORKFLOW_AGENT")
+      .map(message => message.metadata.agentRole)
+      .slice(0, 5);
+  }, { timeout: 60_000 }).toEqual([
+    "DESIGN",
+    "PLAYABILITY_AUDIT",
+    "DIFFICULTY_AUDIT",
+    "FUN_AUDIT",
+    "COHERENCE_AUDIT",
+  ]);
+
+  const authorized = await stack.web(
+    `/api/projects/${project.id}/artifacts/${designArtifact!.id}/download`,
+    { method: "POST" },
+  );
+  expect(authorized.ok(), await authorized.text()).toBeTruthy();
+  const download = await authorized.json() as { url: string; filename: string };
+  expect(download.filename).toMatch(/game-design.*\.md$/i);
+  const markdown = await stack.apiRequest.get(download.url);
+  expect(markdown.ok()).toBeTruthy();
+  expect(markdown.headers()["content-type"]).toContain("text/markdown");
+  expect(await markdown.text()).toContain("# Game Design");
 });
 
 test("Development readiness turns an initially uncertain change into a confirmable rerun", async ({ stack }) => {

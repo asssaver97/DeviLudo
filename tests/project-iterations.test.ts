@@ -85,7 +85,10 @@ test("current artifact queries no longer mix evidence from older iterations", as
 });
 
 test("the delivery artifact dock keeps only the newest item for each kind and platform", async () => {
-  const studio = await readFile(new URL("../components/ProjectStudio.tsx", import.meta.url), "utf8");
+  const [studio, bridge] = await Promise.all([
+    readFile(new URL("../components/ProjectStudio.tsx", import.meta.url), "utf8"),
+    readFile(new URL("../scripts/local-git-import-server.mjs", import.meta.url), "utf8"),
+  ]);
   assert.match(studio, /latestArtifactsByKindAndPlatform\([\s\S]*historicalIteration\.artifacts : artifacts/);
   assert.match(studio, /const key = `\$\{artifact\.kind\}:\$\{artifact\.targetPlatform \?\? "common"\}`/);
   assert.match(studio, /artifact\.createdAt > current\.createdAt/);
@@ -95,6 +98,8 @@ test("the delivery artifact dock keeps only the newest item for each kind and pl
   assert.match(studio, /text\(`在 Finder 中显示：\$\{label\}`/);
   assert.match(studio, /accessArtifact\(artifact, "REVEAL"\)/);
   assert.match(studio, /!managed \? \(/);
+  assert.match(studio, /GAME_DESIGN: \["游戏设计文档", "GAME DESIGN DOCUMENT"\]/);
+  assert.match(bridge, /"GAME_DESIGN"/);
   assert.doesNotMatch(studio, /product-delivery-stage-artifacts/);
   assert.doesNotMatch(studio, /className="product-artifacts-panel"/);
 });

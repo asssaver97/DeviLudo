@@ -1,6 +1,6 @@
 import { createHash, randomUUID } from "node:crypto";
 import { chmod, lstat, mkdir, readFile, readdir, rename, rm, writeFile } from "node:fs/promises";
-import { dirname, join, relative, resolve, sep } from "node:path";
+import { basename, dirname, join, relative, resolve, sep } from "node:path";
 import { createTarGzip, type SourceFile } from "./project-import";
 import { isSensitiveProjectPath, normalizeProjectPath } from "@/lib/product/source-archive";
 
@@ -293,6 +293,52 @@ export class ProjectSourceStore {
     }
   }
 
+  /**
+   * Delete one durable but no-longer-reachable source snapshot. The scheduler
+   * obtains the exact path from the fenced cleanup queue; this final local
+   * check prevents a stale lease or malformed row from ever deleting CURRENT.
+   */
+  async deleteObsoleteRevision(input: Readonly<{
+    workspaceId: string;
+    projectId: string;
+    revision: number;
+    relativePath: string;
+  }>): Promise<boolean> {
+    assertIdentity(input.workspaceId, "workspace");
+    assertIdentity(input.projectId, "project");
+    if (!Number.isSafeInteger(input.revision) || input.revision < 1) throw new Error("Source revision is invalid");
+    const project = this.projectPath(input.workspaceId, input.projectId);
+    const revisions = join(project, "revisions");
+    const target = resolve(this.root, input.relativePath);
+    const expectedName = new RegExp(`^r${String(input.revision).padStart(12, "0")}-[0-9a-f]{16}$`);
+    if (dirname(target) !== revisions || !expectedName.test(basename(target))) {
+      throw new Error("Source revision cleanup path is invalid");
+    }
+    assertWithin(this.root, target);
+    const lock = join(project, ".source-write.lock");
+    await acquireSourceLock(lock);
+    try {
+      const current = parseCurrentSourcePointer(await readFile(join(project, "CURRENT"), "utf8"));
+      if (current.revision === input.revision || current.relativePath === input.relativePath) {
+        throw new Error("Current source revision cannot be garbage-collected");
+      }
+      try {
+        const info = await lstat(target);
+        if (!info.isDirectory() || info.isSymbolicLink()) {
+          throw new Error("Stored source revision is not a safe directory");
+        }
+      } catch (error) {
+        if (isMissing(error)) return false;
+        throw error;
+      }
+      await rm(target, { recursive: true, force: false });
+      this.imagePathCache.delete(input.relativePath);
+      return true;
+    } finally {
+      await rm(lock, { recursive: true, force: true });
+    }
+  }
+
   async deleteProject(workspaceId: string, projectId: string): Promise<void> {
     const project = this.projectPath(workspaceId, projectId);
     assertWithin(this.root, project);
@@ -445,6 +491,15 @@ async function refreshCurrentPointer(root: string, project: string, revisions: s
   const pointer = join(project, `.CURRENT-${randomUUID()}`);
   await writeFile(pointer, `${JSON.stringify({ revision, relativePath, digest })}\n`, { flag: "wx", mode: SOURCE_FILE_MODE });
   await rename(pointer, current);
+}
+
+function parseCurrentSourcePointer(raw: string): Readonly<{ revision: number; relativePath: string }> {
+  const value = JSON.parse(raw) as { revision?: unknown; relativePath?: unknown };
+  if (!Number.isSafeInteger(value.revision) || Number(value.revision) < 1
+    || typeof value.relativePath !== "string" || value.relativePath.length < 1) {
+    throw new Error("Current source pointer is invalid");
+  }
+  return Object.freeze({ revision: Number(value.revision), relativePath: value.relativePath });
 }
 
 async function ensureProjectTree(root: string, workspaceId: string, projectId: string): Promise<void> {

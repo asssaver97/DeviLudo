@@ -349,7 +349,9 @@ export function streamingConversationReplyIsActive(reply: StreamingConversationR
 
 function isProjectRuntimeRole(value: unknown): value is ProjectRuntimeRole {
   return value === "INTENT" || value === "ANALYSIS" || value === "DESIGN"
-    || value === "UI_DESIGN" || value === "DEVELOPMENT" || value === "TEST";
+    || value === "PLAYABILITY_AUDIT" || value === "DIFFICULTY_AUDIT"
+    || value === "FUN_AUDIT" || value === "COHERENCE_AUDIT"
+    || value === "UI_DESIGN" || value === "DEVELOPMENT" || value === "TEST" || value === "PUBLISHING";
 }
 
 function isConversationStreamPhase(value: unknown): value is ConversationStreamPhase {
