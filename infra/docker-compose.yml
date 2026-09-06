@@ -6,6 +6,7 @@ x-core: &core
     context: ..
     dockerfile: Dockerfile.core
     args:
+      CODEX_CLI_VERSION: ${DEVILUDO_CODEX_IMAGE_VERSION:-0.153.4}
       NPM_CONFIG_REGISTRY: ${DEVILUDO_NPM_REGISTRY:-https://registry.npmjs.org/}
   restart: unless-stopped
   read_only: true
@@ -482,6 +483,7 @@ services:
       context: ..
       dockerfile: Dockerfile.agent-codex
       args:
+        CODEX_CLI_VERSION: ${DEVILUDO_CODEX_IMAGE_VERSION:-0.153.4}
         NPM_CONFIG_REGISTRY: ${DEVILUDO_NPM_REGISTRY:-https://registry.npmjs.org/}
     profiles: ["images"]
 

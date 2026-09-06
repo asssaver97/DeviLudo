@@ -244,15 +244,14 @@ export function ProductDashboard({
       <>
         <section className="project-page-header">
           <div>
-            <div className="breadcrumb"><Link href="/projects">{text("游戏项目", "GAME PROJECTS")}</Link><span>/</span><b>{initialMode === "IDEA" ? text("开始新构想", "NEW CONCEPT") : text("导入已有项目", "IMPORT EXISTING PROJECT")}</b></div>
-            <span className="eyebrow">{initialMode === "IDEA" ? "IDEA TO PLAYABLE" : "SOURCE TO PLAYABLE"}</span>
+            <div className="breadcrumb"><Link href="/projects">{text("返回项目列表", "Back to projects")}</Link></div>
             <h1>{initialMode === "IDEA" ? text("描述你的新游戏", "DESCRIBE YOUR GAME") : text("导入已有项目", "IMPORT AN EXISTING PROJECT")}</h1>
           </div>
         </section>
         <section className="repository-onboarding idea-onboarding">
           {initialMode === "IDEA" ? (
             <div className="repository-onboarding-form">
-              <label>{text("游戏名称", "Game name")}<input aria-label={text("游戏名称", "Game name")} maxLength={200} onChange={event => setName(event.target.value)} placeholder={text("例如：余烬群岛", "e.g. Ember Archipelago")} value={name} /></label>
+              <label>{text("游戏名称（可选）", "Game name (optional)")}<input aria-label={text("游戏名称", "Game name")} maxLength={200} onChange={event => setName(event.target.value)} placeholder={text("例如：余烬群岛", "e.g. Ember Archipelago")} value={name} /></label>
               <label>{text("游戏构想", "Game concept")}<textarea ref={conceptRef} aria-label={text("游戏构想", "Game concept")} maxLength={4000} onChange={event => setConcept(event.target.value)} onKeyDown={event => { if ((event.metaKey || event.ctrlKey) && event.key === "Enter") void createProject(); }} placeholder={text("描述玩法、画面或你想让玩家感受到的体验……", "Describe the gameplay, visuals, or the experience you want players to have…")} value={concept} /></label>
               <div className="idea-submit-row"><button className="button button-acid" disabled={concept.trim().length < 10 || creating} onClick={() => void createProject()} type="button"><PlusIcon />{creating ? text("正在建立项目…", "CREATING PROJECT…") : text("创建项目", "CREATE PROJECT")}</button></div>
             </div>
@@ -264,21 +263,20 @@ export function ProductDashboard({
               </div> : null}
               {importSource === "LOCAL" ? (
                 <div id="local-project-import" role="tabpanel">
-                  <p>{text("选择本地 Godot 项目目录后，DeviLudo 只记录目录关联，不上传、不复制项目。Agent 始终读取原目录的最新源码，并把成功修改直接写回原目录。", "Choose a local Godot project directory and DeviLudo only records the directory link—it does not upload or copy the project. The Agent always reads and writes the original directory.")}</p>
-                  <small>{text("如果目录是 Git 仓库，关联后可在项目页新建并切换分支。", "If the directory is a Git repository, you can create and switch branches from the project page after linking it.")}</small>
+                  <p>{text("选择包含 project.godot 的文件夹。Agent 直接读写原目录，不上传或复制项目。", "Choose the folder containing project.godot. The Agent reads and writes it directly without uploading or copying the project.")}</p>
                   <div className="idea-submit-row"><button className="button button-acid" disabled={creating} onClick={() => void bindLocalProject()} type="button"><FileIcon />{creating ? text("正在选择并关联目录…", "SELECTING & LINKING…") : text("选择项目文件夹并关联", "CHOOSE FOLDER & LINK")}</button></div>
                 </div>
               ) : (
                 <div className="local-github-import" id="github-project-import" role="tabpanel">
                   <p>{managed
-                    ? text("选择已授权的 GitHub 仓库。平台导入源码归档，凭证不会交给 Core 或浏览器。", "Choose an authorized GitHub repository. The platform imports a source archive without exposing credentials to Core or the browser.")
-                    : text("输入 GitHub 仓库地址并选择本地保存位置。DeviLudo 使用本机 Git 凭证直接克隆到该位置，随后只关联这个工作目录；项目内容和凭证都不会经浏览器上传。", "Enter a GitHub repository URL and choose a local destination. DeviLudo clones there with the host's Git credentials, then only links that working directory; neither project contents nor credentials are uploaded through the browser.")}</p>
+                    ? text("导入已授权仓库的源码归档，凭证不会暴露给浏览器。", "Import a source archive from an authorized repository without exposing credentials to the browser.")
+                    : text("使用本机 Git 凭证克隆到你选择的位置，之后直接在该目录开发。", "Clone with your local Git credentials, then develop directly in the chosen folder.")}</p>
                   <label>{managed ? text("GitHub 仓库", "GitHub repository") : text("GitHub 仓库地址", "GitHub repository URL")}{managed
                     ? <select aria-label={text("GitHub 仓库", "GitHub repository")} onChange={event => setGitHubRepositoryUrl(event.target.value)} value={githubRepositoryUrl}>{managedRepositories.map(repository => <option key={repository.id} value={repository.id}>{repository.fullName}{repository.private ? " · private" : ""}</option>)}</select>
                     : <input aria-label={text("GitHub 仓库地址", "GitHub repository URL")} autoCapitalize="none" autoComplete="off" onChange={event => setGitHubRepositoryUrl(event.target.value)} placeholder="https://github.com/owner/repository.git" spellCheck={false} value={githubRepositoryUrl} />}</label>
                   <small>{managed
                     ? text("若列表为空，请先在账号页面连接或重新授权 GitHub。", "If the list is empty, connect or reauthorize GitHub from your account page.")
-                    : text("支持 HTTPS 和 git@github.com SSH 地址，包括本地凭证可访问的私有仓库；关联后可在项目页新建分支。", "Supports HTTPS and git@github.com SSH URLs, including private repositories available to your local credentials; create branches from the project page after linking it.")}</small>
+                    : text("支持 HTTPS、SSH 及本机可访问的私有仓库。", "Supports HTTPS, SSH, and private repositories accessible from this machine.")}</small>
                   <div className="idea-submit-row"><button className="button button-acid" disabled={creating || !githubRepositoryUrl.trim()} onClick={() => void cloneAndBindGitHubProject()} type="button">{creating ? text("正在导入…", "IMPORTING…") : managed ? text("导入并分析", "IMPORT & ANALYZE") : text("选择保存位置、克隆并关联", "CHOOSE, CLONE & LINK")}</button></div>
                 </div>
               )}
@@ -293,13 +291,13 @@ export function ProductDashboard({
   return (
     <>
       <section className="page-heading project-catalog-heading">
-        <div><span className="eyebrow">PROJECTS</span><h1>{text("游戏项目", "GAME PROJECTS")}</h1></div>
+        <div><h1>{text("游戏项目", "GAME PROJECTS")}</h1></div>
         <div className="project-catalog-actions"><Link className="button button-secondary" href="/projects/import"><FileIcon /> {text("导入已有项目", "IMPORT EXISTING PROJECT")}</Link><Link className="button button-primary" href="/projects/new"><PlusIcon /> {text("开始新构想", "NEW CONCEPT")}</Link></div>
       </section>
       {error ? <div className="inline-notice danger" role="alert">{error}</div> : null}
       {loading ? <section className="project-catalog-empty">{text("正在加载项目…", "LOADING PROJECTS…")}</section> : null}
       {!loading && !error && projects.length === 0 ? (
-        <section className="project-catalog-empty"><span><SparkIcon /></span><h2>{text("还没有游戏项目", "NO GAME PROJECTS YET")}</h2><div className="project-catalog-actions"><Link className="button button-secondary" href="/projects/import">{text("导入已有项目", "IMPORT EXISTING PROJECT")}</Link><Link className="button button-acid" href="/projects/new">{text("创建第一个项目", "CREATE FIRST PROJECT")}</Link></div></section>
+        <section className="project-catalog-empty"><span><SparkIcon /></span><h2>{text("还没有游戏项目", "NO GAME PROJECTS YET")}</h2></section>
       ) : null}
       {projects.length > 0 ? (
         <section className="project-catalog-grid" aria-label={text("可访问项目", "Accessible projects")}>

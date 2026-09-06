@@ -75,6 +75,11 @@ export const AGENT_RUNTIME_KINDS = ["CLAUDE_CODE", "CODEX_CLI"] as const;
 export const CODEX_ACCOUNT_DEFAULT_MODEL = "account-default" as const;
 export type AgentRuntimeKind = typeof AGENT_RUNTIME_KINDS[number];
 
+export type CodexModelOption = Readonly<{
+  id: string;
+  displayName: string;
+}>;
+
 export const IMAGE_GENERATION_BACKENDS = ["HTTP_IMAGES", "CODEX_IMAGEGEN"] as const;
 export type ImageGenerationBackend = typeof IMAGE_GENERATION_BACKENDS[number];
 

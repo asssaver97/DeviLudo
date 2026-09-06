@@ -8,6 +8,10 @@ html[data-theme="dark"] {
 
 html[data-theme="light"] {
   color-scheme: light;
+  --text-primary: #253447;
+  --text-secondary: #526479;
+  --text-subtle: #5d6d80;
+  --text-danger: #a42f41;
 }
 
 .theme-switcher {
@@ -92,29 +96,29 @@ html[data-theme="light"] .app-shell {
   --canvas: #edf2f6;
   --paper: #ffffff;
   --ink: #17212d;
-  --muted: #647285;
+  --muted: #5d6d80;
   --line: #ccd6e1;
   --line-strong: #9aaabd;
   --sidebar: #f7f9fc;
   --sidebar-muted: #68778a;
   --acid: #e4a716;
   --acid-strong: #c48a00;
-  --blue: #087fa7;
+  --blue: #076e91;
   --violet: #6755c7;
   --amber: #a76508;
   --green: #177b57;
   --coral: #cc523d;
-  --danger: #c13f50;
+  --danger: #b33a4b;
   --field: #f8fafc;
   --ink-strong: #17212d;
-  --ink-muted: #647285;
+  --ink-muted: #5d6d80;
   --panel: #ffffff;
   color: var(--ink);
 }
 
 html[data-theme="light"] .app-shell::after,
 html[data-theme="light"] .auth-screen::before {
-  background-image: repeating-linear-gradient(to bottom, transparent 0, transparent 3px, rgba(33, 52, 72, .035) 3px, rgba(33, 52, 72, .035) 4px);
+  background-image: none;
 }
 
 html[data-theme="light"] .shell-sidebar {
@@ -182,7 +186,6 @@ html[data-theme="light"] .shell-nav-item.is-active {
 html[data-theme="light"] .shell-main {
   background:
     radial-gradient(circle at 92% 4%, rgba(8, 127, 167, .08), transparent 26%),
-    linear-gradient(135deg, rgba(228, 167, 22, .045) 25%, transparent 25%) 0 0 / 18px 18px,
     var(--canvas);
 }
 
@@ -216,7 +219,7 @@ html[data-theme="light"] :is(.language-switcher, .theme-switcher) {
 }
 
 html[data-theme="light"] :is(.language-switcher, .theme-switcher) button {
-  color: #66768a;
+  color: #5d6d80;
 }
 
 html[data-theme="light"] :is(.language-switcher, .theme-switcher) button[aria-pressed="true"] {
@@ -292,7 +295,7 @@ html[data-theme="light"] .product-delivery-configuration > summary b {
 }
 
 html[data-theme="light"] .product-delivery-configuration > summary small {
-  color: #627286;
+  color: var(--text-subtle);
 }
 
 html[data-theme="light"] .product-delivery-config-marker {
@@ -309,7 +312,7 @@ html[data-theme="light"] .product-delivery-config-branch {
 
 html[data-theme="light"] .product-delivery-config-toggle {
   background: #dff2f8;
-  border-color: #087fa7;
+  border-color: var(--blue);
   box-shadow: 2px 2px 0 #b9c8d4;
   color: #075f7c;
 }
@@ -320,7 +323,7 @@ html[data-theme="light"] .product-delivery-config-toggle-icon {
 
 html[data-theme="light"] .product-delivery-artifact-actions .product-delivery-artifact-open {
   background: #dff2f8;
-  border-color: #087fa7;
+  border-color: var(--blue);
   color: #075f7c;
 }
 
@@ -348,10 +351,13 @@ html[data-theme="light"] :is(
   .settings-json-editor textarea,
   .homeChat-contextRow,
   .project-conversation-history,
+  .product-delivery-material-group > legend,
+  .product-delivery-artifacts-dock > legend,
   .product-document-sidebar,
   .product-delivery-pipeline-header,
   .product-iteration-selector select,
   .product-delivery-material-group,
+  .product-delivery-steam-group,
   .product-delivery-artifacts-dock,
   .product-delivery-material-disclosure,
   .product-delivery-stage-marker,
@@ -495,7 +501,7 @@ html[data-theme="light"] .conversation-image-button:hover,
 html[data-theme="light"] .conversation-image-button:focus-visible {
   background: #e2f2f7;
   border-color: #8db8c8;
-  color: #087fa7;
+  color: var(--blue);
 }
 
 html[data-theme="light"] .conversation-composer-images button {
@@ -519,7 +525,7 @@ html[data-theme="light"] .conversation-image-button:focus-visible {
 html[data-theme="light"] .conversation-image-drop-hint {
   background: rgba(248, 251, 253, .96);
   border-color: #6ca8bc;
-  color: #087fa7;
+  color: var(--blue);
 }
 
 html[data-theme="light"] :is(.conversation-file-attachment, .conversation-composer-images figure) {
@@ -530,7 +536,7 @@ html[data-theme="light"] :is(.conversation-file-attachment, .conversation-compos
 html[data-theme="light"] :is(.conversation-file-attachment > span, .conversation-file-badge) {
   background: #e4f2f7;
   border-color: #8db8c8;
-  color: #087fa7;
+  color: var(--blue);
 }
 
 html[data-theme="light"] .conversation-box-composer.is-image-dragover {
@@ -609,6 +615,7 @@ html[data-theme="light"] :is(
   .local-platform-invalidated,
   .delivery-cancel-controls,
   .asset-manifest-error,
+  .asset-error,
   .asset-item-failed .asset-status
 ) {
   background: #fff0f2;
@@ -662,10 +669,10 @@ html[data-theme="light"] .workspace-dialog-backdrop {
  * flashing the dark palette while Core is loading. */
 html[data-theme="light"] .auth-screen {
   --acid: #e4a716;
-  --blue: #087fa7;
+  --blue: #076e91;
   --field: #ffffff;
   --ink-strong: #17212d;
-  --ink-muted: #647285;
+  --ink-muted: #5d6d80;
   --line-strong: #9aaabd;
   --panel: #ffffff;
   background:
@@ -693,6 +700,146 @@ html[data-theme="light"] .auth-card :is(input, .auth-consent) {
   background: #f7f9fb;
   border-color: #aebdcd;
   color: var(--ink-strong);
+}
+
+/* Text inside legacy dark components must follow the surface's light palette. */
+html[data-theme="light"] :is(
+  .homeChat-hero h1, .auth-card h1, .workspace-option b,
+  .agent-runtime-choice b, .steam-browser-session-controls b,
+  .steam-preparation-detail dd, .asset-description,
+  .conversation-box-message .agent-generation-progress-events p,
+  .security-explainer li, .local-event-log li b
+) {
+  color: var(--text-primary);
+}
+
+html[data-theme="light"] .homeChat-hero h1,
+html[data-theme="light"] .auth-card h1 {
+  text-shadow: 2px 2px 0 #d6dee7;
+}
+
+html[data-theme="light"] :is(
+  .page-heading p, .settings-form label, .agent-config-form legend,
+  .agent-config-form > label, .agent-model-top-level label > span,
+  .agent-model-expanded label > span, .agent-role-model-details > summary,
+  .agent-local-default span, .project-conversation-history small,
+  .conversation-box-options button small, .conversation-box-composer > footer,
+  .project-delivery-asset-setting-status, .project-delivery-asset-toggle-copy small,
+  .project-delivery-asset-setting-note, .product-iteration-readonly-notice,
+  .product-iteration-history-summary li, .steam-preparation-detail > p,
+  .steam-preparation-assets figcaption, .asset-source-thumbnail > span,
+  .security-explainer > p, .security-callout span, .local-event-log li
+) {
+  color: var(--text-secondary);
+}
+
+html[data-theme="light"] :is(
+  .shell-nav > p, .revision-badge, .workspace-option small,
+  .agent-runtime-choice small, .agent-config-form label > small,
+  .agent-model-expanded small, .project-conversation-history-title,
+  .project-conversation-history > p, .product-iteration-selector span,
+  .product-iteration-history-summary dt, .product-delivery-stage small,
+  .product-delivery-stage-finished-at, .product-delivery-material-group > legend small,
+  .product-delivery-steam-group > legend small, .product-delivery-artifacts-dock > legend small,
+  .product-delivery-artifact-summary span, .product-delivery-artifact-summary small,
+  .product-delivery-rerun-hint, .product-artifacts-panel > header > span,
+  .product-artifact-list span, .product-artifact-list code,
+  .steam-preparation-detail dt, .steam-preparation-assets figcaption small,
+  .project-catalog-card.is-analyzing .project-catalog-card-footer > span
+) {
+  color: var(--text-subtle);
+}
+
+html[data-theme="light"] :is(input, textarea)::placeholder {
+  color: var(--text-subtle);
+  opacity: 1;
+}
+
+html[data-theme="light"] :is(
+  .import-source-switch button, .config-mode-switch button,
+  .workspace-option, .workspace-clear-option
+) {
+  border-color: var(--line-strong);
+  color: var(--text-secondary);
+}
+
+html[data-theme="light"] :is(
+  .import-source-switch button.is-active, .config-mode-switch button.is-active,
+  .config-mode-switch button:hover, .product-document-toggle:hover,
+  .workspace-clear-option:hover
+) {
+  background: #e2f2f7;
+  border-color: #82b7ca;
+  color: #075f7c;
+}
+
+html[data-theme="light"] .agent-local-default {
+  color: #075f7c;
+}
+
+html[data-theme="light"] :is(.agent-member.role-ui_design i, .conversation-box-message.role-ui_design .message-avatar) {
+  background: #fff3d6;
+  border-color: #d6b36b;
+  color: #805006;
+}
+
+html[data-theme="light"] :is(.agent-member.role-test i, .conversation-box-message.role-test .message-avatar) {
+  background: #eeeafb;
+  border-color: #baadde;
+  color: #6751a4;
+}
+
+html[data-theme="light"] .conversation-box-message.role-development .message-avatar {
+  background: #e5f5ee;
+  color: #126645;
+}
+
+html[data-theme="light"] .product-delivery-stage.status-pending {
+  --stage-color: var(--text-subtle);
+}
+
+html[data-theme="light"] :is(.product-release-approval strong, .product-release-approval p, .product-release-approval small) {
+  color: #126645;
+}
+
+html[data-theme="light"] :is(
+  .homeChat-error, .product-delivery-failure, .project-delete-button,
+  .project-delete-confirm, .project-delete-local-option
+) {
+  background: #fff0f2;
+  border-color: #dca3ae;
+  color: var(--text-danger);
+}
+
+html[data-theme="light"] :is(
+  .project-analysis-error, .agent-runtime-status.is-missing, .form-error,
+  .workspace-menu-error, .project-delete-local-option b, .project-delete-local-option small,
+  .project-delete-error, .product-delivery-failure-copy strong,
+  .product-delivery-failure-copy p, .product-delivery-failure-copy span,
+  .product-delivery-failure-copy small, .product-delivery-failure-copy summary,
+  .product-delivery-failure-copy code, .conversation-box-failed,
+  .conversation-box-failure-detail, .conversation-image-error, .asset-error,
+  .conversation-box-message .agent-generation-progress-events .progress-failed
+) {
+  color: var(--text-danger);
+}
+
+html[data-theme="light"] .product-delivery-failure-icon {
+  background: #f8dce2;
+  color: var(--text-danger);
+}
+
+html[data-theme="light"] :is(.project-delete-button:hover, .project-delete-confirm:hover) {
+  background: #a42f41;
+  color: #ffffff;
+}
+
+html[data-theme="light"] .button:disabled {
+  background: #e2e8ef;
+  border-color: #b7c4d2;
+  box-shadow: none;
+  color: #59697c;
+  opacity: 1;
 }
 
 @media (max-width: 980px) {

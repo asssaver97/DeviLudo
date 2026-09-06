@@ -1155,7 +1155,7 @@ textarea {
 }
 
 .homeChat-hero h1 {
-  color: #fff;
+  color: var(--ink);
   font-family: var(--font-geist-mono), monospace;
   font-weight: 800;
   text-shadow: 4px 4px 0 #000;
@@ -1244,10 +1244,9 @@ textarea {
   flex: 0 1 auto;
   font: 8px var(--font-geist-mono), monospace;
   min-width: 0;
-  overflow: hidden;
+  overflow: visible;
   padding: 7px 10px;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+  white-space: normal;
 }
 
 .homeChat-starters button:hover {
@@ -4644,4 +4643,150 @@ textarea {
   font-family: var(--font-geist-mono), monospace;
   font-size: 10px;
   padding: 0;
+}
+
+/* Compact, readable task surfaces in both themes. */
+.app-shell :is(.page-heading, .project-page-header) h1 {
+  font-size: clamp(24px, 2.4vw, 34px);
+  line-height: 1.5;
+  overflow-wrap: anywhere;
+}
+
+.homeChat-hero.simple-home-hero {
+  margin-top: clamp(18px, 4vh, 48px);
+  margin-bottom: 24px;
+}
+
+.app-shell .homeChat-hero h1 {
+  font-size: clamp(24px, 2.5vw, 36px);
+  line-height: 1.5;
+  margin: 12px auto 0;
+  max-width: 820px;
+  text-wrap: balance;
+}
+
+.homeChat-import-link {
+  align-items: center;
+  color: var(--blue);
+  display: inline-flex;
+  flex: none;
+  font-size: 12px;
+  gap: 6px;
+  min-height: 36px;
+  padding: 4px 2px;
+}
+
+.homeChat-import-link:hover { text-decoration: underline; }
+.homeChat-import-link:focus-visible { outline: 2px solid var(--blue); outline-offset: 3px; }
+.homeChat-starters { flex-wrap: wrap; overflow: visible; }
+.homeChat-starters button { min-height: 36px; padding: 8px 14px; line-height: 1.5; }
+.homeChat-starters button:focus-visible { outline: 2px solid var(--blue); outline-offset: 2px; }
+.project-catalog-actions { flex-wrap: wrap; }
+
+.project-import-form [role="tabpanel"] > p,
+.project-import-form [role="tabpanel"] > small,
+.settings-section .settings-description,
+.settings-form label,
+.settings-form .field-help,
+.agent-config-form label > small,
+.agent-model-top-level label > span,
+.agent-model-expanded label > span,
+.agent-model-expanded small,
+.agent-connection-status p,
+.agent-local-default,
+.agent-runtime-choice small,
+.telemetry-status small,
+.telemetry-last-report,
+.steam-browser-session-controls > small,
+.project-delivery-asset-toggle-copy small,
+.project-delivery-asset-setting-note {
+  font-family: var(--font-geist-sans), sans-serif;
+  font-size: 13px;
+  line-height: 1.6;
+}
+
+.settings-form :is(input, select),
+.repository-onboarding-form :is(input, select) { font-size: 14px; min-height: 42px; }
+.agent-config-form legend { font-size: 13px; }
+.agent-runtime-choice b, .agent-role-model-details > summary { font-size: 13px; }
+.agent-model-fieldset > .field-help { margin: 0 0 14px; }
+.agent-model-top-level label, .agent-model-expanded label { align-content: start; }
+.agent-local-default { padding: 10px 14px; }
+.agent-local-default b { font-size: 12px; font-weight: 500; }
+.agent-connection-status p { margin: 0; }
+.agent-config-actions { flex-wrap: wrap; }
+.product-delivery-configuration-grid { grid-template-columns: minmax(0, 1fr); }
+.product-delivery-configuration-grid > :is(.project-delivery-git-settings, .product-steam-panel) { grid-column: 1 / -1; }
+.product-steam-panel { grid-template-columns: minmax(0, 1fr); }
+.product-steam-panel.is-compact > .section-heading { align-items: center; display: flex; justify-content: space-between; gap: 12px; }
+.product-steam-panel.is-compact > .section-heading h2 { font-size: 14px; margin: 0; }
+.product-steam-settings { border: 0; padding: 0; }
+.product-steam-settings > form { padding-top: 0; }
+.product-steam-settings .settings-form { min-width: 0; grid-template-columns: minmax(0, 1fr); }
+.product-steam-field-grid { grid-template-columns: repeat(auto-fit, minmax(min(170px, 100%), 1fr)); }
+.product-release-form label { flex: 1 1 150px; min-width: 0; }
+.product-release-form :is(input, select) { min-width: 0; width: 100%; }
+.product-release-decision .button { white-space: normal; line-height: 1.6; }
+.product-delivery-canvas { overflow-x: auto; overscroll-behavior-x: contain; }
+.product-delivery-failure { min-width: 0; }
+
+.project-conversation-layout:not(:has(.project-conversation-history)) { grid-template-columns: minmax(0, 1fr); }
+.product-document-sidebar-header { min-height: 66px; }
+.product-document-sidebar-header h2 { font-size: 16px; margin: 0; }
+.project-primary-section .project-conversation-panel,
+.project-primary-section .product-document-sidebar { border-top-width: 2px; }
+.project-document-section .product-document-sidebar { height: min(700px, calc(100dvh - 140px)); max-height: 700px; min-height: 560px; }
+
+.conversation-agent-roster {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px 14px;
+  margin-bottom: 16px;
+  padding: 8px 10px;
+}
+.agent-member { border: 0; display: inline-flex; gap: 6px; padding: 0; }
+.agent-member i { height: 24px; width: 24px; }
+.agent-member b { font-size: 11px; }
+
+.conversation-box-messages:has(.conversation-box-empty) { display: flex; flex-direction: column; }
+.conversation-box-empty { flex: 1; height: auto; }
+.conversation-agent-roster { flex: none; }
+
+.app-shell :is(
+  .shell-nav > p, .settings-form label, .agent-config-form label > small,
+  .agent-model-expanded small, .product-iteration-selector span,
+  .product-delivery-stage small, .document-section-label,
+  .project-conversation-history small, .product-delivery-configuration > summary small,
+  .product-delivery-steam-group > legend small
+) { color: var(--muted); }
+.product-delivery-stage.status-pending { --stage-color: var(--muted); opacity: 1; }
+.project-delivery-asset-toggle.is-disabled .project-delivery-asset-toggle-copy { opacity: 1; }
+
+@media (max-width: 1100px) and (min-width: 801px) {
+  .project-collaboration-layout { grid-template-columns: minmax(0, 1fr); }
+  .project-document-section .product-document-sidebar { height: 480px; min-height: 360px; position: static; }
+}
+
+@media (max-width: 800px) {
+  .homeChat-contextRow { flex-direction: row; flex-wrap: wrap; gap: 8px; }
+  .homeChat-contextRow label { flex: 1 1 210px; }
+  .homeChat-contextRow select { flex: 1; min-width: 0; max-width: 100%; width: 100%; }
+  .homeChat-starters { flex-direction: row; }
+  .homeChat-starters button { flex: 1 1 140px; }
+  .project-catalog-heading { align-items: stretch; }
+  .project-catalog-actions { justify-content: flex-start; }
+  .project-catalog-actions .button { flex: 1 1 160px; }
+  .project-document-section .product-document-sidebar { min-height: 360px; height: 480px; }
+  .settings-card { padding: 18px; }
+  .product-delivery-pipeline-header { align-items: stretch; min-width: 0; }
+  .product-delivery-pipeline-actions { justify-content: flex-start; }
+  .product-iteration-selector { flex: 1 1 200px; min-width: 0; }
+  .product-iteration-selector select { flex: 1; min-width: 0; width: 100%; }
+  .product-release-decision { grid-template-columns: minmax(0, 1fr); }
+  .product-delivery-failure { grid-template-columns: auto minmax(0, 1fr); padding: 14px; }
+  .product-delivery-failure > .button { grid-column: 1 / -1; justify-self: start; }
+}
+
+@media (max-width: 600px) {
+  .agent-model-top-level, .agent-model-expanded { grid-template-columns: minmax(0, 1fr); }
 }

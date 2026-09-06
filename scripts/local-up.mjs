@@ -214,6 +214,7 @@ const baseEnvironment = {
   DEVILUDO_STEAMWORKS_BRIDGE_TOKEN: steamworksConfiguration.internalToken,
   DEVILUDO_PROVIDER_UPSTREAM_PROXY: providerUpstreamProxy,
   DEVILUDO_NPM_REGISTRY: npmRegistry,
+  DEVILUDO_CODEX_IMAGE_VERSION: codexVersion ?? "0.153.4",
   DEVILUDO_CODEX_ACCOUNT_DEFAULT_MODEL: codexAccountDefaultModel ?? "",
 };
 await runStartupStage("Start PostgreSQL, Vault, and object storage", () => executeVisible("docker", [
@@ -252,7 +253,7 @@ const {
   imagesBuilt,
   imageBuiltAt,
 } = await runStartupStage("Prepare local runtime images", async () => {
-  const inputFingerprint = await fingerprintLocalImageInputs();
+  const inputFingerprint = await fingerprintLocalImageInputs(baseEnvironment);
   let resolvedImageIds = await reusableLocalImageIds(inputFingerprint);
   if (resolvedImageIds) {
     startupProgress("Sources and images are unchanged; skipping 10 redundant image builds");
@@ -611,7 +612,7 @@ function acquireStartupLock() {
  * same context drives every local Dockerfile, so docs and test-only changes no
  * longer trigger a rebuild while a new COPY input is picked up automatically.
  */
-async function fingerprintLocalImageInputs() {
+async function fingerprintLocalImageInputs(environment) {
   let stdout;
   try {
     ({ stdout } = await execute("git", [
@@ -632,6 +633,9 @@ async function fingerprintLocalImageInputs() {
   if (paths.length === 0) return null;
   const hash = createHash("sha256");
   hash.update("deviludo-local-images-v1\0", "utf8");
+  for (const value of [environment.DEVILUDO_CODEX_IMAGE_VERSION, environment.DEVILUDO_NPM_REGISTRY]) {
+    hash.update(`${Buffer.byteLength(value)}:${value}:`, "utf8");
+  }
   for (const relativePath of paths) {
     const absolutePath = resolve(rootPath, relativePath);
     const bounded = relative(rootPath, absolutePath);

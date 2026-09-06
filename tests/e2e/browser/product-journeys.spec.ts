@@ -839,9 +839,9 @@ test("the home chat supports both project feedback and a fresh game conversation
   })).toEqual({
     backgroundColor: "rgb(226, 242, 247)",
     borderColor: "rgb(141, 184, 200)",
-    color: "rgb(8, 127, 167)",
+    color: "rgb(7, 110, 145)",
   });
-  await page.getByLabel("导入已有项目").selectOption(project.id);
+  await page.getByLabel("选择对话项目").selectOption(project.id);
   const feedbackQuestion = "当前低视野模式为什么会增加资源管理压力？";
   await page.getByLabel("游戏想法或修改意见").fill(feedbackQuestion);
   const imageTransfer = await page.evaluateHandle(() => {
@@ -954,8 +954,8 @@ test("the home chat supports both project feedback and a fresh game conversation
   await page.getByRole("link", { name: "首页", exact: true }).click();
 
   await expect(page.getByRole("heading", { name: "今天想做什么游戏？" })).toBeVisible();
-  await expect(page.getByLabel("导入已有项目")).toHaveValue("");
-  await expect(page.getByLabel("导入已有项目").locator('option[value="__import_existing_project__"]')).toHaveText("导入已有项目…");
+  await expect(page.getByLabel("选择对话项目")).toHaveValue("");
+  await expect(page.getByRole("link", { name: "导入已有项目", exact: true })).toHaveAttribute("href", "/projects/import");
   const concept = "我想做一款以时间循环为核心的像素冒险游戏。";
   await page.getByLabel("游戏想法或修改意见").fill(concept);
   await page.getByLabel("游戏想法或修改意见").press("Control+Enter");

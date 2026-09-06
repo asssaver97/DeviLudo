@@ -161,13 +161,9 @@ async function prepareCodexHome(root: string, credential: string, official: bool
 export async function installCodexModelsCache(
   codexHome: string,
   source = process.env.DEVILUDO_CODEX_MODELS_CACHE_FILE?.trim() ?? "",
-  bundledCliVersion = process.env.DEVILUDO_BUNDLED_CODEX_CLI_VERSION?.trim() ?? "",
 ): Promise<boolean> {
   if (!source) return false;
   if (!isAbsolute(source)) throw new Error("Codex models cache path must be absolute");
-  if (bundledCliVersion && !CODEX_CLIENT_VERSION.test(bundledCliVersion)) {
-    throw new Error("Bundled Codex CLI version metadata is invalid");
-  }
   const metadata = await stat(source);
   if (!metadata.isFile() || metadata.size < 2 || metadata.size > MAX_CODEX_MODELS_CACHE_BYTES) {
     throw new Error("Codex models cache file is invalid");
@@ -183,10 +179,6 @@ export async function installCodexModelsCache(
     || typeof (parsed as { client_version?: unknown }).client_version !== "string"
     || !CODEX_CLIENT_VERSION.test((parsed as { client_version: string }).client_version)) {
     throw new Error("Codex models cache file is invalid");
-  }
-  if (bundledCliVersion
-    && (parsed as { client_version: string }).client_version !== bundledCliVersion) {
-    throw new Error("Codex models cache does not match the bundled CLI version");
   }
   const models = (parsed as { models: unknown[] }).models.map(model => {
     if (!model || typeof model !== "object" || Array.isArray(model)) {

@@ -37,6 +37,7 @@ import {
   type AgentSecretStore,
 } from "./agent-settings";
 import { detectAgentRuntimes } from "./agent-runtime-detection";
+import { readCodexModelOptions } from "./codex-models";
 import { testAgentConnection } from "./agent-connection";
 import {
   matchingLocalAgentRuntimeDefault,
@@ -401,6 +402,8 @@ export async function runApi(
       settings: publicAgentSettings(settings, apiKeyMask),
       runtimes,
       localDefaults: localDefaults.map(publicLocalAgentRuntimeDefault),
+      codexModels: runtimes.some(runtime => runtime.kind === "CODEX_CLI" && runtime.authentication === "CHATGPT")
+        ? await readCodexModelOptions() : [],
     });
   });
 

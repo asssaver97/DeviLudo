@@ -17,8 +17,8 @@ test("project linking is reachable from Home and separates local and GitHub sour
     readFile(new URL("../app/api/local-git-import/config/route.ts", import.meta.url), "utf8"),
     readFile(new URL("../infra/postgres/001_core.sql", import.meta.url), "utf8"),
   ]);
-  assert.match(home, /<option value=\{IMPORT_PROJECT_VALUE\}>\{text\("导入已有项目…"/);
-  assert.match(home, /router\.push\("\/projects\/import"\)/);
+  assert.match(home, /<Link[^>]*aria-label=\{text\("导入已有项目"[^>]*href="\/projects\/import"/);
+  assert.doesNotMatch(home, /IMPORT_PROJECT_VALUE/);
   assert.doesNotMatch(dashboard, /className="creation-mode-switch"/);
   assert.match(dashboard, /className="import-source-switch"/);
   assert.match(dashboard, /text\("本地项目", "LOCAL PROJECT"\)/);

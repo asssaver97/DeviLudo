@@ -1028,8 +1028,7 @@ export function ProjectStudio({ projectId }: { projectId: string }) {
     <>
       <section className="project-page-header product-studio-header">
         <div>
-          <div className="breadcrumb"><Link href="/projects">{text("游戏项目", "GAME PROJECTS")}</Link><span>/</span><b>{project.name}</b></div>
-          <span className="eyebrow">{text("PROJECT · 项目", "PROJECT")}</span>
+          <div className="breadcrumb"><Link href="/projects">{text("返回项目列表", "Back to projects")}</Link></div>
           <h1>{project.name}</h1>
           <p>{viewingHistoricalIteration ? historicalIteration.concept : project.concept}</p>
         </div>
@@ -1047,7 +1046,7 @@ export function ProjectStudio({ projectId }: { projectId: string }) {
       >
         <header className="product-delivery-pipeline-header">
           <div className="product-delivery-pipeline-title">
-            <div><span className="eyebrow">DELIVERY PIPELINE</span><h2>{text(`交付流程 · 第 ${viewedIterationNumber} 轮`, `DELIVERY PIPELINE · ITERATION ${viewedIterationNumber}`)}</h2></div>
+            <div><h2>{text(`交付流程 · 第 ${viewedIterationNumber} 轮`, `DELIVERY PIPELINE · ITERATION ${viewedIterationNumber}`)}</h2></div>
           </div>
           <div className="product-delivery-pipeline-actions">
             {!viewingHistoricalIteration ? <span className="revision-badge">E2E G{project.e2eGoalRevision}</span> : null}
@@ -1205,7 +1204,7 @@ export function ProjectStudio({ projectId }: { projectId: string }) {
                       {text("运行结束", "Finished")} · {formatConversationTime(finishedAt, localeTag(locale), text)}
                     </time>
                   ) : null}
-                  {!viewingHistoricalIteration && inProfile && rerunnableKind ? (
+                  {!viewingHistoricalIteration && inProfile && rerunnableKind && rerunnableKind !== rerunnableFailedStage ? (
                     <button
                       aria-label={text(
                         `从「${chineseLabel}」重新执行，之后的阶段都会重跑`,
@@ -1275,7 +1274,7 @@ export function ProjectStudio({ projectId }: { projectId: string }) {
               </fieldset>
             ) : null}
             <fieldset className="product-delivery-material-group">
-              <legend><span>{text("素材生成", "ASSET GENERATION")}</span><small>{text("Agent 与构建之间的素材门禁", "ASSET GATE BETWEEN AGENT AND BUILD")}</small></legend>
+              <legend><span>{text("素材生成", "ASSET GENERATION")}</span></legend>
               <ol className="product-delivery-material-stages">
                 <li className={`product-delivery-stage product-delivery-material-stage status-${viewingHistoricalIteration ? "pending" : assetNodeStatus}`} data-stage-status={viewingHistoricalIteration ? "pending" : assetNodeStatus}>
                   <button
@@ -1407,17 +1406,15 @@ export function ProjectStudio({ projectId }: { projectId: string }) {
 
       <div className="project-collaboration-layout">
       <section className="project-primary-section project-conversations-section" aria-label={text("项目会话", "Project conversations")}>
-        <div className="project-primary-section-heading"><div><b>{text("项目会话", "PROJECT CONVERSATIONS")}</b><small>{text("设计、开发与测试 Agent 的协作记录", "Design, Development, and Test Agent collaboration")}</small></div></div>
         <section className="conversation-panel project-conversation-panel">
             <div className="conversation-header product-panel-heading">
-              <div><span><h2>{text("会话记录", "CONVERSATION HISTORY")}</h2><small>{conversations.length ? text(`${conversations.length} 个历史会话`, `${conversations.length} saved conversation${conversations.length === 1 ? "" : "s"}`) : text("还没有历史会话", "No conversation history")}</small></span></div>
-              <button className="button button-secondary project-new-conversation" disabled={viewingHistoricalIteration} onClick={startConversation} type="button"><PlusIcon />{text("新对话", "NEW CHAT")}</button>
+              <div><span><h2>{text("会话记录", "CONVERSATION HISTORY")}</h2></span></div>
+              {activeConversation ? <button className="button button-secondary project-new-conversation" disabled={viewingHistoricalIteration} onClick={startConversation} type="button"><PlusIcon />{text("新对话", "NEW CHAT")}</button> : null}
             </div>
             {viewingHistoricalIteration ? <p className="product-iteration-readonly-notice">{text("正在查看历史轮次。会话和项目说明仅供参考；切回当前轮后才能修改。", "You are viewing a historical iteration. Conversations and the project document are reference-only until you return to the current iteration.")}</p> : null}
             <div className="project-conversation-layout">
-              <nav aria-label={text("历史会话", "Conversation history")} className="project-conversation-history">
-                <span className="project-conversation-history-title">{text("历史会话", "HISTORY")}</span>
-                {conversations.length ? conversations.map(item => (
+              {conversations.length > 0 ? <nav aria-label={text("历史会话", "Conversation history")} className="project-conversation-history">
+                {conversations.map(item => (
                   <button
                     aria-pressed={selectedConversationId === item.id}
                     className={selectedConversationId === item.id ? "is-active" : ""}
@@ -1428,8 +1425,8 @@ export function ProjectStudio({ projectId }: { projectId: string }) {
                     <b>{item.preview}</b>
                     <small>{conversationActivityLabel(item.userMessageCount, item.systemGenerated, text)} · {formatConversationTime(item.updatedAt, localeTag(locale), text)}</small>
                   </button>
-                )) : <p>{text("发送第一条消息后，会话会保存在这里。", "Your conversations will appear here after the first message.")}</p>}
-              </nav>
+                ))}
+              </nav> : null}
 
               <ConversationBox
                 agentProgress={!viewingHistoricalIteration && activeAgentJob ? {
@@ -1484,10 +1481,9 @@ export function ProjectStudio({ projectId }: { projectId: string }) {
       </section>
 
       <section className="project-primary-section project-document-section" aria-label={text("项目说明", "Project document")}>
-        <div className="project-primary-section-heading"><div><b>{text("项目说明", "PROJECT DOCUMENT")}</b><small>{text("由需求会话持续维护的当前设计规格", "The current design specification maintained by project conversations")}</small></div></div>
         <aside className="product-document-sidebar">
           <header className="product-document-sidebar-header">
-            <div><span><b>{text("当前项目说明", "CURRENT PROJECT DOCUMENT")}</b><small>{text("Agent 随需求对话实时维护", "Updated by Agent from the conversation")}</small></span></div>
+            <h2>{text("项目说明", "PROJECT DOCUMENT")}</h2>
           </header>
           <>
               <div className="product-document-sidebar-actions">

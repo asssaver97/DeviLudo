@@ -53,8 +53,7 @@ export function SteamPreparationNode(props: Readonly<{
   }
 
   return (
-    <fieldset className="product-delivery-steam-group">
-      <legend><span>{text("商店与 Depot", "STORE & DEPOTS")}</span><small>{text("E2E 通过后保存到 Steamworks", "SAVE TO STEAMWORKS AFTER E2E")}</small></legend>
+    <fieldset aria-label={text("商店与 Depot", "Store & Depots")} className="product-delivery-steam-group">
       <ol className="product-delivery-material-stages product-delivery-steam-stages">
         <li className={`product-delivery-stage product-delivery-material-stage status-${view.kind}`} data-stage-kind="STEAM_PREPARATION" data-stage-status={view.kind}>
           <button aria-expanded={expanded} className="product-delivery-material-disclosure" onClick={() => setExpanded(value => !value)} type="button">

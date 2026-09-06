@@ -136,11 +136,10 @@ export function ProjectSteamPanel(props: Readonly<{
   return (
     <section className={`panel-card product-steam-panel${props.compact ? " is-compact" : ""}`} aria-label={text("Steam 发布", "Steam releases")}>
       <header className="section-heading">
-        <div><span className="eyebrow">STEAM RELEASES</span><h2>{text("Steam 发布", "STEAM RELEASES")}</h2></div>
+        <div><h2>{text("Steam 发布", "STEAM RELEASES")}</h2></div>
         <span className="revision-badge">{settings ? `APP ${settings.appId}` : text("未配置", "NOT CONFIGURED")}</span>
       </header>
-      <details className="product-steam-settings" open={!settings}>
-        <summary>{text("项目 SteamPipe 配置", "PROJECT STEAMPIPE SETTINGS")}</summary>
+      <div className="product-steam-settings">
         <form className="settings-form" onSubmit={saveSettings}>
           <div className="product-steam-field-grid">
             <label>App ID<input disabled={!editable || props.readOnly} onChange={event => setAppId(event.target.value)} value={appId} /></label>
@@ -150,7 +149,6 @@ export function ProjectSteamPanel(props: Readonly<{
             <label>{text("测试分支", "Test branch")}<input disabled={!editable || props.readOnly} onChange={event => setTestBranch(event.target.value)} value={testBranch} /></label>
           </div>
           {editable && !props.readOnly ? <button className="button button-secondary" disabled={busy || !appId || (!linuxDepot && !windowsDepot && !macosDepot)} type="submit">{text("保存项目配置", "SAVE PROJECT SETTINGS")}</button> : null}
-          <small>{text("构建凭证在全局设置中维护；这里仅保存项目的 App、Depot 与测试分支。", "The build credential is maintained in global Settings; this section stores only the project's App, depots, and test branch.")}</small>
           <div className="steam-browser-session-controls">
             <span><b>{text("Steamworks 受管会话", "MANAGED STEAMWORKS SESSION")}</b><small>{browserSession.state}</small></span>
             <button className="button button-secondary" disabled={busy || browserSession.state === "UNAVAILABLE"} onClick={() => void changeBrowserSession("POST")} type="button">{text("连接 Steamworks", "CONNECT STEAMWORKS")}</button>
@@ -158,13 +156,12 @@ export function ProjectSteamPanel(props: Readonly<{
             <button className="button button-secondary" disabled={busy || ["UNAVAILABLE", "DISCONNECTED"].includes(browserSession.state)} onClick={() => void changeBrowserSession("DELETE")} type="button">{text("清除会话", "CLEAR SESSION")}</button>
           </div>
         </form>
-      </details>
+      </div>
 
       {!props.readOnly && props.workflowState === "RELEASE_APPROVAL_PENDING" ? (
         <div className="product-release-decision">
           <div>
             <strong>{text("真实操作 E2E 已通过", "REAL-INPUT E2E PASSED")}</strong>
-            <p>{text("可以结束本轮并继续迭代，也可以创建唯一发布记录并上传 Steam。", "Finish this iteration and continue development, or create its single release record and upload it to Steam.")}</p>
           </div>
           <button className="button button-secondary" disabled={busy} onClick={() => void request(`/api/projects/${encodeURIComponent(props.projectId)}/iterations/${encodeURIComponent(props.workflowId)}/complete`)} type="button">{text("完成本轮，不发布", "FINISH WITHOUT PUBLISHING")}</button>
           <form className="product-release-form" onSubmit={event => {
@@ -178,7 +175,8 @@ export function ProjectSteamPanel(props: Readonly<{
         </div>
       ) : null}
 
-      {currentRelease?.state === "FAILED" && !props.readOnly ? (
+      {/* Compact settings share the pipeline's preparation/upload retry controls. */}
+      {currentRelease?.state === "FAILED" && !props.readOnly && !props.compact ? (
         <button className="button button-primary" disabled={busy} onClick={() => void request(
           currentRelease.failureStage === "STEAM_PREPARATION"
             ? `/api/projects/${encodeURIComponent(props.projectId)}/steam-preparation/retry`
@@ -198,7 +196,7 @@ export function ProjectSteamPanel(props: Readonly<{
             <button className="button button-primary" disabled={busy} onClick={() => void request(`/api/projects/${encodeURIComponent(props.projectId)}/steam-releases/${encodeURIComponent(release.id)}/confirm-live`)} type="button">{text("已手动设为 default", "CONFIRM DEFAULT IS LIVE")}</button>
           </div> : null}
         </article>)}
-      </div> : <p>{text("尚无 Steam 发布记录。每轮最多创建一条成功发布。", "No Steam releases yet. Each iteration can create at most one successful release.")}</p>}
+      </div> : null}
       {error ? <div className="inline-notice danger">{error}</div> : null}
     </section>
   );

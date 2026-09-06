@@ -9,6 +9,7 @@ import {
   type AgentRuntimeAvailability,
   type AgentRuntimeKind,
   type InstanceAgentSettings,
+  type CodexModelOption,
 } from "@/lib/product/contracts";
 import { EyeIcon, FileIcon, SettingsIcon, ShieldIcon } from "./console/Icons";
 import { useLanguage } from "./i18n/LanguageProvider";
@@ -19,6 +20,7 @@ type AgentSettingsPayload = Readonly<{
   settings: InstanceAgentSettings;
   runtimes: readonly AgentRuntimeAvailability[];
   localDefaults: readonly AgentRuntimeLocalDefault[];
+  codexModels: readonly CodexModelOption[];
 }>;
 
 const DEFAULT_SETTINGS: InstanceAgentSettings = Object.freeze({
@@ -64,6 +66,7 @@ export function AgentSettings() {
   const [settingsJson, setSettingsJson] = useState(() => formatClaudeSettingsJson(initialConnection.baseUrl, initialConnection.apiKeyMasked ?? "", initialConnection.primaryModel));
   const [runtimes, setRuntimes] = useState<readonly AgentRuntimeAvailability[]>(initialPayload?.runtimes ?? []);
   const [localDefaults, setLocalDefaults] = useState<readonly AgentRuntimeLocalDefault[]>(initialDefaults);
+  const [codexModels, setCodexModels] = useState<readonly CodexModelOption[]>(initialPayload?.codexModels ?? []);
   const [loading, setLoading] = useState(!initialPayload);
   const [saving, setSaving] = useState(false);
   const [testing, setTesting] = useState(false);
@@ -78,10 +81,11 @@ export function AgentSettings() {
           settings?: InstanceAgentSettings;
           runtimes?: readonly AgentRuntimeAvailability[];
           localDefaults?: readonly AgentRuntimeLocalDefault[];
+          codexModels?: readonly CodexModelOption[];
           message?: string;
         };
         if (!response.ok || !body.settings) throw new Error(errorText(body.message, "无法读取 Agent 设置", "Unable to load Agent settings"));
-        return Object.freeze({ settings: body.settings, runtimes: body.runtimes ?? [], localDefaults: body.localDefaults ?? [] });
+        return Object.freeze({ settings: body.settings, runtimes: body.runtimes ?? [], localDefaults: body.localDefaults ?? [], codexModels: body.codexModels ?? [] });
       })
       .then(body => {
         if (!active) return;
@@ -99,6 +103,7 @@ export function AgentSettings() {
         setSettingsJson(formatClaudeSettingsJson(connection.baseUrl, connection.apiKeyMasked ?? "", connection.primaryModel));
         setRuntimes(body.runtimes);
         setLocalDefaults(body.localDefaults);
+        setCodexModels(body.codexModels ?? []);
       })
       .catch(fetchError => {
         if (active) setError(fetchError instanceof Error ? fetchError.message : text("无法读取 Agent 设置", "Unable to load Agent settings"));
@@ -120,7 +125,7 @@ export function AgentSettings() {
       });
       const body = await response.json() as { settings?: InstanceAgentSettings; message?: string };
       if (!response.ok || !body.settings) throw new Error(errorText(body.message, "保存失败", "Save failed"));
-      storeCached(clientCacheKeys.agentSettings, Object.freeze({ settings: body.settings, runtimes, localDefaults }), 60_000);
+      storeCached(clientCacheKeys.agentSettings, Object.freeze({ settings: body.settings, runtimes, localDefaults, codexModels }), 60_000);
       setSettings(body.settings);
       setAgentRuntime(body.settings.agentRuntime);
       setBaseUrl(body.settings.baseUrl);
@@ -260,16 +265,16 @@ export function AgentSettings() {
   }
 
   const selectedLocalDefault = localDefaults.find(candidate => candidate.agentRuntime === agentRuntime) ?? null;
+  const officialModels = agentRuntime === "CODEX_CLI" && codexConnectionMode === "OFFICIAL" && codexModels.length > 0
+    ? codexModels : undefined;
 
   return (
     <>
       <section className="page-heading agent-config-heading">
         <div>
-          <span className="eyebrow">{text("CONFIGURATION · 全局配置", "CONFIGURATION · INSTANCE GLOBAL")}</span>
           <h1>{text("Agent 设置", "AGENT SETTINGS")}</h1>
-          <p>{text("选择一个 Agent 运行时；文本 Agent 可继承主模型，图片生成后端会随运行时自动切换。", "Choose one Agent runtime. Text Agents may inherit the primary model; the image-generation backend follows the selected runtime automatically.")}</p>
+          <p>{text("配置适用于之后启动的任务。", "Settings apply to newly started tasks.")}</p>
         </div>
-        <span className="scope-badge"><ShieldIcon /> INSTANCE GLOBAL</span>
       </section>
 
       <div className="settings-page-stack">
@@ -302,17 +307,14 @@ export function AgentSettings() {
 
             {selectedLocalDefault ? (
               <aside className="agent-local-default" role="status">
-                <b>{text("已读取本地默认配置", "LOCAL DEFAULT LOADED")} · {selectedLocalDefault.source}</b>
-                <span>Base URL · {selectedLocalDefault.baseUrl}</span>
-                <span>{text("主模型", "Primary model")} · {selectedLocalDefault.primaryModel}</span>
-                {selectedLocalDefault.apiKeyMasked ? <span>API Key · {selectedLocalDefault.apiKeyMasked}</span> : null}
+                <b>{text("已填入本地配置", "Local settings loaded")} · {selectedLocalDefault.source}</b>
               </aside>
             ) : null}
 
             {agentRuntime === "CODEX_CLI" ? (
               <>
                 <label>{text("Codex 连接", "Codex connection")}
-                  <select disabled={loading || saving} onChange={event => {
+                  <select aria-label={text("Codex 连接", "Codex connection")} disabled={loading || saving} onChange={event => {
                     const mode = event.target.value as CodexConnectionMode;
                     const discovered = localDefaults.find(candidate => candidate.agentRuntime === "CODEX_CLI") ?? null;
                     const useDiscovered = discovered && (discovered.baseUrl === "https://chatgpt.com") === (mode === "OFFICIAL");
@@ -329,9 +331,9 @@ export function AgentSettings() {
                 {codexConnectionMode === "OFFICIAL" ? (
                   <div className="agent-connection-status" role="status">
                     <ShieldIcon />
-                    <div><b>{text("OpenAI 官方登录", "OFFICIAL OPENAI SIGN-IN")}</b><p>{text(
-                      "使用宿主机 Codex CLI 的 ChatGPT 登录和本地主模型配置。",
-                      "Uses the host Codex CLI ChatGPT session and local primary-model setting.",
+                    <div><p>{text(
+                      "使用宿主机 Codex CLI 的 ChatGPT 登录。",
+                      "Uses the host Codex CLI ChatGPT session.",
                     )}</p></div>
                   </div>
                 ) : (
@@ -357,9 +359,12 @@ export function AgentSettings() {
                   </>
                 )}
                 <label>{text("主模型", "Primary model")}
-                  <input autoCapitalize="none" autoComplete="off" disabled={loading || saving} maxLength={200} name="primaryModel" onChange={event => setPrimaryModel(event.target.value)} placeholder="account-default" required type="text" value={primaryModel} />
+                  {officialModels ? <CodexModelSelect disabled={loading || saving} label={text("主模型", "Primary model")} models={officialModels} name="primaryModel" onChange={setPrimaryModel} value={primaryModel} />
+                    : <input autoCapitalize="none" autoComplete="off" disabled={loading || saving} maxLength={200} name="primaryModel" onChange={event => setPrimaryModel(event.target.value)} placeholder="account-default" required type="text" value={primaryModel} />}
                   <small className="field-help">{codexConnectionMode === "OFFICIAL"
-                    ? text("填写 Codex CLI 可用模型；account-default 使用账户默认模型。", "Enter a Codex CLI model; account-default uses the account default.")
+                    ? officialModels
+                      ? text("已读取 Codex 账户模型列表。", "Loaded the Codex account model catalogue.")
+                      : text("暂未检测到模型列表，可填写模型名称；account-default 使用账户默认模型。", "Model catalogue unavailable. Enter a model name, or use account-default.")
                     : text("填写 Provider 暴露的模型，例如 xai/grok-4.6。", "Enter a model exposed by the Provider, such as xai/grok-4.6.")}</small>
                 </label>
               </>
@@ -397,20 +402,21 @@ export function AgentSettings() {
 
             <fieldset className="agent-model-fieldset agent-role-model-fieldset">
               <legend>{text("Agent 模型", "AGENT MODELS")}</legend>
+              {!officialModels ? <p className="field-help">{text("文本模型留空时使用主模型。", "Leave text models blank to use the primary model.")}</p> : null}
               <div className="agent-model-top-level">
-                <ModelInput disabled={loading || saving} inheritLabel={text("继承主模型", "Inherits primary")} label={text("意图 Agent", "Intent Agent")} onChange={value => updateModelOverride("intent", value)} placeholder={primaryModel} value={modelOverrides.intent ?? ""} />
+                <ModelInput disabled={loading || saving} label={text("意图 Agent", "Intent Agent")} models={officialModels} onChange={value => updateModelOverride("intent", value)} placeholder={primaryModel} value={modelOverrides.intent ?? ""} />
                 {agentRuntime === "CLAUDE_CODE"
                   ? <ModelInput disabled={loading || saving} label={text("图片生成模型", "Image generation model")} onChange={setImageModel} placeholder={text("例如 gpt-image-2", "For example, gpt-image-2")} value={imageModel} />
                   : <ModelInput disabled inheritLabel={text("Codex 内置 ImageGen · 随运行时自动选择", "Codex built-in ImageGen · selected by runtime")} label={text("图片生成模型", "Image generation model")} onChange={() => undefined} placeholder="gpt-image-2" value="gpt-image-2" />}
               </div>
               <details className="agent-role-model-details">
-                <summary>{text("配置项目 Agent 模型", "CONFIGURE PROJECT AGENT MODELS")}<span>4</span></summary>
+                <summary>{text("项目 Agent 模型", "Project Agent models")}<span>5</span></summary>
                 <div className="agent-model-expanded">
-                  <ModelInput disabled={loading || saving} inheritLabel={text("继承主模型", "Inherits primary")} label={text("项目分析 Agent", "Project Analysis Agent")} onChange={value => updateModelOverride("analysis", value)} placeholder={primaryModel} value={modelOverrides.analysis ?? ""} />
-                  <ModelInput disabled={loading || saving} inheritLabel={text("继承主模型", "Inherits primary")} label={text("设计 Agent", "Design Agent")} onChange={value => updateModelOverride("design", value)} placeholder={primaryModel} value={modelOverrides.design ?? ""} />
-                  <ModelInput disabled={loading || saving} inheritLabel={text("继承主模型", "Inherits primary")} label={text("UI 设计 Agent", "UI Design Agent")} onChange={value => updateModelOverride("uiDesign", value)} placeholder={primaryModel} value={modelOverrides.uiDesign ?? ""} />
-                  <ModelInput disabled={loading || saving} inheritLabel={text("继承主模型", "Inherits primary")} label={text("开发 Agent", "Development Agent")} onChange={value => updateModelOverride("development", value)} placeholder={primaryModel} value={modelOverrides.development ?? ""} />
-                  <ModelInput disabled={loading || saving} inheritLabel={text("继承主模型", "Inherits primary")} label={text("测试 Agent", "Test Agent")} onChange={value => updateModelOverride("test", value)} placeholder={primaryModel} value={modelOverrides.test ?? ""} />
+                  <ModelInput disabled={loading || saving} label={text("项目分析 Agent", "Project Analysis Agent")} models={officialModels} onChange={value => updateModelOverride("analysis", value)} placeholder={primaryModel} value={modelOverrides.analysis ?? ""} />
+                  <ModelInput disabled={loading || saving} label={text("设计 Agent", "Design Agent")} models={officialModels} onChange={value => updateModelOverride("design", value)} placeholder={primaryModel} value={modelOverrides.design ?? ""} />
+                  <ModelInput disabled={loading || saving} label={text("UI 设计 Agent", "UI Design Agent")} models={officialModels} onChange={value => updateModelOverride("uiDesign", value)} placeholder={primaryModel} value={modelOverrides.uiDesign ?? ""} />
+                  <ModelInput disabled={loading || saving} label={text("开发 Agent", "Development Agent")} models={officialModels} onChange={value => updateModelOverride("development", value)} placeholder={primaryModel} value={modelOverrides.development ?? ""} />
+                  <ModelInput disabled={loading || saving} label={text("测试 Agent", "Test Agent")} models={officialModels} onChange={value => updateModelOverride("test", value)} placeholder={primaryModel} value={modelOverrides.test ?? ""} />
                 </div>
               </details>
             </fieldset>
@@ -489,6 +495,7 @@ function ModelInput({
   disabled,
   inheritLabel,
   label,
+  models,
   onChange,
   placeholder,
   value,
@@ -496,15 +503,46 @@ function ModelInput({
   disabled: boolean;
   inheritLabel?: string;
   label: string;
+  models?: readonly CodexModelOption[];
   onChange: (value: string) => void;
   placeholder: string;
   value: string;
 }>) {
   return (
     <label><span>{label}</span>
-      <input autoCapitalize="none" autoComplete="off" disabled={disabled} maxLength={200} onChange={event => onChange(event.target.value)} placeholder={placeholder} type="text" value={value} />
+      {models?.length ? <CodexModelSelect disabled={disabled} inherit label={label} models={models} onChange={onChange} value={value} />
+        : <input aria-label={label} autoCapitalize="none" autoComplete="off" disabled={disabled} maxLength={200} onChange={event => onChange(event.target.value)} placeholder={placeholder} type="text" value={value} />}
       {inheritLabel ? <small className="field-help">{inheritLabel}</small> : null}
     </label>
+  );
+}
+
+function CodexModelSelect({
+  disabled,
+  inherit = false,
+  label,
+  models,
+  name,
+  onChange,
+  value,
+}: Readonly<{
+  disabled: boolean;
+  inherit?: boolean;
+  label: string;
+  models: readonly CodexModelOption[];
+  name?: string;
+  onChange: (value: string) => void;
+  value: string;
+}>) {
+  const { text } = useLanguage();
+  const unknownModel = value && value !== "account-default" && !models.some(model => model.id === value);
+  return (
+    <select aria-label={label} disabled={disabled} name={name} onChange={event => onChange(event.target.value)} required={!inherit} value={value}>
+      {inherit ? <option value="">{text("继承主模型", "Inherit primary model")}</option> : null}
+      <option value="account-default">{text("账户默认模型", "Account default model")}</option>
+      {unknownModel ? <option value={value}>{value} · {text("当前配置，未检测到", "Current setting, not detected")}</option> : null}
+      {models.map(model => <option key={model.id} value={model.id}>{model.displayName}</option>)}
+    </select>
   );
 }
 

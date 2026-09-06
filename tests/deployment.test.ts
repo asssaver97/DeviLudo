@@ -15,6 +15,19 @@ test("Claude and Codex images contain persistent Runtime, signed Skills and buil
   }
 });
 
+test("Core and project Runtime build the same current Codex CLI", async () => {
+  const [core, runtime, compose] = await Promise.all([
+    readFile(new URL("../Dockerfile.core", import.meta.url), "utf8"),
+    readFile(new URL("../Dockerfile.agent-codex", import.meta.url), "utf8"),
+    readFile(new URL("../infra/docker-compose.yml", import.meta.url), "utf8"),
+  ]);
+  const coreVersion = core.match(/ARG CODEX_CLI_VERSION=(\S+)/)?.[1];
+  const runtimeVersion = runtime.match(/ARG CODEX_CLI_VERSION=(\S+)/)?.[1];
+  assert.equal(coreVersion, "0.153.4");
+  assert.equal(runtimeVersion, coreVersion);
+  assert.equal((compose.match(/CODEX_CLI_VERSION: \$\{DEVILUDO_CODEX_IMAGE_VERSION:-0\.153\.4\}/g) ?? []).length, 2);
+});
+
 test("project Runtime container has source access but no Docker or hypervisor authority", async () => {
   const supervisor = await readFile(
     new URL("../services/sandbox-executor/src/project-runtime-supervisor.ts", import.meta.url),

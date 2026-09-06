@@ -18,6 +18,7 @@ import {
   MAX_CONVERSATION_ATTACHMENT_BYTES,
   MAX_CONVERSATION_ATTACHMENT_TOTAL_BYTES,
   normalizeConversationReplyOptions,
+  isDevelopmentAuthorization,
   PROJECT_AGENT_ROLES,
   PROJECT_RUNTIME_ROLES,
   type AgentProgressEvent,
@@ -235,7 +236,7 @@ export function ConversationBox({
           <div className="conversation-agent-roster" role="list" aria-label={text("群聊成员", "Group chat members")}>
             {PROJECT_AGENT_ROLES.map(role => {
               const member = agentIdentity(role, text);
-              return <span className={`agent-member role-${role.toLowerCase()}`} key={role} role="listitem"><i>{member.avatar}</i><b>{member.shortName}</b><small>{member.responsibility}</small></span>;
+              return <span className={`agent-member role-${role.toLowerCase()}`} key={role} role="listitem" title={member.responsibility}><i>{member.avatar}</i><b>{member.shortName}</b></span>;
             })}
           </div>
           {intro}
@@ -243,7 +244,7 @@ export function ConversationBox({
             const failed = message.role === "USER" && message.metadata.failed === true;
             const identity = message.role === "ASSISTANT" ? agentIdentity(messageAgentRole(message), text) : null;
             const options = message.id === latestOptionMessageId && message.role === "ASSISTANT"
-              ? conversationOptions(message.metadata)
+              ? conversationOptions(message.metadata).filter(option => !primaryAction || !isDevelopmentAuthorization(option.label))
               : Object.freeze([]);
             return (
             <article className={`conversation-box-message ${message.role === "USER" ? "user" : `assistant role-${messageAgentRole(message).toLowerCase()}`}${failed ? " is-failed" : ""}`} key={message.id}>
@@ -299,7 +300,7 @@ export function ConversationBox({
                     {formatMessageCompletedAt(message.completedAt, locale)}
                   </time>
                 ) : null}
-                {failed && typeof message.metadata.failureMessage === "string" ? (
+                {failed && typeof message.metadata.failureMessage === "string" && message.metadata.failureMessage !== message.content ? (
                   <small className="conversation-box-failure-detail">{errorText(message.metadata.failureMessage, "消息未保存，请重试", "Message was not saved. Please retry.")}</small>
                 ) : null}
                 {options.length && onOptionSelect ? (

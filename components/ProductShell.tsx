@@ -8,7 +8,7 @@ import type { LocalInstance } from "@/lib/product/contracts";
 import { cachedValue, clientCacheKeys, loadCached } from "@/lib/product/client-cache";
 import { LanguageSwitcher, useLanguage } from "./i18n/LanguageProvider";
 import { ThemeSwitcher } from "./theme/ThemeProvider";
-import { BellIcon, GamepadIcon, HomeIcon, ServerIcon, SettingsIcon } from "./console/Icons";
+import { GamepadIcon, HomeIcon, ServerIcon, SettingsIcon } from "./console/Icons";
 
 type HealthState = "checking" | "ok" | "degraded";
 const LocalInstanceContext = createContext<LocalInstance | undefined>(undefined);
@@ -115,12 +115,11 @@ export function ProductShell({ children }: { children: ReactNode }) {
 
       <div className="shell-main">
         <header className="shell-topbar">
-          <div className="topbar-context"><span className="topbar-mode">COMMAND CENTER</span><span>{workspace.name}</span></div>
+          <div className="topbar-context"><span className="topbar-mode">{text("游戏工作台", "GAME WORKSPACE")}</span></div>
           <div className="topbar-actions">
             <ThemeSwitcher compact />
             <LanguageSwitcher compact />
             <span aria-live="polite" className={`system-pill is-${health}`}><i /> {healthLabel}</span>
-            <button aria-label={text("通知", "Notifications")} className="icon-button" type="button"><BellIcon /></button>
           </div>
         </header>
         <main className="shell-content"><LocalInstanceContext.Provider value={instance}>{children}</LocalInstanceContext.Provider></main>

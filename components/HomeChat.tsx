@@ -25,7 +25,7 @@ import {
   type StreamingConversationReplies,
 } from "@/lib/product/conversation-stream";
 import { ConversationBox } from "./conversation/ConversationBox";
-import { GamepadIcon, PlusIcon, SparkIcon } from "./console/Icons";
+import { FileIcon, GamepadIcon, PlusIcon, SparkIcon } from "./console/Icons";
 import { useLanguage } from "./i18n/LanguageProvider";
 import { useLocalInstance } from "./ProductShell";
 
@@ -39,7 +39,6 @@ const STARTERS_EN = Object.freeze([
   "Design a pixel adventure built around a time loop",
   "Help me shape the core loop of a lightweight strategy game",
 ]);
-const IMPORT_PROJECT_VALUE = "__import_existing_project__";
 
 export function HomeChat() {
   const { errorText, locale, text } = useLanguage();
@@ -50,6 +49,7 @@ export function HomeChat() {
   const [selectedProjectId, setSelectedProjectId] = useState("");
   const [conversation, setConversation] = useState<ProductConversation | null>(null);
   const [content, setContent] = useState("");
+  const [composerFocusKey, setComposerFocusKey] = useState(0);
   const [attachments, setAttachments] = useState<readonly ConversationAttachmentDraft[]>(Object.freeze([]));
   const [loadingProjects, setLoadingProjects] = useState(!initialProjects);
   const [sending, setSending] = useState(false);
@@ -270,21 +270,14 @@ export function HomeChat() {
     <div className="homeChat-contextRow">
       <label>
         <GamepadIcon />
-        <span>{text("导入已有项目", "IMPORT EXISTING PROJECT")}</span>
+        <span>{text("项目", "Project")}</span>
         <select
-          aria-label={text("导入已有项目", "Import existing project")}
+          aria-label={text("选择对话项目", "Choose conversation project")}
           disabled={Boolean(conversation) || loadingProjects}
-          onChange={event => {
-            if (event.target.value === IMPORT_PROJECT_VALUE) {
-              router.push("/projects/import");
-              return;
-            }
-            setSelectedProjectId(event.target.value);
-          }}
+          onChange={event => setSelectedProjectId(event.target.value)}
           value={activeProjectId}
         >
           <option value="">{text("创建新项目", "Create new project")}</option>
-          <option value={IMPORT_PROJECT_VALUE}>{text("导入已有项目…", "Import existing project…")}</option>
           {projects.map(project => (
             <option disabled={project.analysisStatus !== "READY" && project.analysisStatus !== "NEEDS_INPUT"} key={project.id} value={project.id}>
               {project.name} · {project.analysisStatus === "PENDING" || project.analysisStatus === "ANALYZING"
@@ -298,6 +291,7 @@ export function HomeChat() {
           ))}
         </select>
       </label>
+      <Link aria-label={text("导入已有项目", "Import existing project")} className="homeChat-import-link" href="/projects/import"><FileIcon />{text("导入项目", "Import project")}</Link>
     </div>
   );
 
@@ -315,7 +309,8 @@ export function HomeChat() {
     <ConversationBox
       autoFocus={!conversation}
       className="home-conversation-box"
-      composerPrefix={projectSelector}
+      composerPrefix={conversation ? null : projectSelector}
+      focusKey={composerFocusKey}
       conversationKey={conversation?.id ?? null}
       intro={conversation ? <div className="conversation-date"><span>{text("项目群聊", "PROJECT GROUP CHAT")}</span></div> : null}
       messages={orderedMessages}
@@ -358,7 +353,7 @@ export function HomeChat() {
         ) : (
           <header className="simple-home-hero homeChat-hero">
             <span className="assistant-mark"><SparkIcon /></span>
-            <span className="eyebrow">{text("FROM IDEA TO PLAYABLE / 从想法到可玩", "FROM IDEA TO PLAYABLE")}</span>
+            <span className="eyebrow">{text("从想法到可玩", "FROM IDEA TO PLAYABLE")}</span>
             <h1>{text("今天想做什么游戏？", "WHAT WILL YOU BUILD TODAY?")}</h1>
           </header>
         )}
@@ -366,7 +361,7 @@ export function HomeChat() {
 
         {!conversation ? (
           <div aria-label={text("灵感示例", "Idea starters")} className="homeChat-starters">
-            {starters.map(starter => <button key={starter} onClick={() => setContent(starter)} type="button">{starter}</button>)}
+            {starters.map((starter, index) => <button key={starter} onClick={() => { setContent(starter); setComposerFocusKey(value => value + 1); }} title={starter} type="button">{[text("十分钟合作游戏", "Ten-minute co-op"), text("时间循环冒险", "Time-loop adventure"), text("轻量策略游戏", "Lightweight strategy")][index]}</button>)}
           </div>
         ) : null}
         {error ? <p className="homeChat-error" role="alert">{error}</p> : null}

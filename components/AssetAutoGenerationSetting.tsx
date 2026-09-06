@@ -82,7 +82,6 @@ export function AssetAutoGenerationSetting({ projectId, readOnly = false, onChan
   return (
     <section aria-label={text("图片素材配置", "Image asset settings")} className="project-delivery-asset-settings">
       <header>
-        <span className="eyebrow">IMAGE ASSETS</span>
         <h3>{text("图片素材生成", "IMAGE ASSET GENERATION")}</h3>
       </header>
       <div className="project-delivery-asset-setting-row">
@@ -95,10 +94,10 @@ export function AssetAutoGenerationSetting({ projectId, readOnly = false, onChan
           />
           <span aria-hidden="true" className="project-delivery-asset-switch"><span /></span>
           <span className="project-delivery-asset-toggle-copy">
-            <b>{text("自动生成图片素材", "GENERATE IMAGE ASSETS AUTOMATICALLY")}</b>
+            <b>{text("自动生成", "Generate automatically")}</b>
             <small>{text(
-              "Agent 完成素材规划后，由当前运行时的图片后端自动生成并作为构建门禁。",
-              "After the Agent plans the assets, the selected runtime generates them before the build can continue.",
+              "素材规划完成后生成，完成后继续构建。",
+              "Generate planned images before continuing the build.",
             )}</small>
           </span>
         </label>

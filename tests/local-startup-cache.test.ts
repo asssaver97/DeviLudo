@@ -36,6 +36,9 @@ test("an unchanged checkout reuses verified images and never runs two local star
   assert.match(startup, /"ls-files", "--cached", "--others", "--exclude-standard", "-z"/);
   assert.match(startup, /path === "\.dockerignore" \|\| !isDockerIgnored\(path, ignoreRules\)/);
   assert.match(startup, /startupCache\.imageInputFingerprint !== inputFingerprint/);
+  assert.match(startup, /DEVILUDO_CODEX_IMAGE_VERSION: codexVersion \?\? "0\.153\.4"/);
+  assert.match(startup, /fingerprintLocalImageInputs\(baseEnvironment\)/);
+  assert.match(startup, /environment\.DEVILUDO_CODEX_IMAGE_VERSION, environment\.DEVILUDO_NPM_REGISTRY/);
   assert.doesNotMatch(startup, /imageCacheMaxAgeMs|age >= imageCacheMaxAgeMs/);
   assert.match(startup, /current\[image\] === startupCache\.imageIds\[image\]/);
   assert.match(startup, /if \(resolvedImageIds\) \{[\s\S]*skipping 10 redundant image builds/);
