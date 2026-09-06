@@ -22,7 +22,7 @@ type Conversation = Readonly<{
   }>[];
 }>;
 
-const ONE_PIXEL_PNG = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAusB9Y9Zl1sAAAAASUVORK5CYII=";
+const ONE_PIXEL_PNG = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAACXBIWXMAAAPoAAAD6AG1e1JrAAAADUlEQVR4nGNg2PL/PwAFHgKz57crZQAAAABJRU5ErkJggg==";
 
 test("conversation stream emits the authoritative reply before the persisted result", async ({ stack }) => {
   await stack.configureAgent();
@@ -48,12 +48,20 @@ test("conversation stream emits the authoritative reply before the persisted res
   const documentAt = events.findIndex(event => event.type === "project_document");
   expect(processes.length).toBeGreaterThanOrEqual(1);
   expect(replacements.length).toBe(1);
-  expect(starts).toEqual([{ type: "agent_start", agentRole: "DESIGN" }]);
-  expect(agentCompleted).toEqual([{ type: "agent_complete", agentRole: "DESIGN" }]);
-  expect(events.findIndex(event => event.type === "agent_start")).toBeLessThan(events.findIndex(event => event.type === "agent_process"));
-  expect(events.findIndex(event => event.type === "agent_process")).toBeLessThan(events.findIndex(event => event.type === "agent_complete"));
-  expect(events.findIndex(event => event.type === "agent_replace")).toBeLessThan(events.findIndex(event => event.type === "agent_complete"));
-  expect(events.findIndex(event => event.type === "agent_complete")).toBeLessThan(completedAt);
+  expect(starts).toEqual([
+    { type: "agent_start", agentRole: "INTENT" },
+    { type: "agent_start", agentRole: "DESIGN" },
+  ]);
+  expect(agentCompleted).toEqual([
+    { type: "agent_complete", agentRole: "INTENT" },
+    { type: "agent_complete", agentRole: "DESIGN" },
+  ]);
+  const designStartedAt = events.findIndex(event => event.type === "agent_start" && event.agentRole === "DESIGN");
+  const designCompletedAt = events.findIndex(event => event.type === "agent_complete" && event.agentRole === "DESIGN");
+  expect(designStartedAt).toBeLessThan(events.findIndex(event => event.type === "agent_process"));
+  expect(events.findIndex(event => event.type === "agent_process")).toBeLessThan(designCompletedAt);
+  expect(events.findIndex(event => event.type === "agent_replace")).toBeLessThan(designCompletedAt);
+  expect(designCompletedAt).toBeLessThan(completedAt);
   expect(documentAt).toBe(-1);
   expect(replacements[0]).toMatchObject({ agentRole: "DESIGN" });
   if (deltas.length) expect(new Set(deltas.map(event => event.agentRole))).toEqual(new Set(["DESIGN"]));
@@ -84,7 +92,7 @@ test("conversation stream emits the authoritative reply before the persisted res
     SELECT count(*)::int AS intent_turns
       FROM deviludo.agent_turns
      WHERE project_id = '${project.id}'::uuid AND role = 'INTENT'
-  `)).toEqual([{ intent_turns: 0 }]);
+  `)).toEqual([{ intent_turns: 1 }]);
 });
 
 test("conversation attachments are validated, persisted, displayed through an authenticated boundary, and exposed to the reply Agent", async ({ stack }) => {
@@ -319,31 +327,17 @@ test("project conversations apply explicit feedback, defer tentative changes, an
   const draftConversation = draftedBody.conversation;
   expect(draftConversation.mode).toBe("PROJECT_FEEDBACK");
   expect(draftConversation.projectId).toBe(project.id);
-  const expectedOptions = [
-    {
-      label: "采用强化资源管理方案（推荐）",
-      description: "强调资源来源、消耗与风险之间的持续取舍。",
-    },
-    {
-      label: "采用随机事件驱动方案",
-      description: "用可读的随机事件推动局势变化与临场决策。",
-    },
-  ];
   expect(draftConversation.messages[1].metadata).toMatchObject({
     source: "AI_AGENT",
     appliedToDraft: false,
-    readyForUiDesign: true,
+    readyForAudit: true,
     readyForDevelopment: false,
     projectDocumentUpdated: false,
-    options: expectedOptions,
+    options: [],
   });
-  expect(draftConversation.messages[2].metadata).toMatchObject({
-    source: "AI_AGENT",
-    agentRole: "UI_DESIGN",
-    readyForUiDesign: false,
-    readyForDevelopment: true,
-    projectDocumentUpdated: false,
-  });
+  expect(draftConversation.messages.map(message => (
+    message.role === "USER" ? "USER" : message.metadata.agentRole
+  ))).toEqual(["USER", "DESIGN"]);
   const runtimeTurnId = String(draftConversation.messages[1].metadata.runtimeTurnId);
   expect(runtimeTurnId).toMatch(/^[0-9a-f-]{36}$/i);
   await stack.executeSql(`
@@ -355,7 +349,7 @@ test("project conversations apply explicit feedback, defer tentative changes, an
   const recoveredResponse = await stack.web(`/api/conversations/${draftConversation.id}`);
   expect(recoveredResponse.status()).toBe(200);
   const recoveredConversation = (await recoveredResponse.json() as { conversation: Conversation }).conversation;
-  expect(recoveredConversation.messages[1].metadata.options).toEqual(expectedOptions);
+  expect(recoveredConversation.messages[1].metadata.options).toEqual([]);
   expect(draftConversation.messages[1].content).toContain("测试设计 Agent");
   expect(draftedBody.project.document).toMatchObject({
     revision: 2,
@@ -480,16 +474,32 @@ test("an explicit source fix routes only to Development and starts the workflow 
 test("formal game design is audited by every specialist before UI Design and remains openable as Markdown", async ({ stack }) => {
   test.setTimeout(75_000);
   await stack.configureAgent();
-  const project = await stack.createProject({
-    name: "设计审计闭环",
-    concept: "A compact strategy game with meaningful choices, recovery, progression, and a conclusive ending.",
-  });
   const started = await stack.web("/api/conversations/messages", {
     method: "POST",
-    data: { projectId: project.id, content: "按照当前需求开始开发。" },
+    data: { content: "A compact strategy game with meaningful choices, recovery, progression, and a conclusive ending." },
   });
   expect(started.status()).toBe(201);
-  const conversationId = ((await started.json()) as { conversation: Conversation }).conversation.id;
+  const startedBody = await started.json() as {
+    conversation: Conversation;
+    project: { id: string };
+    changeRequest: { state: string };
+    intentDecision: { intent: string; explicitExecution: boolean; targetRole: string };
+    workflowAction: string;
+  };
+  expect(startedBody.intentDecision).toMatchObject({
+    intent: "CHANGE_REQUEST",
+    explicitExecution: false,
+    targetRole: "DESIGN",
+  });
+  expect(startedBody.changeRequest.state).toBe("APPLIED");
+  expect(startedBody.workflowAction).toBe("AGENT_STARTED");
+  expect(startedBody.conversation.messages[1].metadata).toMatchObject({
+    agentRole: "DESIGN",
+    readyForAudit: true,
+    options: [],
+  });
+  const project = startedBody.project;
+  const conversationId = startedBody.conversation.id;
 
   let currentArtifacts: readonly ArtifactRecord[] = [];
   await expect.poll(async () => {
@@ -616,7 +626,7 @@ test("messages during Agent generation are intent-routed and confirmed changes s
   expect(questionResult.workflowAction).toBe("NONE");
   expect(questionResult.conversation.messages.map(message => (
     message.role === "USER" ? "USER" : message.metadata.agentRole
-  ))).toEqual(["USER", "DESIGN", "UI_DESIGN"]);
+  ))).toEqual(["USER", "DESIGN"]);
   expect((await stack.readProject(project.id)).document.revision).toBe(documentBefore);
   expect(await stack.queryRows<{ state: string; fencing_token: string }>(`
     SELECT state::text, fencing_token::text FROM deviludo.jobs WHERE id = '${jobId}'::uuid
@@ -639,9 +649,9 @@ test("messages during Agent generation are intent-routed and confirmed changes s
   expect(proposedBody.intentDecision).toMatchObject({ intent: "CHANGE_REQUEST", explicitExecution: false });
   expect(proposedBody.workflowAction).toBe("AWAITING_CONFIRMATION");
   expect(proposedBody.changeRequest.state).toBe("PENDING");
-  expect(proposedBody.conversation.messages.slice(-3).map(message => (
+  expect(proposedBody.conversation.messages.slice(-2).map(message => (
     message.role === "USER" ? "USER" : message.metadata.agentRole
-  ))).toEqual(["USER", "DESIGN", "UI_DESIGN"]);
+  ))).toEqual(["USER", "DESIGN"]);
   expect((await stack.readProject(project.id)).document.revision).toBe(documentBefore);
   expect((await stack.readProject(project.id)).workflowState).toBe("STOPPED");
   expect(await stack.queryRows<{ state: string; fencing_token: string; lease_token: string | null }>(`
@@ -722,10 +732,36 @@ test("a successful replacement Manifest retires generated objects but preserves 
        AND kind = 'AGENT_TURN' AND payload->>'role' = 'DEVELOPMENT'
        AND state = 'SUCCEEDED'
   `))[0]?.count ?? 0, { timeout: 45_000 }).toBe(1);
+  // This suite runs without an image Provider. Reconcile the two staged fixture
+  // files as existing source inputs so the asset gate can exercise the rest of
+  // the workflow and its replacement cleanup.
+  await stack.executeSql(`
+    UPDATE deviludo.asset_items AS item
+       SET status = 'existing',
+           source_path = CASE item.asset_key
+             WHEN 'ui/obsolete-panel'
+               THEN 'assets/generated/ui/obsolete-panel.png'
+             ELSE 'assets/generated/ui/user-banner.png'
+           END,
+           bucket = NULL,
+           object_key = NULL,
+           sha256 = NULL,
+           size_bytes = NULL,
+           generation_lease_token = NULL,
+           generation_lease_expires_at = NULL,
+           updated_at = clock_timestamp()
+      FROM deviludo.asset_manifests AS manifest
+     WHERE item.workspace_id = '${project.workspaceId}'::uuid
+       AND manifest.workspace_id = item.workspace_id
+       AND manifest.id = item.manifest_id
+       AND manifest.project_id = '${project.id}'::uuid
+  `);
+  await stack.executeSql("SELECT deviludo.advance_asset_workflows(20);");
   await expect.poll(async () => {
     const response = await stack.web(`/api/conversations/${startedBody.conversation.id}`);
     const conversation = (await response.json() as { conversation: Conversation }).conversation;
-    return conversation.messages.filter(message => message.metadata.source === "WORKFLOW_AGENT");
+    return conversation.messages.filter(message => message.metadata.source === "WORKFLOW_AGENT"
+      && ["DEVELOPMENT", "TEST"].includes(String(message.metadata.agentRole)));
   }, { timeout: 45_000 }).toEqual([
     expect.objectContaining({
       role: "ASSISTANT",

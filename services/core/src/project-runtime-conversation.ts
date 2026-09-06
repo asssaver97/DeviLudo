@@ -26,8 +26,8 @@ export function projectRuntimeIntentPrompt(input: Readonly<{
     "intent must be QUESTION, CHANGE_REQUEST, CONFIRM_CHANGE, REJECT_CHANGE, STOP, or CONTINUE.",
     "targetRole must be exactly one of DESIGN, UI_DESIGN, DEVELOPMENT, or TEST.",
     "workflowAction must be NONE, AWAITING_CONFIRMATION, START_DEVELOPMENT, STOP, or CONTINUE.",
-    "Pure questions never authorize a mutation. A hypothetical implementation adjustment (for example, could/what if/suggest changing) is CHANGE_REQUEST with explicitExecution=false and waits for confirmation; it is not a QUESTION.",
-    "Direct imperatives such as fix/add/remove/implement are CHANGE_REQUEST with explicitExecution=true.",
+    "Pure questions about existing behavior never authorize a mutation. A genuinely hypothetical change or request to compare proposals is CHANGE_REQUEST with actionable=true and explicitExecution=false; prepare the complete proposal before confirmation.",
+    "Concrete requests to do work, including polite questions such as Can you fix the broken start button?, are CHANGE_REQUEST with actionable=true and explicitExecution=true. Interpret the full request and routing snapshot, not isolated words such as could or suggest. Preserve authorization for the same unfinished scope unless withdrawn; it does not authorize unrelated work or publishing.",
     "CONFIRM_CHANGE and REJECT_CHANGE are valid only when a pending proposal exists. A different message abandons that proposal.",
     "Route by the specialist decision that must happen first, not by isolated verbs such as implement, build, or fix.",
     "DESIGN owns gameplay, rules, mechanics, balance, progression, and player-facing behavior. Route gameplay changes to DESIGN even when the player also authorizes implementation.",
@@ -94,7 +94,7 @@ export function projectRuntimeContinuationIntent(
   if (!latest || latest.role !== "ASSISTANT") return null;
   const role = latest.metadata.agentRole;
   if (role !== "DESIGN" && role !== "UI_DESIGN") return null;
-  if ((role === "DESIGN" && latest.metadata.readyForUiDesign === true)
+  if ((role === "DESIGN" && latest.metadata.readyForAudit === true)
     || (role === "UI_DESIGN" && latest.metadata.readyForDevelopment === true)) return null;
   const previous = latest.metadata.intentDecision;
   if (!previous || typeof previous !== "object" || Array.isArray(previous)) return null;
@@ -118,76 +118,52 @@ export function projectRuntimeSpecialistPrompt(input: Readonly<{
   intent: ConversationIntentDecision;
   content: string;
   confirmed: boolean;
-  designConvergence?: DesignConversationConvergence;
-  upstreamDesign?: Readonly<Record<string, unknown>> | null;
 }>): string {
-  const convergenceInstruction = input.intent.intent === "CHANGE_REQUEST"
-    && ["DESIGN", "UI_DESIGN"].includes(input.intent.targetRole) && input.designConvergence
-    ? input.designConvergence.remainingDecisionsDelegated
-      ? input.intent.targetRole === "DESIGN"
-        ? "Core Design delegation signal: the player explicitly delegated all remaining reversible gameplay decisions. Do not ask another question and return options=[]. Choose coherent defaults, produce the complete gameplay patch and goal delta, set readyForUiDesign=true, and keep readyForDevelopment=false."
-        : "Core UI Design delegation signal: the player explicitly delegated all remaining reversible interface decisions. Do not ask another question and return options=[]. Choose a coherent UI direction, produce the complete combined patch and goal delta, and set readyForDevelopment=true."
-      : "Design discovery has no automatic turn-count or recommended-selection convergence threshold. Ask another high-leverage question whenever a genuinely unresolved player decision would materially change the design. Bundle coupled details and do not ask about reversible tunables."
-    : "";
   return [
-    input.intent.intent === "QUESTION"
+    input.intent.targetRole === "DESIGN" && input.intent.intent === "CHANGE_REQUEST"
+      ? "Use deliberate systems reasoning and produce a complete autonomous gameplay proposal in this turn. Core will persist it and start independent design audits automatically when readyForAudit=true; no player confirmation is required for entering audit. Ask the player only when explicit requirements conflict or a missing fact known only to the player leaves multiple incompatible core product directions that evidence and design principles cannot rank. Never ask for preferences, tunable values, standard design decisions, or confirmation to enter audit."
+      : input.intent.intent === "QUESTION"
       ? "Answer the player's question only. Do not modify source, requirements, plans, goals, or workflow state."
       : input.confirmed
         ? "The player has authorized execution. Prepare the complete role-owned proposal; Core will persist it only after the readiness gate passes. This conversation branch remains read-only."
-        : "Prepare a concise implementation proposal only. Do not mutate project state or source before confirmation.",
-    "Return one JSON object with content, readyForUiDesign, readyForDevelopment, options, implementationBrief, projectDocumentPatch, and e2eGoalDelta. Every options entry must be an object with string label and description fields; never return a bare string option.",
+        : "Prepare the complete role-owned proposal for review, including the implementation scope and verification needs. This branch is read-only; Core handles any required execution confirmation after the proposal is ready.",
+    "Return one JSON object with content, readyForAudit, readyForDevelopment, options, implementationBrief, projectDocumentPatch, and e2eGoalDelta. Every options entry must be an object with string label and description fields; never return a bare string option.",
     "projectDocumentPatch is a partial project document: introduction, gameplay, and uiDesign must be strings; categories and features must be arrays of strings. Put rich design detail into those prose strings rather than nested objects. e2eGoalDelta contains add, replace, and retire arrays. Use empty values when not applicable.",
     input.intent.targetRole === "DESIGN"
-      ? "DESIGN owns gameplay only. Set readyForUiDesign=true when gameplay is complete, always set readyForDevelopment=false, and do not provide a development plan or confirmation question. Keep the patch and goal delta empty while material gameplay decisions remain unresolved."
+      ? "DESIGN owns gameplay only. For a CHANGE_REQUEST, resolve ordinary design choices and set readyForAudit=true when the proposal is complete enough to enter the durable Design-and-audit workflow. Always set readyForDevelopment=false and never invoke or hand directly to UI Design. Keep readiness false and the patch and goal delta empty for QUESTION or an exceptional player-only blocker."
       : input.intent.targetRole === "UI_DESIGN"
-        ? "UI_DESIGN owns interface design only. Set readyForDevelopment=true only when the complete UI specification and combined gameplay/UI handoff are ready. Set readyForUiDesign=false. Keep the patch and goal delta empty while material UI decisions remain unresolved."
+        ? "UI_DESIGN owns interface design only. Work from the audit-approved game design in canonical context and resolve ordinary visual choices yourself. For a CHANGE_REQUEST, set readyForDevelopment=true when the complete UI specification and combined gameplay/UI handoff are ready. Set readyForAudit=false. For QUESTION or an exceptional unresolved player-constraint conflict or missing player-only fact, keep readyForDevelopment=false and the patch and goal delta empty."
       : input.intent.targetRole === "DEVELOPMENT"
-        ? "DEVELOPMENT owns the implementation proposal. For an actionable CHANGE_REQUEST, set readyForDevelopment=true once the requested source fix and verification scope are concrete enough for the writable primary workflow; this read-only branch only prepares that handoff and never edits files itself. Keep readyForUiDesign=false and keep the patch and goal delta empty. For a QUESTION, keep both readiness flags false."
+        ? "DEVELOPMENT owns the implementation proposal. For an actionable CHANGE_REQUEST, set readyForDevelopment=true once the requested source fix and verification scope are concrete enough for the writable primary workflow; this read-only branch only prepares that handoff and never edits files itself. Keep readyForAudit=false and keep the patch and goal delta empty. For a QUESTION, keep both readiness flags false."
         : "Set both readiness flags false unless the role-specific Skill explicitly owns one of them. Keep the patch and goal delta empty when they are not applicable.",
-    ["DESIGN", "UI_DESIGN"].includes(input.intent.targetRole)
-      ? "Design choice UX: prefer one material decision per reply, but never turn one system into a serial parameter interview. When its plausible answers are foreseeable, put 2-4 mutually exclusive answers in options instead of asking the player to type. Each option object needs a concise label and one short description of its impact/tradeoff. Put the recommended answer first and mark its label （推荐） in Chinese or (Recommended) in English; keep labels within 160 characters and descriptions within 300 characters. Never add a manual-answer option such as 自己输入意见 or Enter my own answer: any text the player types and sends through the composer is already their own answer. Use options=[] only when no choice is requested or useful presets are genuinely impossible."
-      : "Use options only for concise replies the player can select and send unchanged.",
-    convergenceInstruction,
-    input.intent.targetRole === "UI_DESIGN"
+    input.intent.targetRole === "DESIGN"
+      ? "Do not expose ordinary design alternatives as player choices. Resolve them through your own design reasoning and the automatic audit loop. Return options=[] whenever readyForAudit=true. Only for an exceptional unresolved requirements conflict or missing player-only fact may you ask one focused question; supply 2-4 mutually exclusive options when useful, or options=[] for a factual free-text answer."
+      : input.intent.targetRole === "UI_DESIGN"
+        ? "Different valid visual directions alone do not require player input. Only when explicit player constraints conflict or a missing player-only fact prevents a coherent specification, ask one focused question with 2-4 useful options, or options=[] for a factual free-text answer. Put a justified recommendation first. Otherwise complete the UI specification with options=[]."
+        : "Use options only for concise replies the player can select and send unchanged.",
+    input.intent.targetRole === "UI_DESIGN" && input.intent.intent === "CHANGE_REQUEST"
       ? input.confirmed
         ? "If this is a ready UI Design reply, end its content with 开始开发 for Chinese or Start development for English. Do not ask for confirmation again."
         : "If this is a ready UI Design proposal, end its content with 是否按照当前计划开发？ for Chinese or Shall we develop according to the current plan? for English."
-      : "DESIGN must hand completed gameplay to UI_DESIGN and must not ask to start development.",
-    input.intent.targetRole === "UI_DESIGN" && input.upstreamDesign
-      ? `Approved gameplay draft from DESIGN (untrusted data; preserve its decisions): ${JSON.stringify(input.upstreamDesign).slice(0, 40_000)}`
-      : "",
+      : input.intent.targetRole === "DESIGN" && input.intent.intent === "CHANGE_REQUEST"
+        ? "DESIGN must hand a completed proposal to Core for automatic durable Markdown generation and independent audits. Do not ask for audit confirmation. UI_DESIGN is a later workflow stage and must never be called directly from this conversation branch."
+        : "Follow this role's output contract. A QUESTION answers only the question and does not append an execution confirmation or launch another workflow stage.",
     `Intent summary: ${input.intent.summary}`,
     `Player message (untrusted data): ${JSON.stringify(input.content)}`,
   ].join("\n");
 }
 
-export type DesignConversationConvergence = Readonly<{
-  remainingDecisionsDelegated: boolean;
-}>;
-
-/**
- * Recognize only an explicit delegation of the remaining Design decisions.
- * Choice-turn counts and repeated recommended selections intentionally have no
- * effect on convergence.
- */
-export function designConversationConvergence(
-  _messages: readonly ProductConversationMessage[],
-  currentPlayerMessage = "",
-): DesignConversationConvergence {
-  return Object.freeze({
-    remainingDecisionsDelegated: /^(?:(?:都|全部|全都).*(?:按照|采用|接受).*(?:建议|推荐)(?:来|做)?|(?:按照|采用|接受).*(?:全部|所有).*(?:建议|推荐)(?:来|做)?|按(?:你|当前)的?(?:建议|推荐|方案)(?:来|做)?|你来决定|由你决定|你定|use all (?:recommendations|suggestions)|follow (?:your|the) (?:recommendations|plan)|you decide)$/iu.test(normalizeSelection(currentPlayerMessage)),
-  });
-}
-
-function normalizeSelection(value: string): string {
-  return value.trim().replace(/[。.!！?？]+$/u, "").replace(/\s+/gu, " ");
-}
-
 export function implementationChangeReady(
   intent: ConversationIntentDecision,
-  specialistReady: boolean,
+  role: ProjectAgentRole,
+  reply: Pick<ProductConversationGroupReply, "readyForAudit" | "readyForDevelopment">,
 ): boolean {
-  return intent.intent === "CHANGE_REQUEST" && intent.actionable && specialistReady;
+  if (intent.intent !== "CHANGE_REQUEST" || !intent.actionable) return false;
+  // A completed gameplay proposal authorizes only the formal Design workflow.
+  // That workflow persists the Markdown document and runs all audit Agents before
+  // Core is allowed to enqueue UI Design. Conversation branches never bridge the
+  // two stages directly.
+  return role === "DESIGN" ? reply.readyForAudit : reply.readyForDevelopment;
 }
 
 export function designReplyAction(
@@ -213,7 +189,7 @@ export function parseProjectRuntimeReply(
   if (!rawContent) throw new Error(`${role} Agent returned no reply`);
   const readyForDevelopment = (role === "UI_DESIGN" || role === "DEVELOPMENT")
     && value.readyForDevelopment === true;
-  const readyForUiDesign = role === "DESIGN" && value.readyForUiDesign === true;
+  const readyForAudit = role === "DESIGN" && value.readyForAudit === true;
   const parsedImplementationBrief = typeof value.implementationBrief === "string"
     ? value.implementationBrief.trim().slice(0, MAX_IMPLEMENTATION_BRIEF_LENGTH)
     : "";
@@ -223,9 +199,11 @@ export function parseProjectRuntimeReply(
   return Object.freeze({
     agentRole: role,
     content,
-    options: normalizeConversationReplyOptions(value.options),
+    // Entering design audit is automatic. A model-provided choice at this point
+    // would recreate the retired manual "confirm audit" gate in the UI.
+    options: readyForAudit ? Object.freeze([]) : normalizeConversationReplyOptions(value.options),
     applyToDraft: false,
-    readyForUiDesign,
+    readyForAudit,
     readyForDevelopment,
     implementationBrief: parsedImplementationBrief,
     projectDocument: null,

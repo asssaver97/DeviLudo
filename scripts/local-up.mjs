@@ -217,7 +217,8 @@ const baseEnvironment = {
   DEVILUDO_CODEX_ACCOUNT_DEFAULT_MODEL: codexAccountDefaultModel ?? "",
 };
 await runStartupStage("Start PostgreSQL, Vault, and object storage", () => executeVisible("docker", [
-  "compose", "-f", "infra/docker-compose.yml", "up", "-d", "--wait", "postgres", "vault", "minio",
+  "compose", "--ansi", "never", "--progress", "quiet",
+  "-f", "infra/docker-compose.yml", "up", "-d", "--wait", "postgres", "vault", "minio",
 ], { cwd: root, env: baseEnvironment }));
 // Vault stores its data on a file volume, so a restarted Vault comes back sealed
 // and its service tokens have to be reissued. Both facts follow from the container
@@ -333,14 +334,16 @@ const storageFingerprints = await runStartupStage("Prepare local persistent stor
   const operations = [];
   if (!matchesCachedFingerprint("objectStore", objectStoreFingerprint)) {
     operations.push(executeVisible("docker", [
-      "compose", "-f", "infra/docker-compose.yml", "run", "--rm", "--no-deps", "minio-init",
+      "compose", "--ansi", "never", "--progress", "quiet",
+      "-f", "infra/docker-compose.yml", "run", "--rm", "--no-deps", "minio-init",
     ], { cwd: root, env: environment }));
   } else {
     startupProgress("Object storage is unchanged; skipping bucket initialization");
   }
   if (!matchesCachedFingerprint("projectSources", projectFingerprint)) {
     operations.push(executeVisible("docker", [
-      "compose", "-f", "infra/docker-compose.yml", "run", "--rm", "--no-deps", "project-sources-init",
+      "compose", "--ansi", "never", "--progress", "quiet",
+      "-f", "infra/docker-compose.yml", "run", "--rm", "--no-deps", "project-sources-init",
     ], { cwd: root, env: environment }));
   } else {
     startupProgress("Project storage permissions are unchanged; skipping initialization");
@@ -382,6 +385,8 @@ const steamworksBridgePid = await runStartupStage("Start the managed Steamworks 
 });
 await runStartupStage("Start Web, Core, and local dependencies", () => executeVisible("docker", [
   "compose",
+  "--ansi", "never",
+  "--progress", "quiet",
   "-f", "infra/docker-compose.yml",
   "up",
   "-d",
@@ -458,7 +463,7 @@ if (e2ePid) {
   console.log("  Detailed log: .deviludo/local/e2e-macos.log");
 }
 console.log("");
-console.log(JSON.stringify({
+const startupSummary = {
   ready: true,
   ciMode,
   webUrl: `http://127.0.0.1:${webPort}`,
@@ -479,7 +484,8 @@ console.log(JSON.stringify({
     codexCli: codexVersion,
     e2eVm: e2ePid ? "background" : "ci-skipped",
   },
-}));
+};
+if (ciMode) console.log(JSON.stringify(startupSummary));
 releaseStartupLock();
 
 async function runStartupStage(label, operation) {
@@ -511,6 +517,8 @@ async function buildLocalImages(environment) {
     cwd: root,
     env: { ...environment, BUILDX_NO_DEFAULT_ATTESTATIONS: "1" },
   };
+  // Keep BuildKit's native TTY renderer here: image preparation is the long
+  // fourth stage, and its colored completion transitions are useful feedback.
   const compose = ["compose", "-f", "infra/docker-compose.yml", "--profile", "images", "build"];
   try {
     await executeVisible("docker", [...compose, ...localImageBuilds.map(entry => entry.service)], options);
@@ -535,11 +543,19 @@ function executeVisible(command, arguments_, options) {
   return new Promise((resolvePromise, rejectPromise) => {
     const child = spawn(command, arguments_, { ...options, stdio: "inherit" });
     child.once("error", rejectPromise);
-    child.once("exit", (code, signal) => {
+    // `exit` may precede the final inherited output. `close` guarantees that a
+    // following stage heading cannot interleave with the child process output.
+    child.once("close", (code, signal) => {
+      resetTerminalLine();
       if (code === 0) resolvePromise();
       else rejectPromise(new Error(`${command} exited with ${code ?? signal ?? "unknown status"}`));
     });
   });
+}
+
+function resetTerminalLine() {
+  if (!process.stdout.isTTY && !process.stderr.isTTY) return;
+  process.stdout.write("\r\u001b[0m\u001b[2K");
 }
 
 /**

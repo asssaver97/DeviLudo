@@ -61,10 +61,13 @@ test("project linking is reachable from Home and separates local and GitHub sour
   assert.match(analysisSkill, /not the design stage/);
   assert.match(repository, /status: "READY"/);
   assert.match(repository, /agentRole: "ANALYSIS"/);
-  assert.match(repository, /"PROJECT_IMPORT_UI_DESIGN_AGENT" : "PROJECT_IMPORT_DESIGN_AGENT"/);
+  assert.match(repository, /source: "PROJECT_IMPORT_DESIGN_AGENT"/);
+  assert.doesNotMatch(repository, /PROJECT_IMPORT_UI_DESIGN_AGENT/);
   assert.match(core, /role: "ANALYSIS"[\s\S]*designImportedProject/);
   assert.match(core, /role: "DESIGN"[\s\S]*mode: "READ_ONLY_BRANCH"/);
-  assert.match(core, /role: "UI_DESIGN"[\s\S]*mode: "READ_ONLY_BRANCH"/);
+  assert.match(core, /readyForAudit=true[\s\S]*automatically, without player confirmation/);
+  assert.match(core, /design\.reply\.readyForAudit[\s\S]*startImportedDesignAudit/);
+  assert.doesNotMatch(core, /designImportedProject[\s\S]*role: "UI_DESIGN"[\s\S]*mode: "READ_ONLY_BRANCH"/);
   assert.match(conversationBox, /role === "ANALYSIS"[\s\S]*DeviLudo 分析 Agent/);
   assert.match(repository, /state_data #>> '\{importAnalysis,status\}' = 'NEEDS_INPUT'/);
   assert.match(core, /pending\?\.state === "WAITING_FOR_ANALYSIS"[\s\S]*applyConfirmedConversationChange/);

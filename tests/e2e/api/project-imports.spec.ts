@@ -30,11 +30,13 @@ test("bound local directory creates immediately, then finishes its source snapsh
   expect(body.project).toMatchObject({ name: "clock-game", analysisStatus: "PENDING", source: null });
   expect(body.conversation).toBeNull();
 
-  const analyzed = await stack.waitForProject(body.project.id, project => project.analysisStatus === "READY");
+  const analyzed = await stack.waitForProject(body.project.id, project => (
+    project.analysisStatus === "READY" && project.workflowState !== "DRAFT"
+  ));
   expect(analyzed.name).toBe("clock-game");
   expect(analyzed.document).toMatchObject({
     maintainedBy: "AGENT",
-    content: { categories: ["puzzle", "adventure"] },
+    content: { categories: expect.arrayContaining(["automated testing", "game design"]) },
   });
   expect(analyzed.localDirectory).toEqual({
     bindingId,
@@ -54,9 +56,22 @@ test("bound local directory creates immediately, then finishes its source snapsh
   expect(conversation.messages[1].content).not.toContain("Development plan");
   expect(conversation.messages[1].content).not.toContain("Shall we develop according to the current plan?");
   expect(conversation.messages[1].metadata).toMatchObject({ agentRole: "ANALYSIS", agentName: "DeviLudo Analysis Agent" });
-  expect(conversation.messages[2].metadata).toMatchObject({ agentRole: "DESIGN", agentName: "DeviLudo Design Agent" });
-  expect(conversation.messages[2].content).toContain("Development plan");
-  expect(conversation.messages[2].content).toMatch(/Shall we develop according to the current plan\?$/);
+  expect(conversation.messages[2].metadata).toMatchObject({
+    agentRole: "DESIGN",
+    agentName: "DeviLudo Design Agent",
+    readyForAudit: true,
+    options: [],
+  });
+  expect(conversation.messages[2].content).not.toContain("Development plan");
+  expect(conversation.messages[2].content).not.toContain("Shall we develop according to the current plan?");
+
+  await expect.poll(async () => Number((await stack.queryRows<{ count: number }>(`
+    SELECT count(*)::int AS count
+      FROM deviludo.implementation_change_requests
+     WHERE project_id = '${body.project.id}'::uuid
+       AND state = 'APPLIED'
+       AND explicit_execution = true
+  `))[0]?.count ?? 0), { timeout: 30_000 }).toBe(1);
 
   const sources = await stack.queryRows<{
     revision:number;content_digest:string;relative_path:string;file_count:number;
@@ -72,7 +87,15 @@ test("bound local directory creates immediately, then finishes its source snapsh
     data: { conversationId: conversation.id, content: "接下来增加一个可以保留线索的日志面板。" },
   });
   expect(continued.status(), await continued.text()).toBe(200);
-  expect((await continued.json() as { conversation: { messages: unknown[] } }).conversation.messages).toHaveLength(5);
+  const continuedMessages = (await continued.json() as {
+    conversation: { messages: readonly { role: string; content: string; metadata: Record<string, unknown> }[] };
+  }).conversation.messages;
+  expect(continuedMessages).toEqual(expect.arrayContaining([
+    expect.objectContaining({ role: "USER", content: "接下来增加一个可以保留线索的日志面板。" }),
+    expect.objectContaining({ role: "ASSISTANT", metadata: expect.objectContaining({
+      source: "AI_AGENT", agentRole: "DESIGN", readyForAudit: true, options: [],
+    }) }),
+  ]));
 
   const replay = await stack.web(localBindingUrl, {
     method: "POST",
@@ -90,25 +113,15 @@ test("bound local directory creates immediately, then finishes its source snapsh
   `);
   expect(localBinding).toEqual([{ binding_id: bindingId, branch: "codex/local-import" }]);
 
-  await stack.executeSql(`
-    INSERT INTO deviludo.runtime_images(runtime_key, image_reference, release_version, verified_at)
-    VALUES ('AGENT_CLAUDE', 'sha256:${"a".repeat(64)}', 'test', clock_timestamp())
-    ON CONFLICT (runtime_key) DO UPDATE
-      SET image_reference = EXCLUDED.image_reference, verified_at = EXCLUDED.verified_at;
-  `);
-  const approved = await stack.web(`/api/projects/${body.project.id}/approve`, {
-    method: "POST",
-    data: {},
-  });
-  expect(approved.status(), await approved.text()).toBe(202);
-  const generationJobs = await stack.queryRows<{ kind: string;source_revision:number }>(`
-    SELECT job.kind::text AS kind,(job.payload->>'sourceRevision')::int source_revision
+  const generationJobs = await stack.queryRows<{ kind: string; source_revision: number; role: string }>(`
+    SELECT job.kind::text AS kind,(job.payload->>'sourceRevision')::int source_revision,
+           job.payload->>'role' AS role
       FROM deviludo.jobs job
      WHERE job.project_id = '${body.project.id}'::uuid
        AND job.kind = 'AGENT_TURN'
      ORDER BY job.created_at
   `);
-  expect(generationJobs).toEqual([{kind:"AGENT_TURN",source_revision:1}]);
+  expect(generationJobs).toContainEqual({ kind: "AGENT_TURN", source_revision: 1, role: "DESIGN" });
 });
 
 test("project linking still creates immediately and records an asynchronous failure when Agent is not configured", async ({ stack }) => {

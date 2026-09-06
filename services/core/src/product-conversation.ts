@@ -40,7 +40,7 @@ export type ProductConversationAgentReply = Readonly<{
   content: string;
   options: readonly ConversationReplyOption[];
   applyToDraft: boolean;
-  readyForUiDesign: boolean;
+  readyForAudit: boolean;
   readyForDevelopment: boolean;
   implementationBrief: string;
   projectDocument: ProjectDocumentContent | null;

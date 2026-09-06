@@ -22,7 +22,6 @@ import {
   deliverValidatedConversationReply,
 } from "@/services/core/src/product-conversation";
 import {
-  designConversationConvergence,
   designReplyAction,
   implementationChangeReady,
   parseProjectRuntimeIntent,
@@ -231,7 +230,7 @@ test("persistent Runtime intent selects exactly one role and rejects contradicto
     }),
     content: "帮我设计玩法",
     confirmed: false,
-  }), /Each option object needs a concise label and one short description/);
+  }), /Every options entry must be an object with string label and description fields/);
 });
 
 test("unfinished Design replies continue without another Intent Agent turn", () => {
@@ -264,7 +263,7 @@ test("unfinished Design replies continue without another Intent Agent turn", () 
   });
   assert.deepEqual(projectRuntimeContinuationIntent([message(Object.freeze({
     agentRole: "DESIGN",
-    readyForUiDesign: false,
+    readyForAudit: false,
     options: Object.freeze([Object.freeze({ label: "时间循环（推荐）", description: "每轮积累线索。" })]),
     intentDecision,
   }))], "我想让每轮保留一条记忆"), {
@@ -275,7 +274,7 @@ test("unfinished Design replies continue without another Intent Agent turn", () 
     summary: "我想让每轮保留一条记忆",
   });
   assert.deepEqual(projectRuntimeContinuationIntent([message(Object.freeze({
-    agentRole: "DESIGN", readyForUiDesign: false, options: Object.freeze([]), intentDecision,
+    agentRole: "DESIGN", readyForAudit: false, options: Object.freeze([]), intentDecision,
   }))], "已上传你要求的完整正文"), {
     intent: "CHANGE_REQUEST",
     targetRole: "DESIGN",
@@ -284,83 +283,28 @@ test("unfinished Design replies continue without another Intent Agent turn", () 
     summary: "已上传你要求的完整正文",
   });
   assert.equal(projectRuntimeContinuationIntent([message(Object.freeze({
-    agentRole: "DESIGN", readyForUiDesign: true,
+    agentRole: "DESIGN", readyForAudit: true,
     options: Object.freeze([Object.freeze({ label: "继续", description: "已完成设计。" })]), intentDecision,
   }))], "继续"), null);
 });
 
-test("Design discovery converges only after the player explicitly delegates remaining decisions", () => {
-  const question = (id: string, label: string): ProductConversationMessage => Object.freeze({
-    id,
-    role: "ASSISTANT",
-    content: "请选择",
-    attachments: Object.freeze([]),
-    metadata: Object.freeze({
-      agentRole: "DESIGN",
-      readyForUiDesign: false,
-      readyForDevelopment: false,
-      options: Object.freeze([Object.freeze({ label, description: "推荐方向" })]),
-    }),
-    createdAt: "2026-08-27T00:00:00.000Z",
-    completedAt: "2026-08-27T00:00:01.000Z",
-  });
-  const player = (id: string, content: string): ProductConversationMessage => Object.freeze({
-    id,
-    role: "USER",
-    content,
-    attachments: Object.freeze([]),
-    metadata: Object.freeze({}),
-    createdAt: "2026-08-27T00:00:00.000Z",
-    completedAt: "2026-08-27T00:00:01.000Z",
-  });
-
-  assert.deepEqual(designConversationConvergence([
-    question("q1", "方向 A（推荐）"),
-    player("u1", "方向 A（推荐）"),
-    question("q2", "规则 B（推荐）"),
-  ], "规则 B（推荐）"), { remainingDecisionsDelegated: false });
-  assert.equal(designConversationConvergence([
-    question("q1", "A（推荐）"), player("u1", "自定义 A"),
-    question("q2", "B（推荐）"), player("u2", "自定义 B"),
-    question("q3", "C（推荐）"),
-  ], "自定义 C").remainingDecisionsDelegated, false);
-  assert.equal(designConversationConvergence([
-    question("q1", "A（推荐）"),
-  ], "都按照建议来").remainingDecisionsDelegated, true);
-
-  const forcedPrompt = projectRuntimeSpecialistPrompt({
+test("Design change prompts require autonomous completion and automatic audit", () => {
+  const prompt = projectRuntimeSpecialistPrompt({
     intent: Object.freeze({
       intent: "CHANGE_REQUEST",
       targetRole: "DESIGN",
       explicitExecution: false,
       actionable: true,
-      summary: "Complete the game design.",
+      summary: "Produce a coherent game design.",
     }),
-    content: "继续",
+    content: "Design the complete game.",
     confirmed: false,
-    designConvergence: Object.freeze({
-      remainingDecisionsDelegated: true,
-    }),
   });
-  assert.match(forcedPrompt, /Do not ask another question/);
-  assert.match(forcedPrompt, /set readyForUiDesign=true/);
-  assert.match(forcedPrompt, /keep readyForDevelopment=false/);
-
-  const openPrompt = projectRuntimeSpecialistPrompt({
-    intent: Object.freeze({
-      intent: "CHANGE_REQUEST",
-      targetRole: "DESIGN",
-      explicitExecution: false,
-      actionable: true,
-      summary: "Continue resolving the game design.",
-    }),
-    content: "规则 B（推荐）",
-    confirmed: false,
-    designConvergence: Object.freeze({
-      remainingDecisionsDelegated: false,
-    }),
-  });
-  assert.match(openPrompt, /no automatic turn-count or recommended-selection convergence threshold/);
+  assert.match(prompt, /complete autonomous gameplay proposal in this turn/);
+  assert.match(prompt, /start independent design audits automatically/);
+  assert.match(prompt, /Do not expose ordinary design alternatives as player choices/);
+  assert.match(prompt, /no player confirmation is required for entering audit/);
+  assert.doesNotMatch(prompt, /turns used|discovery budget|prefer one material decision per reply/i);
 });
 
 test("development authorization labels remain explicit UI actions", () => {
@@ -453,7 +397,7 @@ test("specialist output is attributed to the real persistent role session", () =
 test("specialist replies recover trailing object closures and hoist fields nested by a missing delimiter", () => {
   const malformed = JSON.stringify({
     content: "已完成六章十八场的连贯叙事设计。",
-    readyForUiDesign: true,
+    readyForAudit: true,
     readyForDevelopment: false,
     options: [],
     implementationBrief: {
@@ -491,7 +435,7 @@ test("specialist replies recover trailing object closures and hoist fields neste
   }, "zh");
 
   assert.equal(reply.content, "已完成六章十八场的连贯叙事设计。");
-  assert.equal(reply.readyForUiDesign, true);
+  assert.equal(reply.readyForAudit, true);
   assert.deepEqual(reply.projectDocumentPatch, { gameplay: { narrativeStructure: "six-chapter" } });
   assert.deepEqual(reply.e2eGoalDelta.add, [
     { description: "从开端完成至因选择累积得到的结局", source: "ACCEPTANCE" },
@@ -584,7 +528,7 @@ test("ready UI Design replies end with one development plan and the localized fi
   };
   const discovery = parseProjectRuntimeReply(result("DESIGN", {
     content: "请选择核心循环方向。",
-    readyForUiDesign: false,
+    readyForAudit: false,
     readyForDevelopment: false,
     options: [
       { label: " 采用探索驱动方案（推荐） ", description: "通过探索发现持续改变后续路线的机会。" },
@@ -610,20 +554,21 @@ test("ready UI Design replies end with one development plan and the localized fi
 
   const invalidDesignReadiness = parseProjectRuntimeReply(result("DESIGN", {
     content: "玩法完成，但 UI 设计尚未完成。",
-    readyForUiDesign: true,
+    readyForAudit: true,
     readyForDevelopment: true,
     options: [],
     implementationBrief: "交给 UI 设计 Agent。",
     projectDocumentPatch: {},
     e2eGoalDelta: { add: [], replace: [], retire: [] },
   }), "DESIGN", settings, "zh", "START_DEVELOPMENT");
-  assert.equal(invalidDesignReadiness.readyForUiDesign, true);
+  assert.equal(invalidDesignReadiness.readyForAudit, true);
   assert.equal(invalidDesignReadiness.readyForDevelopment, false);
+  assert.deepEqual(invalidDesignReadiness.options, []);
   assert.doesNotMatch(invalidDesignReadiness.content, /开发计划|是否按照当前计划开发|开始开发/u);
 
   const reply = parseProjectRuntimeReply(result("UI_DESIGN", {
     content: "玩法、界面和验收目标已经明确。",
-    readyForUiDesign: false,
+    readyForAudit: false,
     readyForDevelopment: true,
     options: [],
     implementationBrief: "先完成核心循环，再接入界面与验收测试。",
@@ -635,7 +580,7 @@ test("ready UI Design replies end with one development plan and the localized fi
 
   const authorized = parseProjectRuntimeReply(result("UI_DESIGN", {
     content: "玩法、界面和验收目标已经明确。\n\n## 实施计划（按风险排序）\n先完成核心循环。\n\n**开发计划**\n这段重复计划不应出现。\n\n是否按照当前计划开发？",
-    readyForUiDesign: false,
+    readyForAudit: false,
     readyForDevelopment: true,
     options: [],
     implementationBrief: "先完成核心循环，再接入界面与验收测试。",
@@ -829,8 +774,14 @@ test("incomplete design discovery cannot stage or execute an implementation chan
     actionable: true,
     summary: "Create a new game from an incomplete seed.",
   }));
-  assert.equal(implementationChangeReady(change, false), false);
-  assert.equal(implementationChangeReady(change, true), true);
+  assert.equal(implementationChangeReady(change, "DESIGN", {
+    readyForAudit: false,
+    readyForDevelopment: false,
+  }), false);
+  assert.equal(implementationChangeReady(change, "DESIGN", {
+    readyForAudit: true,
+    readyForDevelopment: false,
+  }), true);
   const question = parseProjectRuntimeIntent(result("INTENT", {
     intent: "QUESTION",
     targetRole: "DESIGN",
@@ -838,7 +789,10 @@ test("incomplete design discovery cannot stage or execute an implementation chan
     actionable: false,
     summary: "Explain the proposed core loop.",
   }));
-  assert.equal(implementationChangeReady(question, true), false);
+  assert.equal(implementationChangeReady(question, "DESIGN", {
+    readyForAudit: true,
+    readyForDevelopment: false,
+  }), false);
 });
 
 test("an actionable Development conversation can hand a concrete fix to the writable workflow", () => {
@@ -860,7 +814,7 @@ test("an actionable Development conversation can hand a concrete fix to the writ
   };
   const reply = parseProjectRuntimeReply(result("DEVELOPMENT", {
     content: "The source fix is scoped and ready for implementation.",
-    readyForUiDesign: false,
+    readyForAudit: false,
     readyForDevelopment: true,
     options: [],
     implementationBrief: "Persist player-visible choice copy and verify every recap and ending.",

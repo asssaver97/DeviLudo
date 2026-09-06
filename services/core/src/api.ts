@@ -18,6 +18,7 @@ import {
 import {
   MAX_PROJECT_RUNTIME_PROMPT_CHARS,
   type ProjectRuntimeProgressEvent,
+  type ProjectRuntimeTurnResult,
 } from "@/lib/product/project-runtime";
 import {
   assertPoolOperatingSystem,
@@ -111,7 +112,6 @@ import { ProjectSourceStore } from "./project-sources";
 import { ProjectRuntimeRepository } from "./project-runtime-repository";
 import { ProjectRuntimeService } from "./project-runtime-service";
 import {
-  designConversationConvergence,
   designReplyAction,
   implementationChangeReady,
   implementationBrief as runtimeImplementationBrief,
@@ -284,6 +284,7 @@ export async function runApi(
           capabilities: Object.freeze(["project.read", "project.write"] as const),
         }),
         repository,
+        objectStore,
         projectSources,
         projectRuntime,
         source: inspectProjectZip({
@@ -1327,25 +1328,28 @@ export async function runApi(
           concept: project.concept, settings,
           source: project.source ? { revision: project.source.revision, digest: project.source.digest, relativePath: project.source.relativePath } : null,
         });
+        const proposalConversation = await repository.readConversation(
+          workspace.id, changeRequest.conversationId,
+        );
+        const replanRole = lastConversationSpecialistRole(proposalConversation) ?? "DESIGN";
         const replannedResult = await projectRuntime.turn({
-          workspaceId: workspace.id, projectId: project.id, role: "UI_DESIGN", mode: "READ_ONLY_BRANCH",
+          workspaceId: workspace.id, projectId: project.id, role: replanRole, mode: "READ_ONLY_BRANCH",
           prompt: projectRuntimeSpecialistPrompt({
-            intent: Object.freeze({ intent: "CHANGE_REQUEST", targetRole: "UI_DESIGN", explicitExecution: false,
+            intent: Object.freeze({ intent: "CHANGE_REQUEST", targetRole: replanRole, explicitExecution: false,
               actionable: true, summary: changeRequest.summary }),
             content: `Re-plan the pending change against the current document. ${changeRequest.implementationBrief}`,
             confirmed: false,
-            upstreamDesign: Object.freeze({
-              implementationBrief: changeRequest.implementationBrief,
-              projectDocumentPatch: changeRequest.documentPatch,
-              e2eGoalDelta: changeRequest.e2eGoalDelta,
-            }),
           }),
           responseLanguage, settings,
           sourceRevision: project.source?.revision ?? null,
           sourceRelativePath: project.source?.relativePath ?? null,
         });
         const replannedReply = parseProjectRuntimeReply(
-          replannedResult, "UI_DESIGN", settings, responseLanguage, "AWAITING_CONFIRMATION",
+          replannedResult, replanRole, settings, responseLanguage, designReplyAction(
+            Object.freeze({ intent: "CHANGE_REQUEST", targetRole: replanRole, explicitExecution: false,
+              actionable: true, summary: changeRequest.summary }),
+            replanRole,
+          ),
         );
         const replacement = await repository.createImplementationChangeRequest({
           workspaceId: workspace.id,
@@ -2531,62 +2535,12 @@ async function processConversationMessage(input: Readonly<{
       streamedContent: streamedSpecialistContent, hasStreamedProcess: hasStreamedSpecialistProcess,
       signal: input.signal,
     });
-    let effectiveIntent = intentDecision;
-    let effectiveResult = specialistResult;
-    let effectiveReply = specialistReply;
     const assistantMessages: Array<Readonly<{ content: string; metadata: Readonly<Record<string, unknown>> }>> = [Object.freeze({
       content: specialistReply.content,
       metadata: Object.freeze({ ...conversationAgentMetadata(specialistReply), intentDecision,
         runtimeTurnId: specialistResult.turnId, runtimeSessionId: specialistResult.sessionId }),
     })];
-    if (specialistRole === "DESIGN" && specialistReply.readyForUiDesign) {
-      input.stream?.onComplete("DESIGN");
-      const uiIntent = Object.freeze({ ...intentDecision, targetRole: "UI_DESIGN" as const });
-      let streamedUiContent = "";
-      let hasStreamedUiProcess = false;
-      input.stream?.onStart("UI_DESIGN");
-      const uiResult = await input.projectRuntime.turn({
-        workspaceId: targetWorkspace.id,
-        projectId,
-        role: "UI_DESIGN",
-        mode: "READ_ONLY_BRANCH",
-        prompt: projectRuntimeSpecialistPrompt({
-          intent: uiIntent,
-          content: conversationAgentContent(command),
-          confirmed: intentDecision.intent === "CHANGE_REQUEST" && intentDecision.explicitExecution,
-          upstreamDesign: conversationDesignHandoff(specialistReply),
-        }),
-        responseLanguage: command.responseLanguage,
-        settings,
-        sourceRevision: null,
-        sourceRelativePath: null,
-        attachments: command.runtimeImages,
-        onEvent: event => {
-          const forwarded = forwardConversationRuntimeProgress(input.stream, "UI_DESIGN", event);
-          streamedUiContent += forwarded.content;
-          hasStreamedUiProcess ||= forwarded.process;
-        },
-      }).catch(error => { throw httpError(424, "UI_DESIGN_AGENT_FAILED", error instanceof Error ? error.message : "UI Design Agent failed"); });
-      const uiReply = parseProjectRuntimeReply(
-        uiResult, "UI_DESIGN", settings, command.responseLanguage, designReplyAction(uiIntent, "UI_DESIGN"),
-      );
-      await deliverValidatedConversationReply({
-        stream: input.stream, role: "UI_DESIGN", content: uiReply.content,
-        streamedContent: streamedUiContent, hasStreamedProcess: hasStreamedUiProcess,
-        signal: input.signal,
-      });
-      input.stream?.onComplete("UI_DESIGN");
-      assistantMessages.push(Object.freeze({
-        content: uiReply.content,
-        metadata: Object.freeze({ ...conversationAgentMetadata(uiReply), intentDecision: uiIntent,
-          runtimeTurnId: uiResult.turnId, runtimeSessionId: uiResult.sessionId }),
-      }));
-      effectiveIntent = uiIntent;
-      effectiveResult = uiResult;
-      effectiveReply = uiReply;
-    } else {
-      input.stream?.onComplete(specialistRole);
-    }
+    input.stream?.onComplete(specialistRole);
     input.onStage?.("SAVING");
     const userAttachments = await storeConversationAttachments(objectStore, {
       workspaceId: targetWorkspace.id,
@@ -2610,23 +2564,25 @@ async function processConversationMessage(input: Readonly<{
     let createdProject = await repository.readProject(targetWorkspace.id, projectId) ?? shell.project;
     let changeRequest: ImplementationChangeRequest | undefined;
     let initialWorkflowAction: ConversationWorkflowAction = "NONE";
-    if (implementationChangeReady(effectiveIntent, effectiveReply.readyForDevelopment)) {
+    const automaticDesignAudit = specialistRole === "DESIGN" && specialistReply.readyForAudit;
+    if (implementationChangeReady(intentDecision, specialistRole, specialistReply)) {
       changeRequest = await repository.createImplementationChangeRequest({
         workspaceId: targetWorkspace.id,
         projectId,
         workflowId,
         conversationId,
-        summary: effectiveIntent.summary,
-        implementationBrief: runtimeImplementationBrief(effectiveResult, effectiveReply.content),
-        projectDocumentPatch: effectiveReply.projectDocumentPatch ?? Object.freeze({}),
-        e2eGoalDelta: effectiveReply.e2eGoalDelta,
-        explicitExecution: effectiveIntent.explicitExecution,
+        summary: intentDecision.summary,
+        implementationBrief: runtimeImplementationBrief(specialistResult, specialistReply.content),
+        projectDocumentPatch: specialistReply.projectDocumentPatch ?? Object.freeze({}),
+        e2eGoalDelta: specialistReply.e2eGoalDelta,
+        explicitExecution: intentDecision.explicitExecution || automaticDesignAudit,
         idempotencyKey: requestIdempotencyKey(request, "implementation-change"),
       });
     }
     if (createdProject.workflowState === "DRAFT" && createdProject.analysisStatus === "READY"
-      && effectiveIntent.intent === "CHANGE_REQUEST" && effectiveIntent.explicitExecution
-      && effectiveIntent.actionable && effectiveReply.readyForDevelopment && changeRequest) {
+      && intentDecision.intent === "CHANGE_REQUEST" && (intentDecision.explicitExecution || automaticDesignAudit)
+      && intentDecision.actionable && implementationChangeReady(intentDecision, specialistRole, specialistReply)
+      && changeRequest) {
       initialWorkflowAction = await applyConfirmedConversationChange({
         repository, objectStore, workspaceId: targetWorkspace.id, project: createdProject,
         changeRequest, actorId: principal.actorId, responseLanguage: command.responseLanguage,
@@ -2724,20 +2680,16 @@ async function processConversationMessage(input: Readonly<{
     const rejected = intentDecision.intent === "REJECT_CHANGE";
     if (!rejected && pending.state === "PENDING"
       && pending.baseDocumentRevision !== project.document.revision) {
+      const replanRole = lastConversationSpecialistRole(existingConversation) ?? "DESIGN";
       const replannedResult = await input.projectRuntime.turn({
         workspaceId: workspace.id,
         projectId,
-        role: "UI_DESIGN",
+        role: replanRole,
         mode: "READ_ONLY_BRANCH",
         prompt: projectRuntimeSpecialistPrompt({
-          intent: Object.freeze({ ...intentDecision, intent: "CHANGE_REQUEST", targetRole: "UI_DESIGN", explicitExecution: false, actionable: true }),
+          intent: Object.freeze({ ...intentDecision, intent: "CHANGE_REQUEST", targetRole: replanRole, explicitExecution: false, actionable: true }),
           content: `Re-plan the pending change against the current document. Pending change: ${pending.summary}`,
           confirmed: false,
-          upstreamDesign: Object.freeze({
-            implementationBrief: pending.implementationBrief,
-            projectDocumentPatch: pending.documentPatch,
-            e2eGoalDelta: pending.e2eGoalDelta,
-          }),
         }),
         responseLanguage: command.responseLanguage,
         settings,
@@ -2745,7 +2697,11 @@ async function processConversationMessage(input: Readonly<{
         sourceRelativePath: project.source?.relativePath ?? null,
       });
       const replannedReply = parseProjectRuntimeReply(
-        replannedResult, "UI_DESIGN", settings, command.responseLanguage, "AWAITING_CONFIRMATION",
+        replannedResult, replanRole, settings, command.responseLanguage, designReplyAction(
+          Object.freeze({ ...intentDecision, intent: "CHANGE_REQUEST", targetRole: replanRole,
+            explicitExecution: false, actionable: true }),
+          replanRole,
+        ),
       );
       input.onStage?.("SAVING");
       const conversation = await repository.appendConversationTurn({
@@ -2880,9 +2836,6 @@ async function processConversationMessage(input: Readonly<{
   }
 
   const specialistRole = intentDecision.targetRole;
-  const designConvergence = ["DESIGN", "UI_DESIGN"].includes(specialistRole)
-    ? designConversationConvergence(existingConversation?.messages ?? Object.freeze([]), command.content)
-    : undefined;
   let streamedSpecialistContent = "";
   let hasStreamedSpecialistProcess = false;
   input.stream?.onStart(specialistRole);
@@ -2895,10 +2848,6 @@ async function processConversationMessage(input: Readonly<{
       intent: intentDecision,
       content: conversationAgentContent(command),
       confirmed: intentDecision.intent === "CHANGE_REQUEST" && intentDecision.explicitExecution,
-      designConvergence,
-      upstreamDesign: specialistRole === "UI_DESIGN"
-        ? conversationDesignHandoff(existingConversation)
-        : null,
     }),
     responseLanguage: command.responseLanguage,
     settings,
@@ -2928,68 +2877,12 @@ async function processConversationMessage(input: Readonly<{
     streamedContent: streamedSpecialistContent, hasStreamedProcess: hasStreamedSpecialistProcess,
     signal: input.signal,
   });
-  let effectiveIntent = intentDecision;
-  let effectiveResult = specialistResult;
-  let effectiveReply = specialistReply;
   const assistantMessages: Array<Readonly<{ content: string; metadata: Readonly<Record<string, unknown>> }>> = [Object.freeze({
     content: specialistReply.content,
     metadata: Object.freeze({ ...conversationAgentMetadata(specialistReply), intentDecision,
       runtimeTurnId: specialistResult.turnId, runtimeSessionId: specialistResult.sessionId }),
   })];
-  if (specialistRole === "DESIGN" && specialistReply.readyForUiDesign) {
-    input.stream?.onComplete("DESIGN");
-    const uiIntent = Object.freeze({ ...intentDecision, targetRole: "UI_DESIGN" as const });
-    let streamedUiContent = "";
-    let hasStreamedUiProcess = false;
-    input.stream?.onStart("UI_DESIGN");
-    const uiResult = await input.projectRuntime.turn({
-      workspaceId: workspace.id,
-      projectId,
-      role: "UI_DESIGN",
-      mode: "READ_ONLY_BRANCH",
-      prompt: projectRuntimeSpecialistPrompt({
-        intent: uiIntent,
-        content: conversationAgentContent(command),
-        confirmed: intentDecision.intent === "CHANGE_REQUEST" && intentDecision.explicitExecution,
-        designConvergence,
-        upstreamDesign: conversationDesignHandoff(specialistReply),
-      }),
-      responseLanguage: command.responseLanguage,
-      settings,
-      sourceRevision: project.source?.revision ?? null,
-      sourceRelativePath: project.source?.relativePath ?? null,
-      attachments: command.runtimeImages,
-      onEvent: event => {
-        const forwarded = forwardConversationRuntimeProgress(input.stream, "UI_DESIGN", event);
-        streamedUiContent += forwarded.content;
-        hasStreamedUiProcess ||= forwarded.process;
-      },
-    }).catch(async error => {
-      if (pausedDeliveryForChange) {
-        await input.projectRuntime.resumeWorkflowAfterConversationChange(workspace.id, projectId).catch(() => undefined);
-      }
-      throw httpError(424, "UI_DESIGN_AGENT_FAILED", error instanceof Error ? error.message : "UI Design Agent failed");
-    });
-    const uiReply = parseProjectRuntimeReply(
-      uiResult, "UI_DESIGN", settings, command.responseLanguage, designReplyAction(uiIntent, "UI_DESIGN"),
-    );
-    await deliverValidatedConversationReply({
-      stream: input.stream, role: "UI_DESIGN", content: uiReply.content,
-      streamedContent: streamedUiContent, hasStreamedProcess: hasStreamedUiProcess,
-      signal: input.signal,
-    });
-    input.stream?.onComplete("UI_DESIGN");
-    assistantMessages.push(Object.freeze({
-      content: uiReply.content,
-      metadata: Object.freeze({ ...conversationAgentMetadata(uiReply), intentDecision: uiIntent,
-        runtimeTurnId: uiResult.turnId, runtimeSessionId: uiResult.sessionId }),
-    }));
-    effectiveIntent = uiIntent;
-    effectiveResult = uiResult;
-    effectiveReply = uiReply;
-  } else {
-    input.stream?.onComplete(specialistRole);
-  }
+  input.stream?.onComplete(specialistRole);
   input.onStage?.("SAVING");
   const conversation = await repository.appendConversationTurn({
     workspaceId: workspace.id,
@@ -3003,7 +2896,7 @@ async function processConversationMessage(input: Readonly<{
     resolveImportAnalysis: false,
     responseLanguage: command.responseLanguage,
   });
-  if (!implementationChangeReady(effectiveIntent, effectiveReply.readyForDevelopment)) {
+  if (!implementationChangeReady(intentDecision, specialistRole, specialistReply)) {
     if (resumePausedDeliveryAfterResponse) {
       await input.projectRuntime.resumeWorkflowAfterConversationChange(workspace.id, projectId);
     }
@@ -3014,19 +2907,23 @@ async function processConversationMessage(input: Readonly<{
     });
   }
 
+  const automaticDesignAudit = specialistRole === "DESIGN"
+    && specialistReply.readyForAudit
+    && project.workflowState === "DRAFT"
+    && existingConversation?.mode === "NEW_GAME";
   const changeRequest = await repository.createImplementationChangeRequest({
     workspaceId: workspace.id,
     projectId,
     workflowId: project.workflowId,
     conversationId,
-    summary: effectiveIntent.summary,
-    implementationBrief: runtimeImplementationBrief(effectiveResult, effectiveReply.content),
-    projectDocumentPatch: effectiveReply.projectDocumentPatch ?? Object.freeze({}),
-    e2eGoalDelta: effectiveReply.e2eGoalDelta,
-    explicitExecution: effectiveIntent.explicitExecution,
+    summary: intentDecision.summary,
+    implementationBrief: runtimeImplementationBrief(specialistResult, specialistReply.content),
+    projectDocumentPatch: specialistReply.projectDocumentPatch ?? Object.freeze({}),
+    e2eGoalDelta: specialistReply.e2eGoalDelta,
+    explicitExecution: intentDecision.explicitExecution || automaticDesignAudit,
     idempotencyKey: requestIdempotencyKey(request, "implementation-change"),
   });
-  if (!effectiveIntent.explicitExecution) {
+  if (!intentDecision.explicitExecution && !automaticDesignAudit) {
     const updatedProject = await repository.readProject(workspace.id, projectId) ?? project;
     return Object.freeze({
       statusCode: created ? 201 : 200, setWorkspaceCookie: false,
@@ -3494,6 +3391,7 @@ async function processHostedProjectImport(input: Readonly<{
   request: FastifyRequest;
   principal: CorePrincipal;
   repository: CoreRepository;
+  objectStore: CoreObjectStore;
   projectSources: ProjectSourceStore;
   projectRuntime: ProjectRuntimeService;
   source: ImportedSourceSnapshot;
@@ -3574,7 +3472,7 @@ async function processHostedProjectImport(input: Readonly<{
       model: resolveAgentModel(settings.primaryModel, settings.modelOverrides, "analysis"),
       settingsRevision: settings.revision,
     });
-    const designAssistants = await designImportedProject({
+    const design = await designImportedProject({
       projectRuntime: input.projectRuntime,
       workspaceId: input.principal.workspace.id,
       projectId,
@@ -3601,7 +3499,7 @@ async function processHostedProjectImport(input: Readonly<{
         model: analysis.model,
         settingsRevision: analysis.settingsRevision,
       },
-      designAssistants,
+      designAssistants: design.assistants,
       discovery: analysis.discovery,
       source: {
         kind: "GIT",
@@ -3617,8 +3515,21 @@ async function processHostedProjectImport(input: Readonly<{
       },
     });
     if (!completed) throw new Error("Hosted project import could not be completed");
-    const project = await input.repository.readProject(input.principal.workspace.id, projectId);
+    let project = await input.repository.readProject(input.principal.workspace.id, projectId);
     if (!project) throw new Error("Hosted project import could not be read");
+    if (design.reply.readyForAudit) {
+      await startImportedDesignAudit({
+        repository: input.repository,
+        objectStore: input.objectStore,
+        workspaceId: input.principal.workspace.id,
+        project,
+        conversationId: completed,
+        actorId: input.principal.actorId,
+        responseLanguage,
+        design,
+      });
+      project = await input.repository.readProject(input.principal.workspace.id, projectId) ?? project;
+    }
     return Object.freeze({ created: true, project });
   } catch (error) {
     await input.repository.deleteProject(input.principal.workspace.id, projectId, async () => undefined).catch(() => undefined);
@@ -3635,7 +3546,11 @@ async function designImportedProject(input: Readonly<{
   settings: StoredInstanceAgentSettings;
   sourceRevision: number;
   sourceRelativePath: string;
-}>): Promise<ReadonlyArray<Readonly<{ content: string; metadata: Readonly<Record<string, unknown>> }>>> {
+}>): Promise<Readonly<{
+  assistants: ReadonlyArray<Readonly<{ content: string; metadata: Readonly<Record<string, unknown>> }>>;
+  result: ProjectRuntimeTurnResult;
+  reply: ProductConversationGroupReply;
+}>> {
   const result = await input.projectRuntime.turn({
     workspaceId: input.workspaceId,
     projectId: input.projectId,
@@ -3644,9 +3559,9 @@ async function designImportedProject(input: Readonly<{
     prompt: [
       "The Analysis Agent has completed the imported-project source analysis and persisted it in canonical context at workflow.analysis.",
       "Read that report first, then continue as the Design Agent. Preserve verified working behavior and turn the analysis findings into a coherent, playable game design.",
-      "Resolve design gaps when evidence supports a reversible default; ask only high-impact player questions that remain unresolved.",
+      "Use deliberate systems reasoning to resolve design gaps autonomously. Ask the player only when explicit requirements conflict or a missing player-only fact makes the core product direction impossible to choose responsibly; ordinary design alternatives, preferences and tunable values are yours to decide and send through audit.",
       "Do not edit source or durable project state in this read-only branch.",
-      "Return the standard Design Agent JSON response. Set readyForUiDesign from gameplay completeness and always keep readyForDevelopment=false.",
+      "Return the standard Design Agent JSON response. Unless that exceptional blocker exists, return a complete proposal with readyForAudit=true and options=[]; Core starts durable Markdown generation and independent audits automatically, without player confirmation. Always keep readyForDevelopment=false and never hand directly to UI Design.",
     ].join("\n"),
     responseLanguage: input.responseLanguage,
     settings: input.settings,
@@ -3654,7 +3569,7 @@ async function designImportedProject(input: Readonly<{
     sourceRelativePath: input.sourceRelativePath,
   });
   const reply = parseProjectRuntimeReply(
-    result, "DESIGN", input.settings, input.responseLanguage, "AWAITING_CONFIRMATION",
+    result, "DESIGN", input.settings, input.responseLanguage,
   );
   const assistants: Array<Readonly<{ content: string; metadata: Readonly<Record<string, unknown>> }>> = [Object.freeze({
     content: reply.content,
@@ -3664,42 +3579,41 @@ async function designImportedProject(input: Readonly<{
       runtimeSessionId: result.sessionId,
     }),
   })];
-  if (!reply.readyForUiDesign) return Object.freeze(assistants);
-  const intent = Object.freeze({
-    intent: "CHANGE_REQUEST" as const,
-    targetRole: "UI_DESIGN" as const,
-    explicitExecution: false,
-    actionable: true,
-    summary: "Design the interface for the analyzed project's completed gameplay proposal.",
-  });
-  const uiResult = await input.projectRuntime.turn({
+  return Object.freeze({ assistants: Object.freeze(assistants), result, reply });
+}
+
+async function startImportedDesignAudit(input: Readonly<{
+  repository: CoreRepository;
+  objectStore: CoreObjectStore;
+  workspaceId: string;
+  project: ProductProjectDetail;
+  conversationId: string;
+  actorId: string;
+  responseLanguage: ResponseLanguage;
+  design: Readonly<{ result: ProjectRuntimeTurnResult; reply: ProductConversationGroupReply }>;
+}>): Promise<void> {
+  const changeRequest = await input.repository.createImplementationChangeRequest({
     workspaceId: input.workspaceId,
-    projectId: input.projectId,
-    role: "UI_DESIGN",
-    mode: "READ_ONLY_BRANCH",
-    prompt: projectRuntimeSpecialistPrompt({
-      intent,
-      content: "Continue from the imported-project analysis and completed gameplay proposal.",
-      confirmed: false,
-      upstreamDesign: conversationDesignHandoff(reply),
-    }),
-    responseLanguage: input.responseLanguage,
-    settings: input.settings,
-    sourceRevision: input.sourceRevision,
-    sourceRelativePath: input.sourceRelativePath,
+    projectId: input.project.id,
+    workflowId: input.project.workflowId,
+    conversationId: input.conversationId,
+    summary: input.design.reply.content.slice(0, 2_000),
+    implementationBrief: runtimeImplementationBrief(input.design.result, input.design.reply.content),
+    projectDocumentPatch: input.design.reply.projectDocumentPatch ?? Object.freeze({}),
+    e2eGoalDelta: input.design.reply.e2eGoalDelta,
+    explicitExecution: true,
+    idempotencyKey: `import-design-audit:${input.design.result.turnId}`,
   });
-  const uiReply = parseProjectRuntimeReply(
-    uiResult, "UI_DESIGN", input.settings, input.responseLanguage, "AWAITING_CONFIRMATION",
-  );
-  assistants.push(Object.freeze({
-    content: uiReply.content,
-    metadata: Object.freeze({
-      ...conversationAgentMetadata(uiReply),
-      runtimeTurnId: uiResult.turnId,
-      runtimeSessionId: uiResult.sessionId,
-    }),
-  }));
-  return Object.freeze(assistants);
+  await applyConfirmedConversationChange({
+    repository: input.repository,
+    objectStore: input.objectStore,
+    workspaceId: input.workspaceId,
+    project: input.project,
+    changeRequest,
+    actorId: input.actorId,
+    responseLanguage: input.responseLanguage,
+    decisionIdempotencyKey: `import-design-audit-decision:${input.design.result.turnId}`,
+  });
 }
 
 async function runProjectImportAnalysisWorker(input: Readonly<{
@@ -3780,7 +3694,7 @@ async function runProjectImportAnalysisWorker(input: Readonly<{
         model: resolveAgentModel(settings.primaryModel, settings.modelOverrides, "analysis"),
         settingsRevision: settings.revision,
       });
-      const designAssistants = await designImportedProject({
+      const design = await designImportedProject({
         projectRuntime: input.projectRuntime,
         workspaceId: claimed.workspaceId,
         projectId: claimed.projectId,
@@ -3807,7 +3721,7 @@ async function runProjectImportAnalysisWorker(input: Readonly<{
           settingsRevision: analysis.settingsRevision,
           analyzedProjectName: analysis.name,
         },
-        designAssistants,
+        designAssistants: design.assistants,
         discovery: analysis.discovery,
         source: {
           kind: source.sourceKind as "GIT" | "LOCAL_DIRECTORY",
@@ -3836,6 +3750,17 @@ async function runProjectImportAnalysisWorker(input: Readonly<{
             changeRequest: pending,
             actorId: claimed.actorId,
             responseLanguage: claimed.responseLanguage,
+          });
+        } else if (project && design.reply.readyForAudit) {
+          await startImportedDesignAudit({
+            repository: input.repository,
+            objectStore: input.objectStore,
+            workspaceId: claimed.workspaceId,
+            project,
+            conversationId: completed,
+            actorId: claimed.actorId,
+            responseLanguage: claimed.responseLanguage,
+            design,
           });
         }
       }
@@ -3905,14 +3830,7 @@ function conversationAgentMetadata(reply: ProductConversationGroupReply): Readon
     model: reply.model,
     settingsRevision: reply.settingsRevision,
     readyForDevelopment: reply.readyForDevelopment,
-    readyForUiDesign: reply.readyForUiDesign,
-    ...(reply.readyForUiDesign ? {
-      designHandoff: Object.freeze({
-        implementationBrief: reply.implementationBrief,
-        projectDocumentPatch: reply.projectDocumentPatch ?? Object.freeze({}),
-        e2eGoalDelta: reply.e2eGoalDelta,
-      }),
-    } : {}),
+    readyForAudit: reply.readyForAudit,
     options: reply.options,
   });
 }
@@ -3924,29 +3842,6 @@ function lastConversationSpecialistRole(conversation: ProductConversation | null
     ?.metadata.agentRole;
   return role === "DESIGN" || role === "UI_DESIGN" || role === "DEVELOPMENT" || role === "TEST"
     ? role
-    : null;
-}
-
-function conversationDesignHandoff(
-  source: ProductConversation | ProductConversationGroupReply | null,
-): Readonly<Record<string, unknown>> | null {
-  if (!source) return null;
-  if ("agentRole" in source) {
-    if (source.agentRole !== "DESIGN" || !source.readyForUiDesign) return null;
-    return Object.freeze({
-      implementationBrief: source.implementationBrief,
-      projectDocumentPatch: source.projectDocumentPatch ?? Object.freeze({}),
-      e2eGoalDelta: source.e2eGoalDelta,
-    });
-  }
-  const candidate = [...source.messages].reverse().find(message => (
-    message.role === "ASSISTANT"
-    && message.metadata.agentRole === "DESIGN"
-    && message.metadata.designHandoff !== undefined
-  ));
-  const handoff = candidate?.metadata.designHandoff;
-  return handoff && typeof handoff === "object" && !Array.isArray(handoff)
-    ? Object.freeze(handoff as Record<string, unknown>)
     : null;
 }
 

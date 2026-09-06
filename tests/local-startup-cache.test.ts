@@ -213,4 +213,9 @@ test("local startup returns with E2E preparation in the background and exposes c
   assert.match(startup, /DEVILUDO_PROJECTS_VOLUME: projectsVolume/);
   assert.match(startup, /fingerprintProjectSources\(\)[\s\S]*"volume",\s*projectsVolume/);
   assert.match(startup, /executeVisible\("docker", \[\s*"compose"/);
+  assert.match(startup, /"compose", "--ansi", "never", "--progress", "quiet"/);
+  assert.match(startup, /const compose = \["compose", "-f", "infra\/docker-compose\.yml", "--profile", "images", "build"\]/);
+  assert.doesNotMatch(startup, /BUILDKIT_PROGRESS: "plain"/);
+  assert.match(startup, /child\.once\("close"/);
+  assert.match(startup, /if \(ciMode\) console\.log\(JSON\.stringify\(startupSummary\)\)/);
 });

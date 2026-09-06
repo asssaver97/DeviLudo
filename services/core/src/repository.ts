@@ -1061,7 +1061,7 @@ export class CoreRepository {
       relativePath: string;
       sha256: string;
     }>;
-  }>): Promise<boolean> {
+  }>): Promise<string | null> {
     return this.database.withWorkspace(input.workspaceId, async client => {
       const workflow = await client.query<{ state_data: Record<string, unknown>; project_name: string }>(
         `SELECT workflow.state_data, project.name AS project_name
@@ -1073,7 +1073,7 @@ export class CoreRepository {
         [input.workflowId, input.projectId],
       );
       const row = workflow.rows[0];
-      if (!row || (!input.hosted && !analysisLeaseMatches(row.state_data, input.leaseToken))) return false;
+      if (!row || (!input.hosted && !analysisLeaseMatches(row.state_data, input.leaseToken))) return null;
       await client.query(
         `UPDATE deviludo.projects SET name = $3, last_activity_at = clock_timestamp()
           WHERE workspace_id = $1::uuid AND id = $2::uuid`,
@@ -1217,18 +1217,17 @@ export class CoreRepository {
         })],
       );
       for (const assistant of input.designAssistants) {
-        const role = assistant.metadata.agentRole === "UI_DESIGN" ? "UI_DESIGN" : "DESIGN";
         await client.query(
           `INSERT INTO deviludo.conversation_messages(workspace_id, conversation_id, role, content, metadata)
            VALUES ($1::uuid, $2::uuid, 'ASSISTANT', $3, $4::jsonb)`,
           [input.workspaceId, conversationId, assistant.content, JSON.stringify({
             ...assistant.metadata,
-            source: role === "UI_DESIGN" ? "PROJECT_IMPORT_UI_DESIGN_AGENT" : "PROJECT_IMPORT_DESIGN_AGENT",
-            importStage: role,
+            source: "PROJECT_IMPORT_DESIGN_AGENT",
+            importStage: "DESIGN",
           })],
         );
       }
-      return true;
+      return conversationId;
     });
   }
 
@@ -3105,6 +3104,7 @@ export class CoreRepository {
                        CASE WHEN jsonb_typeof(message.metadata->'options') = 'array'
                          THEN message.metadata->'options' ELSE '[]'::jsonb END
                      ), 0) = 0
+                  AND coalesce(message.metadata->>'readyForAudit', 'false') <> 'true'
                   AND jsonb_typeof(agent_turn.structured_output->'options') = 'array'
                 THEN jsonb_set(message.metadata, '{options}', agent_turn.structured_output->'options', true)
                 ELSE message.metadata

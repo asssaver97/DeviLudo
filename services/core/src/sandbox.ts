@@ -498,8 +498,8 @@ function runtimeJobPrompt(job: JobProtocolV4, role: ProjectRuntimeRole): string 
   }
   if (role === "UI_DESIGN") {
     return [
-      "Confirm the approved UI specification against the canonical gameplay and project document.",
-      "Create a complete DEVELOPMENT handoff. Do not edit source or implement UI code.",
+      "Create or revise the complete UI specification from the audit-approved gameplay and current project evidence. Resolve ordinary visual choices yourself.",
+      "This primary turn authorizes the UI specification and durable DEVELOPMENT handoff; do not ask for another player confirmation. Do not edit source or implement UI code.",
       handoff ? `Design handoff: ${JSON.stringify(handoff).slice(0, 40_000)}` : "",
     ].filter(Boolean).join("\n");
   }
@@ -511,7 +511,7 @@ function runtimeJobPrompt(job: JobProtocolV4, role: ProjectRuntimeRole): string 
     ].filter(Boolean).join("\n");
   }
   if (purpose === "TEST_VERDICT") {
-    return "Read all platform evidence for the current source and plan revisions. Return PASS only if every deterministic, visual, performance, crash, input-response, requirement, and asset-binding gate passes. Return REPLAN without a Development handoff when evidence is classified CONFIGURATION or TEST_PLAN_REFERENCE_MISSING. Otherwise return FAIL with one structured DEVELOPMENT handoff, or BLOCKED only for unrecoverable environment configuration.";
+    return "Read all platform evidence for the current source and plan revisions. Return PASS only if every deterministic, visual, performance, crash, input-response, requirement, and asset-binding gate passes. Return REPLAN without a Development handoff when evidence is classified CONFIGURATION or TEST_PLAN_REFERENCE_MISSING. Otherwise return FAIL with one structured DEVELOPMENT handoff, or BLOCKED only when required evidence remains unavailable or untrustworthy after bounded authorized recovery and needs external repair.";
   }
   return "Create and persist the complete test plan for the current requirement and source revisions, covering every target platform, real input, planned asset binding, screenshots, video, crashes, and performance. Before freezing it, use source_list and source_read (with startLine/endLine ranges for large files) to inspect the functions that actually publish the Probe keys and semantic control IDs. Prior plans, agent.json, refresh scripts, and tests may be stale and are not publication evidence. Start all platform runs with the identical frozen plan.";
 }

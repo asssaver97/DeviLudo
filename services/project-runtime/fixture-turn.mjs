@@ -79,11 +79,12 @@ if (request.mode === "COMPACT") {
   if (/素材回收|回收废弃|asset cleanup|retire obsolete/i.test(JSON.stringify(context))) {
     const firstDevelopment = !Array.isArray(context?.assetPlan) || context.assetPlan.length === 0;
     if (firstDevelopment) {
-      const assetDirectory = `${sourceDirectory}/assets/generated`;
+      const assetDirectory = `${sourceDirectory}/assets/generated/ui`;
       await mkdir(assetDirectory, { recursive: true });
+      const png = Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAACXBIWXMAAAPoAAAD6AG1e1JrAAAADUlEQVR4nGNg2PL/PwAFHgKz57crZQAAAABJRU5ErkJggg==", "base64");
       await Promise.all([
-        writeFile(`${assetDirectory}/obsolete-panel.svg`, "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"8\" height=\"8\"><rect width=\"8\" height=\"8\" fill=\"#0cf\"/></svg>\n"),
-        writeFile(`${assetDirectory}/user-banner.svg`, "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"8\" height=\"8\"><rect width=\"8\" height=\"8\" fill=\"#fc0\"/></svg>\n"),
+        writeFile(`${assetDirectory}/obsolete-panel.png`, png),
+        writeFile(`${assetDirectory}/user-banner.png`, png),
       ]);
       await callTool("assets.plan", { assets: fixtureAssets(request.workspaceId, request.projectId) });
     } else {
@@ -326,8 +327,8 @@ function specialistReply(role, language) {
     content: language === "zh"
       ? `${names[role]} 已结合项目上下文生成回复。`
       : `${names[role]} answered from the current project context.`,
-    readyForUiDesign: role === "DESIGN",
-    readyForDevelopment: role === "UI_DESIGN",
+    readyForAudit: role === "DESIGN",
+    readyForDevelopment: role === "UI_DESIGN" || role === "DEVELOPMENT",
     options: language === "zh"
       ? [
           { label: "采用强化资源管理方案（推荐）", description: "强调资源来源、消耗与风险之间的持续取舍。" },
@@ -484,9 +485,21 @@ async function sourceBackedTestManifest(goals) {
     if (manifest.adaptivePlayer && typeof manifest.adaptivePlayer === "object") {
       manifest.adaptivePlayer.requirementIds = requirementIds;
     }
-    for (const feature of manifest.features) {
+    const interactiveFeatures = manifest.features.filter(feature => (
+      feature && typeof feature === "object" && Array.isArray(feature.interactionScript?.events)
+    ));
+    manifest.features = interactiveFeatures;
+    const featureRequirements = interactiveFeatures.map(() => []);
+    requirementIds.forEach((requirementId, index) => {
+      featureRequirements[index % interactiveFeatures.length].push(requirementId);
+    });
+    featureRequirements.forEach((ids, index) => {
+      if (ids.length === 0) ids.push(requirementIds[index % requirementIds.length]);
+    });
+    for (const [featureIndex, feature] of interactiveFeatures.entries()) {
       if (!feature || typeof feature !== "object") continue;
-      feature.requirementIds = requirementIds;
+      const assignedRequirements = featureRequirements[featureIndex];
+      feature.requirementIds = assignedRequirements;
       feature.coreJourney = feature.id === "play-aurora-loop";
       const events = feature.interactionScript?.events;
       if (!Array.isArray(events)) continue;
@@ -501,13 +514,19 @@ async function sourceBackedTestManifest(goals) {
           delay_ms: 50,
           stepId: "fixture-complete-loop",
           intent: "COMPLETE_LOOP",
-          coversRequirementIds: requirementIds,
+          coversRequirementIds: [],
           postconditions: [{ source: "PROGRESS", key: "ship_x", operator: "CHANGED" }],
         });
       }
+      const actions = events.filter(event => event && typeof event === "object"
+        && Array.isArray(event.coversRequirementIds));
+      for (const [actionIndex, event] of actions.entries()) {
+        event.coversRequirementIds = assignedRequirements.filter((_, requirementIndex) => (
+          requirementIndex % actions.length === actionIndex
+        ));
+      }
       for (const event of events) {
         if (!event || typeof event !== "object") continue;
-        if (Array.isArray(event.coversRequirementIds)) event.coversRequirementIds = requirementIds;
         if (["checkpoint", "wait"].includes(String(event.type))) continue;
         const postconditions = Array.isArray(event.postconditions) ? event.postconditions : [];
         if (postconditions.some(item => item?.operator === "CHANGED")) continue;
@@ -551,22 +570,27 @@ function assetPlacementPlan(assets) {
 function fixtureAssets(workspaceId, projectId) {
   return [{
     key: "ui/obsolete-panel",
+    assetType: "ui",
     origin: "GENERATED",
-    targetId: "obsolete-panel",
-    checkpointRole: "READY",
-    expectedResourcePath: "res://assets/generated/obsolete-panel.svg",
-    sourcePath: "assets/generated/obsolete-panel.svg",
+    description: "A generated panel used by the previous interface revision.",
+    generationPrompt: "Render a complete decorative game interface panel with transparent edges.",
+    targetId: "new-game",
+    checkpointRole: "START",
+    expectedResourcePath: "res://assets/generated/ui/obsolete-panel.png",
+    sourcePath: "assets/generated/ui/obsolete-panel.png",
     bucket: "game-assets",
-    objectKey: `workspaces/${workspaceId}/projects/${projectId}/assets/obsolete-panel.svg`,
+    objectKey: `workspaces/${workspaceId}/projects/${projectId}/assets/obsolete-panel.png`,
   }, {
     key: "ui/user-banner",
+    assetType: "ui",
     origin: "USER_UPLOAD",
-    targetId: "user-banner",
-    checkpointRole: "READY",
-    expectedResourcePath: "res://assets/generated/user-banner.svg",
-    sourcePath: "assets/generated/user-banner.svg",
+    description: "A player-provided banner that must survive generated asset cleanup.",
+    targetId: "new-game",
+    checkpointRole: "START",
+    expectedResourcePath: "res://assets/generated/ui/user-banner.png",
+    sourcePath: "assets/generated/ui/user-banner.png",
     bucket: "game-assets",
-    objectKey: `workspaces/${workspaceId}/projects/${projectId}/uploads/user-banner.svg`,
+    objectKey: `workspaces/${workspaceId}/projects/${projectId}/uploads/user-banner.png`,
   }];
 }
 
