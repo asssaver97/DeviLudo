@@ -9,6 +9,7 @@ import {
 } from "@/services/core/src/image-generation";
 import type { AssetGenerationLease } from "@/services/core/src/asset-manifest";
 import type { StoredInstanceAgentSettings } from "@/services/core/src/repository";
+import { CODEX_IMAGE_TIMEOUT_MS, type CodexImageInput } from "@/services/core/src/codex-cli";
 
 const workspaceId = "10000000-0000-4000-8000-000000000001";
 const projectId = "10000000-0000-4000-8000-000000000002";
@@ -66,7 +67,7 @@ function harness(options: Readonly<{
   imageSettings?: StoredInstanceAgentSettings | null;
   apiKey?: string | null;
   fetchImpl?: typeof globalThis.fetch;
-  codexImageRunner?: (input: Readonly<{ baseUrl: string; credential: string; model: string; prompt: string }>) => Promise<Buffer>;
+  codexImageRunner?: (input: CodexImageInput) => Promise<Buffer>;
 }> = {}) {
   const stored: { assetKey: string; extension: string; contentType: string; bytes: number }[] = [];
   const completed: { itemId: string; objectKey: string }[] = [];
@@ -184,7 +185,7 @@ describe("Asset generation batch", () => {
       imageModel: null,
       apiKeyMask: "cod********json",
     });
-    const observed: Array<{ baseUrl: string; credential: string; model: string; prompt: string }> = [];
+    const observed: CodexImageInput[] = [];
     const { dependencies, completed, claims } = harness({
       leases: [lease()],
       imageSettings: codexSettings,
@@ -199,6 +200,10 @@ describe("Asset generation batch", () => {
     });
     assert.equal(completed.length, 1);
     assert.equal(claims[0].batchSize, 1);
+    assert.equal(observed[0].timeoutMs, CODEX_IMAGE_TIMEOUT_MS);
+    assert.ok(observed[0].timeoutMs! > 300_000);
+    assert.ok(claims[0].leaseSeconds * 1_000 >= observed[0].timeoutMs! + 180_000,
+      "a live render must remain leased through its deadline and storage write");
     assert.equal(observed[0].model, "gpt-5.6-sol");
     assert.match(observed[0].prompt, /pixel art character idle/);
     assert.equal(observed[0].baseUrl, "https://chatgpt.com");

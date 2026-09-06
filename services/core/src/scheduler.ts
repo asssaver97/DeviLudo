@@ -39,13 +39,12 @@ export async function runScheduler(
   // Swept on the first tick, then on its own slower cadence.
   let nextAssetSweepAt = 0;
   let nextSourceRevisionSweepAt = 0;
+  const lifecycleTask = new SchedulerTask("runtime_lifecycle");
+  const assetTask = new SchedulerTask("asset_generation");
   while (!signal.aborted) {
     const startedAt = Date.now();
     try {
       const recovered = await repository.recoverExpiredJobs();
-      const projectRuntimeLifecycleResult = projectRuntimeLifecycle
-        ? await projectRuntimeLifecycle.runOnce()
-        : null;
       await repository.reconcileCapacity();
       const expiredAuthRecordsRemoved = await repository.cleanupExpiredAuthState();
       const localGitCommit = await runLocalGitCommit(repository, config, signal);
@@ -62,7 +61,14 @@ export async function runScheduler(
         : 0;
       if (shouldSweepSourceRevisions) nextSourceRevisionSweepAt = Date.now() + 60_000;
       const sourceRevisionCleanup = await runSourceRevisionCleanup(repository, projectSources);
-      const projectCleanup = await runProjectCleanup(repository, objectStore, projectSources);
+      // A late image upload or context write must settle before project deletion
+      // sweeps its storage. Preserve that ordering while the fast tick continues.
+      const projectCleanup = assetTask.running || lifecycleTask.running
+        ? null : await runProjectCleanup(repository, objectStore, projectSources);
+      if (projectRuntimeLifecycle && !signal.aborted) lifecycleTask.start(async () => {
+        const result = await projectRuntimeLifecycle.runOnce();
+        if (result) console.log(JSON.stringify({ level: "info", event: "scheduler_runtime_lifecycle", ...result }));
+      });
       const hostAdmissionEventsCreated = hostServices?.mode === "managed"
         ? await repository.reconcileHostAdmissionEvents()
         : 0;
@@ -72,10 +78,14 @@ export async function runScheduler(
       // Provider calls run less often than the sub-second recovery tick. The
       // durable asset gate is checked on every tick, however, so the last image or
       // a user's explicit "use placeholders" choice advances immediately.
-      const assets = assetGeneration && Date.now() >= nextAssetSweepAt
-        ? await runAssetGenerationBatch(assetGeneration, signal)
-        : null;
-      if (assets) nextAssetSweepAt = Date.now() + config.assetGenerationPollMilliseconds;
+      if (assetGeneration && !signal.aborted && Date.now() >= nextAssetSweepAt) assetTask.start(async () => {
+        try {
+          const assets = await runAssetGenerationBatch(assetGeneration, signal);
+          if (assets.claimed) console.log(JSON.stringify({ level: "info", event: "scheduler_asset_generation", ...assets }));
+        } finally {
+          nextAssetSweepAt = Date.now() + config.assetGenerationPollMilliseconds;
+        }
+      });
       const assetWorkflowsAdvanced = await repository.assets.advanceReadyWorkflows();
       const steamPreparationResult = steamPreparation
         ? await runSteamPreparationOnce(steamPreparation, signal)
@@ -84,7 +94,6 @@ export async function runScheduler(
         level: "info",
         event: "scheduler_tick",
         recovered,
-        ...(projectRuntimeLifecycleResult ? { projectRuntimeLifecycle: projectRuntimeLifecycleResult } : {}),
         expiredAuthRecordsRemoved,
         expiredUploadsEnqueued,
         expiredArtifactsEnqueued,
@@ -95,11 +104,6 @@ export async function runScheduler(
         ...(projectCleanup ? { projectCleanup } : {}),
         hostAdmissionEventsCreated,
         ...(hostAdmission ? { hostAdmission } : {}),
-        ...(assets ? {
-          assetsClaimed: assets.claimed,
-          assetsGenerated: assets.generated,
-          assetsFailed: assets.failed,
-        } : {}),
         assetWorkflowsAdvanced,
         ...(steamPreparationResult ? { steamPreparation: steamPreparationResult } : {}),
         elapsedMilliseconds: Date.now() - startedAt,
@@ -113,6 +117,29 @@ export async function runScheduler(
     }
     await delay(config.pollMilliseconds, signal);
   }
+  // Keep the repository open until in-flight work has settled its leases.
+  await Promise.all([lifecycleTask.wait(), assetTask.wait()]);
+}
+
+/** One in-flight operation per lane; slow model calls never hold the recovery tick. */
+export class SchedulerTask {
+  private pending: Promise<void> | null = null;
+
+  constructor(private readonly name: string) {}
+
+  get running(): boolean { return this.pending !== null; }
+
+  start(operation: () => Promise<void>): void {
+    if (this.pending) return;
+    this.pending = Promise.resolve().then(operation).catch(error => {
+      console.error(JSON.stringify({
+        level: "error", event: `scheduler_${this.name}_failed`,
+        message: error instanceof Error ? error.message : String(error),
+      }));
+    }).finally(() => { this.pending = null; });
+  }
+
+  async wait(): Promise<void> { await this.pending; }
 }
 
 async function runHostAdmissionEvent(repository: CoreRepository, hostServices: CoreHostServices) {
@@ -291,10 +318,12 @@ async function runProjectCleanup(
 function delay(milliseconds: number, signal: AbortSignal): Promise<void> {
   return new Promise(resolve => {
     if (signal.aborted) return resolve();
-    const timer = setTimeout(resolve, milliseconds);
-    signal.addEventListener("abort", () => {
+    const finish = () => {
       clearTimeout(timer);
+      signal.removeEventListener("abort", finish);
       resolve();
-    }, { once: true });
+    };
+    const timer = setTimeout(finish, milliseconds);
+    signal.addEventListener("abort", finish, { once: true });
   });
 }

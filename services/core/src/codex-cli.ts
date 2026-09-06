@@ -32,6 +32,10 @@ export type CodexImageInput = Readonly<{
 
 export type CodexImageRunner = (input: CodexImageInput) => Promise<Buffer>;
 
+// Rendering and provider queueing can exceed five minutes even after the
+// orchestration model has submitted the image request.
+export const CODEX_IMAGE_TIMEOUT_MS = 15 * 60_000;
+
 const MAX_CODEX_IMAGE_BYTES = 8 * 1024 * 1024;
 const MAX_CODEX_OUTPUT_BYTES = 8 * 1024 * 1024;
 const MAX_CODEX_DIAGNOSTIC_BYTES = 64 * 1024;
@@ -118,11 +122,12 @@ export async function runCodexImage(input: CodexImageInput): Promise<Buffer> {
   try {
     const hasStaticCatalog = await prepareCodexHome(root, input.credential, official);
     const args = codexExecutionArgs(input.baseUrl, hasStaticCatalog ? join(root, "model-catalog.json") : null);
-    args.push("--enable", "image_generation", "--sandbox", "read-only");
+    args.push("--enable", "image_generation", "--sandbox", "read-only",
+      "--config", "model_reasoning_effort=low");
     const executionModel = resolveCodexExecutionModel(input.model);
     if (executionModel !== CODEX_ACCOUNT_DEFAULT_MODEL) args.push("-m", executionModel);
     args.push("-C", root, "-");
-    await executeCodex(args, codexImageInstruction(input.prompt), root, input.timeoutMs ?? 300_000, false,
+    await executeCodex(args, codexImageInstruction(input.prompt), root, input.timeoutMs ?? CODEX_IMAGE_TIMEOUT_MS, false,
       official ? {} : { DEVILUDO_CODEX_PROVIDER_API_KEY: input.credential });
     const candidates = await generatedImages(join(root, "generated_images"));
     if (candidates.length !== 1) {

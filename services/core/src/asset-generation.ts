@@ -9,7 +9,7 @@
 import type { AgentSecretStore } from "./agent-settings";
 import sharp from "sharp";
 import type { AssetGenerationLease } from "./asset-manifest";
-import { runCodexImage, type CodexImageRunner } from "./codex-cli";
+import { CODEX_IMAGE_TIMEOUT_MS, runCodexImage, type CodexImageRunner } from "./codex-cli";
 import {
   composeImagePrompt,
   generateAssetImage,
@@ -24,10 +24,10 @@ import type { CoreRepository } from "./repository";
 
 /**
  * The lease has to outlive the slowest runtime backend, or a still-running
- * generation gets re-claimed by the next tick. It covers the five-minute Codex
- * turn plus validation and the object-store write.
+ * generation gets re-claimed by another scheduler. Leave three minutes after
+ * the Codex deadline for termination, validation and the object-store write.
  */
-const LEASE_SECONDS = 600;
+const LEASE_SECONDS = Math.ceil(CODEX_IMAGE_TIMEOUT_MS / 1_000) + 180;
 
 /**
  * Assets are generated a few at a time. The cap is per tick, not per project: a
@@ -209,7 +209,7 @@ async function generateWithCodex(
     credential: backend.credential,
     model: backend.model,
     prompt: composeImagePrompt(request),
-    timeoutMs: 300_000,
+    timeoutMs: CODEX_IMAGE_TIMEOUT_MS,
   });
   return validateGeneratedImage(content);
 }
