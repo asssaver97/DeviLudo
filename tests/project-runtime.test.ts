@@ -40,6 +40,7 @@ import {
   evidenceRunsForVisualRead,
   finalSealPostconditionMismatches,
   hasCurrentTurnSourceCheckpoint,
+  incompleteRuntimeTurnMessage,
   latestEvidenceReport,
   latestUiSpecification,
   missingNarrativeCausalityProofs,
@@ -194,6 +195,19 @@ test("approved Runtime snapshots ignore PostgreSQL jsonb object-key ordering", (
   assert.equal(sameJson(stored, parsed), true);
   assert.equal(sameJson(stored, { ...parsed, gameplay: "Different gameplay." }), false);
   assert.equal(sameJson(stored, { ...parsed, categories: [...parsed.categories].reverse() }), false);
+});
+
+test("an incomplete UI turn preserves its reported blocker without accepting a missing handoff", () => {
+  const fallback = "UI Design Agent completed without creating a DEVELOPMENT handoff";
+  const blocked = result("UI_DESIGN", {
+    status: "BLOCKED",
+    content: "e2e_goals_update rejected the approved sandbox as narrative gameplay",
+  });
+  assert.match(incompleteRuntimeTurnMessage(blocked, fallback), /BLOCKED: e2e_goals_update rejected/);
+  assert.ok(incompleteRuntimeTurnMessage(blocked, fallback).endsWith(fallback));
+  assert.equal(runtimeTurnHandoff(createProjectContext({ workspaceId, projectId }), blocked.turnId, "UI_DESIGN", "DEVELOPMENT"), null);
+  assert.equal(incompleteRuntimeTurnMessage(result("UI_DESIGN", { status: "BLOCKED", content: " " }), fallback), fallback);
+  assert.equal(incompleteRuntimeTurnMessage(result("UI_DESIGN", { status: "COMPLETED", content: "Done" }), fallback), fallback);
 });
 
 test("persistent Runtime intent selects exactly one role and rejects contradictory mutation flags", () => {
@@ -1371,6 +1385,44 @@ test("controlled builds require the source checkpoint created by the current Dev
     assetPlan: [...assetPlan, { key: "scene-03-ending" }],
   }, "turn-current"), false);
   assert.equal(hasCurrentTurnSourceCheckpoint({ ...current, source: null }, "turn-current"), false);
+});
+
+test("narrative scope ignores headings, excluded story features and engine scenes in sandbox games", () => {
+  const sandbox = { projectDocument: {
+    categories: ["回合制策略", "经济经营", "开放六边形棋盘", "4X", "单人对抗AI"],
+    gameplay: [
+      "## 内容与叙事",
+      "[complete-delivery] 完整交付包含全部导入内容条目、可玩地图、自然胜利与失败。没有证据要求新增战役、章节或角色剧情，因此本项目按经营沙盘组织内容。",
+      "[rejected-directions] 不增加无息无限救济、新资源池、实时战斗或故事战役。",
+    ].join("\n"),
+  } };
+  assert.deepEqual(requiredNarrativeSceneKeys(sandbox), []);
+  assert.doesNotThrow(() => assertNarrativeGoalScope(sandbox, [{
+    id: "natural-completion", description: "通过正常经营达到胜利或失败并显示终局报告。", source: "CORE_LOOP",
+  }]));
+  for (const gameplay of [
+    "## Narrative\nNo narrative campaign or chapters are required. Deliver the economic sandbox.",
+    "The game is non-narrative. Story is not required. Use 3 scenes for the Godot menu, map and report.",
+    "不新增剧情；章节不属于本次交付范围。Godot 使用三个场景组织菜单、地图与报告。",
+  ]) {
+    assert.deepEqual(requiredNarrativeSceneKeys({ projectDocument: { categories: ["adventure"], gameplay } }), []);
+  }
+});
+
+test("affirmative narrative scope still requires an exact authored scene inventory", () => {
+  for (const projectDocument of [
+    { categories: ["narrative"], gameplay: "Deliver a complete game." },
+    { categories: ["视觉小说"], gameplay: "交付完整游戏。" },
+    { categories: [], gameplay: "Deliver a non-linear narrative with choices and consequences." },
+    { categories: [], gameplay: "交付非常精彩的非线性叙事。" },
+    { categories: ["strategy"], gameplay: "No optional campaign is needed, but deliver a story-driven main game." },
+    { categories: [], gameplay: "无需额外章节，但是主线剧情必须完整交付。" },
+  ]) {
+    assert.throws(() => requiredNarrativeSceneKeys({ projectDocument }), /one exact authored scene count/);
+  }
+  assert.equal(requiredNarrativeSceneKeys({ projectDocument: {
+    categories: [], gameplay: "Deliver 4 authored scenes with complete choices and consequences.",
+  } }).length, 4);
 });
 
 test("approved narrative scope requires source-backed narrative beats regardless of asset names", async () => {

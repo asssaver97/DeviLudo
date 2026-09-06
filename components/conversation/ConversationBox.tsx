@@ -37,6 +37,7 @@ import { agentProgressDisplayRows, localizedAgentProgressContent } from "@/lib/p
 import { CloseIcon, PlusIcon, SendIcon } from "../console/Icons";
 import { TypingDots } from "../console/TypingDots";
 import { localeTag, useLanguage } from "../i18n/LanguageProvider";
+import { AgentMessageContent } from "./AgentMessageContent";
 
 type ConversationBoxProps = Readonly<{
   conversationKey: string | null;
@@ -227,6 +228,12 @@ export function ConversationBox({
         <div
           aria-live="polite"
           className="conversation-box-messages"
+          onPointerDownCapture={event => {
+            if (event.target instanceof Element && event.target.closest(".conversation-code-block")) followLatestMessage.current = false;
+          }}
+          onFocusCapture={event => {
+            if (event.target.closest(".conversation-code-block")) followLatestMessage.current = false;
+          }}
           onScroll={event => {
             const viewport = event.currentTarget;
             followLatestMessage.current = viewport.scrollHeight - viewport.scrollTop - viewport.clientHeight <= 48;
@@ -290,7 +297,7 @@ export function ConversationBox({
                     })}
                   </div>
                 ) : null}
-                <p>{message.content}</p>
+                {message.role === "ASSISTANT" ? <AgentMessageContent content={message.content} /> : <p>{message.content}</p>}
                 {message.completedAt ? (
                   <time
                     className="conversation-message-completed-at"
@@ -359,18 +366,18 @@ export function ConversationBox({
                     <span className="message-avatar">{identity.avatar}</span>
                     <div>
                       <header><b>{identity.name}</b>{status ? <span className="conversation-agent-working">{status}</span> : null}</header>
-                      <p>
+                      <div>
                         {reply.processEvents.length ? (
-                          <span className="conversation-agent-process">
-                            {reply.processEvents.join("")}
-                          </span>
+                          <div className="conversation-agent-process">
+                            <AgentMessageContent content={reply.processEvents.join("")} />
+                          </div>
                         ) : null}
-                        {reply.content}
+                        <AgentMessageContent content={reply.content} />
                         {!reply.content && !reply.processEvents.length && reply.activity ? (
                           <span className="conversation-agent-activity">{reply.activity}</span>
                         ) : null}
                         {streamingConversationReplyIsActive(reply) ? <TypingDots /> : null}
-                      </p>
+                      </div>
                       {role === "DEVELOPMENT" && reply.developmentLogs.length ? (
                         <div className="conversation-development-logs">
                           <b>{text("开发日志", "Development log")}</b>
@@ -510,6 +517,12 @@ function AgentProgressPanel({
         </header>
         <div
           className="agent-generation-progress-events"
+          onPointerDownCapture={event => {
+            if (event.target instanceof Element && event.target.closest(".conversation-code-block")) followLatest.current = false;
+          }}
+          onFocusCapture={event => {
+            if (event.target.closest(".conversation-code-block")) followLatest.current = false;
+          }}
           onScroll={event => {
             const viewport = event.currentTarget;
             followLatest.current = viewport.scrollHeight - viewport.scrollTop - viewport.clientHeight <= 24;
@@ -517,7 +530,9 @@ function AgentProgressPanel({
           ref={viewportRef}
         >
           {rows.map(row => (
-            <p className={`progress-${row.kind.toLowerCase()}`} key={row.sequence}>{localizedAgentProgressContent(row, locale)}</p>
+            <div className={`progress-${row.kind.toLowerCase()}`} key={row.sequence}>
+              <AgentMessageContent content={localizedAgentProgressContent(row, locale)} />
+            </div>
           ))}
           {progress.state === "FAILED" && progress.error ? <p className="progress-failed">{progress.error}</p> : null}
           {progress.running ? <TypingDots /> : null}

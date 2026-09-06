@@ -1,3 +1,5 @@
+import { commandOutputMarkdown } from "./agent-code";
+
 export type RuntimeOutputTextFragment = Readonly<{
   content: string;
   continuous: boolean;
@@ -11,13 +13,24 @@ export type RuntimeOutputTextFragment = Readonly<{
 export function runtimeOutputText(output: string): string {
   const rendered: string[] = [];
   const lines = output.split(/\r?\n/u);
+  let fence: string | null = null;
   for (const [index, line] of lines.entries()) {
+    const marker = line.match(/^ {0,3}(`{3,}|~{3,})/u)?.[1];
+    if (fence || marker) {
+      if (!fence) fence = marker!;
+      else if (line.trim().length >= fence.length && [...line.trim()].every(character => character === fence![0])) fence = null;
+      rendered.push(`${line}${index < lines.length - 1 ? "\n" : ""}`);
+      continue;
+    }
     if (!line) {
       if (index > 0 && index < lines.length - 1) rendered.push("\n");
       continue;
     }
     let value: unknown;
     try { value = JSON.parse(line); } catch {
+      // A provider event may span multiple stored progress rows. Wait for its
+      // remaining bytes instead of flashing escaped source and transport JSON.
+      if (index === lines.length - 1 && /^\s*\{\s*"type"\s*:/u.test(line)) continue;
       appendFragment(rendered, Object.freeze({
         content: `${line}${index < lines.length - 1 ? "\n" : ""}`,
         continuous: true,
@@ -65,7 +78,7 @@ export function runtimeOutputTextFragments(value: unknown): readonly RuntimeOutp
   }
   if (itemType === "command_execution" || itemType === "shell_command") {
     const outputText = textPayload(item?.aggregated_output ?? item?.output);
-    if (outputText) return fragments(outputText, false);
+    if (outputText) return fragments(commandOutputMarkdown(string(item?.command), outputText), false);
     return type.endsWith(".started")
       ? fragments(safeCommand(string(item?.command)), false)
       : Object.freeze([]);

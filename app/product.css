@@ -3937,6 +3937,81 @@ textarea {
   word-break: break-word;
 }
 
+.conversation-agent-content {
+  min-width: 0;
+}
+
+.conversation-agent-content > * + * {
+  margin-top: 8px;
+}
+
+.conversation-code-block {
+  background: var(--panel);
+  border: 1px solid var(--line-strong);
+  color: var(--ink);
+  max-width: 100%;
+  min-width: 0;
+  overflow: hidden;
+  white-space: normal;
+}
+
+.conversation-code-block > summary {
+  align-items: center;
+  cursor: pointer;
+  display: flex;
+  gap: 8px;
+  list-style: none;
+  min-height: 38px;
+  padding: 8px 10px;
+}
+
+.conversation-code-block > summary::-webkit-details-marker { display: none; }
+.conversation-code-block > summary::before {
+  content: "›";
+  flex: 0 0 auto;
+  font-size: 18px;
+  line-height: 1;
+}
+.conversation-code-block[open] > summary::before { transform: rotate(90deg); }
+.conversation-code-block > summary:hover { background: color-mix(in srgb, var(--blue) 8%, transparent); }
+.conversation-code-block > summary:focus-visible,
+.conversation-code-block > pre:focus-visible { outline: 2px solid var(--blue); outline-offset: -2px; }
+
+.conversation-code-filename {
+  flex: 1;
+  font: 600 12px/1.5 var(--font-geist-mono), monospace;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.conversation-code-lines {
+  color: var(--muted);
+  flex: 0 0 auto;
+  font: 11px/1.5 var(--font-geist-mono), monospace;
+}
+
+.conversation-code-block > pre {
+  border-top: 1px solid var(--line);
+  color: var(--ink);
+  font: 12px/1.6 var(--font-geist-mono), monospace;
+  margin: 0;
+  max-height: min(220px, 30dvh);
+  max-width: 100%;
+  overflow: auto;
+  overflow-wrap: normal;
+  overscroll-behavior: contain;
+  padding: 10px 12px;
+  scrollbar-color: var(--muted) transparent;
+  scrollbar-width: thin;
+  tab-size: 4;
+  white-space: pre;
+  word-break: normal;
+}
+
+.conversation-code-block code { color: inherit; font: inherit; }
+
 .conversation-development-logs {
   display: grid;
   gap: 0.3rem;
@@ -4026,7 +4101,7 @@ textarea {
   position: absolute;
 }
 
-.conversation-box-message .agent-generation-progress-events .progress-superseded {
+.conversation-box-message .agent-generation-progress-events .progress-superseded p {
   color: var(--yellow);
 }
 
@@ -4062,11 +4137,12 @@ textarea {
   visibility: visible;
 }
 
-.conversation-box-message .agent-generation-progress-events .progress-completed {
+.conversation-box-message .agent-generation-progress-events .progress-completed p {
   color: var(--green);
 }
 
-.conversation-box-message .agent-generation-progress-events .progress-failed {
+.conversation-box-message .agent-generation-progress-events .progress-failed,
+.conversation-box-message .agent-generation-progress-events .progress-failed p {
   color: #ff9ca7;
 }
 

@@ -319,7 +319,8 @@ export class ProjectRuntimeService {
       if (input.role === "UI_DESIGN" && input.mode === "PRIMARY") {
         const durable = await this.readContext(input.workspaceId, input.projectId);
         if (!runtimeTurnHandoff(durable, result.turnId, "UI_DESIGN", "DEVELOPMENT")) {
-          throw new Error("UI Design Agent completed without creating a DEVELOPMENT handoff");
+          throw new Error(incompleteRuntimeTurnMessage(result,
+            "UI Design Agent completed without creating a DEVELOPMENT handoff"));
         }
       }
       const toolSummaries = summarizeRuntimeToolCalls(result.toolCalls);
@@ -1722,6 +1723,16 @@ export function sameJson(left: unknown, right: unknown): boolean {
   return JSON.stringify(left, canonicalize) === JSON.stringify(right, canonicalize);
 }
 
+export function incompleteRuntimeTurnMessage(
+  result: ProjectRuntimeTurnResult,
+  fallback: string,
+): string {
+  if (result.structured.status !== "BLOCKED") return fallback;
+  const detail = typeof result.structured.content === "string"
+    ? result.structured.content.trim() : result.content.trim();
+  return detail ? `${result.role} Agent reported BLOCKED: ${detail.slice(0, 4_000)}. ${fallback}` : fallback;
+}
+
 export function runtimeTurnHandoff(
   context: ProjectContext,
   turnId: string,
@@ -2253,10 +2264,13 @@ export function requiredNarrativeSceneKeys(
     ? context.projectDocument.gameplay : "";
   const categories = Array.isArray(context.projectDocument.categories)
     ? context.projectDocument.categories.map(value => String(value).toLocaleLowerCase("und")) : [];
-  const narrative = categories.some(category => /narrative|story|adventure|campaign|剧情|叙事|故事|冒险/.test(category))
-    || /narrative|story-driven|campaign|chapter-based|剧情|叙事|故事|章节/.test(gameplay.toLocaleLowerCase("und"));
+  const scope = affirmativeNarrativeScope(gameplay);
+  const narrative = categories.some(category => affirmativeNarrativeScope(category).length > 0)
+    || scope.length > 0;
+  // Engine scenes, generic adventure genres, template headings and excluded
+  // story features do not establish an authored narrative delivery contract.
+  if (!narrative) return Object.freeze([]);
   const counts = narrativeSceneCounts(gameplay);
-  if (!narrative && counts.length === 0) return Object.freeze([]);
   if (counts.length === 0) {
     throw new Error("Narrative gameplay must declare one exact authored scene count in projectDocument.gameplay");
   }
@@ -2268,6 +2282,21 @@ export function requiredNarrativeSceneKeys(
   if (count < 2 || count > 80) throw new Error("Narrative gameplay scene count must be from 2 through 80");
   const width = Math.max(2, String(count).length);
   return Object.freeze(Array.from({ length: count }, (_, index) => `scene-${String(index + 1).padStart(width, "0")}`));
+}
+
+function affirmativeNarrativeScope(value: string): readonly string[] {
+  const marker = /\b(?:narrative|story(?:[- ]driven|[- ]based)?|visual novel|interactive fiction|chapter[- ]based|authored\s+(?:narrative\s+)?scenes?)\b|剧情|叙事|故事|章节|视觉小说|互动小说/iu;
+  return value.split(/\r?\n/u)
+    .filter(line => !/^\s{0,3}#{1,6}\s/u.test(line))
+    .flatMap(line => line.split(/[。！？.!?;；，,]|\b(?:but|however)\b|但是|而是/iu))
+    .filter(clause => {
+      const match = marker.exec(clause);
+      if (!match) return false;
+      const before = clause.slice(0, match.index);
+      const after = clause.slice(match.index + match[0].length);
+      return !/\b(?:no|without|not(?!\s+only\b)|never|exclude[ds]?|omit(?:ted)?|(?:does|do|is|are|will|should|must)n['’]t)\b|\bnon[-\s]*$|无需|无须|不需要|不要求|不包含|不增加|不新增|不设置|不采用|不提供|不涉及|不引入|不做|没有|并无|排除|取消|非\s*$/iu.test(before)
+        && !/^\s*(?:(?:is|are)\s+)?(?:not (?:required|included|planned)|out of scope|不(?:在|属于).{0,8}范围|无需|不需要|不要求)/iu.test(after);
+    });
 }
 
 function narrativeSceneCounts(value: string): readonly number[] {

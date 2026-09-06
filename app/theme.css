@@ -819,7 +819,8 @@ html[data-theme="light"] :is(
   .product-delivery-failure-copy small, .product-delivery-failure-copy summary,
   .product-delivery-failure-copy code, .conversation-box-failed,
   .conversation-box-failure-detail, .conversation-image-error, .asset-error,
-  .conversation-box-message .agent-generation-progress-events .progress-failed
+  .conversation-box-message .agent-generation-progress-events .progress-failed,
+  .conversation-box-message .agent-generation-progress-events .progress-failed p
 ) {
   color: var(--text-danger);
 }

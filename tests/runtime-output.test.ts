@@ -20,7 +20,7 @@ test("Codex JSONL renders reasoning, safe commands, output, and structured reply
   assert.equal(rendered, [
     "先检查项目结构。",
     "$ API_KEY=•••• npm test",
-    "全部测试通过",
+    "\n```output\n全部测试通过\n```",
     "开发计划已经完成。",
   ].join("\n"));
   assert.doesNotMatch(rendered, /thread_id|input_tokens|readyForDevelopment|\{"/u);
