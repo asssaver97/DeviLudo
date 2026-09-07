@@ -206,6 +206,7 @@ export async function runSandbox(
           const runtimeResult = await projectRuntime.turn({
             workspaceId: job.workspaceId, projectId: job.projectId, workflowJobId: job.jobId,
             role, mode: "PRIMARY",
+            completionContract: role === "TEST" && job.payload.purpose === "TEST_PLAN" ? "TEST_PLAN" : undefined,
             prompt: runtimeJobPrompt(job, role), responseLanguage, settings,
             sourceRevision: project.source?.revision ?? null,
             sourceRelativePath: project.source?.relativePath ?? null,

@@ -82,6 +82,7 @@ function sendError(id, code, message) {
 }
 
 function toolDescription(name) {
+  if (name === "e2e.observe") return "Read existing controlled E2E run history. This does not launch a game or exploratory observation; an empty runs list means no run evidence exists yet.";
   if (name === "context.update_analysis") {
     return "Persist the complete imported-project analysis. Pass the canonical report in the required analysis object.";
   }

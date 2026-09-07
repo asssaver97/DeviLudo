@@ -38,6 +38,7 @@ import {
 import { ProjectSourceStore } from "./project-sources";
 import type { StoredInstanceAgentSettings } from "./repository";
 import { extractAndValidateEvidenceBundle } from "@/scripts/e2e-evidence.mjs";
+import { completeTestPlanning } from "./test-planning-completion";
 
 const ROLE_TO_MODEL = Object.freeze({
   INTENT: "intent",
@@ -99,6 +100,7 @@ type ProjectRuntimeTurnInput = Readonly<{
   workspaceId: string;
   projectId: string;
   workflowJobId?: string;
+  completionContract?: "TEST_PLAN";
   role: ProjectRuntimeRole;
   mode: ProjectRuntimeTurnMode;
   prompt: string;
@@ -269,7 +271,7 @@ export class ProjectRuntimeService {
       input.attachments ?? Object.freeze([]),
     );
     try {
-      const result = await this.backend.turn({
+      const run = (continuation: string | null) => this.backend.turn({
         schemaVersion: PROJECT_RUNTIME_SCHEMA,
         workspaceId: input.workspaceId,
         projectId: input.projectId,
@@ -288,13 +290,26 @@ export class ProjectRuntimeService {
         sourceRelativePath: input.sourceRelativePath,
         contextRevision: context.revision,
         responseLanguage: input.responseLanguage,
-        prompt: input.prompt,
+        prompt: continuation ? `${input.prompt}\n\n${continuation}` : input.prompt,
         attachmentPaths: stagedAttachments.paths,
         credentialRef: input.settings.credentialSecretRef,
         mcpToken: started.mcpToken,
         leaseToken: started.leaseToken,
         leaseExpiresAt: new Date(Date.now() + 24 * 60 * 60_000).toISOString(),
       }, input.signal, input.onEvent);
+      const result = input.role === "TEST" && input.mode === "PRIMARY" && input.completionContract === "TEST_PLAN"
+        ? await completeTestPlanning({
+          run,
+          signal: input.signal,
+          onContinue: () => input.onEvent?.({ kind: "ACTIVITY", content: "测试计划尚未保存，正在继续当前会话完成交付。" }),
+          isComplete: async result => {
+            const plan = await this.repository.readLatestTestPlan(input.workspaceId, input.projectId);
+            if (plan?.createdByTurnId === started.id) return true;
+            if (result.structured.reason !== "SOURCE_PROBE_CONTRACT_MISSING") return false;
+            const durable = await this.readContext(input.workspaceId, input.projectId);
+            return Boolean(runtimeTurnHandoff(durable, started.id, "TEST", "DEVELOPMENT"));
+          },
+        }) : await run(null);
       if (input.role === "ANALYSIS" && input.mode === "PRIMARY") {
         const durable = await this.readContext(input.workspaceId, input.projectId);
         if (durable.workflow.analysisTurnId !== result.turnId) {

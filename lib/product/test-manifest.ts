@@ -244,6 +244,9 @@ export function testManifestValidationError(value: unknown): string | null {
     if (typeof item.id !== "string" || !isStableId(item.id)) {
       return `features[${index}].id must match ^[a-z0-9][a-z0-9-]{0,119}$`;
     }
+    if (typeof item.description !== "string" || item.description.trim().length < 1 || item.description.length > 2_000) {
+      return `features[${index}].description must contain 1-2000 characters`;
+    }
     if (!FEATURE_CATEGORIES.includes(item.category as FeatureCategory)) {
       return `features[${index}].category must be one of: ${FEATURE_CATEGORIES.join(", ")}`;
     }
@@ -614,7 +617,11 @@ export function planE2eExecution(manifest: TestManifest, currentRegressionMs = 0
     + currentRegressionMs + adaptiveMs + adaptivePolicyMs + solidificationMs + evidenceMs));
   const plannedTimeoutMs = Math.ceil(Math.max(MIN_PLATFORM_E2E_TIMEOUT_MS, raw) / 60_000) * 60_000;
   if (plannedTimeoutMs > MAX_PLATFORM_E2E_TIMEOUT_MS) {
-    throw Object.assign(new Error("E2E_PLAN_EXCEEDS_LIMIT"), { code: "E2E_PLAN_EXCEEDS_LIMIT", plannedTimeoutMs });
+    throw Object.assign(new Error(
+      `E2E_PLAN_EXCEEDS_LIMIT: estimated ${plannedTimeoutMs} ms exceeds the ${MAX_PLATFORM_E2E_TIMEOUT_MS} ms platform limit. `
+      + `Interactive timeouts total ${deterministicMs} ms; unit timeouts ${unitMs} ms; adaptive gameplay, policy and replay ${adaptiveMs + adaptivePolicyMs + solidificationMs} ms. `
+      + "Size each feature timeout to its actual event count and work, preserving required coverage and the minimum per-event budget.",
+    ), { code: "E2E_PLAN_EXCEEDS_LIMIT", plannedTimeoutMs });
   }
   return Object.freeze({
     plannedTimeoutMs, setupMs, unitMs, deterministicMs, visualMs, currentRegressionMs,

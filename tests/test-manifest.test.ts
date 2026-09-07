@@ -84,6 +84,19 @@ function completeManifest(): TestManifest {
 }
 
 describe("test-manifest", () => {
+  test("reports invalid feature descriptions without blaming a valid core lifecycle", () => {
+    const manifest = completeManifest();
+    for (const description of ["", "   ", "x".repeat(2001), null]) {
+      const invalid = { ...manifest, features: manifest.features.map((feature, index) =>
+        index === 1 ? { ...feature, description } : feature) };
+      assert.equal(validateTestManifest(invalid), false);
+      assert.equal(testManifestValidationError(invalid), "features[1].description must contain 1-2000 characters");
+    }
+    const boundary = { ...manifest, features: manifest.features.map(feature => ({ ...feature, description: "x".repeat(2000) })) };
+    assert.equal(validateTestManifest(boundary), true);
+    assert.equal(testManifestValidationError(boundary), null);
+  });
+
   test("validates fresh core play, semantic real input, postconditions and system checks", () => {
     const manifest = completeManifest();
     assert.equal(validateTestManifest(manifest), true);
@@ -405,6 +418,8 @@ describe("test-manifest", () => {
     assert.equal(validateTestManifest(overBudget), true);
     assert.throws(() => planE2eExecution(overBudget), (error: unknown) => (
       (error as { code?: string }).code === "E2E_PLAN_EXCEEDS_LIMIT"
+      && error instanceof Error && /estimated \d+ ms exceeds the 5400000 ms platform limit/.test(error.message)
+      && /Interactive timeouts total \d+ ms; unit timeouts 6030000 ms/.test(error.message)
     ));
     assert.throws(() => planE2eExecution(manifest, 300_001), /regression estimate/i);
   });
