@@ -361,13 +361,17 @@ async function execute(
     }
     const network = plan.job.runtimeImage === fixtureAgentImage ? "none"
       : plan.networkPolicy === "STEAM_ONLY" ? process.env.DEVILUDO_EXECUTOR_STEAM_NETWORK ?? "none" : "none";
+    // Godot stages the macOS bundle, PCK and universal-binary signing copies in
+    // /tmp. A 256 MiB mount can fill even for a modest project; these files still
+    // count against the task's memory limit and disappear with its container.
+    const temporaryStorage = plan.job.jobKind === "BUILD" ? "1g" : "256m";
     const createArguments = [
       "create", "--name", taskName, "--read-only", "--cap-drop=ALL",
       "--security-opt=no-new-privileges", "--pids-limit=256",
       `--memory=${Math.max(64 * 1024 * 1024, plan.job.budget.memoryBytes)}`,
       `--cpus=${Math.max(0.1, plan.job.budget.cpuMillis / Math.max(1, plan.job.timeoutSeconds) / 1000).toFixed(2)}`,
       `--tmpfs=/run/deviludo:rw,noexec,nosuid,nodev,size=2m,mode=0700,uid=10001,gid=10001`,
-      `--tmpfs=/tmp:rw,noexec,nosuid,nodev,size=256m,uid=10001,gid=10001`,
+      `--tmpfs=/tmp:rw,noexec,nosuid,nodev,size=${temporaryStorage},uid=10001,gid=10001`,
       `--tmpfs=/workspace:rw,nosuid,nodev,size=2147483648,mode=0700,uid=10001,gid=10001`,
       "--user=10001:10001",
       `--network=${network}`,
